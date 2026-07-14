@@ -4,5 +4,9 @@ packages:
 
 onlyBuiltDependencies:
   - esbuild
+  - electron
+  - electron-winstaller
 allowBuilds:
   esbuild: true
+  electron: true
+  electron-winstaller: true

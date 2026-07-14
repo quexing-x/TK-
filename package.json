@@ -1,6 +1,6 @@
 {
   "name": "tk-ads-automation",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "scripts": {
@@ -10,6 +10,9 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
+    "desktop:build": "pnpm --filter @tk-auto/web build && pnpm --filter @tk-auto/desktop build",
+    "desktop:run": "pnpm desktop:build && pnpm --filter @tk-auto/desktop start",
+    "desktop:dist": "pnpm desktop:build && pnpm --filter @tk-auto/desktop dist",
     "docs:generate": "node scripts/generate-manual.mjs"
   },
   "devDependencies": {

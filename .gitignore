@@ -4,6 +4,7 @@ dist/
 .vite/
 coverage/
 *.tsbuildinfo
+apps/desktop/release/
 .env
 .env.*
 !.env.example
