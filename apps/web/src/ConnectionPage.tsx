@@ -109,18 +109,32 @@ export function ConnectionPage({
   }, [load]);
 
   const connection = connections.find((item) => item.kind === providerKind);
+  const verifiedCookieTargets = (["campaign", "ad-group", "ad"] as const).filter(
+    (target) =>
+      readiness.readTargets.includes(target) &&
+      readiness.statusTargets.includes(target),
+  );
+  const cookieLayerCoverageIncomplete =
+    providerKind === "cookie" &&
+    readiness.statusTargets.length > 0 &&
+    verifiedCookieTargets.length < 3;
   const cookieOnboardingIncomplete =
-    providerKind === "cookie" && readiness.completedSteps < 2;
+    providerKind === "cookie" &&
+    (readiness.completedSteps < 2 || cookieLayerCoverageIncomplete);
   const displayedConnectionStatus = cookieOnboardingIncomplete
     ? "untested"
     : (connection?.status ?? "not-configured");
-  const displayedConnectionLabel = cookieOnboardingIncomplete
-    ? `接入未完成（${readiness.completedSteps}/2）`
+  const displayedConnectionLabel = cookieLayerCoverageIncomplete
+    ? `层级未完成（${verifiedCookieTargets.length}/3）`
+    : cookieOnboardingIncomplete
+      ? `接入未完成（${readiness.completedSteps}/2）`
     : providerKind === "cookie" && connection?.status === "ready"
       ? "完整接入完成"
       : connectionStatusLabel(connection?.status);
-  const displayedConnectionMessage = cookieOnboardingIncomplete
-    ? readiness.dataRequestImported && connection?.status === "ready"
+  const displayedConnectionMessage = cookieLayerCoverageIncomplete
+    ? `广告系列和广告组的读取与启停已确认；最终广告层仍缺少真实列表和启停 cURL，广告层自动化保持不可用。${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
+    : cookieOnboardingIncomplete
+      ? readiness.dataRequestImported && connection?.status === "ready"
       ? "第 1 步只读连接正常；第 2 步启停请求尚未导入，自动启停暂不可用。"
       : `Cookie 完整接入尚未完成。${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
     : (connection?.lastMessage ?? "尚未保存此 Provider 的接入参数。");
@@ -404,11 +418,17 @@ export function ConnectionPage({
                 <span className="cookie-step-number">{readiness.statusRequestImported ? "✓" : "2"}</span>
                 <div>
                   <span className="eyebrow">第 2 步 · 开启和关闭</span>
-                  <h3>导入广告启停 cURL</h3>
+                  <h3>导入广告组启停 cURL</h3>
                 </div>
-                <strong className="cookie-step-state">{readiness.statusRequestImported ? "已完成" : "未完成"}</strong>
+                <strong className="cookie-step-state">
+                  {readiness.statusRequestImported
+                    ? "已完成"
+                    : readiness.statusTargets.length > 0
+                      ? `部分完成 ${readiness.statusTargets.length}/3`
+                      : "未完成"}
+                </strong>
               </header>
-              <p>进入广告层级，切换一次测试广告的开关，再在 Network 搜索以下内容并复制新出现的 POST 请求。</p>
+              <p>进入广告组层级，切换一次测试广告组的开关，再在 Network 搜索以下内容并复制新出现的 POST 请求。</p>
               <div className="network-filter-row">
                 <span>Network 搜索内容</span>
                 <button
@@ -426,6 +446,7 @@ export function ConnectionPage({
                 <strong>第二步请求必须同时满足</strong>
                 <span><code>POST /api/v3/i18n/overture/ad/update_status/</code></span>
                 <span>Form Data 包含 <code>ad_list</code> 和 <code>operation=enable/disable</code></span>
+                <span>TikTok 内部字段 <code>ad_list</code> 对应界面中的广告组，不代表最终广告层</span>
                 <span>必须复制完整 cURL，以保留 Cookie、boundary、aadvid 和签名参数</span>
               </div>
               {!readiness.statusRequestImported && (
@@ -451,6 +472,12 @@ export function ConnectionPage({
                 </button>
               </div>
               {importFeedback?.step === "status" && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />} {importFeedback.message}</div>}
+              {readiness.statusTargets.length > 0 && !readiness.statusRequestImported && (
+                <div className="import-warning compact">
+                  <AlertTriangle size={17} />
+                  <span>已确认广告系列和广告组启停；最终广告层请求尚未导入，因此完整接入仍未完成。</span>
+                </div>
+              )}
             </article>
           </div>
           <div className="quick-import-security">完整请求仅进入本机 DPAPI 加密保险库，不写入 SQLite 明文。</div>

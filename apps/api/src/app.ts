@@ -304,12 +304,21 @@ export async function createApp(
                   (item) => `${item.target}:${item.action ?? ""}`,
                 ),
               );
+              const discardStaleAutoExpandedAd = [
+                "ad-group",
+                "ad-group-status",
+              ].includes(imported.summary.target);
               credential = CookieCredentialInputSchema.parse({
                 ...credential,
                 requestTemplates: [
                   ...(parsedPrevious.requestTemplates ?? []).filter(
                     (item) =>
-                      !incomingKeys.has(`${item.target}:${item.action ?? ""}`),
+                      !incomingKeys.has(`${item.target}:${item.action ?? ""}`) &&
+                      !(
+                        discardStaleAutoExpandedAd &&
+                        item.derived &&
+                        ["ad", "ad-status"].includes(item.target)
+                      ),
                   ),
                   ...(credential.requestTemplates ?? []),
                 ],
@@ -342,7 +351,7 @@ export async function createApp(
       }
 
       const importMessage = imported.summary.target.endsWith("-status")
-        ? "已识别为真实启停 cURL（第 2 步），并自动生成三个层级的开启、关闭模板。"
+        ? "已识别为真实启停 cURL（第 2 步），已保存该请求及可安全确认的层级模板。"
         : "已识别为列表 cURL（第 1 步），没有识别到启停动作。第 2 步请复制包含 update/status 的真实开关请求。";
 
       try {
@@ -407,12 +416,21 @@ export async function createApp(
                 (item) => `${item.target}:${item.action ?? ""}`,
               ),
             );
+            const discardStaleAutoExpandedAd = [
+              "ad-group",
+              "ad-group-status",
+            ].includes(imported.summary.target);
             credential = CookieCredentialInputSchema.parse({
               ...credential,
               requestTemplates: [
                 ...(parsedPrevious.requestTemplates ?? []).filter(
                   (item) =>
-                    !incomingKeys.has(`${item.target}:${item.action ?? ""}`),
+                    !incomingKeys.has(`${item.target}:${item.action ?? ""}`) &&
+                    !(
+                      discardStaleAutoExpandedAd &&
+                      item.derived &&
+                      ["ad", "ad-status"].includes(item.target)
+                    ),
                 ),
                 ...(credential.requestTemplates ?? []),
               ],

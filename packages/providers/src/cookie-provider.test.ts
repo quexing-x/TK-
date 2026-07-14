@@ -137,7 +137,7 @@ describe("CookieAdsProvider", () => {
     });
   });
 
-  it("replays a multipart update_status template with the target ad id", async () => {
+  it("replays an overture ad template as an ad-group request", async () => {
     let requestBody = "";
     vi.stubGlobal(
       "fetch",
@@ -177,7 +177,7 @@ describe("CookieAdsProvider", () => {
           csrfHeaderName: "x-csrftoken",
           requestTemplates: [
             {
-              target: "ad-status",
+              target: "ad-group-status",
               action: "enable",
               url: "https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456",
               method: "POST",
@@ -187,7 +187,7 @@ describe("CookieAdsProvider", () => {
           ],
         },
       },
-      [{ entityType: "ad", externalId: "new-id", action: "enable" }],
+      [{ entityType: "ad-group", externalId: "new-id", action: "enable" }],
     );
 
     expect(result[0]).toMatchObject({ ok: true, externalId: "new-id" });

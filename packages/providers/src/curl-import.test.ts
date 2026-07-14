@@ -16,7 +16,7 @@ describe("parseTikTokCurl", () => {
 
     expect(imported.settings.advertiserId).toBe("123456");
     expect(JSON.stringify(imported.settings)).not.toContain("ephemeral-token");
-    expect(imported.credential.requestTemplates).toHaveLength(3);
+    expect(imported.credential.requestTemplates).toHaveLength(2);
     expect(imported.credential.requestTemplates).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -29,7 +29,6 @@ describe("parseTikTokCurl", () => {
           body: '{"page":1}',
           derived: false,
         }),
-        expect.objectContaining({ target: "ad", derived: true }),
       ]),
     );
     expect(imported.credential.cookie).toBe(
@@ -58,7 +57,7 @@ describe("parseTikTokCurl", () => {
       `curl 'https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_id":"old-id","status":0}'`,
     );
 
-    expect(imported.credential.requestTemplates).toHaveLength(6);
+    expect(imported.credential.requestTemplates).toHaveLength(4);
     expect(imported.credential.requestTemplates).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -71,12 +70,6 @@ describe("parseTikTokCurl", () => {
           target: "campaign-status",
           action: "disable",
           body: '{"campaign_id":"old-id","status":0}',
-          derived: true,
-        }),
-        expect.objectContaining({
-          target: "ad-status",
-          action: "enable",
-          body: '{"ad_id":"old-id","status":1}',
           derived: true,
         }),
       ]),
@@ -120,13 +113,14 @@ describe("parseTikTokCurl", () => {
       `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456' -H 'content-type: multipart/form-data; boundary=----TestBoundary' -b 'sessionid=authorized-test-cookie' --data-raw $'${multipart}'`,
     );
 
-    expect(imported.summary.target).toBe("ad-status");
+    expect(imported.summary.target).toBe("ad-group-status");
     const templates = imported.credential.requestTemplates ?? [];
+    expect(templates).toHaveLength(4);
     const enable = templates.find(
-      (item) => item.target === "ad-status" && item.action === "enable",
+      (item) => item.target === "ad-group-status" && item.action === "enable",
     );
     const disable = templates.find(
-      (item) => item.target === "ad-status" && item.action === "disable",
+      (item) => item.target === "ad-group-status" && item.action === "disable",
     );
     const campaignDisable = templates.find(
       (item) => item.target === "campaign-status" && item.action === "disable",
@@ -135,6 +129,7 @@ describe("parseTikTokCurl", () => {
     expect(disable?.body).toContain('name="operation"\r\n\r\ndisable');
     expect(campaignDisable?.url).toContain("/campaign/update_status/");
     expect(campaignDisable?.body).toContain('name="campaign_list"');
+    expect(templates.some((item) => item.target === "ad-status")).toBe(false);
     expect(campaignDisable?.body).not.toContain("$------TestBoundary");
   });
 });

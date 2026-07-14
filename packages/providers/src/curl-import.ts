@@ -308,11 +308,16 @@ function classifyRequestTarget(
   | "ad-status" {
   const normalized = pathname.toLowerCase();
   const isStatus = normalized.includes("status") || normalized.includes("update");
+  const isOverture = normalized.includes("/overture/");
   if (isStatus && normalized.includes("adgroup")) return "ad-group-status";
   if (isStatus && normalized.includes("campaign")) return "campaign-status";
-  if (isStatus && /\/(?:ad|creative)(?:\/|_)/.test(normalized)) return "ad-status";
+  if (isStatus && normalized.includes("/creative/")) return "ad-status";
+  if (isStatus && /\/ad(?:\/|_)/.test(normalized)) {
+    return isOverture ? "ad-group-status" : "ad-status";
+  }
   if (normalized.includes("/adgroup/list")) return "ad-group";
   if (normalized.includes("/campaign/list")) return "campaign";
+  if (normalized.includes("/creative/list")) return "ad";
   if (normalized.includes("/ad/list")) return "ad";
   return "health";
 }
@@ -329,7 +334,10 @@ type ReadTemplateRequest = {
 };
 
 function createAllReadTemplates(request: ReadTemplateRequest) {
-  const targets: ReadTarget[] = ["campaign", "ad-group", "ad"];
+  const targets: ReadTarget[] =
+    request.target === "ad-group"
+      ? ["campaign", "ad-group"]
+      : [request.target];
   return targets.map((target) => {
     if (target === request.target) return { ...request, derived: false };
     const url = new URL(request.url);
@@ -356,11 +364,10 @@ function createAllStatusTemplatePairs(request: {
   contentType: string | undefined;
   headers: Record<string, string>;
 }) {
-  const targets: StatusTarget[] = [
-    "campaign-status",
-    "ad-group-status",
-    "ad-status",
-  ];
+  const targets: StatusTarget[] =
+    request.target === "ad-group-status"
+      ? ["campaign-status", "ad-group-status"]
+      : [request.target];
   return targets.flatMap((target) => {
     const adapted = adaptStatusRequest(request, target);
     const transformed = transformStatusRequest(adapted.url, adapted.body);
@@ -405,7 +412,7 @@ function adaptStatusRequest(
     if (isMultipartBody(request.contentType, body)) {
       const renamed = rewriteMultipartFields(body, (field) =>
         multipartEntityListKeys.has(field.name.toLowerCase())
-          ? { name: targetMultipartEntityListKey(target) }
+          ? { name: targetMultipartEntityListKey(target, url.pathname) }
           : undefined,
       );
       if (renamed.changes === 0) {
@@ -432,10 +439,11 @@ function adaptStatusRequest(
 }
 
 function replaceStatusPathLevel(pathname: string, target: StatusTarget): string {
+  const isOverture = pathname.toLowerCase().includes("/overture/");
   const segment = {
     "campaign-status": "campaign",
-    "ad-group-status": "adgroup",
-    "ad-status": "ad",
+    "ad-group-status": isOverture ? "ad" : "adgroup",
+    "ad-status": isOverture ? "creative" : "ad",
   }[target];
   const replaced = pathname.replace(
     /\/(campaign|adgroup|ad|creative)(?=\/.*(?:status|update)|\/(?:status|update))/i,
@@ -467,12 +475,19 @@ const multipartEntityListKeys = new Set([
   "adgroup_list",
   "ad_group_list",
   "ad_list",
+  "creative_list",
 ]);
 
-function targetMultipartEntityListKey(target: StatusTarget): string {
+function targetMultipartEntityListKey(
+  target: StatusTarget,
+  pathname: string,
+): string {
+  const isOverture = pathname.toLowerCase().includes("/overture/");
   if (target === "campaign-status") return "campaign_list";
-  if (target === "ad-group-status") return "adgroup_list";
-  return "ad_list";
+  if (target === "ad-group-status") {
+    return isOverture ? "ad_list" : "adgroup_list";
+  }
+  return isOverture ? "creative_list" : "ad_list";
 }
 
 function targetEntityIdKey(target: StatusTarget, plural: boolean): string {

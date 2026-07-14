@@ -1546,6 +1546,23 @@ function connectionStateLabel(
   kind: ProviderKind,
 ): ReactNode {
   const connection = state?.connection;
+  const cookieReadiness = state?.readiness;
+  const verifiedCookieTargets = (["campaign", "ad-group", "ad"] as const).filter(
+    (target) =>
+      cookieReadiness?.readTargets.includes(target) &&
+      cookieReadiness.statusTargets.includes(target),
+  );
+  if (
+    kind === "cookie" &&
+    (cookieReadiness?.statusTargets.length ?? 0) > 0 &&
+    verifiedCookieTargets.length < 3
+  ) {
+    return (
+      <span className="status warning">
+        层级未完成 {verifiedCookieTargets.length}/3
+      </span>
+    );
+  }
   if (kind === "cookie" && (state?.readiness?.completedSteps ?? 0) < 2) {
     return (
       <span className="status warning">

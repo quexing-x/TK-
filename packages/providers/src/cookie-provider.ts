@@ -219,7 +219,13 @@ function materializeStatusRequest(
     const contentType = template.contentType?.toLowerCase() ?? "";
     if (isMultipartBody(contentType, body)) {
       const replaced = rewriteMultipartFields(body, (field) => {
-        if (!isMultipartEntityListKey(mutation.entityType, field.name)) {
+        if (
+          !isMultipartEntityListKey(
+            mutation.entityType,
+            field.name,
+            url.pathname,
+          )
+        ) {
           return undefined;
         }
         return {
@@ -309,12 +315,16 @@ function isEntityIdKey(entityType: SyncEntityType, key: string): boolean {
 function isMultipartEntityListKey(
   entityType: SyncEntityType,
   key: string,
+  pathname: string,
 ): boolean {
   const normalized = key.toLowerCase();
+  const isOverture = pathname.toLowerCase().includes("/overture/");
   const keys: Record<SyncEntityType, string[]> = {
     campaign: ["campaign_list"],
-    "ad-group": ["adgroup_list", "ad_group_list"],
-    ad: ["ad_list"],
+    "ad-group": isOverture
+      ? ["ad_list"]
+      : ["adgroup_list", "ad_group_list"],
+    ad: isOverture ? ["creative_list"] : ["ad_list"],
   };
   return keys[entityType].includes(normalized);
 }

@@ -151,7 +151,7 @@ describe("local API", () => {
     });
     expect(wrongStep.statusCode).toBe(400);
     expect(wrongStep.json().message).toContain("第 2 步只接受启停请求");
-    const statusCommand = `curl 'https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"DISABLE"}'`;
+    const statusCommand = `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"DISABLE"}'`;
     const response = await app.inject({
       method: "POST",
       url: "/api/accounts/demo-account/connections/cookie/import-curl",
@@ -171,8 +171,6 @@ describe("local API", () => {
         expect.objectContaining({ target: "campaign-status", action: "enable" }),
         expect.objectContaining({ target: "ad-group-status", action: "disable" }),
         expect.objectContaining({ target: "ad-group-status", action: "enable" }),
-        expect.objectContaining({ target: "ad-status", action: "disable" }),
-        expect.objectContaining({ target: "ad-status", action: "enable" }),
       ]),
     );
     const readiness = await app.inject({
@@ -182,9 +180,10 @@ describe("local API", () => {
     expect(readiness.statusCode).toBe(200);
     expect(readiness.json()).toMatchObject({
       dataRequestImported: true,
-      statusRequestImported: true,
-      statusTargets: ["campaign", "ad-group", "ad"],
-      completedSteps: 2,
+      statusRequestImported: false,
+      readTargets: ["campaign", "ad-group"],
+      statusTargets: ["campaign", "ad-group"],
+      completedSteps: 1,
     });
   });
 
