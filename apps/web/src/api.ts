@@ -2,7 +2,6 @@ import type {
   AccountConfig,
   AccountSettingsUpdate,
   AccountCreateInput,
-  CookieConnectionReadiness,
   GlobalAutomationSettings,
   GlobalAutomationSettingsInput,
   AutomationSwitchRisk,
@@ -21,6 +20,21 @@ import type {
   ManagedEntityRecord,
   ManualStatusInput,
 } from "@tk-auto/core";
+
+export interface CookieConnectionReadiness {
+  dataRequestImported: boolean;
+  statusRequestImported: boolean;
+  requiredFields: {
+    listQuery: boolean;
+    updateQuery: boolean;
+    copyQuery: boolean;
+    csrfToken: boolean;
+    cookie: boolean;
+  };
+  completedFields: number;
+  totalFields: 5;
+  fieldsComplete: boolean;
+}
 
 export interface SwitchDefinition {
   key: keyof AutomationSwitches;

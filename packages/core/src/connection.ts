@@ -121,24 +121,6 @@ export const ProviderConnectionSchema = z.object({
 
 export type ProviderConnection = z.infer<typeof ProviderConnectionSchema>;
 
-export const CookieConnectionReadinessSchema = z.object({
-  dataRequestImported: z.boolean(),
-  statusRequestImported: z.boolean(),
-  requiredFields: z.object({
-    listQuery: z.boolean(),
-    updateQuery: z.boolean(),
-    copyQuery: z.boolean(),
-    csrfToken: z.boolean(),
-    cookie: z.boolean(),
-  }),
-  completedFields: z.number().int().min(0).max(5),
-  totalFields: z.literal(5),
-  fieldsComplete: z.boolean(),
-});
-export type CookieConnectionReadiness = z.infer<
-  typeof CookieConnectionReadinessSchema
->;
-
 export const SyncEntityTypeSchema = z.enum([
   "campaign",
   "ad-group",

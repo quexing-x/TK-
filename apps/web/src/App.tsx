@@ -44,7 +44,6 @@ import type {
   AdOperationRecord,
   EntityMetricSnapshotRecord,
   ManagedEntityRecord,
-  CookieConnectionReadiness,
   ProviderConnection,
   ProviderKind,
   ThresholdConfig,
@@ -53,6 +52,7 @@ import type {
 import {
   api,
   type BootstrapPayload,
+  type CookieConnectionReadiness,
   type SwitchDefinition,
 } from "./api";
 import { ConnectionPage } from "./ConnectionPage";

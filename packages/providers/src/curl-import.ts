@@ -2,7 +2,6 @@ import {
   CookieConnectionSettingsSchema,
   CookieCredentialInputSchema,
   type CookieConnectionSettings,
-  type CookieConnectionReadiness,
   type AutomationAction,
   type ProviderCredentialInput,
   type SyncEntityType,
@@ -41,9 +40,24 @@ export interface TikTokCurlImportResult {
   };
 }
 
+export interface TikTokCookieImportReadiness {
+  dataRequestImported: boolean;
+  statusRequestImported: boolean;
+  requiredFields: {
+    listQuery: boolean;
+    updateQuery: boolean;
+    copyQuery: boolean;
+    csrfToken: boolean;
+    cookie: boolean;
+  };
+  completedFields: number;
+  totalFields: 5;
+  fieldsComplete: boolean;
+}
+
 export function getTikTokCookieImportReadiness(
   credential?: Extract<ProviderCredentialInput, { kind: "cookie" }>,
-): CookieConnectionReadiness {
+): TikTokCookieImportReadiness {
   const templates = credential?.requestTemplates ?? [];
   const listTemplate = templates.find(
     (item) => item.target === "ad-group" && !item.derived,
@@ -561,7 +575,13 @@ function replaceStatusPathLevel(pathname: string, target: StatusTarget): string 
       "状态 cURL 路径无法安全扩展到三个层级，请重新复制标准 update/status 请求。",
     );
   }
-  return pathname.replace(levelPattern, `/${segment}`);
+  const replaced = pathname.replace(levelPattern, `/${segment}`);
+  return target === "ad-status" && isOverture
+    ? replaced.replace(
+        /\/api\/v3\/i18n\/overture\//i,
+        "/api/v2/i18n/overture/",
+      )
+    : replaced;
 }
 
 const entityIdKeys = new Set([

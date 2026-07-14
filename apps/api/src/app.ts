@@ -5,7 +5,6 @@ import {
   AccountSettingsUpdateSchema,
   AccountCreateInputSchema,
   GlobalAutomationSettingsInputSchema,
-  AutomationActionSchema,
   AutomationSwitchesSchema,
   CookieCredentialInputSchema,
   ProviderConnectionSettingsSchema,
@@ -46,10 +45,6 @@ const ProviderParamsSchema = AccountParamsSchema.extend({
 const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
   step: z.enum(["read", "status"]).optional(),
-});
-const StatusCurlImportBodySchema = CurlImportBodySchema.extend({
-  entityType: SyncEntityTypeSchema,
-  action: AutomationActionSchema,
 });
 const DecisionParamsSchema = z.object({ decisionId: z.string().uuid() });
 const EntityParamsSchema = AccountParamsSchema.extend({
@@ -351,100 +346,6 @@ export async function createApp(
           `${importMessage} 请求已加密保存，但连接检测失败：${getSafeProviderError(cause)}`,
         );
       }
-    },
-  );
-
-  app.post(
-    "/api/accounts/:accountId/connections/cookie/import-status-curl",
-    async (request, reply) => {
-      const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
-        return reply.status(404).send({ message: "账号不存在。" });
-      }
-      const body = StatusCurlImportBodySchema.parse(request.body);
-      let imported: ReturnType<typeof parseTikTokStatusCurl>;
-      try {
-        imported = parseTikTokStatusCurl(body.command);
-      } catch (cause) {
-        if (cause instanceof TikTokCurlImportError) {
-          return reply.status(400).send({ message: cause.message });
-        }
-        throw cause;
-      }
-
-      const previous = dependencies.store.getProviderConnection(
-        accountId,
-        "cookie",
-      );
-      let credential = imported.credential;
-      if (previous?.credentialRef) {
-        const previousSecret = await dependencies.vault.read(
-          previous.credentialRef,
-        );
-        if (previousSecret) {
-          const parsedPrevious = ProviderCredentialInputSchema.parse(
-            JSON.parse(previousSecret),
-          );
-          if (parsedPrevious.kind === "cookie") {
-            const incomingKeys = new Set(
-              (credential.requestTemplates ?? []).map(
-                (item) => `${item.target}:${item.action ?? ""}`,
-              ),
-            );
-            const discardStaleAutoExpandedAd = [
-              "ad-group",
-              "ad-group-status",
-            ].includes(imported.summary.target);
-            credential = CookieCredentialInputSchema.parse({
-              ...credential,
-              requestTemplates: [
-                ...(parsedPrevious.requestTemplates ?? []).filter(
-                  (item) =>
-                    !incomingKeys.has(`${item.target}:${item.action ?? ""}`) &&
-                    !(
-                      discardStaleAutoExpandedAd &&
-                      item.derived &&
-                      ["ad", "ad-status"].includes(item.target)
-                    ),
-                ),
-                ...(credential.requestTemplates ?? []),
-              ],
-            });
-          }
-        }
-      }
-
-      dependencies.store.saveProviderConnectionSettings(
-        accountId,
-        imported.settings,
-      );
-      const reference = await dependencies.vault.create(
-        JSON.stringify(credential),
-      );
-      try {
-        dependencies.store.setProviderCredentialReference(
-          accountId,
-          "cookie",
-          reference,
-        );
-      } catch (cause) {
-        await dependencies.vault.delete(reference);
-        throw cause;
-      }
-      if (previous?.credentialRef) {
-        await dependencies.vault.delete(previous.credentialRef);
-      }
-      if (previous?.status === "ready") {
-        return dependencies.store.updateProviderStatus(
-          accountId,
-          "cookie",
-          "ready",
-          "已识别并生成三个层级的开启、关闭模板。",
-        );
-      }
-      return dependencies.store
-        .listProviderConnections(accountId)
-        .find((item) => item.kind === "cookie");
     },
   );
 

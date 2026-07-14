@@ -12,12 +12,16 @@ import {
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
   AccountConfig,
-  CookieConnectionReadiness,
   OfficialApiConnectionSettings,
   ProviderConnection,
   ProviderKind,
 } from "@tk-auto/core";
-import { api } from "./api";
+import { api, type CookieConnectionReadiness } from "./api";
+import {
+  canSubmitCookieImport,
+  describeCookieState,
+  getCookieImportSteps,
+} from "./cookie-onboarding.js";
 
 const emptyApiSettings: OfficialApiConnectionSettings = {
   kind: "official-api",
@@ -115,30 +119,34 @@ export function ConnectionPage({
       setBusy("import");
       setImportFeedback(null);
       let result = connection;
-      if (readCurlCommand.trim()) {
+      for (const importStep of getCookieImportSteps(
+        readCurlCommand,
+        statusCurlCommand,
+      )) {
         result = await api.importCookieCurl(
           account.id,
-          readCurlCommand.trim(),
-          "read",
+          importStep.command,
+          importStep.step,
         );
-        setReadCurlCommand("");
-        await load();
+        if (importStep.step === "read") {
+          setReadCurlCommand("");
+          await load();
+        } else {
+          setStatusCurlCommand("");
+        }
       }
-      if (statusCurlCommand.trim()) {
-        result = await api.importCookieCurl(
-          account.id,
-          statusCurlCommand.trim(),
-          "status",
-        );
-        setStatusCurlCommand("");
-      }
+      const nextReadiness = await api.getCookieReadiness(account.id);
       await load();
+      const importReady =
+        result?.status === "ready" &&
+        nextReadiness.fieldsComplete &&
+        nextReadiness.statusRequestImported;
       setImportFeedback({
-        ok: result?.status === "ready",
+        ok: importReady,
         message:
-          result?.status === "ready"
+          importReady
             ? "两段 cURL 已解码并加密保存，必要字段与启停能力均已建立。"
-            : result?.lastMessage ?? "字段已保存，但当前连接异常。",
+            : "请求已加密保存，但必要字段、账户读取或三级启停模板仍未全部就绪，请按实时状态提示重新复制对应 cURL。",
       });
     } catch (cause) {
       const message = getErrorMessage(cause);
@@ -279,16 +287,12 @@ export function ConnectionPage({
               <button
                 className="primary-button"
                 disabled={
-                  busy !== null ||
-                  (!readCurlCommand.trim() && !statusCurlCommand.trim()) ||
-                  (Boolean(readCurlCommand.trim()) &&
-                    !readCurlCommand.trim().startsWith("curl")) ||
-                  (Boolean(statusCurlCommand.trim()) &&
-                    !statusCurlCommand.trim().startsWith("curl")) ||
-                  (!readiness.dataRequestImported &&
-                    !readCurlCommand.trim().startsWith("curl")) ||
-                  (!readiness.statusRequestImported &&
-                    !statusCurlCommand.trim().startsWith("curl"))
+                  !canSubmitCookieImport({
+                    busy: busy !== null,
+                    readCommand: readCurlCommand,
+                    readiness,
+                    statusCommand: statusCurlCommand,
+                  })
                 }
                 onClick={() => void importBothCurls()}
                 type="button"
@@ -485,45 +489,6 @@ function CurlStep({
       {children}
     </article>
   );
-}
-
-function describeCookieState(
-  readiness: CookieConnectionReadiness,
-  connection?: ProviderConnection,
-) {
-  if (!readiness.fieldsComplete) {
-    return {
-      status: "untested",
-      label: `等待导入（${readiness.completedFields}/${readiness.totalFields}）`,
-      message: "请粘贴两段完整 cURL；只有五个必要字段全部获取后，才会显示接入正常。",
-    };
-  }
-  if (!readiness.statusRequestImported) {
-    return {
-      status: "failed",
-      label: "启停能力未建立",
-      message: "必要字段已获取，但启停请求未能生成完整控制模板，请重新复制 /ad/update_status/? 的 POST cURL。",
-    };
-  }
-  if (connection?.status === "ready") {
-    return {
-      status: "ready",
-      label: "接入正常",
-      message: "广告账户可正常读取，系列、广告组和广告的开启与关闭能力均已建立。",
-    };
-  }
-  if (connection?.status === "failed") {
-    return {
-      status: "failed",
-      label: "Cookie 已失效或连接异常",
-      message: connection.lastMessage ?? "请重新获取并导入两段 cURL。",
-    };
-  }
-  return {
-    status: "untested",
-    label: "字段已获取，等待连接结果",
-    message: connection?.lastMessage ?? "正在等待本机完成连接状态更新。",
-  };
 }
 
 function ConnectionField({ label, children }: { label: string; children: React.ReactNode }) {

@@ -166,6 +166,7 @@ describe("parseTikTokCurl", () => {
     expect(campaignDisable?.url).toContain("/campaign/update_status/");
     expect(campaignDisable?.body).toContain('name="campaign_list"');
     expect(creativeDisable?.url).toContain("/creative/update_status/");
+    expect(creativeDisable?.url).toContain("/api/v2/i18n/overture/");
     expect(creativeDisable?.body).toContain('name="creative_list"');
     expect(creativeDisable?.body).toContain('name="aco_creative_list"');
     expect(campaignDisable?.body).not.toContain("$------TestBoundary");
