@@ -4,8 +4,12 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   AccountConfigSchema,
+  GlobalAutomationSettingsSchema,
   type AccountConfig,
   type AccountSettingsUpdate,
+  type AccountCreateInput,
+  type GlobalAutomationSettings,
+  type GlobalAutomationSettingsInput,
   type AutomationSwitchKey,
   type AutomationSwitches,
   type AutomationAction,
@@ -14,6 +18,11 @@ import {
   type AutomationDecisionStatus,
   type AutomationRunRecord,
   type AutomationTrigger,
+  type AdOperationRecord,
+  type EntityMetricSnapshotRecord,
+  type IgnoredEntityRecord,
+  type ManagedEntityRecord,
+  normalizeProviderEntity,
   ThresholdConfigSchema,
   type ThresholdConfig,
   type ThresholdInput,
@@ -66,28 +75,27 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT INTO accounts (
-          id, display_name, enabled, provider_kind, credential_ref,
+          id, display_name, account_type, enabled, provider_kind, credential_ref,
           timezone, polling_interval_minutes, max_actions_per_run,
           execution_mode, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         accountId,
         "演示广告账户",
+        "standard",
         1,
         "cookie",
         null,
         "Asia/Shanghai",
+        5,
         15,
-        10,
         "manual-approval",
         now,
       );
 
     this.writeSwitches(accountId, createDefaultAutomationSwitches(), false);
-    for (const threshold of defaultThresholds) {
-      this.insertThreshold(accountId, threshold, false);
-    }
+    this.ensureGlobalDefaults();
     this.writeAudit("system", accountId, "account.seeded", {
       source: "default-seed",
     });
@@ -98,6 +106,37 @@ export class AutomationStore {
       .prepare("SELECT * FROM accounts ORDER BY display_name")
       .all() as SqlRow[];
     return rows.map(mapAccount);
+  }
+
+  createAccount(input: AccountCreateInput): AccountConfig {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO accounts (
+          id, display_name, account_type, enabled, provider_kind,
+          credential_ref, timezone, polling_interval_minutes,
+          max_actions_per_run, execution_mode, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.displayName,
+        input.accountType,
+        toSqlBoolean(input.enabled),
+        input.providerKind,
+        "Asia/Shanghai",
+        5,
+        15,
+        input.executionMode,
+        now,
+      );
+    this.writeSwitches(id, createDefaultAutomationSwitches(), false);
+    this.writeAudit("local-user", id, "account.created", {
+      displayName: input.displayName,
+      accountType: input.accountType,
+    });
+    return this.getAccount(id) as AccountConfig;
   }
 
   getAccount(accountId: string): AccountConfig | null {
@@ -115,18 +154,15 @@ export class AutomationStore {
     const result = this.db
       .prepare(
         `UPDATE accounts SET
-          display_name = ?, enabled = ?, provider_kind = ?, timezone = ?,
-          polling_interval_minutes = ?, max_actions_per_run = ?,
+          display_name = ?, account_type = ?, enabled = ?, provider_kind = ?,
           execution_mode = ?, updated_at = ?
         WHERE id = ?`,
       )
       .run(
         settings.displayName,
+        settings.accountType,
         toSqlBoolean(settings.enabled),
         settings.providerKind,
-        settings.timezone,
-        settings.pollingIntervalMinutes,
-        settings.maxActionsPerRun,
         settings.executionMode,
         now,
         accountId,
@@ -140,6 +176,33 @@ export class AutomationStore {
       ...settings,
     });
     return this.getAccount(accountId);
+  }
+
+  getGlobalAutomationSettings(): GlobalAutomationSettings {
+    this.ensureGlobalDefaults();
+    const row = this.db
+      .prepare("SELECT * FROM global_automation_settings WHERE id = 1")
+      .get() as SqlRow;
+    return GlobalAutomationSettingsSchema.parse({
+      pollingIntervalMinutes: Number(row.polling_interval_minutes),
+      maxActionsPerRun: Number(row.max_actions_per_run),
+      updatedAt: row.updated_at,
+    });
+  }
+
+  updateGlobalAutomationSettings(
+    input: GlobalAutomationSettingsInput,
+  ): GlobalAutomationSettings {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE global_automation_settings SET
+          polling_interval_minutes = ?, max_actions_per_run = ?, updated_at = ?
+        WHERE id = 1`,
+      )
+      .run(input.pollingIntervalMinutes, input.maxActionsPerRun, now);
+    this.writeSystemAudit("global.automation-settings.updated", input);
+    return this.getGlobalAutomationSettings();
   }
 
   listProviderConnections(accountId: string): ProviderConnection[] {
@@ -269,6 +332,12 @@ export class AutomationStore {
         account_id, provider_kind, entity_type, external_id, payload_json, synced_at
       ) VALUES (?, ?, ?, ?, ?, ?)`,
     );
+    const insertSnapshot = this.db.prepare(
+      `INSERT INTO entity_metric_snapshots (
+        id, account_id, provider_kind, entity_type, external_id, entity_name,
+        operational_status, metrics_json, captured_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
     this.db.exec("BEGIN IMMEDIATE");
     try {
       remove.run(accountId, kind);
@@ -281,7 +350,27 @@ export class AutomationStore {
           JSON.stringify(entity.payload),
           result.finishedAt,
         );
+        const normalized = normalizeProviderEntity(entity);
+        insertSnapshot.run(
+          randomUUID(),
+          accountId,
+          kind,
+          entity.entityType,
+          entity.externalId,
+          normalized.name,
+          normalized.status,
+          JSON.stringify(normalized.metrics),
+          result.finishedAt,
+        );
       }
+      this.db
+        .prepare(
+          "DELETE FROM entity_metric_snapshots WHERE account_id = ? AND captured_at < ?",
+        )
+        .run(
+          accountId,
+          new Date(Date.now() - 90 * 24 * 60 * 60_000).toISOString(),
+        );
       this.db
         .prepare(
           `INSERT INTO sync_runs (
@@ -327,6 +416,249 @@ export class AutomationStore {
       externalId: String(row.external_id),
       payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
     }));
+  }
+
+  listManagedEntities(
+    accountId: string,
+    kind: ProviderKind,
+  ): ManagedEntityRecord[] {
+    const ignored = new Set(
+      this.listIgnoredEntities(accountId, kind).map(
+        (item) => `${item.entityType}:${item.externalId}`,
+      ),
+    );
+    const rows = this.db
+      .prepare(
+        `SELECT entity_type, external_id, payload_json, synced_at
+         FROM provider_entities
+         WHERE account_id = ? AND provider_kind = ?
+         ORDER BY entity_type, external_id`,
+      )
+      .all(accountId, kind) as SqlRow[];
+    return rows.map((row) => {
+      const snapshot = normalizeProviderEntity({
+        entityType: row.entity_type as ProviderEntity["entityType"],
+        externalId: String(row.external_id),
+        payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
+      });
+      return {
+        ...snapshot,
+        ignored: ignored.has(`${snapshot.entityType}:${snapshot.externalId}`),
+        syncedAt: String(row.synced_at),
+      };
+    });
+  }
+
+  listIgnoredEntities(
+    accountId: string,
+    kind: ProviderKind,
+  ): IgnoredEntityRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM ignored_entities
+         WHERE account_id = ? AND provider_kind = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(accountId, kind) as SqlRow[];
+    return rows.map((row) => ({
+      accountId: String(row.account_id),
+      providerKind: row.provider_kind as IgnoredEntityRecord["providerKind"],
+      entityType: row.entity_type as IgnoredEntityRecord["entityType"],
+      externalId: String(row.external_id),
+      reason: String(row.reason),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  setEntityIgnored(
+    accountId: string,
+    kind: ProviderKind,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+    reason: string,
+  ): IgnoredEntityRecord {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO ignored_entities (
+          account_id, provider_kind, entity_type, external_id, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, provider_kind, entity_type, external_id)
+        DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at`,
+      )
+      .run(accountId, kind, entityType, externalId, reason, now);
+    this.recordAdOperation({
+      accountId,
+      providerKind: kind,
+      entityType,
+      externalId,
+      entityName: this.findEntityName(accountId, kind, entityType, externalId),
+      action: "ignore",
+      source: "manual",
+      status: "succeeded",
+      message: reason,
+    });
+    return this.listIgnoredEntities(accountId, kind).find(
+      (item) => item.entityType === entityType && item.externalId === externalId,
+    ) as IgnoredEntityRecord;
+  }
+
+  removeEntityIgnored(
+    accountId: string,
+    kind: ProviderKind,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `DELETE FROM ignored_entities
+         WHERE account_id = ? AND provider_kind = ? AND entity_type = ?
+           AND external_id = ?`,
+      )
+      .run(accountId, kind, entityType, externalId);
+    if (result.changes > 0) {
+      this.recordAdOperation({
+        accountId,
+        providerKind: kind,
+        entityType,
+        externalId,
+        entityName: this.findEntityName(accountId, kind, entityType, externalId),
+        action: "unignore",
+        source: "manual",
+        status: "succeeded",
+        message: null,
+      });
+    }
+    return result.changes > 0;
+  }
+
+  isEntityIgnored(
+    accountId: string,
+    kind: ProviderKind,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+  ): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM ignored_entities
+           WHERE account_id = ? AND provider_kind = ? AND entity_type = ?
+             AND external_id = ? LIMIT 1`,
+        )
+        .get(accountId, kind, entityType, externalId),
+    );
+  }
+
+  recordAdOperation(
+    input: Omit<AdOperationRecord, "id" | "createdAt">,
+  ): AdOperationRecord {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO ad_operations (
+          id, account_id, provider_kind, entity_type, external_id, entity_name,
+          action, source, status, message, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.accountId,
+        input.providerKind,
+        input.entityType,
+        input.externalId,
+        input.entityName,
+        input.action,
+        input.source,
+        input.status,
+        input.message,
+        createdAt,
+      );
+    const row = this.db
+      .prepare("SELECT * FROM ad_operations WHERE id = ?")
+      .get(id) as SqlRow;
+    return mapAdOperation(row);
+  }
+
+  listAdOperations(accountId: string, limit = 100): AdOperationRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM ad_operations WHERE account_id = ?
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(accountId, limit) as SqlRow[];
+    return rows.map(mapAdOperation);
+  }
+
+  queueAppeal(
+    accountId: string,
+    kind: ProviderKind,
+    externalId: string,
+    reason: string,
+  ): AdOperationRecord {
+    return this.recordAdOperation({
+      accountId,
+      providerKind: kind,
+      entityType: "ad",
+      externalId,
+      entityName: this.findEntityName(accountId, kind, "ad", externalId),
+      action: "appeal",
+      source: "manual",
+      status: "pending",
+      message: reason,
+    });
+  }
+
+  listMetricSnapshots(
+    accountId: string,
+    kind: ProviderKind,
+    since: string,
+    entityType?: ProviderEntity["entityType"],
+    limit = 5000,
+  ): EntityMetricSnapshotRecord[] {
+    const rows = entityType
+      ? (this.db
+          .prepare(
+            `SELECT * FROM entity_metric_snapshots
+             WHERE account_id = ? AND provider_kind = ? AND captured_at >= ?
+               AND entity_type = ? ORDER BY captured_at DESC LIMIT ?`,
+          )
+          .all(accountId, kind, since, entityType, limit) as SqlRow[])
+      : (this.db
+          .prepare(
+            `SELECT * FROM entity_metric_snapshots
+             WHERE account_id = ? AND provider_kind = ? AND captured_at >= ?
+             ORDER BY captured_at DESC LIMIT ?`,
+          )
+          .all(accountId, kind, since, limit) as SqlRow[]);
+    return rows.map((row) => ({
+      id: String(row.id),
+      accountId: String(row.account_id),
+      providerKind:
+        row.provider_kind as EntityMetricSnapshotRecord["providerKind"],
+      entityType: row.entity_type as EntityMetricSnapshotRecord["entityType"],
+      externalId: String(row.external_id),
+      entityName: String(row.entity_name),
+      status: row.operational_status as EntityMetricSnapshotRecord["status"],
+      metrics: JSON.parse(
+        String(row.metrics_json),
+      ) as EntityMetricSnapshotRecord["metrics"],
+      capturedAt: String(row.captured_at),
+    }));
+  }
+
+  private findEntityName(
+    accountId: string,
+    kind: ProviderKind,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+  ): string {
+    return (
+      this.listManagedEntities(accountId, kind).find(
+        (item) =>
+          item.entityType === entityType && item.externalId === externalId,
+      )?.name ?? externalId
+    );
   }
 
   createAutomationRun(
@@ -567,6 +899,66 @@ export class AutomationStore {
     return rows.map(mapThreshold);
   }
 
+  listGlobalThresholds(): ThresholdConfig[] {
+    this.ensureGlobalDefaults();
+    const rows = this.db
+      .prepare("SELECT * FROM global_thresholds ORDER BY stage, code")
+      .all() as SqlRow[];
+    return rows.map(mapGlobalThreshold);
+  }
+
+  createGlobalThreshold(input: ThresholdInput): ThresholdConfig {
+    const threshold = this.insertGlobalThreshold(input, true);
+    return threshold;
+  }
+
+  updateGlobalThreshold(
+    thresholdId: string,
+    input: ThresholdInput,
+  ): ThresholdConfig | null {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE global_thresholds SET
+          code = ?, label = ?, metric = ?, operator = ?, value = ?, unit = ?,
+          stage = ?, enabled = ?, entity_type = ?, action = ?,
+          automation_enabled = ?, minimum_spend = ?, cooldown_minutes = ?,
+          updated_at = ?
+        WHERE id = ?`,
+      )
+      .run(
+        input.code,
+        input.label,
+        input.metric,
+        input.operator,
+        input.value,
+        input.unit,
+        input.stage,
+        toSqlBoolean(input.enabled),
+        input.entityType,
+        input.action,
+        toSqlBoolean(input.automationEnabled),
+        input.minimumSpend,
+        input.cooldownMinutes,
+        now,
+        thresholdId,
+      );
+    if (result.changes === 0) return null;
+    this.writeSystemAudit("global.threshold.updated", { thresholdId, ...input });
+    return this.getGlobalThreshold(thresholdId);
+  }
+
+  deleteGlobalThreshold(thresholdId: string): boolean {
+    const result = this.db
+      .prepare("DELETE FROM global_thresholds WHERE id = ?")
+      .run(thresholdId);
+    if (result.changes > 0) {
+      this.writeSystemAudit("global.threshold.deleted", { thresholdId });
+      return true;
+    }
+    return false;
+  }
+
   createThreshold(
     accountId: string,
     input: ThresholdInput,
@@ -693,6 +1085,50 @@ export class AutomationStore {
     return result;
   }
 
+  private getGlobalThreshold(thresholdId: string): ThresholdConfig | null {
+    const row = this.db
+      .prepare("SELECT * FROM global_thresholds WHERE id = ?")
+      .get(thresholdId) as SqlRow | undefined;
+    return row ? mapGlobalThreshold(row) : null;
+  }
+
+  private insertGlobalThreshold(
+    input: ThresholdInput,
+    audit: boolean,
+  ): ThresholdConfig {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO global_thresholds (
+          id, code, label, metric, operator, value, unit, stage, enabled,
+          entity_type, action, automation_enabled, minimum_spend,
+          cooldown_minutes, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.code,
+        input.label,
+        input.metric,
+        input.operator,
+        input.value,
+        input.unit,
+        input.stage,
+        toSqlBoolean(input.enabled),
+        input.entityType,
+        input.action,
+        toSqlBoolean(input.automationEnabled),
+        input.minimumSpend,
+        input.cooldownMinutes,
+        now,
+      );
+    if (audit) this.writeSystemAudit("global.threshold.created", { id, ...input });
+    const result = this.getGlobalThreshold(id);
+    if (!result) throw new Error("Global threshold was not persisted");
+    return result;
+  }
+
   private writeSwitches(
     accountId: string,
     switches: AutomationSwitches,
@@ -756,17 +1192,22 @@ export class AutomationStore {
       );
   }
 
+  private writeSystemAudit(action: string, payload: unknown): void {
+    this.writeAudit("local-user", "global", action, payload);
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
         id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
+        account_type TEXT NOT NULL DEFAULT 'standard',
         enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
         provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api')),
         credential_ref TEXT,
         timezone TEXT NOT NULL,
         polling_interval_minutes INTEGER NOT NULL,
-        max_actions_per_run INTEGER NOT NULL DEFAULT 10,
+        max_actions_per_run INTEGER NOT NULL DEFAULT 15,
         execution_mode TEXT NOT NULL CHECK (execution_mode IN ('observe', 'manual-approval', 'automatic')),
         updated_at TEXT NOT NULL
       );
@@ -799,6 +1240,31 @@ export class AutomationStore {
         UNIQUE (account_id, code)
       );
 
+      CREATE TABLE IF NOT EXISTS global_automation_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        polling_interval_minutes INTEGER NOT NULL,
+        max_actions_per_run INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS global_thresholds (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        metric TEXT NOT NULL,
+        operator TEXT NOT NULL,
+        value REAL NOT NULL CHECK (value >= 0),
+        unit TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        entity_type TEXT NOT NULL,
+        action TEXT NOT NULL,
+        automation_enabled INTEGER NOT NULL CHECK (automation_enabled IN (0, 1)),
+        minimum_spend REAL NOT NULL DEFAULT 0,
+        cooldown_minutes INTEGER NOT NULL DEFAULT 60,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY,
         actor TEXT NOT NULL,
@@ -828,6 +1294,47 @@ export class AutomationStore {
         payload_json TEXT NOT NULL,
         synced_at TEXT NOT NULL,
         PRIMARY KEY (account_id, provider_kind, entity_type, external_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS ignored_entities (
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        provider_kind TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, provider_kind, entity_type, external_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS ad_operations (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        provider_kind TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        action TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS entity_metric_snapshots (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        provider_kind TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        operational_status TEXT NOT NULL,
+        metrics_json TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS entity_metric_snapshots_lookup
+      ON entity_metric_snapshots (
+        account_id, provider_kind, entity_type, captured_at
       );
 
       CREATE TABLE IF NOT EXISTS sync_runs (
@@ -886,8 +1393,13 @@ export class AutomationStore {
 
     this.ensureColumn(
       "accounts",
+      "account_type",
+      "TEXT NOT NULL DEFAULT 'standard'",
+    );
+    this.ensureColumn(
+      "accounts",
       "max_actions_per_run",
-      "INTEGER NOT NULL DEFAULT 10",
+      "INTEGER NOT NULL DEFAULT 15",
     );
     this.ensureColumn(
       "thresholds",
@@ -914,6 +1426,56 @@ export class AutomationStore {
       "cooldown_minutes",
       "INTEGER NOT NULL DEFAULT 60",
     );
+    this.ensureGlobalDefaults();
+  }
+
+  private ensureGlobalDefaults(): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO global_automation_settings (
+          id, polling_interval_minutes, max_actions_per_run, updated_at
+        ) VALUES (1, 5, 15, ?)`,
+      )
+      .run(now);
+
+    const count = this.db
+      .prepare("SELECT COUNT(*) AS count FROM global_thresholds")
+      .get() as SqlRow;
+    if (Number(count.count) > 0) return;
+
+    const legacyRows = this.db
+      .prepare("SELECT * FROM thresholds ORDER BY updated_at DESC")
+      .all() as SqlRow[];
+    const seen = new Set<string>();
+    for (const row of legacyRows) {
+      const code = String(row.code);
+      if (seen.has(code)) continue;
+      seen.add(code);
+      this.insertGlobalThreshold(
+        {
+          code,
+          label: String(row.label),
+          metric: row.metric as ThresholdInput["metric"],
+          operator: row.operator as ThresholdInput["operator"],
+          value: Number(row.value),
+          unit: String(row.unit),
+          stage: row.stage as ThresholdInput["stage"],
+          enabled: fromSqlBoolean(row.enabled),
+          entityType: row.entity_type as ThresholdInput["entityType"],
+          action: row.action as ThresholdInput["action"],
+          automationEnabled: fromSqlBoolean(row.automation_enabled),
+          minimumSpend: Number(row.minimum_spend),
+          cooldownMinutes: Number(row.cooldown_minutes),
+        },
+        false,
+      );
+    }
+    if (seen.size === 0) {
+      for (const threshold of defaultThresholds) {
+        this.insertGlobalThreshold(threshold, false);
+      }
+    }
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -931,6 +1493,7 @@ function mapAccount(row: SqlRow): AccountConfig {
   return AccountConfigSchema.parse({
     id: row.id,
     displayName: row.display_name,
+    accountType: row.account_type,
     enabled: fromSqlBoolean(row.enabled),
     providerKind: row.provider_kind,
     credentialRef: row.credential_ref ?? null,
@@ -946,6 +1509,27 @@ function mapThreshold(row: SqlRow): ThresholdConfig {
   return ThresholdConfigSchema.parse({
     id: row.id,
     accountId: row.account_id,
+    code: row.code,
+    label: row.label,
+    metric: row.metric,
+    operator: row.operator,
+    value: Number(row.value),
+    unit: row.unit,
+    stage: row.stage,
+    enabled: fromSqlBoolean(row.enabled),
+    entityType: row.entity_type,
+    action: row.action,
+    automationEnabled: fromSqlBoolean(row.automation_enabled),
+    minimumSpend: Number(row.minimum_spend),
+    cooldownMinutes: Number(row.cooldown_minutes),
+    updatedAt: row.updated_at,
+  });
+}
+
+function mapGlobalThreshold(row: SqlRow): ThresholdConfig {
+  return ThresholdConfigSchema.parse({
+    id: row.id,
+    accountId: "global",
     code: row.code,
     label: row.label,
     metric: row.metric,
@@ -1005,6 +1589,22 @@ function mapAutomationDecision(row: SqlRow): AutomationDecisionRecord {
       typeof row.error_message === "string" ? row.error_message : null,
     createdAt: String(row.created_at),
     executedAt: typeof row.executed_at === "string" ? row.executed_at : null,
+  };
+}
+
+function mapAdOperation(row: SqlRow): AdOperationRecord {
+  return {
+    id: String(row.id),
+    accountId: String(row.account_id),
+    providerKind: row.provider_kind as AdOperationRecord["providerKind"],
+    entityType: row.entity_type as AdOperationRecord["entityType"],
+    externalId: String(row.external_id),
+    entityName: String(row.entity_name),
+    action: row.action as AdOperationRecord["action"],
+    source: row.source as AdOperationRecord["source"],
+    status: row.status as AdOperationRecord["status"],
+    message: typeof row.message === "string" ? row.message : null,
+    createdAt: String(row.created_at),
   };
 }
 

@@ -1,6 +1,8 @@
 import {
   Activity,
   AlertTriangle,
+  BarChart3,
+  Ban,
   BookOpen,
   Check,
   ChevronDown,
@@ -9,7 +11,9 @@ import {
   Gauge,
   KeyRound,
   Layers3,
+  ListFilter,
   Plus,
+  Pencil,
   PlugZap,
   Play,
   RefreshCcw,
@@ -18,6 +22,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  UserRound,
   X,
 } from "lucide-react";
 import {
@@ -31,9 +36,14 @@ import {
 import type {
   AccountConfig,
   AccountSettingsUpdate,
+  AccountCreateInput,
+  GlobalAutomationSettings,
   AutomationSwitches,
   AutomationDecisionRecord,
   AutomationRunRecord,
+  AdOperationRecord,
+  EntityMetricSnapshotRecord,
+  ManagedEntityRecord,
   ProviderConnection,
   ProviderKind,
   ThresholdConfig,
@@ -49,10 +59,11 @@ import { ManualPage } from "./ManualPage";
 
 type PageKey =
   | "manual"
-  | "connections"
+  | "users"
   | "automation"
+  | "ads"
+  | "analytics"
   | "switches"
-  | "configuration"
   | "thresholds";
 
 const emptyThreshold: ThresholdInput = {
@@ -84,10 +95,10 @@ const navItems: Array<{
     icon: BookOpen,
   },
   {
-    key: "connections",
-    label: "接入管理",
-    description: "连接检测与只读同步",
-    icon: PlugZap,
+    key: "users",
+    label: "用户管理",
+    description: "多广告账户与独立配置",
+    icon: UserRound,
   },
   {
     key: "automation",
@@ -96,16 +107,22 @@ const navItems: Array<{
     icon: Play,
   },
   {
+    key: "ads",
+    label: "广告管理",
+    description: "筛选、忽略与手动启停",
+    icon: ListFilter,
+  },
+  {
+    key: "analytics",
+    label: "广告分析",
+    description: "指标快照与执行结果",
+    icon: BarChart3,
+  },
+  {
     key: "switches",
     label: "自动化开关",
     description: "控制账户可执行能力",
     icon: SlidersHorizontal,
-  },
-  {
-    key: "configuration",
-    label: "配置管理",
-    description: "接入方式与运行策略",
-    icon: Settings2,
   },
   {
     key: "thresholds",
@@ -139,19 +156,6 @@ export function App() {
   const account = bootstrap?.accounts.find(
     (item) => item.id === selectedAccountId,
   );
-
-  const updateAccountInState = (updated: AccountConfig) => {
-    setBootstrap((current) =>
-      current
-        ? {
-            ...current,
-            accounts: current.accounts.map((item) =>
-              item.id === updated.id ? updated : item,
-            ),
-          }
-        : current,
-    );
-  };
 
   if (!bootstrap) {
     return (
@@ -216,22 +220,6 @@ export function App() {
             <span className="eyebrow">核心控制台</span>
             <h1>{navItems.find((item) => item.key === page)?.label}</h1>
           </div>
-          <label className="account-picker">
-            <span>操作账户</span>
-            <div>
-              <select
-                value={selectedAccountId}
-                onChange={(event) => setSelectedAccountId(event.target.value)}
-              >
-                {bootstrap.accounts.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.displayName}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={16} />
-            </div>
-          </label>
         </header>
 
         {error && (
@@ -246,38 +234,478 @@ export function App() {
 
         {page === "manual" ? (
           <ManualPage />
+        ) : page === "users" ? (
+          <UsersPage
+            accounts={bootstrap.accounts}
+            onChanged={loadBootstrap}
+            onError={setError}
+          />
+        ) : page === "thresholds" ? (
+          <ThresholdsPage
+            settings={bootstrap.globalAutomationSettings}
+            onSettingsSaved={loadBootstrap}
+            onError={setError}
+          />
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
-        ) : page === "connections" ? (
-          <ConnectionPage account={account} onError={setError} />
         ) : page === "automation" ? (
-          <AutomationPage account={account} onError={setError} />
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
+            <AutomationPage account={account} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} onError={setError} />
+          </AccountScopedPage>
+        ) : page === "ads" ? (
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
+            <AdsManagementPage account={account} onError={setError} />
+          </AccountScopedPage>
+        ) : page === "analytics" ? (
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
+            <AnalyticsPage account={account} onError={setError} />
+          </AccountScopedPage>
         ) : page === "switches" ? (
-          <SwitchesPage
-            account={account}
-            definitions={bootstrap.switchDefinitions}
-            onError={setError}
-          />
-        ) : page === "configuration" ? (
-          <ConfigurationPage
-            account={account}
-            providers={bootstrap.providers}
-            onSaved={updateAccountInState}
-            onError={setError}
-          />
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
+            <SwitchesPage
+              account={account}
+              definitions={bootstrap.switchDefinitions}
+              onError={setError}
+            />
+          </AccountScopedPage>
         ) : (
-          <ThresholdsPage account={account} onError={setError} />
+          <EmptyState text="页面不存在。" />
         )}
       </main>
     </div>
   );
 }
 
-function AutomationPage({
+const defaultAccountInput: AccountCreateInput = {
+  displayName: "",
+  accountType: "standard",
+  enabled: true,
+  providerKind: "cookie",
+  executionMode: "manual-approval",
+};
+
+function UsersPage({
+  accounts,
+  onChanged,
+  onError,
+}: {
+  accounts: AccountConfig[];
+  onChanged: () => Promise<void>;
+  onError: (message: string | null) => void;
+}) {
+  const [editing, setEditing] = useState<AccountConfig | null>(null);
+  const [form, setForm] = useState<AccountCreateInput>(defaultAccountInput);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [connecting, setConnecting] = useState<AccountConfig | null>(null);
+  const [connectionStates, setConnectionStates] = useState<
+    Record<string, ProviderConnection | null>
+  >({});
+
+  const loadConnectionStates = useCallback(async () => {
+    const entries = await Promise.all(
+      accounts.map(async (account) => {
+        const list = await api.getConnections(account.id).catch(() => []);
+        return [
+          account.id,
+          list.find((item) => item.kind === account.providerKind) ?? null,
+        ] as const;
+      }),
+    );
+    setConnectionStates(Object.fromEntries(entries));
+  }, [accounts]);
+
+  useEffect(() => {
+    void loadConnectionStates();
+    const timer = window.setInterval(() => void loadConnectionStates(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [loadConnectionStates]);
+
+  const openNew = () => {
+    setEditing(null);
+    setForm(defaultAccountInput);
+    setShowForm(true);
+  };
+
+  const openEdit = (account: AccountConfig) => {
+    setEditing(account);
+    setForm(settingsFromAccount(account));
+    setShowForm(true);
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      setSaving(true);
+      if (editing) await api.updateSettings(editing.id, form);
+      else await api.createAccount(form);
+      await onChanged();
+      setShowForm(false);
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleAccount = async (account: AccountConfig) => {
+    try {
+      await api.updateSettings(account.id, {
+        ...settingsFromAccount(account),
+        enabled: !account.enabled,
+      });
+      await onChanged();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    }
+  };
+
+  return (
+    <section className="page-stack">
+      <div className="panel table-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="panel-icon"><UserRound size={18} /></span>
+            <div>
+              <h2>TikTok 广告账户</h2>
+              <p>账户独立保存接入凭据和启用状态；自动化规则由全部账户共用。</p>
+            </div>
+          </div>
+          <button className="primary-button" onClick={openNew} type="button">
+            <Plus size={17} /> 新增账户
+          </button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>账户名称</th>
+                <th>账户类型</th>
+                <th>接入方式</th>
+                <th>执行模式</th>
+                <th>接入状态</th>
+                <th>自动化</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.map((account) => (
+                <tr key={account.id}>
+                  <td><strong>{account.displayName}</strong><br /><small>{account.id}</small></td>
+                  <td>{accountTypeLabel(account.accountType)}</td>
+                  <td>{providerLabel(account.providerKind)}</td>
+                  <td>{executionModeLabel(account.executionMode)}</td>
+                  <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
+                  <td><span className={account.enabled ? "status active" : "status"}>{account.enabled ? "启用" : "停用"}</span></td>
+                  <td>
+                    <div className="row-actions">
+                      <button type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
+                      <button type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
+                      <button type="button" onClick={() => void toggleAccount(account)}>{account.enabled ? "停用" : "启用"}</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showForm && (
+        <div className="modal-backdrop" onMouseDown={() => setShowForm(false)}>
+          <form className="modal" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void save(event)}>
+            <div className="modal-heading">
+              <div><span className="eyebrow">用户管理</span><h2>{editing ? "编辑广告账户" : "新增广告账户"}</h2></div>
+              <button type="button" onClick={() => setShowForm(false)}><X size={20} /></button>
+            </div>
+            <div className="form-grid">
+              <Field label="账户名称">
+                <input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} />
+              </Field>
+              <Field label="账户类型">
+                <select value={form.accountType} onChange={(event) => setForm({ ...form, accountType: event.target.value as AccountCreateInput["accountType"] })}>
+                  <option value="standard">普通广告账户</option>
+                  <option value="agency">代理账户</option>
+                  <option value="shop">TikTok Shop</option>
+                </select>
+              </Field>
+              <Field label="默认接入方式">
+                <select value={form.providerKind} onChange={(event) => setForm({ ...form, providerKind: event.target.value as ProviderKind })}>
+                  <option value="cookie">Cookie 会话</option>
+                  <option value="official-api">Marketing API</option>
+                </select>
+              </Field>
+              <Field label="执行模式">
+                <select value={form.executionMode} onChange={(event) => setForm({ ...form, executionMode: event.target.value as AccountCreateInput["executionMode"] })}>
+                  <option value="observe">仅观察</option>
+                  <option value="manual-approval">人工确认</option>
+                  <option value="automatic">全自动</option>
+                </select>
+              </Field>
+              <div className="field toggle-field"><span>启用账户</span><Toggle checked={form.enabled} label="启用账户" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
+            </div>
+            <div className="modal-actions">
+              <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
+              <button className="primary-button" disabled={saving} type="submit"><Save size={17} /> {saving ? "保存中…" : "保存账户"}</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {connecting && (
+        <div className="modal-backdrop" onMouseDown={() => setConnecting(null)}>
+          <div className="modal connection-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><span className="eyebrow">广告账户接入</span><h2>{connecting.displayName}</h2></div>
+              <button type="button" onClick={() => { setConnecting(null); void loadConnectionStates(); }}><X size={20} /></button>
+            </div>
+            <ConnectionPage account={connecting} onError={onError} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AdsManagementPage({
   account,
   onError,
 }: {
   account: AccountConfig;
+  onError: (message: string | null) => void;
+}) {
+  const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
+  const [operations, setOperations] = useState<AdOperationRecord[]>([]);
+  const [query, setQuery] = useState("");
+  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>("all");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [nextEntities, nextOperations] = await Promise.all([
+        api.getManagedEntities(account.id),
+        api.getAdOperations(account.id),
+      ]);
+      setEntities(nextEntities);
+      setOperations(nextOperations);
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    }
+  }, [account.id, onError]);
+
+  useEffect(() => {
+    setEntities(null);
+    void load();
+  }, [load]);
+
+  const filtered = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return (entities ?? []).filter((entity) => {
+      if (level !== "all" && entity.entityType !== level) return false;
+      if (statusFilter !== "all" && entity.status !== statusFilter) return false;
+      return (
+        !normalizedQuery ||
+        entity.name.toLowerCase().includes(normalizedQuery) ||
+        entity.externalId.toLowerCase().includes(normalizedQuery)
+      );
+    });
+  }, [entities, level, query, statusFilter]);
+
+  const changeStatus = async (entity: ManagedEntityRecord) => {
+    if (entity.status === "unknown") return;
+    const action = entity.status === "enabled" ? "disable" : "enable";
+    if (!window.confirm(`确认${action === "enable" ? "开启" : "关闭"}“${entity.name}”吗？`)) return;
+    try {
+      setBusy(`${entity.entityType}:${entity.externalId}:status`);
+      const result = await api.changeEntityStatus(account.id, {
+        entityType: entity.entityType,
+        externalId: entity.externalId,
+        action,
+      });
+      if (!result.ok) throw new Error(result.message);
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleIgnore = async (entity: ManagedEntityRecord) => {
+    try {
+      setBusy(`${entity.entityType}:${entity.externalId}:ignore`);
+      if (entity.ignored) {
+        await api.unignoreEntity(account.id, entity.entityType, entity.externalId);
+      } else {
+        const reason = window.prompt("请输入忽略原因：", "人工排除，不参与自动化")?.trim();
+        if (!reason) return;
+        await api.ignoreEntity(
+          account.id,
+          entity.entityType,
+          entity.externalId,
+          reason,
+        );
+      }
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const queueAppeal = async (entity: ManagedEntityRecord) => {
+    const reason = window.prompt("请输入申诉原因或备注：")?.trim();
+    if (!reason) return;
+    try {
+      setBusy(`${entity.externalId}:appeal`);
+      await api.queueAppeal(account.id, entity.externalId, reason);
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!entities) return <EmptyState text="正在读取广告对象…" loading />;
+
+  return (
+    <section className="page-stack">
+      <div className="panel filter-panel">
+        <div className="form-grid management-filters">
+          <Field label="名称或 ID">
+            <input placeholder="搜索广告系列、广告组或广告" value={query} onChange={(event) => setQuery(event.target.value)} />
+          </Field>
+          <Field label="层级">
+            <select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}>
+              <option value="all">全部层级</option>
+              <option value="campaign">广告系列</option>
+              <option value="ad-group">广告组</option>
+              <option value="ad">广告</option>
+            </select>
+          </Field>
+          <Field label="状态">
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+              <option value="all">全部状态</option>
+              <option value="enabled">已开启</option>
+              <option value="disabled">已关闭</option>
+              <option value="unknown">未知</option>
+            </select>
+          </Field>
+        </div>
+      </div>
+
+      <div className="panel table-panel">
+        <div className="panel-heading">
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象</h2><p>共 {filtered.length} 项；忽略对象不会参与自动化决策。</p></div></div>
+          <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPC</th><th>转化</th><th>自动化</th><th>操作</th></tr></thead>
+            <tbody>
+              {filtered.length === 0 ? <tr><td colSpan={8}>暂无数据，请先在用户管理完成账户接入，或在自动化中心执行一次检测。</td></tr> : filtered.map((entity) => {
+                const key = `${entity.entityType}:${entity.externalId}`;
+                return (
+                  <tr key={key}>
+                    <td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
+                    <td>{entityTypeLabel(entity.entityType)}</td>
+                    <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
+                    <td>{formatMetric(entity.metrics.spend)}</td>
+                    <td>{formatMetric(entity.metrics.cost_per_click)}</td>
+                    <td>{formatMetric(entity.metrics.conversions)}</td>
+                    <td>{entity.ignored ? <span className="risk-badge destructive">已忽略</span> : "参与"}</td>
+                    <td><div className="row-actions">
+                      <button disabled={busy !== null || entity.status === "unknown"} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>
+                      <button disabled={busy !== null} onClick={() => void toggleIgnore(entity)} type="button"><Ban size={14} /> {entity.ignored ? "取消忽略" : "忽略"}</button>
+                      {entity.entityType === "ad" && <button disabled={busy !== null} onClick={() => void queueAppeal(entity)} type="button">加入申诉</button>}
+                    </div></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel table-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>广告操作记录</h2><p>手动和自动启停、忽略名单变更均记录在本机。</p></div></div></div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>对象</th><th>动作</th><th>来源</th><th>结果</th><th>信息</th><th>时间</th></tr></thead>
+          <tbody>{operations.length === 0 ? <tr><td colSpan={6}>暂无操作记录。</td></tr> : operations.slice(0, 50).map((operation) => <tr key={operation.id}>
+            <td>{operation.entityName}<br /><small>{operation.externalId}</small></td>
+            <td>{operationActionLabel(operation.action)}</td>
+            <td>{operation.source === "automation" ? "自动化" : "手动"}</td>
+            <td><span className={operation.status === "succeeded" ? "status active" : "status"}>{operation.status === "succeeded" ? "成功" : operation.status === "pending" ? "等待" : "失败"}</span></td>
+            <td>{operation.message ?? "—"}</td>
+            <td>{new Date(operation.createdAt).toLocaleString()}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </div>
+    </section>
+  );
+}
+
+function AnalyticsPage({
+  account,
+  onError,
+}: {
+  account: AccountConfig;
+  onError: (message: string | null) => void;
+}) {
+  const [days, setDays] = useState(7);
+  const [level, setLevel] = useState<"all" | EntityMetricSnapshotRecord["entityType"]>("ad-group");
+  const [snapshots, setSnapshots] = useState<EntityMetricSnapshotRecord[] | null>(null);
+
+  useEffect(() => {
+    setSnapshots(null);
+    void api
+      .getAnalytics(account.id, days, level === "all" ? undefined : level)
+      .then((result) => {
+        setSnapshots(result);
+        onError(null);
+      })
+      .catch((cause) => onError(getErrorMessage(cause)));
+  }, [account.id, days, level, onError]);
+
+  const analysis = useMemo(() => analyzeSnapshots(snapshots ?? []), [snapshots]);
+  if (!snapshots) return <EmptyState text="正在分析指标快照…" loading />;
+
+  return (
+    <section className="page-stack">
+      <div className="panel filter-panel">
+        <div className="form-grid management-filters">
+          <Field label="时间范围"><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={1}>最近 1 天</option><option value={7}>最近 7 天</option><option value={30}>最近 30 天</option><option value={90}>最近 90 天</option></select></Field>
+          <Field label="分析层级"><select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}><option value="all">全部层级</option><option value="campaign">广告系列</option><option value="ad-group">广告组</option><option value="ad">广告</option></select></Field>
+        </div>
+      </div>
+      <div className="summary-grid">
+        <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+      </div>
+      <div className="panel table-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次趋势</h2><p>相同检测时间的对象聚合为一个批次，避免把多次累计指标重复相加。</p></div></div></div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
+          <tbody>{analysis.batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : analysis.batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
+        </table></div>
+      </div>
+    </section>
+  );
+}
+
+function AutomationPage({
+  account,
+  maxActionsPerRun,
+  onError,
+}: {
+  account: AccountConfig;
+  maxActionsPerRun: number;
   onError: (message: string | null) => void;
 }) {
   const [runs, setRuns] = useState<AutomationRunRecord[] | null>(null);
@@ -311,7 +739,7 @@ function AutomationPage({
       !preview &&
       account.executionMode === "automatic" &&
       !window.confirm(
-        `当前为全自动模式，本轮最多会执行 ${account.maxActionsPerRun} 个真实启停操作。确认继续吗？`,
+        `当前为全自动模式，本轮最多会执行 ${maxActionsPerRun} 个真实启停操作。确认继续吗？`,
       )
     ) {
       return;
@@ -381,7 +809,7 @@ function AutomationPage({
           <span className="eyebrow">检测 → 判断 → 执行</span>
           <h2>自动化运行控制</h2>
           <p>
-            检测预览永远不会修改广告；按配置运行会遵循账户执行模式、层级开关、阈值、冷却时间和单轮操作上限。
+            检测预览永远不会修改广告；按配置运行会遵循账户执行模式、层级开关、全局阈值、冷却时间和全局单轮操作上限。
           </p>
         </div>
         <div className="automation-actions">
@@ -582,39 +1010,38 @@ function SwitchesPage({
   );
 }
 
-function ConfigurationPage({
-  account,
-  providers,
-  onSaved,
+function ThresholdsPage({
+  settings,
+  onSettingsSaved,
   onError,
 }: {
-  account: AccountConfig;
-  providers: BootstrapPayload["providers"];
-  onSaved: (account: AccountConfig) => void;
+  settings: GlobalAutomationSettings;
+  onSettingsSaved: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
-  const [form, setForm] = useState<AccountSettingsUpdate>(() =>
-    settingsFromAccount(account),
-  );
-  const [health, setHealth] = useState<ProviderConnection | null>(null);
+  const [thresholds, setThresholds] = useState<ThresholdConfig[] | null>(null);
+  const [editing, setEditing] = useState<ThresholdConfig | null>(null);
+  const [form, setForm] = useState<ThresholdInput>(emptyThreshold);
+  const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [globalForm, setGlobalForm] = useState({
+    pollingIntervalMinutes: settings.pollingIntervalMinutes,
+    maxActionsPerRun: settings.maxActionsPerRun,
+  });
 
   useEffect(() => {
-    setForm(settingsFromAccount(account));
-    setHealth(null);
-    void api
-      .providerHealth(account.id)
-      .then(setHealth)
-      .catch((cause) => onError(getErrorMessage(cause)));
-  }, [account, onError]);
+    setGlobalForm({
+      pollingIntervalMinutes: settings.pollingIntervalMinutes,
+      maxActionsPerRun: settings.maxActionsPerRun,
+    });
+  }, [settings]);
 
-  const save = async (event: FormEvent) => {
+  const saveGlobalSettings = async (event: FormEvent) => {
     event.preventDefault();
     try {
       setSaving(true);
-      const updated = await api.updateSettings(account.id, form);
-      onSaved(updated);
-      setHealth(await api.providerHealth(account.id));
+      await api.updateGlobalAutomationSettings(globalForm);
+      await onSettingsSaved();
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -623,178 +1050,14 @@ function ConfigurationPage({
     }
   };
 
-  return (
-    <section className="page-stack two-column-layout">
-      <form className="panel form-panel" onSubmit={(event) => void save(event)}>
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><Settings2 size={18} /></span>
-            <div>
-              <h2>账号运行配置</h2>
-              <p>这些设置独立于接入方式，可在 Cookie 与官方 API 间复用。</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="form-grid">
-          <Field label="账户名称">
-            <input
-              value={form.displayName}
-              onChange={(event) =>
-                setForm({ ...form, displayName: event.target.value })
-              }
-            />
-          </Field>
-          <Field label="接入方式">
-            <select
-              value={form.providerKind}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  providerKind: event.target.value as ProviderKind,
-                })
-              }
-            >
-              {providers.map((provider) => (
-                <option key={provider.kind} value={provider.kind}>
-                  {provider.displayName}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="执行模式">
-            <select
-              value={form.executionMode}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  executionMode: event.target
-                    .value as AccountSettingsUpdate["executionMode"],
-                })
-              }
-            >
-              <option value="observe">仅观察</option>
-              <option value="manual-approval">人工确认</option>
-              <option value="automatic">全自动</option>
-            </select>
-          </Field>
-          <Field label="轮询间隔（分钟）">
-            <input
-              min="1"
-              max="1440"
-              type="number"
-              value={form.pollingIntervalMinutes}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  pollingIntervalMinutes: Number(event.target.value),
-                })
-              }
-            />
-          </Field>
-          <Field label="单轮最大启停数">
-            <input
-              min="1"
-              max="100"
-              type="number"
-              value={form.maxActionsPerRun}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  maxActionsPerRun: Number(event.target.value),
-                })
-              }
-            />
-          </Field>
-          <Field label="账户时区" wide>
-            <input
-              value={form.timezone}
-              onChange={(event) =>
-                setForm({ ...form, timezone: event.target.value })
-              }
-            />
-          </Field>
-        </div>
-
-        <div className="inline-setting">
-          <div>
-            <strong>启用此账户</strong>
-            <span>关闭后调度器将跳过该账户。</span>
-          </div>
-          <Toggle
-            checked={form.enabled}
-            label="启用此账户"
-            onChange={(enabled) => setForm({ ...form, enabled })}
-          />
-        </div>
-
-        <div className="form-actions">
-          <button className="primary-button" disabled={saving} type="submit">
-            <Save size={17} />
-            {saving ? "保存中…" : "保存配置"}
-          </button>
-        </div>
-      </form>
-
-      <aside className="side-stack">
-        <div className="panel provider-panel">
-          <div className="provider-icon">
-            {account.providerKind === "cookie" ? (
-              <KeyRound size={24} />
-            ) : (
-              <Database size={24} />
-            )}
-          </div>
-          <span className="eyebrow">Provider 状态</span>
-          <h3>{providerLabel(account.providerKind)}</h3>
-          <div className={`health-pill ${health?.status ?? "loading"}`}>
-            <span />
-            {health?.status === "not-configured"
-              ? "尚未配置凭据"
-              : health?.status === "ready"
-                ? "连接正常"
-                : health?.status === "failed"
-                  ? "连接失败"
-                  : health?.status === "untested"
-                    ? "等待检测"
-                    : "检查中"}
-          </div>
-          <p>{health?.lastMessage ?? "正在检查本地接入状态…"}</p>
-        </div>
-
-        <div className="notice-card">
-          <ShieldCheck size={20} />
-          <div>
-            <strong>凭据安全边界</strong>
-            <p>数据库只保存 credentialRef。真实 Cookie 或 Token 将由操作系统凭据库管理。</p>
-          </div>
-        </div>
-      </aside>
-    </section>
-  );
-}
-
-function ThresholdsPage({
-  account,
-  onError,
-}: {
-  account: AccountConfig;
-  onError: (message: string | null) => void;
-}) {
-  const [thresholds, setThresholds] = useState<ThresholdConfig[] | null>(null);
-  const [editing, setEditing] = useState<ThresholdConfig | null>(null);
-  const [form, setForm] = useState<ThresholdInput>(emptyThreshold);
-  const [showForm, setShowForm] = useState(false);
-  const [saving, setSaving] = useState(false);
-
   const load = useCallback(async () => {
     try {
-      setThresholds(await api.getThresholds(account.id));
+      setThresholds(await api.getGlobalThresholds());
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
     }
-  }, [account.id, onError]);
+  }, [onError]);
 
   useEffect(() => {
     setThresholds(null);
@@ -833,9 +1096,9 @@ function ThresholdsPage({
     try {
       setSaving(true);
       if (editing) {
-        await api.updateThreshold(account.id, editing.id, form);
+        await api.updateGlobalThreshold(editing.id, form);
       } else {
-        await api.createThreshold(account.id, form);
+        await api.createGlobalThreshold(form);
       }
       await load();
       setShowForm(false);
@@ -849,7 +1112,7 @@ function ThresholdsPage({
   const remove = async (threshold: ThresholdConfig) => {
     if (!window.confirm(`确定删除阈值“${threshold.label}”吗？`)) return;
     try {
-      await api.deleteThreshold(account.id, threshold.id);
+      await api.deleteGlobalThreshold(threshold.id);
       await load();
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -869,6 +1132,29 @@ function ThresholdsPage({
 
   return (
     <section className="page-stack">
+      <form className="panel form-panel" onSubmit={(event) => void saveGlobalSettings(event)}>
+        <div className="panel-heading">
+          <div>
+            <span className="panel-icon"><RefreshCcw size={18} /></span>
+            <div>
+              <h2>全部接入账户共用设置</h2>
+              <p>状态检测、规则轮询和单轮启停保护对所有账户统一生效。</p>
+            </div>
+          </div>
+          <button className="primary-button" disabled={saving} type="submit">
+            <Save size={17} /> 保存全局设置
+          </button>
+        </div>
+        <div className="form-grid">
+          <Field label="轮询间隔（分钟）">
+            <input min="1" max="1440" type="number" value={globalForm.pollingIntervalMinutes} onChange={(event) => setGlobalForm({ ...globalForm, pollingIntervalMinutes: Number(event.target.value) })} />
+          </Field>
+          <Field label="单轮最大启停数">
+            <input min="1" max="100" type="number" value={globalForm.maxActionsPerRun} onChange={(event) => setGlobalForm({ ...globalForm, maxActionsPerRun: Number(event.target.value) })} />
+          </Field>
+        </div>
+      </form>
+
       <div className="summary-grid">
         <SummaryCard
           icon={<Check size={20} />}
@@ -896,7 +1182,7 @@ function ThresholdsPage({
             <span className="panel-icon"><Gauge size={18} /></span>
             <div>
               <h2>阈值列表</h2>
-              <p>每条阈值可绑定目标层级和启停动作；“允许自动执行”默认关闭。</p>
+              <p>以下规则由全部已接入账户共用；“允许自动执行”默认关闭。</p>
             </div>
           </div>
           <button className="primary-button" onClick={openNew} type="button">
@@ -1186,6 +1472,35 @@ function Field({
   return <label className={wide ? "field wide" : "field"}><span>{label}</span>{children}</label>;
 }
 
+function AccountScopedPage({
+  accounts,
+  selectedId,
+  onSelect,
+  children,
+}: {
+  accounts: AccountConfig[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="page-stack">
+      <div className="panel account-scope-bar">
+        <div>
+          <strong>查看账户</strong>
+          <span>这里只切换当前页面的数据视图，不改变全局自动化规则。</span>
+        </div>
+        <select value={selectedId} onChange={(event) => onSelect(event.target.value)}>
+          {accounts.map((account) => (
+            <option key={account.id} value={account.id}>{account.displayName}</option>
+          ))}
+        </select>
+      </div>
+      {children}
+    </section>
+  );
+}
+
 function EmptyState({ text, loading = false }: { text: string; loading?: boolean }) {
   return (
     <div className="empty-state">
@@ -1198,17 +1513,37 @@ function EmptyState({ text, loading = false }: { text: string; loading?: boolean
 function settingsFromAccount(account: AccountConfig): AccountSettingsUpdate {
   return {
     displayName: account.displayName,
+    accountType: account.accountType,
     enabled: account.enabled,
     providerKind: account.providerKind,
-    timezone: account.timezone,
-    pollingIntervalMinutes: account.pollingIntervalMinutes,
-    maxActionsPerRun: account.maxActionsPerRun,
     executionMode: account.executionMode,
   };
 }
 
+function connectionStateLabel(
+  connection: ProviderConnection | null | undefined,
+  kind: ProviderKind,
+): ReactNode {
+  if (!connection || connection.status === "not-configured") {
+    return <span className="status">未接入</span>;
+  }
+  if (connection.status === "ready") {
+    return <span className="status active">连接正常</span>;
+  }
+  if (connection.status === "failed" && kind === "cookie") {
+    return <span className="status danger">Cookie 已失效</span>;
+  }
+  return <span className="status">{connection.status === "untested" ? "等待检测" : "连接异常"}</span>;
+}
+
 function providerLabel(kind: ProviderKind): string {
   return kind === "cookie" ? "Cookie 会话" : "Marketing API";
+}
+
+function accountTypeLabel(type: AccountConfig["accountType"]): string {
+  return { standard: "普通广告账户", agency: "代理账户", shop: "TikTok Shop" }[
+    type
+  ];
 }
 
 function executionModeLabel(mode: AccountConfig["executionMode"]): string {
@@ -1252,6 +1587,64 @@ function decisionStatusLabel(
     failed: "执行失败",
     skipped: "安全跳过",
   }[status];
+}
+
+function operationalStatusLabel(
+  status: ManagedEntityRecord["status"],
+): string {
+  return { enabled: "已开启", disabled: "已关闭", unknown: "未知" }[status];
+}
+
+function operationActionLabel(action: AdOperationRecord["action"]): string {
+  return {
+    enable: "开启",
+    disable: "关闭",
+    ignore: "加入忽略",
+    unignore: "取消忽略",
+    appeal: "申诉",
+  }[action];
+}
+
+function formatMetric(value: number | null): string {
+  return value === null || !Number.isFinite(value)
+    ? "—"
+    : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+}
+
+function analyzeSnapshots(snapshots: EntityMetricSnapshotRecord[]) {
+  const latestByEntity = new Map<string, EntityMetricSnapshotRecord>();
+  const grouped = new Map<
+    string,
+    { capturedAt: string; count: number; spend: number; clicks: number; conversions: number }
+  >();
+  for (const snapshot of snapshots) {
+    const key = `${snapshot.entityType}:${snapshot.externalId}`;
+    if (!latestByEntity.has(key)) latestByEntity.set(key, snapshot);
+    const batch = grouped.get(snapshot.capturedAt) ?? {
+      capturedAt: snapshot.capturedAt,
+      count: 0,
+      spend: 0,
+      clicks: 0,
+      conversions: 0,
+    };
+    batch.count += 1;
+    batch.spend += snapshot.metrics.spend ?? 0;
+    batch.clicks += snapshot.metrics.clicks ?? 0;
+    batch.conversions += snapshot.metrics.conversions ?? 0;
+    grouped.set(snapshot.capturedAt, batch);
+  }
+  const latest = [...latestByEntity.values()];
+  return {
+    latestSpend: latest.reduce((sum, item) => sum + (item.metrics.spend ?? 0), 0),
+    latestClicks: latest.reduce((sum, item) => sum + (item.metrics.clicks ?? 0), 0),
+    latestConversions: latest.reduce(
+      (sum, item) => sum + (item.metrics.conversions ?? 0),
+      0,
+    ),
+    batches: [...grouped.values()].sort((a, b) =>
+      b.capturedAt.localeCompare(a.capturedAt),
+    ),
+  };
 }
 
 function getErrorMessage(cause: unknown): string {

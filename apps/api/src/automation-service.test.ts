@@ -95,8 +95,8 @@ describe("AutomationService", () => {
     switches.manageAdGroupStatus = true;
     store.updateAutomationSwitches("demo-account", switches);
 
-    const threshold = store.listThresholds("demo-account")[1]!;
-    store.updateThreshold("demo-account", threshold.id, {
+    const threshold = store.listGlobalThresholds()[1]!;
+    store.updateGlobalThreshold(threshold.id, {
       code: threshold.code,
       label: threshold.label,
       metric: "cost_per_click",
@@ -129,11 +129,9 @@ describe("AutomationService", () => {
     const account = store.getAccount("demo-account")!;
     store.updateAccountSettings("demo-account", {
       displayName: account.displayName,
+      accountType: account.accountType,
       enabled: true,
       providerKind: "cookie",
-      timezone: account.timezone,
-      pollingIntervalMinutes: 15,
-      maxActionsPerRun: 5,
       executionMode: "automatic",
     });
 

@@ -123,6 +123,7 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .row-actions .danger-link { color: #b45656; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: #1018277a; backdrop-filter: blur(3px); }
 .modal { width: min(720px, calc(100vw - 80px)); overflow: hidden; border-radius: 16px; background: #fff; box-shadow: 0 24px 70px #0d162938; }
+.connection-modal { width: min(1180px, 94vw); max-height: 92vh; overflow: auto; }
 .modal-heading { padding: 22px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e9edf2; }
 .modal-heading h2 { margin: 5px 0 0; font-size: 21px; }
 .modal-heading button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 8px; color: #778397; background: #f1f3f7; }
@@ -130,6 +131,12 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .toggle-field { align-content: end; }
 .toggle-field .toggle { margin-bottom: 9px; }
 .modal-actions { padding: 17px 24px; display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e9edf2; background: #fafbfd; }
+
+.account-scope-bar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 20px; }
+.account-scope-bar > div { display: grid; gap: 4px; }
+.account-scope-bar span { color: var(--muted); font-size: 13px; }
+.account-scope-bar select { min-width: 240px; }
+.status.danger { color: #b42318; background: #fee4e2; }
 .alert { margin-bottom: 20px; padding: 12px 14px; display: flex; align-items: center; gap: 9px; border-radius: 10px; font-size: 12px; }
 .error-alert { color: #8b4444; border: 1px solid #f1cccc; background: #fff0f0; }
 .alert button { margin-left: auto; display: grid; place-items: center; border: 0; color: currentColor; background: transparent; }
@@ -217,10 +224,24 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .advanced-connection-content { padding: 16px; border-top: 1px solid #e8ecf2; }
 .advanced-connection-content .form-panel { box-shadow: none; }
 
+.automation-control-panel { padding: 22px 24px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.automation-control-panel h2 { margin: 5px 0 7px; font-size: 19px; }
+.automation-control-panel p { margin: 0; max-width: 760px; color: #758297; font-size: 12px; line-height: 1.6; }
+.automation-actions { display: flex; gap: 10px; white-space: nowrap; }
+.compact-button { min-height: 32px; padding-inline: 10px; font-size: 11px; }
+.decision-error { margin-top: 6px; display: block; max-width: 240px; color: #a34c4c; line-height: 1.45; }
+.filter-panel { overflow: hidden; }
+.management-filters { grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(150px, 1fr)); }
+.status-template-import .advanced-connection-content { background: #fbfcff; }
+td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
+.row-actions button:disabled { color: #aeb6c2; cursor: default; }
+
 @media (max-width: 1280px) {
   .main-content { padding-inline: 25px; }
   .switch-grid { grid-template-columns: 1fr; }
   .two-column-layout { grid-template-columns: 1fr; }
   .side-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .manual-layout { grid-template-columns: 210px minmax(0, 1fr); }
+  .automation-control-panel { align-items: flex-start; flex-direction: column; }
+  .management-filters { grid-template-columns: 1fr 1fr; }
 }

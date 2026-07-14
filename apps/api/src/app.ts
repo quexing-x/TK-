@@ -3,6 +3,8 @@ import cors from "@fastify/cors";
 import { z } from "zod";
 import {
   AccountSettingsUpdateSchema,
+  AccountCreateInputSchema,
+  GlobalAutomationSettingsInputSchema,
   AutomationActionSchema,
   AutomationSwitchesSchema,
   CookieCredentialInputSchema,
@@ -11,6 +13,9 @@ import {
   ProviderKindSchema,
   ThresholdInputSchema,
   SyncEntityTypeSchema,
+  IgnoreEntityInputSchema,
+  ManualStatusInputSchema,
+  AppealQueueInputSchema,
   automationSwitchDefinitions,
   type ProviderKind,
 } from "@tk-auto/core";
@@ -44,6 +49,14 @@ const StatusCurlImportBodySchema = CurlImportBodySchema.extend({
   action: AutomationActionSchema,
 });
 const DecisionParamsSchema = z.object({ decisionId: z.string().uuid() });
+const EntityParamsSchema = AccountParamsSchema.extend({
+  entityType: SyncEntityTypeSchema,
+  externalId: z.string().min(1).max(128),
+});
+const AnalyticsQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(90).default(7),
+  entityType: SyncEntityTypeSchema.optional(),
+});
 
 export interface AppDependencies {
   store: AutomationStore;
@@ -109,9 +122,54 @@ export async function createApp(
 
   app.get("/api/bootstrap", async () => ({
     accounts: dependencies.store.listAccounts(),
+    globalAutomationSettings:
+      dependencies.store.getGlobalAutomationSettings(),
     providers: providers.list(),
     switchDefinitions: automationSwitchDefinitions,
   }));
+
+  app.put("/api/automation/settings", async (request) => {
+    const body = GlobalAutomationSettingsInputSchema.parse(request.body);
+    return dependencies.store.updateGlobalAutomationSettings(body);
+  });
+
+  app.get("/api/thresholds", async () =>
+    dependencies.store.listGlobalThresholds(),
+  );
+
+  app.post("/api/thresholds", async (request, reply) => {
+    const body = ThresholdInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(dependencies.store.createGlobalThreshold(body));
+  });
+
+  app.put("/api/thresholds/:thresholdId", async (request, reply) => {
+    const { thresholdId } = z
+      .object({ thresholdId: z.string().min(1) })
+      .parse(request.params);
+    const body = ThresholdInputSchema.parse(request.body);
+    const result = dependencies.store.updateGlobalThreshold(thresholdId, body);
+    if (!result) {
+      return reply.status(404).send({ message: "阈值配置不存在。" });
+    }
+    return result;
+  });
+
+  app.delete("/api/thresholds/:thresholdId", async (request, reply) => {
+    const { thresholdId } = z
+      .object({ thresholdId: z.string().min(1) })
+      .parse(request.params);
+    if (!dependencies.store.deleteGlobalThreshold(thresholdId)) {
+      return reply.status(404).send({ message: "阈值配置不存在。" });
+    }
+    return reply.status(204).send();
+  });
+
+  app.post("/api/accounts", async (request, reply) => {
+    const body = AccountCreateInputSchema.parse(request.body);
+    return reply.status(201).send(dependencies.store.createAccount(body));
+  });
 
   app.get("/api/accounts/:accountId", async (request, reply) => {
     const { accountId } = AccountParamsSchema.parse(request.params);
@@ -179,14 +237,17 @@ export async function createApp(
               JSON.parse(previousSecret),
             );
             if (parsedPrevious.kind === "cookie") {
-              const importedTarget = credential.requestTemplates?.[0]?.target;
+              const incomingKeys = new Set(
+                (credential.requestTemplates ?? []).map(
+                  (item) => `${item.target}:${item.action ?? ""}`,
+                ),
+              );
               credential = CookieCredentialInputSchema.parse({
                 ...credential,
                 requestTemplates: [
                   ...(parsedPrevious.requestTemplates ?? []).filter(
                     (item) =>
-                      item.target !== importedTarget ||
-                      item.action !== credential.requestTemplates?.[0]?.action,
+                      !incomingKeys.has(`${item.target}:${item.action ?? ""}`),
                   ),
                   ...(credential.requestTemplates ?? []),
                 ],
@@ -230,7 +291,7 @@ export async function createApp(
           accountId,
           "cookie",
           health.status,
-          `快速导入成功：${imported.summary.method} ${imported.summary.path}。${health.message}`,
+          `${imported.summary.target.endsWith("-status") ? "已识别层级和动作，并自动生成开启、关闭模板" : "数据请求导入成功"}：${imported.summary.method} ${imported.summary.path}。${health.message}`,
         );
       } catch (cause) {
         return dependencies.store.updateProviderStatus(
@@ -253,11 +314,7 @@ export async function createApp(
       const body = StatusCurlImportBodySchema.parse(request.body);
       let imported: ReturnType<typeof parseTikTokStatusCurl>;
       try {
-        imported = parseTikTokStatusCurl(
-          body.command,
-          body.entityType,
-          body.action,
-        );
+        imported = parseTikTokStatusCurl(body.command);
       } catch (cause) {
         if (cause instanceof TikTokCurlImportError) {
           return reply.status(400).send({ message: cause.message });
@@ -279,14 +336,17 @@ export async function createApp(
             JSON.parse(previousSecret),
           );
           if (parsedPrevious.kind === "cookie") {
-            const incoming = credential.requestTemplates?.[0];
+            const incomingKeys = new Set(
+              (credential.requestTemplates ?? []).map(
+                (item) => `${item.target}:${item.action ?? ""}`,
+              ),
+            );
             credential = CookieCredentialInputSchema.parse({
               ...credential,
               requestTemplates: [
                 ...(parsedPrevious.requestTemplates ?? []).filter(
                   (item) =>
-                    item.target !== incoming?.target ||
-                    item.action !== incoming?.action,
+                    !incomingKeys.has(`${item.target}:${item.action ?? ""}`),
                 ),
                 ...(credential.requestTemplates ?? []),
               ],
@@ -320,7 +380,7 @@ export async function createApp(
           accountId,
           "cookie",
           "ready",
-          `已导入 ${body.entityType} ${body.action} 状态模板。`,
+          `已识别并生成 ${imported.summary.target} 的开启、关闭模板。`,
         );
       }
       return dependencies.store
@@ -446,6 +506,116 @@ export async function createApp(
       return automation.approveDecision(decisionId);
     },
   );
+
+  app.get("/api/accounts/:accountId/entities", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    return dependencies.store.listManagedEntities(
+      accountId,
+      account.providerKind,
+    );
+  });
+
+  app.post(
+    "/api/accounts/:accountId/entities/status",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      const body = ManualStatusInputSchema.parse(request.body);
+      return automation.changeStatusManually(accountId, body);
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/entities/:entityType/:externalId/ignore",
+    async (request, reply) => {
+      const { accountId, entityType, externalId } = EntityParamsSchema.parse(
+        request.params,
+      );
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      const body = IgnoreEntityInputSchema.parse({
+        ...(request.body as object),
+        entityType,
+        externalId,
+      });
+      return dependencies.store.setEntityIgnored(
+        accountId,
+        account.providerKind,
+        entityType,
+        externalId,
+        body.reason,
+      );
+    },
+  );
+
+  app.delete(
+    "/api/accounts/:accountId/entities/:entityType/:externalId/ignore",
+    async (request, reply) => {
+      const { accountId, entityType, externalId } = EntityParamsSchema.parse(
+        request.params,
+      );
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      const removed = dependencies.store.removeEntityIgnored(
+        accountId,
+        account.providerKind,
+        entityType,
+        externalId,
+      );
+      if (!removed) return reply.status(404).send({ message: "忽略记录不存在。" });
+      return reply.status(204).send();
+    },
+  );
+
+  app.get(
+    "/api/accounts/:accountId/ad-operations",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      return dependencies.store.listAdOperations(accountId);
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/appeals",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      if (!dependencies.store.getAutomationSwitches(accountId).appealAds) {
+        return reply.status(409).send({ message: "请先开启“申诉”能力开关。" });
+      }
+      const body = AppealQueueInputSchema.parse(request.body);
+      return reply.status(201).send(
+        dependencies.store.queueAppeal(
+          accountId,
+          account.providerKind,
+          body.externalId,
+          body.reason,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/accounts/:accountId/analytics", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    const query = AnalyticsQuerySchema.parse(request.query);
+    const since = new Date(Date.now() - query.days * 24 * 60 * 60_000).toISOString();
+    return dependencies.store.listMetricSnapshots(
+      accountId,
+      account.providerKind,
+      since,
+      query.entityType,
+    );
+  });
 
   app.post(
     "/api/accounts/:accountId/connections/:providerKind/test",

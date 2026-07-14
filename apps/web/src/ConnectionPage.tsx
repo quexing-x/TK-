@@ -12,13 +12,11 @@ import {
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
   AccountConfig,
-  AutomationAction,
   CookieConnectionSettings,
   OfficialApiConnectionSettings,
   ProviderConnection,
   ProviderKind,
   ReadOnlySyncResult,
-  SyncEntityType,
 } from "@tk-auto/core";
 import { api } from "./api";
 
@@ -55,11 +53,6 @@ export function ConnectionPage({
   const [userAgent, setUserAgent] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [curlCommand, setCurlCommand] = useState("");
-  const [statusCurlCommand, setStatusCurlCommand] = useState("");
-  const [statusEntityType, setStatusEntityType] =
-    useState<SyncEntityType>("campaign");
-  const [statusAction, setStatusAction] =
-    useState<AutomationAction>("disable");
   const [importFeedback, setImportFeedback] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<ReadOnlySyncResult | null>(null);
@@ -104,28 +97,6 @@ export function ConnectionPage({
         result.status === "ready"
           ? "导入完成，Cookie 连接检测已通过。"
           : (result.lastMessage ?? "请求已加密保存，请查看连接状态。"),
-      );
-      await load();
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const importStatusCurl = async () => {
-    try {
-      setBusy("status-import");
-      setImportFeedback(null);
-      await api.importCookieStatusCurl(
-        account.id,
-        statusCurlCommand.trim(),
-        statusEntityType,
-        statusAction,
-      );
-      setStatusCurlCommand("");
-      setImportFeedback(
-        `已加密保存${entityTypeLabel(statusEntityType)}${statusAction === "enable" ? "开启" : "关闭"}模板。`,
       );
       await load();
     } catch (cause) {
@@ -331,11 +302,11 @@ export function ConnectionPage({
             <div>
               <span className="eyebrow">推荐方式 · 一次复制</span>
               <h2>粘贴 cURL，自动导入并检测</h2>
-              <p>自动识别账号、POST/GET、Payload、Cookie 与 CSRF Token。</p>
+              <p>列表请求用于读取数据；真实启停请求会自动生成开启、关闭两个模板。</p>
             </div>
           </div>
           <ol className="quick-import-steps">
-            <li>在 Network 中选中广告系列、广告组或广告列表请求</li>
+            <li>读取数据时复制列表请求；启停功能只需复制一次真实开关请求</li>
             <li>右键该请求，选择 Copy → Copy as cURL (bash)</li>
             <li>粘贴到下面并点击“加密导入并检测”</li>
           </ol>
@@ -356,72 +327,6 @@ export function ConnectionPage({
           </div>
           {importFeedback && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback}</div>}
         </div>
-      )}
-
-      {providerKind === "cookie" && (
-        <details className="advanced-connection panel status-template-import">
-          <summary>
-            <ChevronDown size={18} />
-            <span>
-              <strong>导入真实启停请求</strong>
-              <small>全自动或人工确认执行前，需要为使用的层级分别导入开启和关闭 cURL</small>
-            </span>
-          </summary>
-          <div className="advanced-connection-content">
-            <div className="form-grid">
-              <ConnectionField label="对象层级">
-                <select
-                  value={statusEntityType}
-                  onChange={(event) =>
-                    setStatusEntityType(event.target.value as SyncEntityType)
-                  }
-                >
-                  <option value="campaign">广告系列</option>
-                  <option value="ad-group">广告组</option>
-                  <option value="ad">广告</option>
-                </select>
-              </ConnectionField>
-              <ConnectionField label="请求动作">
-                <select
-                  value={statusAction}
-                  onChange={(event) =>
-                    setStatusAction(event.target.value as AutomationAction)
-                  }
-                >
-                  <option value="disable">关闭</option>
-                  <option value="enable">开启</option>
-                </select>
-              </ConnectionField>
-            </div>
-            <ol className="quick-import-steps">
-              <li>在 TikTok Ads 页面手动切换一个测试对象的开关。</li>
-              <li>Network 中筛选 update 或 status，复制对应请求为 cURL (bash)。</li>
-              <li>选择相同层级和动作后粘贴；程序执行时只替换对象 ID，其余参数沿用真实请求。</li>
-            </ol>
-            <textarea
-              className="curl-input"
-              onChange={(event) => setStatusCurlCommand(event.target.value)}
-              placeholder="curl 'https://ads.tiktok.com/.../update_status/...' ..."
-              rows={7}
-              spellCheck={false}
-              value={statusCurlCommand}
-            />
-            <div className="quick-import-footer">
-              <span>请求模板与 Cookie 一起使用 Windows DPAPI 加密，不写入 SQLite 明文。</span>
-              <button
-                className="primary-button"
-                disabled={
-                  busy !== null || !statusCurlCommand.trim().startsWith("curl")
-                }
-                onClick={() => void importStatusCurl()}
-                type="button"
-              >
-                <Sparkles size={17} />
-                {busy === "status-import" ? "导入中…" : "加密导入状态模板"}
-              </button>
-            </div>
-          </div>
-        </details>
       )}
 
       <div className="connection-summary panel">
@@ -479,10 +384,4 @@ function connectionStatusLabel(status?: ProviderConnection["status"]): string {
 
 function getErrorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "发生未知错误。";
-}
-
-function entityTypeLabel(entityType: SyncEntityType): string {
-  return { campaign: "广告系列", "ad-group": "广告组", ad: "广告" }[
-    entityType
-  ];
 }

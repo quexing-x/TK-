@@ -36,13 +36,16 @@ describe("parseTikTokCurl", () => {
   it("labels a captured switch request by entity level and action", () => {
     const imported = parseTikTokStatusCurl(
       `curl 'https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_id":"old-id","status":0}'`,
-      "ad-group",
-      "disable",
     );
 
     expect(imported.credential.requestTemplates?.[0]).toMatchObject({
       target: "ad-group-status",
       action: "disable",
+    });
+    expect(imported.credential.requestTemplates?.[1]).toMatchObject({
+      target: "ad-group-status",
+      action: "enable",
+      body: '{"ad_id":"old-id","status":1}',
     });
   });
 });

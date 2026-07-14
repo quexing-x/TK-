@@ -9,7 +9,7 @@ const guide = JSON.parse(await readFile(sourcePath, "utf8"));
 const lines = [
   `# ${guide.title}`,
   "",
-  `版本：${guide.version}  `,
+  `版本：${guide.version}`,
   `更新日期：${guide.updatedAt}`,
   "",
   guide.summary,
@@ -29,5 +29,5 @@ for (const section of guide.sections) {
 }
 
 await mkdir(resolve(root, "docs"), { recursive: true });
-await writeFile(outputPath, `${lines.join("\n")}\n`, "utf8");
+await writeFile(outputPath, `${lines.join("\n").trimEnd()}\n`, "utf8");
 console.log(`Generated ${outputPath}`);

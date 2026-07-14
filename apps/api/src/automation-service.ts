@@ -5,6 +5,7 @@ import {
   type AutomationDecisionRecord,
   type AutomationRunRecord,
   type AutomationTrigger,
+  type ManualStatusInput,
   type SyncEntityType,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -72,7 +73,7 @@ export class AutomationService {
 
       const evaluation = evaluateAutomation(
         output.entities,
-        this.store.listThresholds(accountId),
+        this.store.listGlobalThresholds(),
         this.store.getAutomationSwitches(accountId),
       );
       const eligible: AutomationCandidate[] = [];
@@ -85,13 +86,14 @@ export class AutomationService {
         }
       }
 
-      const selected = eligible.slice(0, account.maxActionsPerRun);
-      for (const candidate of eligible.slice(account.maxActionsPerRun)) {
+      const { maxActionsPerRun } = this.store.getGlobalAutomationSettings();
+      const selected = eligible.slice(0, maxActionsPerRun);
+      for (const candidate of eligible.slice(maxActionsPerRun)) {
         this.store.saveAutomationDecision(
           run,
           candidate,
           "skipped",
-          `超过单轮最大操作数 ${account.maxActionsPerRun}。`,
+          `超过全局单轮最大操作数 ${maxActionsPerRun}。`,
         );
       }
 
@@ -129,6 +131,17 @@ export class AutomationService {
               result.message,
             );
           }
+          this.store.recordAdOperation({
+            accountId,
+            providerKind: account.providerKind,
+            entityType: candidate.entity.entityType,
+            externalId: candidate.entity.externalId,
+            entityName: candidate.entity.name,
+            action: candidate.action,
+            source: "automation",
+            status: result.ok ? "succeeded" : "failed",
+            message: result.message,
+          });
           if (consecutiveFailures >= 3) {
             for (const remaining of selected.slice(actionCount)) {
               this.store.saveAutomationDecision(
@@ -161,6 +174,40 @@ export class AutomationService {
       });
     } finally {
       this.runningAccounts.delete(accountId);
+    }
+  }
+
+  async checkAccountConnection(accountId: string): Promise<void> {
+    const account = this.store.getAccount(accountId);
+    if (!account) throw new Error("账号不存在。");
+    const connection = this.store.getProviderConnection(
+      accountId,
+      account.providerKind,
+    );
+    if (!connection?.credentialRef) return;
+    try {
+      const context = await this.loadContext(
+        accountId,
+        account.providerKind,
+        account.timezone,
+      );
+      const health = await this.providers.checkHealth(account.providerKind, context);
+      this.store.updateProviderStatus(
+        accountId,
+        account.providerKind,
+        health.status,
+        health.message,
+      );
+    } catch (cause) {
+      const message = safeMessage(cause);
+      this.store.updateProviderStatus(
+        accountId,
+        account.providerKind,
+        "failed",
+        account.providerKind === "cookie"
+          ? `Cookie 已失效或连接异常：${message}`
+          : `API 连接异常：${message}`,
+      );
     }
   }
 
@@ -203,17 +250,107 @@ export class AutomationService {
       ],
     );
     const first = result[0];
-    return this.store.updateAutomationDecision(
+    const updated = this.store.updateAutomationDecision(
       decision.id,
       first?.ok ? "succeeded" : "failed",
       first?.ok ? null : (first?.message ?? "Provider 未返回执行结果。"),
     );
+    this.store.recordAdOperation({
+      accountId: decision.accountId,
+      providerKind: decision.providerKind,
+      entityType: decision.entityType,
+      externalId: decision.externalId,
+      entityName: decision.entityName,
+      action: decision.action,
+      source: "manual",
+      status: first?.ok ? "succeeded" : "failed",
+      message: first?.message ?? null,
+    });
+    return updated;
+  }
+
+  async changeStatusManually(
+    accountId: string,
+    input: ManualStatusInput,
+  ): Promise<StatusMutationResult> {
+    const account = this.store.getAccount(accountId);
+    if (!account?.enabled) throw new Error("账户已停用，无法执行广告操作。");
+    const connection = this.store.getProviderConnection(
+      accountId,
+      account.providerKind,
+    );
+    if (!connection || connection.status !== "ready") {
+      throw new Error("当前 Provider 尚未通过连接检测。");
+    }
+    const switches = this.store.getAutomationSwitches(accountId);
+    if (!switches[levelSwitch(input.entityType)]) {
+      throw new Error("对应层级的状态管理能力未开启。");
+    }
+    const context = await this.loadContext(
+      accountId,
+      account.providerKind,
+      account.timezone,
+    );
+    const results = await this.providers.changeStatus(
+      account.providerKind,
+      context,
+      [input],
+    );
+    const result =
+      results[0] ?? { ...input, ok: false, message: "Provider 未返回执行结果。" };
+    const entity = this.store
+      .listManagedEntities(accountId, account.providerKind)
+      .find(
+        (item) =>
+          item.entityType === input.entityType &&
+          item.externalId === input.externalId,
+      );
+    this.store.recordAdOperation({
+      accountId,
+      providerKind: account.providerKind,
+      entityType: input.entityType,
+      externalId: input.externalId,
+      entityName: entity?.name ?? input.externalId,
+      action: input.action,
+      source: "manual",
+      status: result.ok ? "succeeded" : "failed",
+      message: result.message,
+    });
+    if (result.ok) {
+      try {
+        const refreshed = await this.providers.syncReadOnly(
+          account.providerKind,
+          context,
+        );
+        this.store.saveReadOnlySync(
+          accountId,
+          account.providerKind,
+          refreshed.entities,
+          refreshed.result,
+        );
+      } catch {
+        // The write was accepted; a later scheduler cycle will retry the readback.
+      }
+    }
+    return result;
   }
 
   private getSkipReason(
     accountId: string,
     candidate: AutomationCandidate,
   ): string | null {
+    const providerKind = this.store.getAccount(accountId)?.providerKind;
+    if (
+      providerKind &&
+      this.store.isEntityIgnored(
+        accountId,
+        providerKind,
+        candidate.entity.entityType,
+        candidate.entity.externalId,
+      )
+    ) {
+      return "对象在忽略名单中。";
+    }
     if (
       this.store.isDecisionInCooldown(
         accountId,
@@ -321,14 +458,25 @@ export class AutomationScheduler {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      const { pollingIntervalMinutes } =
+        this.store.getGlobalAutomationSettings();
       for (const account of this.store.listAccounts()) {
-        if (!account.enabled) continue;
-        const latest = this.store.listAutomationRuns(account.id, 1)[0];
-        const dueAt = latest
-          ? new Date(latest.startedAt).getTime() +
-            account.pollingIntervalMinutes * 60_000
+        const connection = this.store.getProviderConnection(
+          account.id,
+          account.providerKind,
+        );
+        if (!connection?.hasCredential) continue;
+        const dueAt = connection.lastTestedAt
+          ? new Date(connection.lastTestedAt).getTime() +
+            pollingIntervalMinutes * 60_000
           : 0;
         if (Date.now() < dueAt) continue;
+        await this.service.checkAccountConnection(account.id);
+        const refreshed = this.store.getProviderConnection(
+          account.id,
+          account.providerKind,
+        );
+        if (!account.enabled || refreshed?.status !== "ready") continue;
         await this.service.runAccount(account.id, "scheduler");
       }
     } finally {

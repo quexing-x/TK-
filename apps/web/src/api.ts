@@ -1,9 +1,11 @@
 import type {
   AccountConfig,
   AccountSettingsUpdate,
+  AccountCreateInput,
+  GlobalAutomationSettings,
+  GlobalAutomationSettingsInput,
   AutomationSwitchRisk,
   AutomationSwitches,
-  AutomationAction,
   AutomationDecisionRecord,
   AutomationRunRecord,
   ProviderConnection,
@@ -11,9 +13,12 @@ import type {
   ProviderCredentialInput,
   ProviderKind,
   ReadOnlySyncResult,
-  SyncEntityType,
   ThresholdConfig,
   ThresholdInput,
+  AdOperationRecord,
+  EntityMetricSnapshotRecord,
+  ManagedEntityRecord,
+  ManualStatusInput,
 } from "@tk-auto/core";
 
 export interface SwitchDefinition {
@@ -32,8 +37,14 @@ export interface ProviderDescriptor {
 
 export interface BootstrapPayload {
   accounts: AccountConfig[];
+  globalAutomationSettings: GlobalAutomationSettings;
   providers: ProviderDescriptor[];
   switchDefinitions: SwitchDefinition[];
+}
+
+export interface ManualStatusResult extends ManualStatusInput {
+  ok: boolean;
+  message: string;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -61,6 +72,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   bootstrap: () => request<BootstrapPayload>("/api/bootstrap"),
+  createAccount: (input: AccountCreateInput) =>
+    request<AccountConfig>("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   getSwitches: (accountId: string) =>
     request<AutomationSwitches>(`/api/accounts/${accountId}/switches`),
   updateSwitches: (accountId: string, switches: AutomationSwitches) =>
@@ -73,6 +89,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(settings),
     }),
+  updateGlobalAutomationSettings: (input: GlobalAutomationSettingsInput) =>
+    request<GlobalAutomationSettings>("/api/automation/settings", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
   providerHealth: (accountId: string) =>
     request<ProviderConnection | null>(
       `/api/accounts/${accountId}/provider-health`,
@@ -83,19 +104,6 @@ export const api = {
     request<ProviderConnection>(
       `/api/accounts/${accountId}/connections/cookie/import-curl`,
       { method: "POST", body: JSON.stringify({ command }) },
-    ),
-  importCookieStatusCurl: (
-    accountId: string,
-    command: string,
-    entityType: SyncEntityType,
-    action: AutomationAction,
-  ) =>
-    request<ProviderConnection>(
-      `/api/accounts/${accountId}/connections/cookie/import-status-curl`,
-      {
-        method: "POST",
-        body: JSON.stringify({ command, entityType, action }),
-      },
     ),
   saveConnectionSettings: (
     accountId: string,
@@ -153,6 +161,19 @@ export const api = {
     request<void>(`/api/accounts/${accountId}/thresholds/${thresholdId}`, {
       method: "DELETE",
     }),
+  getGlobalThresholds: () => request<ThresholdConfig[]>("/api/thresholds"),
+  createGlobalThreshold: (input: ThresholdInput) =>
+    request<ThresholdConfig>("/api/thresholds", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateGlobalThreshold: (thresholdId: string, input: ThresholdInput) =>
+    request<ThresholdConfig>(`/api/thresholds/${thresholdId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  deleteGlobalThreshold: (thresholdId: string) =>
+    request<void>(`/api/thresholds/${thresholdId}`, { method: "DELETE" }),
   getAutomationRuns: (accountId: string) =>
     request<AutomationRunRecord[]>(
       `/api/accounts/${accountId}/automation/runs`,
@@ -176,4 +197,48 @@ export const api = {
       `/api/automation/decisions/${decisionId}/approve`,
       { method: "POST" },
     ),
+  getManagedEntities: (accountId: string) =>
+    request<ManagedEntityRecord[]>(`/api/accounts/${accountId}/entities`),
+  changeEntityStatus: (accountId: string, input: ManualStatusInput) =>
+    request<ManualStatusResult>(`/api/accounts/${accountId}/entities/status`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  ignoreEntity: (
+    accountId: string,
+    entityType: ManualStatusInput["entityType"],
+    externalId: string,
+    reason: string,
+  ) =>
+    request(
+      `/api/accounts/${accountId}/entities/${entityType}/${encodeURIComponent(externalId)}/ignore`,
+      { method: "POST", body: JSON.stringify({ reason }) },
+    ),
+  unignoreEntity: (
+    accountId: string,
+    entityType: ManualStatusInput["entityType"],
+    externalId: string,
+  ) =>
+    request<void>(
+      `/api/accounts/${accountId}/entities/${entityType}/${encodeURIComponent(externalId)}/ignore`,
+      { method: "DELETE" },
+    ),
+  getAdOperations: (accountId: string) =>
+    request<AdOperationRecord[]>(`/api/accounts/${accountId}/ad-operations`),
+  queueAppeal: (accountId: string, externalId: string, reason: string) =>
+    request<AdOperationRecord>(`/api/accounts/${accountId}/appeals`, {
+      method: "POST",
+      body: JSON.stringify({ externalId, reason }),
+    }),
+  getAnalytics: (
+    accountId: string,
+    days: number,
+    entityType?: ManualStatusInput["entityType"],
+  ) => {
+    const query = new URLSearchParams({ days: String(days) });
+    if (entityType) query.set("entityType", entityType);
+    return request<EntityMetricSnapshotRecord[]>(
+      `/api/accounts/${accountId}/analytics?${query.toString()}`,
+    );
+  },
 };

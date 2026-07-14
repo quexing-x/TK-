@@ -36,28 +36,14 @@ export interface TikTokCurlImportResult {
 
 export function parseTikTokStatusCurl(
   command: string,
-  entityType: SyncEntityType,
-  action: AutomationAction,
 ): TikTokCurlImportResult {
   const imported = parseTikTokCurl(command);
-  const request = imported.credential.requestTemplates?.[0];
-  if (!request) {
-    throw new TikTokCurlImportError("没有在 cURL 中识别到请求模板。");
-  }
-  if (!request.url.includes("update") && !request.url.includes("status")) {
+  if (!imported.summary.target.endsWith("-status")) {
     throw new TikTokCurlImportError(
       "请选择在 TikTok 页面切换开关时产生的 update/status 请求。",
     );
   }
-  const target = `${entityType}-status` as const;
-  return {
-    ...imported,
-    credential: CookieCredentialInputSchema.parse({
-      ...imported.credential,
-      requestTemplates: [{ ...request, target, action }],
-    }),
-    summary: { ...imported.summary, target },
-  };
+  return imported;
 }
 
 export function parseTikTokCurl(command: string): TikTokCurlImportResult {
@@ -169,7 +155,8 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
   const advertiserId =
     url.searchParams.get("aadvid") ??
     url.searchParams.get("advertiser_id") ??
-    url.searchParams.get("advertiserId");
+    url.searchParams.get("advertiserId") ??
+    findAdvertiserId(body);
   if (!advertiserId) {
     throw new TikTokCurlImportError(
       "请求中没有找到 Advertiser ID，请选择广告系列、广告组或广告列表请求。",
@@ -186,7 +173,15 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
     [...headers.entries()]
       .filter(
         ([name]) =>
-          !["cookie", "content-length", "host", "user-agent"].includes(name),
+          ![
+            "cookie",
+            "content-length",
+            "host",
+            "user-agent",
+            "connection",
+            "accept-encoding",
+            "transfer-encoding",
+          ].includes(name) && !name.startsWith("sec-fetch-"),
       )
       .map(([name, header]) => [name, header.value]),
   );
@@ -199,22 +194,24 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
     adGroupsUrl: "",
     adsUrl: "",
   });
+  const request = {
+    target,
+    url: url.toString(),
+    method,
+    body,
+    contentType,
+    headers: capturedHeaders,
+  } as const;
+  const requestTemplates = target.endsWith("-status")
+    ? createStatusTemplatePair({ ...request, target: target as StatusTarget })
+    : [request];
   const credential = CookieCredentialInputSchema.parse({
     kind: "cookie",
     cookie,
     csrfToken: csrf?.value,
     csrfHeaderName: csrf?.name ?? "x-csrftoken",
     userAgent,
-    requestTemplates: [
-      {
-        target,
-        url: url.toString(),
-        method,
-        body,
-        contentType,
-        headers: capturedHeaders,
-      },
-    ],
+    requestTemplates,
   });
 
   return {
@@ -227,6 +224,42 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
       target,
     },
   };
+}
+
+function findAdvertiserId(body: string | undefined): string | null {
+  if (!body) return null;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    return findNestedAdvertiserId(parsed);
+  } catch {
+    const params = new URLSearchParams(body);
+    return (
+      params.get("aadvid") ??
+      params.get("advertiser_id") ??
+      params.get("advertiserId")
+    );
+  }
+}
+
+function findNestedAdvertiserId(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findNestedAdvertiserId(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  for (const [key, item] of Object.entries(value)) {
+    if (["aadvid", "advertiser_id", "advertiserId"].includes(key)) {
+      if (typeof item === "string" || typeof item === "number") {
+        return String(item);
+      }
+    }
+    const found = findNestedAdvertiserId(item);
+    if (found) return found;
+  }
+  return null;
 }
 
 function addHeader(
@@ -242,12 +275,187 @@ function addHeader(
 
 function classifyRequestTarget(
   pathname: string,
-): "health" | "campaign" | "ad-group" | "ad" {
+):
+  | "health"
+  | "campaign"
+  | "ad-group"
+  | "ad"
+  | "campaign-status"
+  | "ad-group-status"
+  | "ad-status" {
   const normalized = pathname.toLowerCase();
+  const isStatus = normalized.includes("status") || normalized.includes("update");
+  if (isStatus && normalized.includes("adgroup")) return "ad-group-status";
+  if (isStatus && normalized.includes("campaign")) return "campaign-status";
+  if (isStatus && /\/(?:ad|creative)(?:\/|_)/.test(normalized)) return "ad-status";
   if (normalized.includes("/adgroup/list")) return "ad-group";
   if (normalized.includes("/campaign/list")) return "campaign";
   if (normalized.includes("/ad/list")) return "ad";
   return "health";
+}
+
+type StatusTarget = "campaign-status" | "ad-group-status" | "ad-status";
+
+function createStatusTemplatePair(request: {
+  target: StatusTarget;
+  url: string;
+  method: "GET" | "POST";
+  body: string | undefined;
+  contentType: string | undefined;
+  headers: Record<string, string>;
+}) {
+  const transformed = transformStatusRequest(request.url, request.body);
+  return [
+    {
+      ...request,
+      url: transformed.originalUrl,
+      body: transformed.originalBody,
+      action: transformed.originalAction,
+    },
+    {
+      ...request,
+      url: transformed.oppositeUrl,
+      body: transformed.oppositeBody,
+      action: oppositeAction(transformed.originalAction),
+    },
+  ];
+}
+
+function transformStatusRequest(urlValue: string, body: string | undefined): {
+  originalAction: AutomationAction;
+  originalUrl: string;
+  oppositeUrl: string;
+  originalBody: string | undefined;
+  oppositeBody: string | undefined;
+} {
+  const url = new URL(urlValue);
+  const queryResult = transformStatusParams(url.searchParams);
+  let bodyResult: StatusTransformResult | null = null;
+  let oppositeBody = body;
+
+  if (body) {
+    const trimmed = body.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(body) as unknown;
+        bodyResult = transformStatusJson(parsed);
+        if (bodyResult) oppositeBody = JSON.stringify(bodyResult.opposite);
+      } catch {
+        throw new TikTokCurlImportError(
+          "状态 cURL 的 JSON 请求体无法解析，请重新复制单个请求。",
+        );
+      }
+    } else {
+      const params = new URLSearchParams(body);
+      bodyResult = transformStatusParams(params);
+      if (bodyResult) oppositeBody = params.toString();
+    }
+  }
+
+  const action = bodyResult?.action ?? queryResult?.action;
+  if (!action) {
+    throw new TikTokCurlImportError(
+      "无法从状态 cURL 中明确识别开启或关闭字段，未保存该请求。",
+    );
+  }
+  if (bodyResult && queryResult && bodyResult.action !== queryResult.action) {
+    throw new TikTokCurlImportError("状态 cURL 中存在互相冲突的状态字段。");
+  }
+  const oppositeUrl = queryResult ? url.toString() : urlValue;
+  return {
+    originalAction: action,
+    originalUrl: urlValue,
+    oppositeUrl,
+    originalBody: body,
+    oppositeBody,
+  };
+}
+
+interface StatusTransformResult {
+  action: AutomationAction;
+  opposite: unknown;
+}
+
+function transformStatusParams(params: URLSearchParams): StatusTransformResult | null {
+  let action: AutomationAction | null = null;
+  for (const key of [...params.keys()]) {
+    if (!isStatusKey(key)) continue;
+    const value = params.get(key);
+    const detected = detectStatusValue(value);
+    if (!detected) continue;
+    if (action && action !== detected.action) {
+      throw new TikTokCurlImportError("状态 cURL 中存在互相冲突的状态字段。");
+    }
+    action = detected.action;
+    params.set(key, String(detected.opposite));
+  }
+  return action ? { action, opposite: params } : null;
+}
+
+function transformStatusJson(value: unknown): StatusTransformResult | null {
+  let action: AutomationAction | null = null;
+  const visit = (item: unknown, key = ""): unknown => {
+    if (Array.isArray(item)) return item.map((entry) => visit(entry));
+    if (typeof item === "object" && item !== null) {
+      return Object.fromEntries(
+        Object.entries(item).map(([childKey, child]) => [
+          childKey,
+          visit(child, childKey),
+        ]),
+      );
+    }
+    if (!isStatusKey(key)) return item;
+    const detected = detectStatusValue(item);
+    if (!detected) return item;
+    if (action && action !== detected.action) {
+      throw new TikTokCurlImportError("状态 cURL 中存在互相冲突的状态字段。");
+    }
+    action = detected.action;
+    return detected.opposite;
+  };
+  const opposite = visit(value);
+  return action ? { action, opposite } : null;
+}
+
+function isStatusKey(key: string): boolean {
+  return /(?:^|_)(?:status|operation_status|opt_status)$/.test(key.toLowerCase());
+}
+
+function detectStatusValue(
+  value: unknown,
+): { action: AutomationAction; opposite: unknown } | null {
+  if (value === 0 || value === "0" || value === false) {
+    return { action: "disable", opposite: typeof value === "string" ? "1" : value === false ? true : 1 };
+  }
+  if (value === 1 || value === "1" || value === true) {
+    return { action: "enable", opposite: typeof value === "string" ? "0" : value === true ? false : 0 };
+  }
+  if (typeof value !== "string") return null;
+  const pairs: Array<[string, string]> = [
+    ["enable", "disable"],
+    ["enabled", "disabled"],
+    ["on", "off"],
+    ["open", "close"],
+    ["active", "inactive"],
+  ];
+  const normalized = value.toLowerCase();
+  for (const [enabled, disabled] of pairs) {
+    if (normalized === enabled) {
+      return { action: "enable", opposite: matchCase(value, disabled) };
+    }
+    if (normalized === disabled) {
+      return { action: "disable", opposite: matchCase(value, enabled) };
+    }
+  }
+  return null;
+}
+
+function matchCase(source: string, value: string): string {
+  return source === source.toUpperCase() ? value.toUpperCase() : value;
+}
+
+function oppositeAction(action: AutomationAction): AutomationAction {
+  return action === "enable" ? "disable" : "enable";
 }
 
 function tokenizeShellCommand(command: string): string[] {

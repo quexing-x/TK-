@@ -16,7 +16,11 @@ describe("AutomationStore", () => {
 
   it("seeds an account and thresholds", () => {
     expect(store.listAccounts()).toHaveLength(1);
-    expect(store.listThresholds("demo-account")).toHaveLength(6);
+    expect(store.listGlobalThresholds()).toHaveLength(6);
+    expect(store.getGlobalAutomationSettings()).toMatchObject({
+      pollingIntervalMinutes: 5,
+      maxActionsPerRun: 15,
+    });
   });
 
   it("persists automation switches", () => {
@@ -53,5 +57,60 @@ describe("AutomationStore", () => {
     const connections = store.listProviderConnections("demo-account");
     expect(connections).toHaveLength(2);
     expect(connections.every((item) => item.hasCredential)).toBe(true);
+  });
+
+  it("creates an independent advertising account", () => {
+    const account = store.createAccount({
+      displayName: "第二广告账户",
+      accountType: "agency",
+      enabled: true,
+      providerKind: "official-api",
+      executionMode: "observe",
+    });
+
+    expect(account.accountType).toBe("agency");
+    expect(store.listGlobalThresholds()).toHaveLength(6);
+    expect(store.getAutomationSwitches(account.id).manageAdStatus).toBe(false);
+  });
+
+  it("stores metric snapshots and excludes ignored entities", () => {
+    const now = new Date().toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [
+        {
+          entityType: "ad-group",
+          externalId: "adgroup-1",
+          payload: {
+            ad_name: "测试组",
+            ad_primary_status: "enable",
+            row_data: { stat_cost: "12.5", cpc: "1.25", click_cnt: "10" },
+          },
+        },
+      ],
+      {
+        startedAt: now,
+        finishedAt: now,
+        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        warnings: [],
+      },
+    );
+
+    expect(
+      store.listMetricSnapshots("demo-account", "cookie", "2020-01-01T00:00:00.000Z"),
+    ).toHaveLength(1);
+    store.setEntityIgnored(
+      "demo-account",
+      "cookie",
+      "ad-group",
+      "adgroup-1",
+      "人工排除",
+    );
+    expect(store.listManagedEntities("demo-account", "cookie")[0]).toMatchObject({
+      name: "测试组",
+      ignored: true,
+      metrics: { spend: 12.5, cost_per_click: 1.25 },
+    });
   });
 });

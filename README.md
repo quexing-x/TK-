@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.0.0
+## Windows 桌面版 1.1.0
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.0.0.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.1.0.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -19,22 +19,27 @@
 pnpm desktop:dist
 ```
 
-当前阶段实现核心配置与双 Provider 只读接入：
+当前版本实现本地检测、决策与受保护的双 Provider 状态管理：
 
 - 自动化功能开关
-- 账号配置管理
+- 用户管理内的账户编辑、接入与连接状态轮询
 - 阈值配置
 - Cookie / Official API 双 Provider 边界
 - Windows DPAPI 加密凭据库
-- 一次性 cURL 快速导入（自动解析账号、GET/POST、Payload 与凭据）
-- 单账户连接检测
-- 系列、广告组和广告只读同步
-- 本地 SQLite 持久化和审计记录
+- 统一 cURL 快速导入（自动解析账号、读请求或状态请求、Payload 与凭据）
+- 单条状态 cURL 自动生成同层级开启、关闭双模板
+- 多广告账户独立凭据与全账户共用自动化规则
+- 系列、广告组和广告分页检测与指标标准化
+- 仅观察、人工确认和全自动三种执行模式
+- Cookie 真实状态 cURL 模板与官方状态更新 API
+- 忽略名单、手动启停、申诉队列和操作记录
+- 90 天指标快照与广告分析
+- 本地 SQLite 持久化、调度器和审计记录
 - Web 置顶操作手册与自动生成 Markdown 手册
 
-当前不会自动读取浏览器 Cookie，也不会向 TikTok 发起写入操作。用户可在
-接入管理中粘贴只读列表请求的 cURL；系统自动解析并加密保存，随后只会重放
-用户明确导入的 GET 或 POST 只读请求。
+程序不会自动读取浏览器 Cookie。Cookie 用户需明确导入列表 cURL；每个实际使用
+层级只需导入一条真实启停 cURL，系统明确识别状态字段后生成双向模板。已有阈值升级后
+默认仅判断，必须同时开启层级能力、阈值自动执行和全自动模式才会真实写入。
 
 ## 架构
 
@@ -82,5 +87,7 @@ pnpm docs:generate
   加密保险库，不以明文写入 SQLite。
 - Cookie 请求只允许 TikTok 官方 HTTPS 域名，并禁止自动跟随重定向。
 - 外部请求优先使用 HTTPS_PROXY/HTTP_PROXY；Windows 下未设置环境变量时自动继承当前系统代理。
-- Provider 未通过连接检测时禁止只读同步。
+- Provider 未通过连接检测时禁止检测和写入。
+- 忽略对象、冷却期对象和超过单轮上限的对象不会执行。
+- 连续三次写入失败会熔断本轮；自动开启只能恢复曾由本工具关闭的对象。
 - 所有配置变更写入审计日志。

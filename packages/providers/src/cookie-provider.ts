@@ -318,7 +318,8 @@ function extractEntities(
 function dedupeEntities(entities: ProviderEntity[]): ProviderEntity[] {
   const unique = new Map<string, ProviderEntity>();
   for (const entity of entities) {
-    unique.set(`${entity.entityType}:${entity.externalId}`, entity);
+    const key = `${entity.entityType}:${entity.externalId}`;
+    if (!unique.has(key)) unique.set(key, entity);
   }
   return [...unique.values()];
 }
