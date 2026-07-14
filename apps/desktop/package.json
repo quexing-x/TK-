@@ -2,6 +2,9 @@
   "name": "@tk-auto/desktop",
   "version": "1.0.0",
   "private": true,
+  "description": "本地优先的 TikTok Ads 自动化管理工具",
+  "author": "TK Ads Automation",
+  "packageManager": "pnpm@11.7.0",
   "type": "module",
   "main": "dist/main.cjs",
   "scripts": {
@@ -46,6 +49,7 @@
       }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",

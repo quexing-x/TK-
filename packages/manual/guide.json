@@ -1,23 +1,27 @@
 {
   "title": "TK Ads 自动化操作使用手册",
-  "version": "0.3.1",
+  "version": "1.0.0",
   "updatedAt": "2026-07-14",
-  "summary": "本手册覆盖本地启动、Cookie 会话接入、TikTok Marketing API 接入、双 Provider 切换、自动化开关、配置管理、阈值配置与只读同步。",
+  "summary": "本手册覆盖 Windows 桌面版安装与升级、Cookie 会话接入、TikTok Marketing API 接入、双 Provider 切换、自动化开关、配置管理、阈值配置与只读同步。",
   "sections": [
     {
       "id": "quick-start",
-      "title": "1. 首次启动",
-      "intro": "当前版本是本地优先工具，不需要公网服务器。API 和数据库只在本机运行。",
+      "title": "1. Windows 桌面版安装与升级",
+      "intro": "1.0.0 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、数据库和加密凭据库均在本机运行。",
       "steps": [
-        "在项目目录执行 pnpm install。",
-        "执行 pnpm dev，同时启动本地 API 和 Web 管理界面。",
-        "浏览器打开 http://127.0.0.1:5173。",
-        "首次启动会创建 data/tk-automation.db 和演示广告账户。",
-        "先在接入管理完成参数、凭据和连接检测，再执行只读同步。"
+        "双击 TK-Ads-Automation-Setup-1.0.0.exe，按安装向导完成当前 Windows 用户安装。",
+        "安装器会创建桌面和开始菜单快捷方式；启动“TK Ads Automation”即可进入管理界面。",
+        "首次启动会在 %APPDATA%\\TK Ads Automation\\data 创建 SQLite 数据库和演示广告账户。Cookie 和 Token 使用当前 Windows 用户的 DPAPI 加密保存。",
+        "先在接入管理完成参数、凭据和连接检测，再执行只读同步。",
+        "安装新版前先关闭正在运行的软件，然后直接运行更高版本安装包；不要先卸载旧版。固定 App ID 会覆盖程序文件并保留用户数据。",
+        "安装或升级后打开软件，确认版本、接入状态、自动化开关和阈值配置正常。"
       ],
       "notes": [
-        "本地 API 默认监听 127.0.0.1:3100，不对局域网和公网开放。",
-        "当前阶段不会自动暂停、复制或删除 TikTok 广告。"
+        "桌面版本地 API 只监听随机的 127.0.0.1 端口，不对局域网和公网开放。",
+        "安装目录与用户数据目录分离，覆盖升级不会删除数据库和加密凭据；主动删除 %APPDATA% 下的数据目录会造成配置丢失。",
+        "当前安装包未配置商业代码签名证书，Windows 可能显示未知发布者或 SmartScreen 提示。只使用本项目生成并核对来源的安装包。",
+        "当前阶段不会自动暂停、复制或删除 TikTok 广告。",
+        "开发者仍可在源码目录执行 pnpm install 和 pnpm dev，Web 管理界面默认使用 http://127.0.0.1:5173。"
       ]
     },
     {

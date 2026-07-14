@@ -10,5 +10,6 @@ apps/desktop/release/
 !.env.example
 data/*.db
 data/*.db-*
+data/logs/
 data/credentials/
 *.log
