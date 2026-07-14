@@ -26,6 +26,7 @@ import {
   parseTikTokStatusCurl,
   ProviderRegistry,
   TikTokCurlImportError,
+  isConfirmedFinalAdEntityPayload,
   type ProviderContext,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
@@ -296,7 +297,7 @@ export async function createApp(
           const confirmedFinalAd = preview.entities.some(
             (entity) =>
               entity.entityType === "ad" &&
-              hasConfirmedFinalAdIdentity(entity.payload),
+              isConfirmedFinalAdEntityPayload(entity.payload),
           );
           if (!confirmedFinalAd) {
             return reply.status(400).send({
@@ -881,23 +882,4 @@ async function loadProviderContext(
 function getSafeProviderError(cause: unknown): string {
   if (!(cause instanceof Error)) return "连接检测失败。";
   return cause.name === "TimeoutError" ? "连接检测超时。" : cause.message;
-}
-
-function hasConfirmedFinalAdIdentity(
-  payload: Record<string, unknown>,
-): boolean {
-  const hasSpecificId = ["creative_id", "creativeId", "ad_id", "adId"].some(
-    (key) =>
-      typeof payload[key] === "string" || typeof payload[key] === "number",
-  );
-  if (hasSpecificId) return true;
-  const hasGenericId =
-    typeof payload.id === "string" || typeof payload.id === "number";
-  const hasAdName = [
-    "creative_name",
-    "creativeName",
-    "ad_name",
-    "adName",
-  ].some((key) => typeof payload[key] === "string");
-  return hasGenericId && hasAdName;
 }
