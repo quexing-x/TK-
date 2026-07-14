@@ -105,4 +105,36 @@ describe("parseTikTokCurl", () => {
       ]),
     );
   });
+
+  it("decodes Chrome ANSI-C multipart update_status cURL", () => {
+    const multipart = [
+      "------TestBoundary\\r\\n",
+      'Content-Disposition: form-data; name="ad_list"\\r\\n\\r\\n',
+      '["old-id"]\\r\\n',
+      "------TestBoundary\\r\\n",
+      'Content-Disposition: form-data; name="operation"\\r\\n\\r\\n',
+      "enable\\r\\n",
+      "------TestBoundary--\\r\\n",
+    ].join("");
+    const imported = parseTikTokStatusCurl(
+      `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456' -H 'content-type: multipart/form-data; boundary=----TestBoundary' -b 'sessionid=authorized-test-cookie' --data-raw $'${multipart}'`,
+    );
+
+    expect(imported.summary.target).toBe("ad-status");
+    const templates = imported.credential.requestTemplates ?? [];
+    const enable = templates.find(
+      (item) => item.target === "ad-status" && item.action === "enable",
+    );
+    const disable = templates.find(
+      (item) => item.target === "ad-status" && item.action === "disable",
+    );
+    const campaignDisable = templates.find(
+      (item) => item.target === "campaign-status" && item.action === "disable",
+    );
+    expect(enable?.body).toContain('name="operation"\r\n\r\nenable');
+    expect(disable?.body).toContain('name="operation"\r\n\r\ndisable');
+    expect(campaignDisable?.url).toContain("/campaign/update_status/");
+    expect(campaignDisable?.body).toContain('name="campaign_list"');
+    expect(campaignDisable?.body).not.toContain("$------TestBoundary");
+  });
 });

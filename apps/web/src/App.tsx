@@ -44,6 +44,7 @@ import type {
   AdOperationRecord,
   EntityMetricSnapshotRecord,
   ManagedEntityRecord,
+  CookieConnectionReadiness,
   ProviderConnection,
   ProviderKind,
   ThresholdConfig,
@@ -299,16 +300,31 @@ function UsersPage({
   const [saving, setSaving] = useState(false);
   const [connecting, setConnecting] = useState<AccountConfig | null>(null);
   const [connectionStates, setConnectionStates] = useState<
-    Record<string, ProviderConnection | null>
+    Record<
+      string,
+      {
+        connection: ProviderConnection | null;
+        readiness: CookieConnectionReadiness | null;
+      }
+    >
   >({});
 
   const loadConnectionStates = useCallback(async () => {
     const entries = await Promise.all(
       accounts.map(async (account) => {
-        const list = await api.getConnections(account.id).catch(() => []);
+        const [list, readiness] = await Promise.all([
+          api.getConnections(account.id).catch(() => []),
+          account.providerKind === "cookie"
+            ? api.getCookieReadiness(account.id).catch(() => null)
+            : Promise.resolve(null),
+        ]);
         return [
           account.id,
-          list.find((item) => item.kind === account.providerKind) ?? null,
+          {
+            connection:
+              list.find((item) => item.kind === account.providerKind) ?? null,
+            readiness,
+          },
         ] as const;
       }),
     );
@@ -1521,9 +1537,22 @@ function settingsFromAccount(account: AccountConfig): AccountSettingsUpdate {
 }
 
 function connectionStateLabel(
-  connection: ProviderConnection | null | undefined,
+  state:
+    | {
+        connection: ProviderConnection | null;
+        readiness: CookieConnectionReadiness | null;
+      }
+    | undefined,
   kind: ProviderKind,
 ): ReactNode {
+  const connection = state?.connection;
+  if (kind === "cookie" && (state?.readiness?.completedSteps ?? 0) < 2) {
+    return (
+      <span className="status warning">
+        接入未完成 {state?.readiness?.completedSteps ?? 0}/2
+      </span>
+    );
+  }
   if (!connection || connection.status === "not-configured") {
     return <span className="status">未接入</span>;
   }

@@ -3,7 +3,7 @@ import { userGuide } from "./index.js";
 
 describe("user guide", () => {
   it("contains both provider tutorials and the update policy", () => {
-    expect(userGuide.version).toBe("1.1.2");
+    expect(userGuide.version).toBe("1.1.3");
     const ids = userGuide.sections.map((section) => section.id);
     expect(ids).toContain("cookie-provider");
     expect(ids).toContain("official-api-provider");
@@ -19,8 +19,11 @@ describe("user guide", () => {
     expect(cookieGuide?.steps.join(" ")).toContain("/adgroup/list/?");
     expect(cookieGuide?.steps.join(" ")).toContain("/ad/update_status/?");
     expect(cookieGuide?.steps.join(" ")).toContain("独立输入框");
+    expect(cookieGuide?.steps.join(" ")).toContain("multipart/form-data");
+    expect(cookieGuide?.steps.join(" ")).toContain("ad_list");
     expect(cookieGuide?.steps.join(" ")).toContain("Cookie 接入完成");
     expect(cookieGuide?.notes.join(" ")).toContain("/ad/update_status/? cURL");
+    expect(cookieGuide?.notes.join(" ")).toContain("接入未完成（1/2）");
 
     const quickStart = userGuide.sections.find(
       (section) => section.id === "quick-start",

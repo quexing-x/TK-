@@ -6,6 +6,10 @@ import {
   type ProviderCredentialInput,
   type SyncEntityType,
 } from "@tk-auto/core";
+import {
+  isMultipartBody,
+  rewriteMultipartFields,
+} from "./multipart.js";
 
 const MAX_COMMAND_LENGTH = 262_144;
 
@@ -398,7 +402,19 @@ function adaptStatusRequest(
   let body = request.body;
   if (body) {
     const trimmed = body.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    if (isMultipartBody(request.contentType, body)) {
+      const renamed = rewriteMultipartFields(body, (field) =>
+        multipartEntityListKeys.has(field.name.toLowerCase())
+          ? { name: targetMultipartEntityListKey(target) }
+          : undefined,
+      );
+      if (renamed.changes === 0) {
+        throw new TikTokCurlImportError(
+          "状态 cURL 的 multipart 请求体中未找到广告对象列表字段。",
+        );
+      }
+      body = renamed.body;
+    } else if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         body = JSON.stringify(renameEntityIdJson(JSON.parse(body), target));
       } catch {
@@ -446,6 +462,19 @@ const entityIdKeys = new Set([
   "creative_ids",
 ]);
 
+const multipartEntityListKeys = new Set([
+  "campaign_list",
+  "adgroup_list",
+  "ad_group_list",
+  "ad_list",
+]);
+
+function targetMultipartEntityListKey(target: StatusTarget): string {
+  if (target === "campaign-status") return "campaign_list";
+  if (target === "ad-group-status") return "adgroup_list";
+  return "ad_list";
+}
+
 function targetEntityIdKey(target: StatusTarget, plural: boolean): string {
   if (target === "campaign-status") return plural ? "campaign_ids" : "campaign_id";
   return plural ? "ad_ids" : "ad_id";
@@ -491,7 +520,10 @@ function transformStatusRequest(urlValue: string, body: string | undefined): {
 
   if (body) {
     const trimmed = body.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    if (isMultipartBody(undefined, body)) {
+      bodyResult = transformStatusMultipart(body);
+      if (bodyResult) oppositeBody = String(bodyResult.opposite);
+    } else if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         const parsed = JSON.parse(body) as unknown;
         bodyResult = transformStatusJson(parsed);
@@ -573,8 +605,25 @@ function transformStatusJson(value: unknown): StatusTransformResult | null {
   return action ? { action, opposite } : null;
 }
 
+function transformStatusMultipart(body: string): StatusTransformResult | null {
+  let action: AutomationAction | null = null;
+  const rewritten = rewriteMultipartFields(body, (field) => {
+    if (!isStatusKey(field.name)) return undefined;
+    const detected = detectStatusValue(field.value.trim());
+    if (!detected) return undefined;
+    if (action && action !== detected.action) {
+      throw new TikTokCurlImportError("状态 cURL 中存在互相冲突的状态字段。");
+    }
+    action = detected.action;
+    return { value: String(detected.opposite) };
+  });
+  return action ? { action, opposite: rewritten.body } : null;
+}
+
 function isStatusKey(key: string): boolean {
-  return /(?:^|_)(?:status|operation_status|opt_status)$/.test(key.toLowerCase());
+  return /(?:^|_)(?:status|operation|operation_status|opt_status)$/.test(
+    key.toLowerCase(),
+  );
 }
 
 function detectStatusValue(
@@ -621,7 +670,7 @@ function tokenizeShellCommand(command: string): string[] {
     .trim();
   const tokens: string[] = [];
   let current = "";
-  let quote: "single" | "double" | null = null;
+  let quote: "single" | "double" | "ansi-single" | null = null;
   let escaped = false;
 
   const push = () => {
@@ -641,10 +690,27 @@ function tokenizeShellCommand(command: string): string[] {
       else current += character;
       continue;
     }
+    if (quote === "ansi-single") {
+      if (character === "'") {
+        quote = null;
+      } else if (character === "\\") {
+        const decoded = decodeAnsiCEscape(input, index);
+        current += decoded.value;
+        index = decoded.endIndex;
+      } else {
+        current += character;
+      }
+      continue;
+    }
     if (quote === "double") {
       if (character === '"') quote = null;
       else if (character === "\\") escaped = true;
       else current += character;
+      continue;
+    }
+    if (character === "$" && input[index + 1] === "'") {
+      quote = "ansi-single";
+      index += 1;
       continue;
     }
     if (character === "'") {
@@ -671,4 +737,40 @@ function tokenizeShellCommand(command: string): string[] {
   }
   push();
   return tokens;
+}
+
+function decodeAnsiCEscape(
+  input: string,
+  slashIndex: number,
+): { value: string; endIndex: number } {
+  const next = input[slashIndex + 1];
+  if (next === undefined) {
+    throw new TikTokCurlImportError("cURL 命令的 ANSI-C 转义不完整。");
+  }
+  const simple: Record<string, string> = {
+    a: "\u0007",
+    b: "\b",
+    e: "\u001b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\u000b",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+  };
+  if (next in simple) {
+    return { value: simple[next]!, endIndex: slashIndex + 1 };
+  }
+  if (next === "x") {
+    const hex = input.slice(slashIndex + 2, slashIndex + 4);
+    if (/^[0-9a-f]{2}$/i.test(hex)) {
+      return {
+        value: String.fromCharCode(Number.parseInt(hex, 16)),
+        endIndex: slashIndex + 3,
+      };
+    }
+  }
+  return { value: next, endIndex: slashIndex + 1 };
 }

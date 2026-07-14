@@ -14,6 +14,10 @@ import type {
   StatusMutation,
   StatusMutationResult,
 } from "./types.js";
+import {
+  isMultipartBody,
+  rewriteMultipartFields,
+} from "./multipart.js";
 
 const capabilities = new Set<ProviderCapability>([
   "read-campaigns",
@@ -213,7 +217,18 @@ function materializeStatusRequest(
   let body = template.body;
   if (body) {
     const contentType = template.contentType?.toLowerCase() ?? "";
-    if (contentType.includes("json") || body.trim().startsWith("{")) {
+    if (isMultipartBody(contentType, body)) {
+      const replaced = rewriteMultipartFields(body, (field) => {
+        if (!isMultipartEntityListKey(mutation.entityType, field.name)) {
+          return undefined;
+        }
+        return {
+          value: replaceMultipartEntityList(field.value, mutation.externalId),
+        };
+      });
+      replacements += replaced.changes;
+      body = replaced.body;
+    } else if (contentType.includes("json") || body.trim().startsWith("{")) {
       try {
         const parsed = JSON.parse(body) as unknown;
         const replaced = replaceEntityIds(parsed, mutation);
@@ -289,6 +304,32 @@ function isEntityIdKey(entityType: SyncEntityType, key: string): boolean {
     ad: ["ad_id", "ad_ids", "creative_id", "creative_ids"],
   };
   return keys[entityType].includes(normalized);
+}
+
+function isMultipartEntityListKey(
+  entityType: SyncEntityType,
+  key: string,
+): boolean {
+  const normalized = key.toLowerCase();
+  const keys: Record<SyncEntityType, string[]> = {
+    campaign: ["campaign_list"],
+    "ad-group": ["adgroup_list", "ad_group_list"],
+    ad: ["ad_list"],
+  };
+  return keys[entityType].includes(normalized);
+}
+
+function replaceMultipartEntityList(value: string, externalId: string): string {
+  const trimmed = value.trim();
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      return JSON.stringify([externalId]);
+    }
+  } catch {
+    // Some TikTok variants send a plain identifier instead of a JSON array.
+  }
+  return externalId;
 }
 
 function legacyRequest(url: string): CapturedCookieRequest | undefined {

@@ -71,6 +71,7 @@ export function ConnectionPage({
   const [importFeedback, setImportFeedback] = useState<{
     step: "read" | "status";
     message: string;
+    ok: boolean;
   } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<ReadOnlySyncResult | null>(null);
@@ -108,6 +109,21 @@ export function ConnectionPage({
   }, [load]);
 
   const connection = connections.find((item) => item.kind === providerKind);
+  const cookieOnboardingIncomplete =
+    providerKind === "cookie" && readiness.completedSteps < 2;
+  const displayedConnectionStatus = cookieOnboardingIncomplete
+    ? "untested"
+    : (connection?.status ?? "not-configured");
+  const displayedConnectionLabel = cookieOnboardingIncomplete
+    ? `接入未完成（${readiness.completedSteps}/2）`
+    : providerKind === "cookie" && connection?.status === "ready"
+      ? "完整接入完成"
+      : connectionStatusLabel(connection?.status);
+  const displayedConnectionMessage = cookieOnboardingIncomplete
+    ? readiness.dataRequestImported && connection?.status === "ready"
+      ? "第 1 步只读连接正常；第 2 步启停请求尚未导入，自动启停暂不可用。"
+      : `Cookie 完整接入尚未完成。${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
+    : (connection?.lastMessage ?? "尚未保存此 Provider 的接入参数。");
 
   const importCurl = async (step: "read" | "status") => {
     const command = step === "read" ? readCurlCommand : statusCurlCommand;
@@ -120,10 +136,13 @@ export function ConnectionPage({
       setImportFeedback({
         step,
         message: result.lastMessage ?? "请求已加密保存，请查看连接状态。",
+        ok: true,
       });
       await load();
     } catch (cause) {
-      onError(getErrorMessage(cause));
+      const message = getErrorMessage(cause);
+      setImportFeedback({ step, message, ok: false });
+      onError(message);
     } finally {
       setBusy(null);
     }
@@ -377,7 +396,7 @@ export function ConnectionPage({
                   <Sparkles size={17} /> {busy === "import-read" ? "正在导入…" : "导入第 1 步"}
                 </button>
               </div>
-              {importFeedback?.step === "read" && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback.message}</div>}
+              {importFeedback?.step === "read" && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />} {importFeedback.message}</div>}
             </article>
 
             <article className={`cookie-import-step ${readiness.statusRequestImported ? "complete" : ""}`}>
@@ -403,6 +422,12 @@ export function ConnectionPage({
                   <span>{copiedFilter === "/ad/update_status/?" ? "已复制" : "复制"}</span>
                 </button>
               </div>
+              <div className="request-contract">
+                <strong>第二步请求必须同时满足</strong>
+                <span><code>POST /api/v3/i18n/overture/ad/update_status/</code></span>
+                <span>Form Data 包含 <code>ad_list</code> 和 <code>operation=enable/disable</code></span>
+                <span>必须复制完整 cURL，以保留 Cookie、boundary、aadvid 和签名参数</span>
+              </div>
               {!readiness.statusRequestImported && (
                 <div className="import-warning compact">
                   <AlertTriangle size={17} />
@@ -425,7 +450,7 @@ export function ConnectionPage({
                   <Sparkles size={17} /> {busy === "import-status" ? "正在导入…" : "导入第 2 步"}
                 </button>
               </div>
-              {importFeedback?.step === "status" && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback.message}</div>}
+              {importFeedback?.step === "status" && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />} {importFeedback.message}</div>}
             </article>
           </div>
           <div className="quick-import-security">完整请求仅进入本机 DPAPI 加密保险库，不写入 SQLite 明文。</div>
@@ -437,11 +462,11 @@ export function ConnectionPage({
 
       <div className="connection-summary panel">
         <div>
-          <span className={`connection-state ${connection?.status ?? "not-configured"}`} />
+          <span className={`connection-state ${displayedConnectionStatus}`} />
           <div>
-            <span className="eyebrow">当前状态</span>
-            <h2>{connectionStatusLabel(connection?.status)}</h2>
-            <p>{connection?.lastMessage ?? "尚未保存此 Provider 的接入参数。"}</p>
+            <span className="eyebrow">完整接入状态</span>
+            <h2>{displayedConnectionLabel}</h2>
+            <p>{displayedConnectionMessage}</p>
           </div>
         </div>
         <div className="connection-actions">

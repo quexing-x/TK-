@@ -136,4 +136,62 @@ describe("CookieAdsProvider", () => {
       status: 0,
     });
   });
+
+  it("replays a multipart update_status template with the target ad id", async () => {
+    let requestBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        requestBody = String(init?.body ?? "");
+        return new Response(JSON.stringify({ code: 0, data: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const body = [
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="ad_list"\r\n\r\n',
+      '["old-id"]\r\n',
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "enable\r\n",
+      "------TestBoundary--\r\n",
+    ].join("");
+
+    const provider = new CookieAdsProvider();
+    const result = await provider.changeStatus(
+      {
+        accountId: "test-account",
+        settings: {
+          kind: "cookie",
+          advertiserId: "123456",
+          healthUrl: "",
+          campaignsUrl: "",
+          adGroupsUrl: "",
+          adsUrl: "",
+        },
+        credential: {
+          kind: "cookie",
+          cookie: "sessionid=test-cookie",
+          csrfHeaderName: "x-csrftoken",
+          requestTemplates: [
+            {
+              target: "ad-status",
+              action: "enable",
+              url: "https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456",
+              method: "POST",
+              body,
+              contentType: "multipart/form-data; boundary=----TestBoundary",
+            },
+          ],
+        },
+      },
+      [{ entityType: "ad", externalId: "new-id", action: "enable" }],
+    );
+
+    expect(result[0]).toMatchObject({ ok: true, externalId: "new-id" });
+    expect(requestBody).toContain('name="ad_list"\r\n\r\n["new-id"]');
+    expect(requestBody).toContain('name="operation"\r\n\r\nenable');
+  });
 });
