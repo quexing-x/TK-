@@ -334,6 +334,10 @@ export async function createApp(
         await dependencies.vault.delete(previous.credentialRef);
       }
 
+      const importMessage = imported.summary.target.endsWith("-status")
+        ? "已识别为真实启停 cURL（第 2 步），并自动生成三个层级的开启、关闭模板。"
+        : "已识别为列表 cURL（第 1 步），没有识别到启停动作。第 2 步请复制包含 update/status 的真实开关请求。";
+
       try {
         const context = await loadProviderContext(
           dependencies.store,
@@ -346,14 +350,14 @@ export async function createApp(
           accountId,
           "cookie",
           health.status,
-          `${imported.summary.target.endsWith("-status") ? "已识别状态请求，并自动生成三个层级的开启、关闭模板" : "数据请求导入成功"}：${imported.summary.method} ${imported.summary.path}。${health.message}`,
+          `${importMessage} ${imported.summary.method} ${imported.summary.path} ${health.message}`,
         );
       } catch (cause) {
         return dependencies.store.updateProviderStatus(
           accountId,
           "cookie",
           "failed",
-          `cURL 已加密保存，但连接检测失败：${getSafeProviderError(cause)}`,
+          `${importMessage} 请求已加密保存，但连接检测失败：${getSafeProviderError(cause)}`,
         );
       }
     },

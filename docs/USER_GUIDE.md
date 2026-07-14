@@ -1,6 +1,6 @@
 # TK Ads 自动化操作使用手册
 
-版本：1.1.1
+版本：1.1.2
 更新日期：2026-07-15
 
 本手册覆盖 Windows 桌面版安装与升级、多账户、Cookie 与官方 API 接入、自动化检测与启停、广告管理、阈值配置和广告分析。
@@ -9,9 +9,9 @@
 
 ## 1. Windows 桌面版安装与升级
 
-1.1.1 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、调度器、数据库和加密凭据库均在本机运行。
+1.1.2 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、调度器、数据库和加密凭据库均在本机运行。
 
-1. 双击 TK-Ads-Automation-Setup-1.1.1.exe，按安装向导完成当前 Windows 用户安装；已安装旧版本的用户可直接覆盖升级。
+1. 双击 TK-Ads-Automation-Setup-1.1.2.exe，按安装向导完成当前 Windows 用户安装；已安装旧版本的用户可直接覆盖升级。
 2. 安装器会创建桌面和开始菜单快捷方式；启动“TK Ads Automation”即可进入管理界面。
 3. 首次启动会在 %APPDATA%\TK Ads Automation\data 创建 SQLite 数据库和演示广告账户。Cookie 和 Token 使用当前 Windows 用户的 DPAPI 加密保存。
 4. 先进入用户管理创建广告账户，再点击该账户后的“接入”完成凭据导入和连接检测。
@@ -32,18 +32,19 @@ Cookie 方案适合自有、已授权的 TikTok Ads 账户。最快流程只需�
 
 1. 使用 Chrome 正常登录 TikTok Ads Manager，并切换到目标广告账户。
 2. 按 F12 打开开发者工具，进入 Network，选择 Fetch/XHR。
-3. 在 Network 左上角 Filter 输入框输入 /adgroup/list/?。
+3. 在接入窗口点击复制 /adgroup/list/?，粘贴到 Network 左上角 Filter 输入框。
 4. 回到 TikTok 页面点击“广告组”，再点击页面上的“刷新数据”，或按 Shift + R 刷新数据。
 5. Network 中应出现一到两条名称类似 list/?aadvid=... 的请求；选择最后一条状态为 200、Response 为 JSON 的请求。
 6. 在该请求上点击鼠标右键，选择 Copy → Copy as cURL (bash)。Copy as cURL (bash) 是右键菜单中的复制选项，不是请求名称。
-7. 如果 /adgroup/list/? 没有结果，在 Filter 中改为 /campaign/list/?，回到 TikTok 页面点击“推广系列”并刷新数据。不要选择 report、batch 或 append 请求。
+7. 如果 /adgroup/list/? 没有结果，在接入窗口点击复制 /campaign/list/? 并替换 Filter，回到 TikTok 页面点击“推广系列”并刷新数据。不要选择 report、batch 或 append 请求。
 8. 进入用户管理，点击目标账户后的“接入”，在 Cookie 会话中把完整 cURL 粘贴到统一导入区域。
 9. 将广告组列表 cURL 粘贴到统一输入框，点击加密导入并检测。系统会识别 Advertiser ID、Cookie 和读取请求，并尝试安全补全另外两个层级的列表请求。
 10. 状态显示连接正常即完成接入。完整请求及其中的 msToken、Cookie 只保存在 Windows DPAPI 加密保险库中。
 11. 如需同步另外两类数据，分别复制对应列表请求的 cURL 并再次导入；系统会按系列、广告组和广告类型自动合并。
 12. 然后在 TikTok 页面任意切换一次测试对象的开关，复制该 update/status 请求的 cURL，仍粘贴到同一个输入框。程序会生成广告系列、广告组、广告三个层级的开启和关闭模板。
-13. 页面显示 2/2 和“Cookie 接入完成”即结束，不需要再分别配置三个层级。
-14. 只有快速导入无法识别时，才展开高级手动接入填写各字段。
+13. 如果第二次导入后仍显示 1/2，说明复制的仍是 list 列表请求而不是开关请求；页面会提示重新选择包含 update 或 status 的真实 POST 请求。
+14. 页面显示 2/2 和“Cookie 接入完成”即结束，不需要再分别配置三个层级。
+15. 只有快速导入无法识别时，才展开高级手动接入填写各字段。
 
 注意事项：
 

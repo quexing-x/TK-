@@ -115,6 +115,12 @@ describe("local API", () => {
       hasCredential: true,
       status: "ready",
     });
+    expect(response.json().lastMessage).toContain(
+      "已识别为列表 cURL（第 1 步）",
+    );
+    expect(response.json().lastMessage).toContain(
+      "第 2 步请复制包含 update/status 的真实开关请求",
+    );
     expect(response.json()).not.toHaveProperty("credentialRef");
     expect(JSON.stringify(response.json())).not.toContain("ephemeral-secret");
 
@@ -145,6 +151,9 @@ describe("local API", () => {
       payload: { command: statusCommand },
     });
     expect(response.statusCode).toBe(200);
+    expect(response.json().lastMessage).toContain(
+      "已识别为真实启停 cURL（第 2 步）",
+    );
     const stored = store.getProviderConnection("demo-account", "cookie")!;
     const secret = JSON.parse((await vault.read(stored.credentialRef!))!) as {
       requestTemplates: Array<{ target: string; action?: string }>;

@@ -1,7 +1,9 @@
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   CloudDownload,
+  Copy,
   KeyRound,
   Link2,
   Save,
@@ -54,6 +56,7 @@ export function ConnectionPage({
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
   const [readiness, setReadiness] =
     useState<CookieConnectionReadiness>(emptyReadiness);
+  const [copiedFilter, setCopiedFilter] = useState<string | null>(null);
   const [cookieSettings, setCookieSettings] =
     useState<CookieConnectionSettings>(emptyCookieSettings);
   const [apiSettings, setApiSettings] =
@@ -116,6 +119,16 @@ export function ConnectionPage({
       onError(getErrorMessage(cause));
     } finally {
       setBusy(null);
+    }
+  };
+
+  const copyNetworkFilter = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedFilter(value);
+      onError(null);
+    } catch {
+      onError("复制失败，请手动选中过滤词后复制。");
     }
   };
 
@@ -328,6 +341,36 @@ export function ConnectionPage({
               任意切换一次测试对象，复制真实开关 cURL；自动扩展全部三级启停
             </li>
           </ol>
+          <div className="network-filter-guide">
+            <div>
+              <strong>第 1 条列表请求过滤词</strong>
+              <span>在 Network 左上角 Filter 中粘贴；第一项没有结果时再用第二项。</span>
+            </div>
+            <div className="network-filter-buttons">
+              {["/adgroup/list/?", "/campaign/list/?"].map((value) => (
+                <button
+                  aria-label={`复制过滤词 ${value}`}
+                  className={copiedFilter === value ? "copied" : ""}
+                  key={value}
+                  onClick={() => void copyNetworkFilter(value)}
+                  type="button"
+                >
+                  <code>{value}</code>
+                  {copiedFilter === value ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                  <span>{copiedFilter === value ? "已复制" : "复制"}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {readiness.dataRequestImported && !readiness.statusRequestImported && (
+            <div className="import-warning">
+              <AlertTriangle size={18} />
+              <div>
+                <strong>当前只完成了读取接入，启停功能还未接入。</strong>
+                <span>第二条不要再复制 list 请求；请在 TikTok 中切换一次测试对象，再复制包含 update 或 status 的真实 POST 请求。</span>
+              </div>
+            </div>
+          )}
           <textarea
             aria-label="cURL 命令"
             className="curl-input"

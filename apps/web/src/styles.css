@@ -211,6 +211,18 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .quick-import-steps li strong { margin-right: 7px; color: #31415f; white-space: nowrap; }
 .quick-import-steps li.complete { border-color: #a8e3c9; background: #f0fbf6; }
 .quick-import-steps li.complete::before { content: "✓"; background: #24a36a; }
+.network-filter-guide { margin: 0 0 14px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #dbe3fa; border-radius: 10px; background: #ffffffb8; }
+.network-filter-guide > div:first-child { display: grid; gap: 3px; color: #31415f; font-size: 11px; }
+.network-filter-guide > div:first-child span { color: #718096; font-size: 10px; }
+.network-filter-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.network-filter-buttons button { min-height: 34px; padding: 7px 10px; display: inline-flex; align-items: center; gap: 7px; color: #4560bb; border: 1px solid #cbd7fb; border-radius: 8px; background: #f7f9ff; cursor: pointer; }
+.network-filter-buttons button:hover, .network-filter-buttons button.copied { border-color: #7892e9; background: #edf2ff; }
+.network-filter-buttons code { color: #263d87; font-size: 11px; }
+.network-filter-buttons span { font-size: 10px; font-weight: 700; }
+.import-warning { margin: 0 0 14px; padding: 11px 13px; display: flex; align-items: flex-start; gap: 9px; color: #8a5b12; border: 1px solid #f1d392; border-radius: 10px; background: #fff9ea; }
+.import-warning > svg { margin-top: 1px; flex: 0 0 auto; }
+.import-warning > div { display: grid; gap: 3px; font-size: 11px; }
+.import-warning span { color: #8b6c35; font-size: 10px; line-height: 1.5; }
 .curl-input { width: 100%; padding: 13px 14px; resize: vertical; border: 1px solid #cfd9f3; border-radius: 10px; color: #253147; background: #fff; outline: none; font: 11px/1.55 "Cascadia Code", Consolas, monospace; }
 .curl-input:focus { border-color: #6f8bea; box-shadow: 0 0 0 3px #5478eb15; }
 .quick-import-footer { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
@@ -247,4 +259,6 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
   .manual-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .automation-control-panel { align-items: flex-start; flex-direction: column; }
   .management-filters { grid-template-columns: 1fr 1fr; }
+  .network-filter-guide { align-items: flex-start; flex-direction: column; }
+  .network-filter-buttons { justify-content: flex-start; }
 }
