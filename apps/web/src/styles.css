@@ -209,13 +209,16 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .cookie-import-steps { margin-top: 20px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .cookie-import-step { min-width: 0; padding: 16px; border: 1px solid #d6dff5; border-radius: 12px; background: #ffffffd9; }
 .cookie-import-step.complete { border-color: #9edfc3; background: #f5fcf8; }
+.cookie-import-step.partial { border-color: #e7c978; background: #fffaf0; }
 .cookie-import-step header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .cookie-import-step h3 { margin: 4px 0 0; color: #25324a; font-size: 15px; }
 .cookie-import-step > p { min-height: 38px; margin: 13px 0 10px; color: #65738a; font-size: 10px; line-height: 1.65; }
 .cookie-step-number { width: 28px; height: 28px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: #5875df; font-size: 11px; font-weight: 800; }
 .cookie-import-step.complete .cookie-step-number { background: #25a36b; }
+.cookie-import-step.partial .cookie-step-number { background: #d39a24; }
 .cookie-step-state { color: #8a95a7; font-size: 10px; }
 .cookie-import-step.complete .cookie-step-state { color: #238158; }
+.cookie-import-step.partial .cookie-step-state { color: #9a6814; }
 .network-filter-row { margin-bottom: 11px; padding: 8px 9px 8px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid #dbe3fa; border-radius: 9px; background: #f7f9ff; }
 .network-filter-row > span { color: #718096; font-size: 10px; }
 .network-filter-row button { min-height: 32px; padding: 6px 9px; display: inline-flex; align-items: center; gap: 7px; color: #4560bb; border: 1px solid #c7d3f7; border-radius: 7px; background: #fff; cursor: pointer; }

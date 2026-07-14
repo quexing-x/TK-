@@ -132,4 +132,40 @@ describe("parseTikTokCurl", () => {
     expect(templates.some((item) => item.target === "ad-status")).toBe(false);
     expect(campaignDisable?.body).not.toContain("$------TestBoundary");
   });
+
+  it("recognizes the confirmed final-ad creative status request", () => {
+    const multipart = [
+      "------CreativeBoundary\\r\\n",
+      'Content-Disposition: form-data; name="creative_list"\\r\\n\\r\\n',
+      '["creative-old"]\\r\\n',
+      "------CreativeBoundary\\r\\n",
+      'Content-Disposition: form-data; name="aco_creative_list"\\r\\n\\r\\n',
+      '["creative-old"]\\r\\n',
+      "------CreativeBoundary\\r\\n",
+      'Content-Disposition: form-data; name="operation"\\r\\n\\r\\n',
+      "enable\\r\\n",
+      "------CreativeBoundary--\\r\\n",
+    ].join("");
+    const imported = parseTikTokStatusCurl(
+      `curl 'https://ads.tiktok.com/api/v2/i18n/overture/creative/update_status/?aadvid=123456' -H 'content-type: multipart/form-data; boundary=----CreativeBoundary' -b 'sessionid=authorized-test-cookie' --data-raw $'${multipart}'`,
+    );
+
+    expect(imported.summary.target).toBe("ad-status");
+    const templates = imported.credential.requestTemplates ?? [];
+    expect(templates).toHaveLength(2);
+    expect(templates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "ad-status",
+          action: "enable",
+          derived: false,
+        }),
+        expect.objectContaining({
+          target: "ad-status",
+          action: "disable",
+          derived: false,
+        }),
+      ]),
+    );
+  });
 });

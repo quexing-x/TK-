@@ -1,6 +1,6 @@
 # TK Ads 自动化操作使用手册
 
-版本：1.1.4
+版本：1.1.5
 更新日期：2026-07-15
 
 本手册覆盖 Windows 桌面版安装与升级、多账户、Cookie 与官方 API 接入、自动化检测与启停、广告管理、阈值配置和广告分析。
@@ -9,9 +9,9 @@
 
 ## 1. Windows 桌面版安装与升级
 
-1.1.4 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、调度器、数据库和加密凭据库均在本机运行。
+1.1.5 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、调度器、数据库和加密凭据库均在本机运行。
 
-1. 双击 TK-Ads-Automation-Setup-1.1.4.exe，按安装向导完成当前 Windows 用户安装；已安装旧版本的用户可直接覆盖升级。
+1. 双击 TK-Ads-Automation-Setup-1.1.5.exe，按安装向导完成当前 Windows 用户安装；已安装旧版本的用户可直接覆盖升级。
 2. 安装器会创建桌面和开始菜单快捷方式；启动“TK Ads Automation”即可进入管理界面。
 3. 首次启动会在 %APPDATA%\TK Ads Automation\data 创建 SQLite 数据库和演示广告账户。Cookie 和 Token 使用当前 Windows 用户的 DPAPI 加密保存。
 4. 先进入用户管理创建广告账户，再点击该账户后的“接入”完成凭据导入和连接检测。
@@ -37,18 +37,18 @@ Cookie 方案适合自有、已授权的 TikTok Ads 账户。接入界面把读�
 5. Network 中应出现一到两条名称类似 list/?aadvid=... 的请求；选择最后一条状态为 200、Response 为 JSON 的请求。
 6. 在该请求上点击鼠标右键，选择 Copy → Copy as cURL (bash)。Copy as cURL (bash) 是右键菜单中的复制选项，不是请求名称。
 7. 将复制的列表 cURL 粘贴到“第 1 步 · 读取数据”的独立输入框，点击“导入第 1 步”。第 1 步只接受 list 请求。
-8. 第 2 步：进入 TikTok 的广告组层级，在接入窗口点击复制 /ad/update_status/? 并粘贴到 Network Filter。
-9. 切换一次测试广告组的开关，在 Network 中选择刚出现的 POST /api/v3/i18n/overture/ad/update_status/ 请求，右键选择 Copy → Copy as cURL (bash)。
-10. 正确的第二步请求使用 multipart/form-data，请求体至少包含 ad_list 对象 ID 数组和 operation=enable/disable；在 TikTok Overture 内部接口中，ad_list 对应界面广告组，不代表最终广告层。必须复制完整 cURL 以保留 Cookie、boundary、aadvid 和签名参数。
-11. 将启停 cURL 粘贴到“第 2 步 · 开启和关闭”的独立输入框，点击“导入第 2 步”。第 2 步只接受 update_status 启停请求。
-12. 程序识别请求中的真实开启或关闭动作后，会保存广告组模板，并生成已通过真实测试的广告系列模板；不会再猜测最终广告层接口。
-13. 当前两条 cURL 完成后可管理广告系列和广告组，页面显示“层级未完成 2/3”是正常结果。最终广告层必须再提供真实列表和启停 cURL，三个层级都确认后才显示完整连接正常。
+8. 启停第 1 条：进入广告组层级，复制 /ad/update_status/? 搜索词并粘贴到 Network Filter，切换一次测试广告组开关。选择 POST /api/v3/i18n/overture/ad/update_status/，右键 Copy → Copy as cURL (bash)。
+9. 广告组启停请求使用 multipart/form-data，请求体包含 ad_list 和 operation=enable/disable；TikTok 内部 ad_list 对应界面广告组。
+10. 启停第 2 条：进入最终广告层，复制 /creative/update_status/? 搜索词并粘贴到 Network Filter，切换一次测试广告开关。选择 POST /api/v2/i18n/overture/creative/update_status/ 并复制完整 cURL。
+11. 最终广告启停请求使用 multipart/form-data，请求体包含 creative_list、aco_creative_list 和 operation=enable/disable。两条启停 cURL 都粘贴到同一个启停输入框，程序会合并层级能力。
+12. 读取数据如果显示 2/3，进入最终广告页面，在 Network 搜索 list 并刷新；选择 Response 中包含单条广告名称或广告 ID 的真实列表请求，复制完整 cURL 并粘贴到读取输入框继续导入。
+13. 只有读取数据和启停能力都覆盖广告系列、广告组、最终广告三个层级时，页面才显示完整连接正常。
 14. 只有快速导入无法识别时，才展开高级手动接入填写各字段。
 
 注意事项：
 
 - Cookie 是登录凭据，只能用于本人或明确授权的账户，不要通过聊天、邮件或公开文档传递。
-- 列表和状态 cURL 分别使用第 1 步和第 2 步输入框；一条 /adgroup/list/? 和一条 /ad/update_status/? 已确认可覆盖广告系列、广告组，但不能冒充最终广告层。
+- 读取和启停分别使用独立输入框；同一输入框可以连续导入不同层级请求，程序会加密合并，不需要为三个层级创建独立账户配置。
 - 只读请求、启停请求或任一目标层级未完成时，用户管理和接入窗口都会显示“接入未完成”或“层级未完成”，不会显示完整连接正常。
 - 跨层级模板由真实状态请求自动扩展。如果 TikTok 拒绝某一层级，软件只会提示补充该层级的一条真实开关 cURL，不影响其他层级。
 - 自动补全的只读列表请求失败时，也只需补充失败层级的一条列表 cURL。

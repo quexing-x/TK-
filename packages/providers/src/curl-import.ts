@@ -476,6 +476,7 @@ const multipartEntityListKeys = new Set([
   "ad_group_list",
   "ad_list",
   "creative_list",
+  "aco_creative_list",
 ]);
 
 function targetMultipartEntityListKey(

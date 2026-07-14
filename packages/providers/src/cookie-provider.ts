@@ -324,7 +324,9 @@ function isMultipartEntityListKey(
     "ad-group": isOverture
       ? ["ad_list"]
       : ["adgroup_list", "ad_group_list"],
-    ad: isOverture ? ["creative_list"] : ["ad_list"],
+    ad: isOverture
+      ? ["creative_list", "aco_creative_list"]
+      : ["ad_list"],
   };
   return keys[entityType].includes(normalized);
 }

@@ -194,4 +194,68 @@ describe("CookieAdsProvider", () => {
     expect(requestBody).toContain('name="ad_list"\r\n\r\n["new-id"]');
     expect(requestBody).toContain('name="operation"\r\n\r\nenable');
   });
+
+  it("replaces both confirmed final-ad creative id lists", async () => {
+    let requestBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        requestBody = String(init?.body ?? "");
+        return new Response(JSON.stringify({ code: 0, data: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const body = [
+      "------CreativeBoundary\r\n",
+      'Content-Disposition: form-data; name="creative_list"\r\n\r\n',
+      '["old-id"]\r\n',
+      "------CreativeBoundary\r\n",
+      'Content-Disposition: form-data; name="aco_creative_list"\r\n\r\n',
+      '["old-id"]\r\n',
+      "------CreativeBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "disable\r\n",
+      "------CreativeBoundary--\r\n",
+    ].join("");
+
+    const provider = new CookieAdsProvider();
+    const result = await provider.changeStatus(
+      {
+        accountId: "test-account",
+        settings: {
+          kind: "cookie",
+          advertiserId: "123456",
+          healthUrl: "",
+          campaignsUrl: "",
+          adGroupsUrl: "",
+          adsUrl: "",
+        },
+        credential: {
+          kind: "cookie",
+          cookie: "sessionid=test-cookie",
+          csrfHeaderName: "x-csrftoken",
+          requestTemplates: [
+            {
+              target: "ad-status",
+              action: "disable",
+              url: "https://ads.tiktok.com/api/v2/i18n/overture/creative/update_status/?aadvid=123456",
+              method: "POST",
+              body,
+              contentType:
+                "multipart/form-data; boundary=----CreativeBoundary",
+            },
+          ],
+        },
+      },
+      [{ entityType: "ad", externalId: "new-id", action: "disable" }],
+    );
+
+    expect(result[0]).toMatchObject({ ok: true, externalId: "new-id" });
+    expect(requestBody).toContain('name="creative_list"\r\n\r\n["new-id"]');
+    expect(requestBody).toContain(
+      'name="aco_creative_list"\r\n\r\n["new-id"]',
+    );
+  });
 });

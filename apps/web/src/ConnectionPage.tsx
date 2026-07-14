@@ -22,6 +22,7 @@ import type {
   ReadOnlySyncResult,
 } from "@tk-auto/core";
 import { api } from "./api";
+import { describeCookieCoverage } from "./cookie-coverage.js";
 
 const emptyCookieSettings: CookieConnectionSettings = {
   kind: "cookie",
@@ -109,6 +110,10 @@ export function ConnectionPage({
   }, [load]);
 
   const connection = connections.find((item) => item.kind === providerKind);
+  const readCoverageComplete = readiness.readTargets.length === 3;
+  const readCoveragePartial =
+    readiness.readTargets.length > 0 && !readCoverageComplete;
+  const cookieCoverage = describeCookieCoverage(readiness);
   const verifiedCookieTargets = (["campaign", "ad-group", "ad"] as const).filter(
     (target) =>
       readiness.readTargets.includes(target) &&
@@ -132,7 +137,7 @@ export function ConnectionPage({
       ? "完整接入完成"
       : connectionStatusLabel(connection?.status);
   const displayedConnectionMessage = cookieLayerCoverageIncomplete
-    ? `广告系列和广告组的读取与启停已确认；最终广告层仍缺少真实列表和启停 cURL，广告层自动化保持不可用。${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
+    ? `${cookieCoverage.message}${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
     : cookieOnboardingIncomplete
       ? readiness.dataRequestImported && connection?.status === "ready"
       ? "第 1 步只读连接正常；第 2 步启停请求尚未导入，自动启停暂不可用。"
@@ -366,20 +371,26 @@ export function ConnectionPage({
           <div className="quick-import-heading">
             <span className="quick-import-icon"><Sparkles size={21} /></span>
             <div>
-              <span className="eyebrow">最快接入 · {readiness.completedSteps}/2</span>
-              <h2>分两步导入 Cookie 请求</h2>
-              <p>每一步使用独立输入框并校验请求类型，避免列表请求和启停请求混淆。</p>
+              <span className="eyebrow">完整层级 · {verifiedCookieTargets.length}/3</span>
+              <h2>分两类导入 Cookie 请求</h2>
+              <p>读取数据与启停请求分别校验；三个层级都具备读取和启停能力后，才算完整接入。</p>
             </div>
           </div>
           <div className="cookie-import-steps">
-            <article className={`cookie-import-step ${readiness.dataRequestImported ? "complete" : ""}`}>
+            <article className={`cookie-import-step ${readCoverageComplete ? "complete" : readCoveragePartial ? "partial" : ""}`}>
               <header>
-                <span className="cookie-step-number">{readiness.dataRequestImported ? "✓" : "1"}</span>
+                <span className="cookie-step-number">{readCoverageComplete ? "✓" : "1"}</span>
                 <div>
-                  <span className="eyebrow">第 1 步 · 读取数据</span>
-                  <h3>导入广告组列表 cURL</h3>
+                  <span className="eyebrow">第 1 类 · 读取数据</span>
+                  <h3>导入真实列表 cURL</h3>
                 </div>
-                <strong className="cookie-step-state">{readiness.dataRequestImported ? "已完成" : "未完成"}</strong>
+                <strong className="cookie-step-state">
+                  {readCoverageComplete
+                    ? "完成 3/3"
+                    : readCoveragePartial
+                      ? `部分完成 ${readiness.readTargets.length}/3`
+                      : "未完成"}
+                </strong>
               </header>
               <p>在 TikTok Ads 的 Network 左上角 Filter 搜索以下内容，刷新广告组页面后复制对应请求。</p>
               <div className="network-filter-row">
@@ -395,11 +406,26 @@ export function ConnectionPage({
                   <span>{copiedFilter === "/adgroup/list/?" ? "已复制" : "复制"}</span>
                 </button>
               </div>
+              {readCoveragePartial && (
+                <div className="network-filter-row">
+                  <span>最终广告列表候选</span>
+                  <button
+                    aria-label="复制过滤词 list"
+                    className={copiedFilter === "list" ? "copied" : ""}
+                    onClick={() => void copyNetworkFilter("list")}
+                    type="button"
+                  >
+                    <code>list</code>
+                    {copiedFilter === "list" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                    <span>{copiedFilter === "list" ? "已复制" : "复制"}</span>
+                  </button>
+                </div>
+              )}
               <textarea
                 aria-label="第 1 步列表 cURL"
                 className="curl-input"
                 onChange={(event) => setReadCurlCommand(event.target.value)}
-                placeholder="粘贴 /adgroup/list/? 请求的完整 cURL"
+                placeholder={readCoveragePartial ? "继续粘贴最终广告层的真实列表 cURL" : "粘贴 /adgroup/list/? 请求的完整 cURL"}
                 rows={5}
                 spellCheck={false}
                 value={readCurlCommand}
@@ -407,18 +433,24 @@ export function ConnectionPage({
               <div className="cookie-step-footer">
                 <span>此处只接受 list 列表请求。</span>
                 <button className="primary-button" disabled={busy !== null || !readCurlCommand.trim().startsWith("curl")} onClick={() => void importCurl("read")} type="button">
-                  <Sparkles size={17} /> {busy === "import-read" ? "正在导入…" : "导入第 1 步"}
+                  <Sparkles size={17} /> {busy === "import-read" ? "正在导入…" : readCoveragePartial ? "补充读取请求" : "导入第 1 类"}
                 </button>
               </div>
               {importFeedback?.step === "read" && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />} {importFeedback.message}</div>}
+              {readCoveragePartial && (
+                <div className="import-warning compact">
+                  <AlertTriangle size={17} />
+                  <span>最终广告启停已接入，但列表数据仍缺失。进入最终“广告”页面，在 Network 搜索 <code>list</code> 并刷新；选择 Response 中含单条广告名称或广告 ID 的真实列表请求，复制完整 cURL 后粘贴到上方继续导入。</span>
+                </div>
+              )}
             </article>
 
             <article className={`cookie-import-step ${readiness.statusRequestImported ? "complete" : ""}`}>
               <header>
                 <span className="cookie-step-number">{readiness.statusRequestImported ? "✓" : "2"}</span>
                 <div>
-                  <span className="eyebrow">第 2 步 · 开启和关闭</span>
-                  <h3>导入广告组启停 cURL</h3>
+                  <span className="eyebrow">第 2 类 · 开启和关闭</span>
+                  <h3>导入真实启停 cURL</h3>
                 </div>
                 <strong className="cookie-step-state">
                   {readiness.statusRequestImported
@@ -428,9 +460,9 @@ export function ConnectionPage({
                       : "未完成"}
                 </strong>
               </header>
-              <p>进入广告组层级，切换一次测试广告组的开关，再在 Network 搜索以下内容并复制新出现的 POST 请求。</p>
+              <p>广告组与最终广告各需要一条真实启停请求；两条请求都粘贴到同一个输入框，程序按真实路径自动合并层级能力。</p>
               <div className="network-filter-row">
-                <span>Network 搜索内容</span>
+                <span>广告组搜索内容</span>
                 <button
                   aria-label="复制过滤词 /ad/update_status/?"
                   className={copiedFilter === "/ad/update_status/?" ? "copied" : ""}
@@ -442,11 +474,24 @@ export function ConnectionPage({
                   <span>{copiedFilter === "/ad/update_status/?" ? "已复制" : "复制"}</span>
                 </button>
               </div>
+              <div className="network-filter-row">
+                <span>最终广告搜索内容</span>
+                <button
+                  aria-label="复制过滤词 /creative/update_status/?"
+                  className={copiedFilter === "/creative/update_status/?" ? "copied" : ""}
+                  onClick={() => void copyNetworkFilter("/creative/update_status/?")}
+                  type="button"
+                >
+                  <code>/creative/update_status/?</code>
+                  {copiedFilter === "/creative/update_status/?" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                  <span>{copiedFilter === "/creative/update_status/?" ? "已复制" : "复制"}</span>
+                </button>
+              </div>
               <div className="request-contract">
-                <strong>第二步请求必须同时满足</strong>
-                <span><code>POST /api/v3/i18n/overture/ad/update_status/</code></span>
-                <span>Form Data 包含 <code>ad_list</code> 和 <code>operation=enable/disable</code></span>
-                <span>TikTok 内部字段 <code>ad_list</code> 对应界面中的广告组，不代表最终广告层</span>
+                <strong>已确认的两种真实启停请求</strong>
+                <span>广告组：<code>POST /api/v3/i18n/overture/ad/update_status/</code>，包含 <code>ad_list</code></span>
+                <span>最终广告：<code>POST /api/v2/i18n/overture/creative/update_status/</code>，包含 <code>creative_list</code> 与 <code>aco_creative_list</code></span>
+                <span>两者都必须包含 <code>operation=enable/disable</code></span>
                 <span>必须复制完整 cURL，以保留 Cookie、boundary、aadvid 和签名参数</span>
               </div>
               {!readiness.statusRequestImported && (
@@ -481,8 +526,8 @@ export function ConnectionPage({
             </article>
           </div>
           <div className="quick-import-security">完整请求仅进入本机 DPAPI 加密保险库，不写入 SQLite 明文。</div>
-          {readiness.completedSteps === 2 && (
-            <div className="import-feedback"><CheckCircle2 size={17} /> Cookie 接入完成，三个层级的启停模板均已就绪。</div>
+          {readiness.statusRequestImported && (
+            <div className="import-feedback"><CheckCircle2 size={17} /> 三个层级的启停模板均已就绪；读取数据当前覆盖 {readiness.readTargets.length}/3，补齐最终广告列表后才是完整接入。</div>
           )}
         </div>
       )}
