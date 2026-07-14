@@ -1,0 +1,27 @@
+{
+  "name": "@tk-auto/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@tk-auto/core": "workspace:*",
+    "@tk-auto/credentials": "workspace:*",
+    "@tk-auto/providers": "workspace:*",
+    "@tk-auto/storage": "workspace:*",
+    "fastify": "^5.6.2",
+    "undici": "7.16.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6"
+  }
+}

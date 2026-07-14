@@ -1,0 +1,19 @@
+{
+  "name": "tk-ads-automation",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @tk-auto/api --filter @tk-auto/web dev",
+    "dev:api": "pnpm --filter @tk-auto/api dev",
+    "dev:web": "pnpm --filter @tk-auto/web dev",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "docs:generate": "node scripts/generate-manual.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

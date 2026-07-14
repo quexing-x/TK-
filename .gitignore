@@ -1,0 +1,13 @@
+node_modules/
+.codex/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-*
+data/credentials/
+*.log
