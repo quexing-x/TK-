@@ -66,8 +66,12 @@ export function ConnectionPage({
   const [csrfHeaderName, setCsrfHeaderName] = useState("x-csrftoken");
   const [userAgent, setUserAgent] = useState("");
   const [accessToken, setAccessToken] = useState("");
-  const [curlCommand, setCurlCommand] = useState("");
-  const [importFeedback, setImportFeedback] = useState<string | null>(null);
+  const [readCurlCommand, setReadCurlCommand] = useState("");
+  const [statusCurlCommand, setStatusCurlCommand] = useState("");
+  const [importFeedback, setImportFeedback] = useState<{
+    step: "read" | "status";
+    message: string;
+  } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<ReadOnlySyncResult | null>(null);
 
@@ -105,15 +109,18 @@ export function ConnectionPage({
 
   const connection = connections.find((item) => item.kind === providerKind);
 
-  const importCurl = async () => {
+  const importCurl = async (step: "read" | "status") => {
+    const command = step === "read" ? readCurlCommand : statusCurlCommand;
     try {
-      setBusy("import");
+      setBusy(`import-${step}`);
       setImportFeedback(null);
-      const result = await api.importCookieCurl(account.id, curlCommand.trim());
-      setCurlCommand("");
-      setImportFeedback(
-        result.lastMessage ?? "请求已加密保存，请查看连接状态。",
-      );
+      const result = await api.importCookieCurl(account.id, command.trim(), step);
+      if (step === "read") setReadCurlCommand("");
+      else setStatusCurlCommand("");
+      setImportFeedback({
+        step,
+        message: result.lastMessage ?? "请求已加密保存，请查看连接状态。",
+      });
       await load();
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -327,66 +334,101 @@ export function ConnectionPage({
             <span className="quick-import-icon"><Sparkles size={21} /></span>
             <div>
               <span className="eyebrow">最快接入 · {readiness.completedSteps}/2</span>
-              <h2>同一个输入框，两条 cURL 完成 Cookie 接入</h2>
-              <p>不需要选择广告层级；完成后默认具备系列、广告组和广告三级管理能力。</p>
+              <h2>分两步导入 Cookie 请求</h2>
+              <p>每一步使用独立输入框并校验请求类型，避免列表请求和启停请求混淆。</p>
             </div>
           </div>
-          <ol className="quick-import-steps">
-            <li className={readiness.dataRequestImported ? "complete" : ""}>
-              <strong>{readiness.dataRequestImported ? "已完成" : "第 1 条"}</strong>
-              复制一条广告组列表 cURL，用于 Cookie、账户和数据读取
-            </li>
-            <li className={readiness.statusRequestImported ? "complete" : ""}>
-              <strong>{readiness.statusRequestImported ? "已完成" : "第 2 条"}</strong>
-              任意切换一次测试对象，复制真实开关 cURL；自动扩展全部三级启停
-            </li>
-          </ol>
-          <div className="network-filter-guide">
-            <div>
-              <strong>第 1 条列表请求过滤词</strong>
-              <span>在 Network 左上角 Filter 中粘贴；第一项没有结果时再用第二项。</span>
-            </div>
-            <div className="network-filter-buttons">
-              {["/adgroup/list/?", "/campaign/list/?"].map((value) => (
+          <div className="cookie-import-steps">
+            <article className={`cookie-import-step ${readiness.dataRequestImported ? "complete" : ""}`}>
+              <header>
+                <span className="cookie-step-number">{readiness.dataRequestImported ? "✓" : "1"}</span>
+                <div>
+                  <span className="eyebrow">第 1 步 · 读取数据</span>
+                  <h3>导入广告组列表 cURL</h3>
+                </div>
+                <strong className="cookie-step-state">{readiness.dataRequestImported ? "已完成" : "未完成"}</strong>
+              </header>
+              <p>在 TikTok Ads 的 Network 左上角 Filter 搜索以下内容，刷新广告组页面后复制对应请求。</p>
+              <div className="network-filter-row">
+                <span>Network 搜索内容</span>
                 <button
-                  aria-label={`复制过滤词 ${value}`}
-                  className={copiedFilter === value ? "copied" : ""}
-                  key={value}
-                  onClick={() => void copyNetworkFilter(value)}
+                  aria-label="复制过滤词 /adgroup/list/?"
+                  className={copiedFilter === "/adgroup/list/?" ? "copied" : ""}
+                  onClick={() => void copyNetworkFilter("/adgroup/list/?")}
                   type="button"
                 >
-                  <code>{value}</code>
-                  {copiedFilter === value ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                  <span>{copiedFilter === value ? "已复制" : "复制"}</span>
+                  <code>/adgroup/list/?</code>
+                  {copiedFilter === "/adgroup/list/?" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                  <span>{copiedFilter === "/adgroup/list/?" ? "已复制" : "复制"}</span>
                 </button>
-              ))}
-            </div>
-          </div>
-          {readiness.dataRequestImported && !readiness.statusRequestImported && (
-            <div className="import-warning">
-              <AlertTriangle size={18} />
-              <div>
-                <strong>当前只完成了读取接入，启停功能还未接入。</strong>
-                <span>第二条不要再复制 list 请求；请在 TikTok 中切换一次测试对象，再复制包含 update 或 status 的真实 POST 请求。</span>
               </div>
-            </div>
-          )}
-          <textarea
-            aria-label="cURL 命令"
-            className="curl-input"
-            onChange={(event) => setCurlCommand(event.target.value)}
-            placeholder="curl 'https://ads.tiktok.com/...' ..."
-            rows={7}
-            spellCheck={false}
-            value={curlCommand}
-          />
-          <div className="quick-import-footer">
-            <span>完整请求仅进入本机 DPAPI 加密保险库，不写入 SQLite 明文。</span>
-            <button className="primary-button" disabled={busy !== null || !curlCommand.trim().startsWith("curl")} onClick={() => void importCurl()} type="button">
-              <Sparkles size={17} /> {busy === "import" ? "正在导入检测…" : "加密导入并检测"}
-            </button>
+              <textarea
+                aria-label="第 1 步列表 cURL"
+                className="curl-input"
+                onChange={(event) => setReadCurlCommand(event.target.value)}
+                placeholder="粘贴 /adgroup/list/? 请求的完整 cURL"
+                rows={5}
+                spellCheck={false}
+                value={readCurlCommand}
+              />
+              <div className="cookie-step-footer">
+                <span>此处只接受 list 列表请求。</span>
+                <button className="primary-button" disabled={busy !== null || !readCurlCommand.trim().startsWith("curl")} onClick={() => void importCurl("read")} type="button">
+                  <Sparkles size={17} /> {busy === "import-read" ? "正在导入…" : "导入第 1 步"}
+                </button>
+              </div>
+              {importFeedback?.step === "read" && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback.message}</div>}
+            </article>
+
+            <article className={`cookie-import-step ${readiness.statusRequestImported ? "complete" : ""}`}>
+              <header>
+                <span className="cookie-step-number">{readiness.statusRequestImported ? "✓" : "2"}</span>
+                <div>
+                  <span className="eyebrow">第 2 步 · 开启和关闭</span>
+                  <h3>导入广告启停 cURL</h3>
+                </div>
+                <strong className="cookie-step-state">{readiness.statusRequestImported ? "已完成" : "未完成"}</strong>
+              </header>
+              <p>进入广告层级，切换一次测试广告的开关，再在 Network 搜索以下内容并复制新出现的 POST 请求。</p>
+              <div className="network-filter-row">
+                <span>Network 搜索内容</span>
+                <button
+                  aria-label="复制过滤词 /ad/update_status/?"
+                  className={copiedFilter === "/ad/update_status/?" ? "copied" : ""}
+                  onClick={() => void copyNetworkFilter("/ad/update_status/?")}
+                  type="button"
+                >
+                  <code>/ad/update_status/?</code>
+                  {copiedFilter === "/ad/update_status/?" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                  <span>{copiedFilter === "/ad/update_status/?" ? "已复制" : "复制"}</span>
+                </button>
+              </div>
+              {!readiness.statusRequestImported && (
+                <div className="import-warning compact">
+                  <AlertTriangle size={17} />
+                  <span>不要复制 list 请求；第 2 步只接受 /ad/update_status/? 的真实启停请求。</span>
+                </div>
+              )}
+              <textarea
+                aria-label="第 2 步启停 cURL"
+                className="curl-input"
+                disabled={!readiness.dataRequestImported}
+                onChange={(event) => setStatusCurlCommand(event.target.value)}
+                placeholder={readiness.dataRequestImported ? "粘贴 /ad/update_status/? 请求的完整 cURL" : "请先完成第 1 步"}
+                rows={5}
+                spellCheck={false}
+                value={statusCurlCommand}
+              />
+              <div className="cookie-step-footer">
+                <span>此处只接受 update_status 启停请求。</span>
+                <button className="primary-button" disabled={busy !== null || !readiness.dataRequestImported || !statusCurlCommand.trim().startsWith("curl")} onClick={() => void importCurl("status")} type="button">
+                  <Sparkles size={17} /> {busy === "import-status" ? "正在导入…" : "导入第 2 步"}
+                </button>
+              </div>
+              {importFeedback?.step === "status" && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback.message}</div>}
+            </article>
           </div>
-          {importFeedback && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback}</div>}
+          <div className="quick-import-security">完整请求仅进入本机 DPAPI 加密保险库，不写入 SQLite 明文。</div>
           {readiness.completedSteps === 2 && (
             <div className="import-feedback"><CheckCircle2 size={17} /> Cookie 接入完成，三个层级的启停模板均已就绪。</div>
           )}

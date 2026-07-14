@@ -17,12 +17,10 @@ describe("user guide", () => {
     );
     expect(cookieGuide?.steps.join(" ")).toContain("Copy as cURL (bash)");
     expect(cookieGuide?.steps.join(" ")).toContain("/adgroup/list/?");
-    expect(cookieGuide?.steps.join(" ")).toContain("/campaign/list/?");
-    expect(cookieGuide?.steps.join(" ")).toContain("report、batch 或 append");
+    expect(cookieGuide?.steps.join(" ")).toContain("/ad/update_status/?");
+    expect(cookieGuide?.steps.join(" ")).toContain("独立输入框");
     expect(cookieGuide?.steps.join(" ")).toContain("Cookie 接入完成");
-    expect(cookieGuide?.steps.join(" ")).toContain("仍显示 1/2");
-    expect(cookieGuide?.steps.join(" ")).toContain("update 或 status");
-    expect(cookieGuide?.notes.join(" ")).toContain("一条任意层级状态 cURL");
+    expect(cookieGuide?.notes.join(" ")).toContain("/ad/update_status/? cURL");
 
     const quickStart = userGuide.sections.find(
       (section) => section.id === "quick-start",

@@ -40,4 +40,27 @@ describe("web API client", () => {
 
     await expect(api.bootstrap()).rejects.toThrow("配置保存失败。");
   });
+
+  it("sends the selected Cookie onboarding step", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ready" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.importCookieCurl("account-1", "curl 'https://ads.tiktok.com/'", "status");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1/connections/cookie/import-curl",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command: "curl 'https://ads.tiktok.com/'",
+          step: "status",
+        }),
+      }),
+    );
+  });
 });

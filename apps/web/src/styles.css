@@ -205,28 +205,33 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .quick-import-icon { width: 44px; height: 44px; min-width: 44px; display: grid; place-items: center; color: #fff; border-radius: 13px; background: linear-gradient(135deg, #5479ee, #765ce7); box-shadow: 0 8px 20px #4f70e535; }
 .quick-import-heading h2 { margin: 5px 0 4px; font-size: 20px; }
 .quick-import-heading p { margin: 0; color: #6f7c91; font-size: 12px; }
-.quick-import-steps { margin: 20px 0 15px; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; counter-reset: import-step; list-style: none; }
-.quick-import-steps li { min-height: 54px; padding: 11px 12px 11px 42px; position: relative; display: flex; align-items: center; color: #526078; border: 1px solid #dbe3fa; border-radius: 10px; background: #ffffffc9; font-size: 11px; line-height: 1.45; }
-.quick-import-steps li::before { content: counter(import-step); counter-increment: import-step; width: 23px; height: 23px; position: absolute; left: 11px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: #5a76df; font-size: 10px; font-weight: 800; }
-.quick-import-steps li strong { margin-right: 7px; color: #31415f; white-space: nowrap; }
-.quick-import-steps li.complete { border-color: #a8e3c9; background: #f0fbf6; }
-.quick-import-steps li.complete::before { content: "✓"; background: #24a36a; }
-.network-filter-guide { margin: 0 0 14px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #dbe3fa; border-radius: 10px; background: #ffffffb8; }
-.network-filter-guide > div:first-child { display: grid; gap: 3px; color: #31415f; font-size: 11px; }
-.network-filter-guide > div:first-child span { color: #718096; font-size: 10px; }
-.network-filter-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.network-filter-buttons button { min-height: 34px; padding: 7px 10px; display: inline-flex; align-items: center; gap: 7px; color: #4560bb; border: 1px solid #cbd7fb; border-radius: 8px; background: #f7f9ff; cursor: pointer; }
-.network-filter-buttons button:hover, .network-filter-buttons button.copied { border-color: #7892e9; background: #edf2ff; }
-.network-filter-buttons code { color: #263d87; font-size: 11px; }
-.network-filter-buttons span { font-size: 10px; font-weight: 700; }
+.cookie-import-steps { margin-top: 20px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.cookie-import-step { min-width: 0; padding: 16px; border: 1px solid #d6dff5; border-radius: 12px; background: #ffffffd9; }
+.cookie-import-step.complete { border-color: #9edfc3; background: #f5fcf8; }
+.cookie-import-step header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.cookie-import-step h3 { margin: 4px 0 0; color: #25324a; font-size: 15px; }
+.cookie-import-step > p { min-height: 38px; margin: 13px 0 10px; color: #65738a; font-size: 10px; line-height: 1.65; }
+.cookie-step-number { width: 28px; height: 28px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: #5875df; font-size: 11px; font-weight: 800; }
+.cookie-import-step.complete .cookie-step-number { background: #25a36b; }
+.cookie-step-state { color: #8a95a7; font-size: 10px; }
+.cookie-import-step.complete .cookie-step-state { color: #238158; }
+.network-filter-row { margin-bottom: 11px; padding: 8px 9px 8px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid #dbe3fa; border-radius: 9px; background: #f7f9ff; }
+.network-filter-row > span { color: #718096; font-size: 10px; }
+.network-filter-row button { min-height: 32px; padding: 6px 9px; display: inline-flex; align-items: center; gap: 7px; color: #4560bb; border: 1px solid #c7d3f7; border-radius: 7px; background: #fff; cursor: pointer; }
+.network-filter-row button:hover, .network-filter-row button.copied { border-color: #7892e9; background: #edf2ff; }
+.network-filter-row code { color: #263d87; font-size: 10px; }
+.network-filter-row button span { font-size: 9px; font-weight: 700; }
 .import-warning { margin: 0 0 14px; padding: 11px 13px; display: flex; align-items: flex-start; gap: 9px; color: #8a5b12; border: 1px solid #f1d392; border-radius: 10px; background: #fff9ea; }
 .import-warning > svg { margin-top: 1px; flex: 0 0 auto; }
 .import-warning > div { display: grid; gap: 3px; font-size: 11px; }
 .import-warning span { color: #8b6c35; font-size: 10px; line-height: 1.5; }
+.import-warning.compact { margin-bottom: 10px; padding: 8px 10px; align-items: center; }
 .curl-input { width: 100%; padding: 13px 14px; resize: vertical; border: 1px solid #cfd9f3; border-radius: 10px; color: #253147; background: #fff; outline: none; font: 11px/1.55 "Cascadia Code", Consolas, monospace; }
 .curl-input:focus { border-color: #6f8bea; box-shadow: 0 0 0 3px #5478eb15; }
-.quick-import-footer { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
-.quick-import-footer > span { color: #718096; font-size: 10px; }
+.curl-input:disabled { color: #8994a5; background: #f1f3f7; cursor: not-allowed; }
+.cookie-step-footer { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cookie-step-footer > span { color: #718096; font-size: 9px; }
+.quick-import-security { margin-top: 13px; color: #718096; font-size: 10px; }
 .import-feedback { margin-top: 13px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; color: #247356; border: 1px solid #c9e8da; border-radius: 9px; background: #effaf5; font-size: 11px; font-weight: 700; }
 .advanced-connection { overflow: hidden; }
 .advanced-connection > summary { padding: 17px 20px; display: flex; align-items: center; gap: 10px; color: #536178; cursor: pointer; list-style: none; background: #fafbfd; }
@@ -259,6 +264,5 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
   .manual-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .automation-control-panel { align-items: flex-start; flex-direction: column; }
   .management-filters { grid-template-columns: 1fr 1fr; }
-  .network-filter-guide { align-items: flex-start; flex-direction: column; }
-  .network-filter-buttons { justify-content: flex-start; }
+  .cookie-import-steps { grid-template-columns: 1fr; }
 }

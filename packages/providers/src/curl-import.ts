@@ -40,7 +40,21 @@ export function parseTikTokStatusCurl(
   const imported = parseTikTokCurl(command);
   if (!imported.summary.target.endsWith("-status")) {
     throw new TikTokCurlImportError(
-      "请选择在 TikTok 页面切换开关时产生的 update/status 请求。",
+      "第 2 步只接受启停请求，请在 Network 搜索 /ad/update_status/? 后复制对应的 POST cURL。",
+    );
+  }
+  return imported;
+}
+
+export function parseTikTokReadCurl(
+  command: string,
+): TikTokCurlImportResult {
+  const imported = parseTikTokCurl(command);
+  if (!(["campaign", "ad-group", "ad"] as const).includes(
+    imported.summary.target as "campaign" | "ad-group" | "ad",
+  )) {
+    throw new TikTokCurlImportError(
+      "第 1 步只接受列表请求，请在 Network 搜索 /adgroup/list/? 后复制对应的 list cURL。",
     );
   }
   return imported;

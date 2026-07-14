@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseTikTokCurl,
+  parseTikTokReadCurl,
   parseTikTokStatusCurl,
   TikTokCurlImportError,
 } from "./curl-import.js";
@@ -44,6 +45,14 @@ describe("parseTikTokCurl", () => {
     ).toThrow(TikTokCurlImportError);
   });
 
+  it("keeps the two onboarding steps separate", () => {
+    const listCommand = `curl 'https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456' -H 'cookie: sessionid=test'`;
+    const statusCommand = `curl 'https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=test' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"ENABLE"}'`;
+
+    expect(() => parseTikTokStatusCurl(listCommand)).toThrow("第 2 步只接受启停请求");
+    expect(() => parseTikTokReadCurl(statusCommand)).toThrow("第 1 步只接受列表请求");
+  });
+
   it("labels a captured switch request by entity level and action", () => {
     const imported = parseTikTokStatusCurl(
       `curl 'https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_id":"old-id","status":0}'`,
@@ -69,6 +78,29 @@ describe("parseTikTokCurl", () => {
           action: "enable",
           body: '{"ad_id":"old-id","status":1}',
           derived: true,
+        }),
+      ]),
+    );
+  });
+
+  it("recognizes the TikTok ad update_status request", () => {
+    const imported = parseTikTokStatusCurl(
+      `curl 'https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"DISABLE"}'`,
+    );
+
+    expect(imported.summary.target).toBe("ad-status");
+    expect(imported.credential.requestTemplates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "ad-status",
+          action: "disable",
+          derived: false,
+        }),
+        expect.objectContaining({
+          target: "ad-status",
+          action: "enable",
+          body: '{"ad_ids":["old-id"],"operation_status":"ENABLE"}',
+          derived: false,
         }),
       ]),
     );

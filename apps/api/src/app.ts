@@ -22,6 +22,7 @@ import {
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
   parseTikTokCurl,
+  parseTikTokReadCurl,
   parseTikTokStatusCurl,
   ProviderRegistry,
   TikTokCurlImportError,
@@ -43,6 +44,7 @@ const ProviderParamsSchema = AccountParamsSchema.extend({
 });
 const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
+  step: z.enum(["read", "status"]).optional(),
 });
 const StatusCurlImportBodySchema = CurlImportBodySchema.extend({
   entityType: SyncEntityTypeSchema,
@@ -266,10 +268,15 @@ export async function createApp(
       if (!dependencies.store.getAccount(accountId)) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
-      const { command } = CurlImportBodySchema.parse(request.body);
+      const { command, step } = CurlImportBodySchema.parse(request.body);
       let imported: ReturnType<typeof parseTikTokCurl>;
       try {
-        imported = parseTikTokCurl(command);
+        imported =
+          step === "read"
+            ? parseTikTokReadCurl(command)
+            : step === "status"
+              ? parseTikTokStatusCurl(command)
+              : parseTikTokCurl(command);
       } catch (cause) {
         if (cause instanceof TikTokCurlImportError) {
           return reply.status(400).send({ message: cause.message });

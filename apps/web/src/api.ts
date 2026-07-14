@@ -105,10 +105,14 @@ export const api = {
     request<CookieConnectionReadiness>(
       `/api/accounts/${accountId}/connections/cookie/readiness`,
     ),
-  importCookieCurl: (accountId: string, command: string) =>
+  importCookieCurl: (
+    accountId: string,
+    command: string,
+    step?: "read" | "status",
+  ) =>
     request<ProviderConnection>(
       `/api/accounts/${accountId}/connections/cookie/import-curl`,
-      { method: "POST", body: JSON.stringify({ command }) },
+      { method: "POST", body: JSON.stringify({ command, step }) },
     ),
   saveConnectionSettings: (
     accountId: string,
