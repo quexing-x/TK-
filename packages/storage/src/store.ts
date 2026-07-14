@@ -35,6 +35,12 @@ import {
   automationSwitchDefinitions,
   createDefaultAutomationSwitches,
   defaultThresholds,
+  defaultRuleConfiguration,
+  RULE_LOOKBACK_HOURS,
+  RuleConfigurationInputSchema,
+  RuleConfigurationSchema,
+  type RuleConfiguration,
+  type RuleConfigurationInput,
 } from "@tk-auto/core";
 
 type SqlRow = Record<string, unknown>;
@@ -90,7 +96,7 @@ export class AutomationStore {
         "Asia/Shanghai",
         5,
         15,
-        "manual-approval",
+        "automatic",
         now,
       );
 
@@ -128,7 +134,7 @@ export class AutomationStore {
         "Asia/Shanghai",
         5,
         15,
-        input.executionMode,
+        "automatic",
         now,
       );
     this.writeSwitches(id, createDefaultAutomationSwitches(), false);
@@ -155,7 +161,7 @@ export class AutomationStore {
       .prepare(
         `UPDATE accounts SET
           display_name = ?, account_type = ?, enabled = ?, provider_kind = ?,
-          execution_mode = ?, updated_at = ?
+          execution_mode = 'automatic', updated_at = ?
         WHERE id = ?`,
       )
       .run(
@@ -163,7 +169,6 @@ export class AutomationStore {
         settings.accountType,
         toSqlBoolean(settings.enabled),
         settings.providerKind,
-        settings.executionMode,
         now,
         accountId,
       );
@@ -203,6 +208,39 @@ export class AutomationStore {
       .run(input.pollingIntervalMinutes, input.maxActionsPerRun, now);
     this.writeSystemAudit("global.automation-settings.updated", input);
     return this.getGlobalAutomationSettings();
+  }
+
+  getRuleConfiguration(): RuleConfiguration {
+    this.ensureGlobalDefaults();
+    const row = this.db
+      .prepare("SELECT * FROM global_rule_configuration WHERE id = 1")
+      .get() as SqlRow;
+    return RuleConfigurationSchema.parse({
+      lookbackHours: RULE_LOOKBACK_HOURS,
+      layers: JSON.parse(String(row.layers_json)),
+      rules: JSON.parse(String(row.rules_json)),
+      updatedAt: row.updated_at,
+    });
+  }
+
+  updateRuleConfiguration(
+    input: RuleConfigurationInput,
+  ): RuleConfiguration {
+    const configuration = RuleConfigurationInputSchema.parse(input);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE global_rule_configuration
+         SET layers_json = ?, rules_json = ?, updated_at = ?
+         WHERE id = 1`,
+      )
+      .run(
+        JSON.stringify(configuration.layers),
+        JSON.stringify(configuration.rules),
+        now,
+      );
+    this.writeSystemAudit("global.rules.updated", configuration);
+    return this.getRuleConfiguration();
   }
 
   listProviderConnections(accountId: string): ProviderConnection[] {
@@ -1247,6 +1285,13 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS global_rule_configuration (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        layers_json TEXT NOT NULL,
+        rules_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS global_thresholds (
         id TEXT PRIMARY KEY,
         code TEXT NOT NULL UNIQUE,
@@ -1441,6 +1486,20 @@ export class AutomationStore {
         )
         .run(new Date().toISOString());
     });
+    this.applyMigration("default-automatic-execution-v1", () => {
+      const now = new Date().toISOString();
+      this.db
+        .prepare("UPDATE accounts SET execution_mode = 'automatic', updated_at = ?")
+        .run(now);
+      this.db
+        .prepare(
+          `UPDATE automation_decisions
+           SET status = 'skipped',
+               error_message = COALESCE(error_message, '已切换为默认自动执行，旧人工确认任务已取消。')
+           WHERE status = 'pending'`,
+        )
+        .run();
+    });
     this.ensureGlobalDefaults();
   }
 
@@ -1473,6 +1532,18 @@ export class AutomationStore {
         ) VALUES (1, 5, 15, ?)`,
       )
       .run(now);
+
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO global_rule_configuration (
+          id, layers_json, rules_json, updated_at
+        ) VALUES (1, ?, ?, ?)`,
+      )
+      .run(
+        JSON.stringify(defaultRuleConfiguration.layers),
+        JSON.stringify(defaultRuleConfiguration.rules),
+        now,
+      );
 
     const count = this.db
       .prepare("SELECT COUNT(*) AS count FROM global_thresholds")

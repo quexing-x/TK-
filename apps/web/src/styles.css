@@ -191,6 +191,42 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .connection-actions { display: flex; gap: 9px; }
 .connection-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .form-grid.single-column { grid-template-columns: 1fr; }
+
+.rule-runtime-grid { padding: 22px; display: grid; grid-template-columns: minmax(160px, .7fr) minmax(160px, .7fr) minmax(320px, 1.6fr); gap: 17px; align-items: stretch; }
+.rule-window-lock { display: flex; gap: 12px; align-items: center; min-height: 72px; padding: 14px 16px; border: 1px solid #cdd9ff; border-radius: 12px; background: #f3f6ff; color: #3153b7; }
+.rule-window-lock div { display: grid; gap: 4px; }
+.rule-window-lock span { color: #65718a; font-size: 12px; line-height: 1.5; }
+.rule-layer-grid { padding: 0 22px 22px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.rule-layer-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid #e2e7f0; border-radius: 12px; background: #fafbfe; }
+.rule-layer-item > div { display: grid; gap: 4px; }
+.rule-layer-item span { color: #768197; font-size: 12px; }
+.rule-panel { overflow: hidden; }
+.rule-card-grid { padding: 0 22px 22px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.rule-card { min-width: 0; padding: 17px; border: 1px solid #dfe5ef; border-radius: 14px; background: #fff; box-shadow: 0 5px 18px #263d6810; transition: .2s ease; }
+.rule-card.disabled { opacity: .58; background: #f7f8fa; }
+.rule-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.rule-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rule-title > div { display: grid; gap: 3px; min-width: 0; }
+.rule-title strong { color: #1c2940; font-size: 14px; }
+.rule-title span { color: #7d8798; font-size: 11px; }
+.rule-number { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 auto; border-radius: 9px; background: #eef2ff; color: #4f68d9; font-weight: 800; }
+.rule-card > p { min-height: 39px; margin: 13px 0; color: #65718a; font-size: 12px; line-height: 1.6; }
+.rule-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.rule-values label { display: grid; gap: 6px; color: #596579; font-size: 12px; }
+.rule-values label > div { display: flex; align-items: center; gap: 6px; }
+.rule-values small { color: #8992a3; font-size: 10px; white-space: nowrap; }
+.editable-rule-value { width: 100%; min-width: 0; color: #d43d4c !important; border-color: #efb7bd !important; background: #fff7f8 !important; font-weight: 700; }
+
+@media (max-width: 1100px) {
+  .rule-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rule-runtime-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rule-window-lock { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+  .rule-card-grid, .rule-layer-grid, .rule-runtime-grid { grid-template-columns: 1fr; }
+  .rule-window-lock { grid-column: auto; }
+}
 .field textarea { width: 100%; padding: 10px 12px; resize: vertical; border: 1px solid #dce2ea; border-radius: 9px; color: #263245; background: #fff; outline: none; }
 .field textarea:focus { border-color: #7390ed; box-shadow: 0 0 0 3px #5478eb15; }
 .provider-endpoint-note { padding: 13px; color: #65738a; border: 1px solid #dfe6f5; border-radius: 9px; background: #f5f7fc; font-size: 11px; line-height: 1.6; }

@@ -7,7 +7,15 @@ afterEach(() => {
 
 describe("web API client", () => {
   it("loads the local bootstrap payload", async () => {
-    const payload = { accounts: [], providers: [], switchDefinitions: [] };
+    const payload = {
+      accounts: [],
+      providers: [],
+      globalAutomationSettings: {
+        pollingIntervalMinutes: 5,
+        maxActionsPerRun: 15,
+        updatedAt: "2026-07-15T00:00:00.000Z",
+      },
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(

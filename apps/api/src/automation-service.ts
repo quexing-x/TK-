@@ -1,12 +1,12 @@
 import {
   ProviderCredentialInputSchema,
-  evaluateAutomation,
+  automationRuleDefinitions,
+  evaluateRuleConfiguration,
+  filterEntitiesToRecentCampaigns,
   type AutomationCandidate,
-  type AutomationDecisionRecord,
   type AutomationRunRecord,
   type AutomationTrigger,
   type ManualStatusInput,
-  type SyncEntityType,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -37,10 +37,12 @@ export class AutomationService {
     }
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
-    if (!account.enabled) throw new Error("账户已停用，自动化不会运行。");
+    if (trigger !== "preview" && !account.enabled) {
+      throw new Error("账户自动化已关闭，不能执行真实启停。");
+    }
 
     this.runningAccounts.add(accountId);
-    const executionMode = trigger === "preview" ? "observe" : account.executionMode;
+    const executionMode = trigger === "preview" ? "observe" : "automatic";
     const run = this.store.createAutomationRun(
       accountId,
       account.providerKind,
@@ -65,17 +67,37 @@ export class AutomationService {
         account.providerKind,
         context,
       );
+      const ruleConfiguration = this.store.getRuleConfiguration();
+      const recent = filterEntitiesToRecentCampaigns(
+        output.entities,
+        new Date(),
+        ruleConfiguration.lookbackHours,
+      );
+      const filteredResult = {
+        ...output.result,
+        counts: {
+          campaign: recent.entities.filter((item) => item.entityType === "campaign").length,
+          "ad-group": recent.entities.filter((item) => item.entityType === "ad-group").length,
+          ad: recent.entities.filter((item) => item.entityType === "ad").length,
+        },
+        warnings:
+          recent.excludedCount > 0
+            ? [
+                ...output.result.warnings,
+                `已排除 ${recent.excludedCount} 个不属于最近 ${ruleConfiguration.lookbackHours} 小时推广系列的对象。`,
+              ]
+            : output.result.warnings,
+      };
       this.store.saveReadOnlySync(
         accountId,
         account.providerKind,
-        output.entities,
-        output.result,
+        recent.entities,
+        filteredResult,
       );
 
-      const evaluation = evaluateAutomation(
-        output.entities,
-        this.store.listGlobalThresholds(),
-        this.store.getAutomationSwitches(accountId),
+      const evaluation = evaluateRuleConfiguration(
+        recent.entities,
+        ruleConfiguration,
       );
       const eligible: AutomationCandidate[] = [];
       for (const candidate of evaluation.candidates) {
@@ -88,8 +110,36 @@ export class AutomationService {
       }
 
       const { maxActionsPerRun } = this.store.getGlobalAutomationSettings();
-      const selected = eligible.slice(0, maxActionsPerRun);
-      for (const candidate of eligible.slice(maxActionsPerRun)) {
+      const orderedEligible = eligible.sort(compareAutomationCandidates);
+      const cappedCandidates = orderedEligible.slice(0, maxActionsPerRun);
+      const closingAdGroups = new Set(
+        cappedCandidates
+          .filter(
+            (candidate) =>
+              candidate.action === "disable" &&
+              candidate.entity.entityType === "ad-group",
+          )
+          .map((candidate) => candidate.entity.externalId),
+      );
+      const selected: AutomationCandidate[] = [];
+      for (const candidate of cappedCandidates) {
+        if (
+          candidate.action === "enable" &&
+          candidate.entity.entityType === "ad" &&
+          candidate.entity.parentAdGroupId &&
+          closingAdGroups.has(candidate.entity.parentAdGroupId)
+        ) {
+          this.store.saveAutomationDecision(
+            run,
+            candidate,
+            "skipped",
+            "父广告组将在本轮关闭，不执行子广告开启。",
+          );
+        } else {
+          selected.push(candidate);
+        }
+      }
+      for (const candidate of orderedEligible.slice(maxActionsPerRun)) {
         this.store.saveAutomationDecision(
           run,
           candidate,
@@ -104,10 +154,6 @@ export class AutomationService {
       if (executionMode === "observe") {
         for (const candidate of selected) {
           this.store.saveAutomationDecision(run, candidate, "preview");
-        }
-      } else if (executionMode === "manual-approval") {
-        for (const candidate of selected) {
-          this.store.saveAutomationDecision(run, candidate, "pending");
         }
       } else {
         let consecutiveFailures = 0;
@@ -212,76 +258,18 @@ export class AutomationService {
     }
   }
 
-  async approveDecision(decisionId: string): Promise<AutomationDecisionRecord> {
-    const decision = this.store.getAutomationDecision(decisionId);
-    if (!decision) throw new Error("自动化决策不存在。");
-    if (decision.status !== "pending") {
-      throw new Error("只有等待确认的决策可以执行。");
-    }
-    const account = this.store.getAccount(decision.accountId);
-    if (!account?.enabled) throw new Error("账户已停用，无法执行决策。");
-    const switches = this.store.getAutomationSwitches(decision.accountId);
-    if (!switches[levelSwitch(decision.entityType)]) {
-      throw new Error("对应层级的状态管理能力未开启。");
-    }
-    if (
-      decision.action === "enable" &&
-      !this.store.wasDisabledByAutomation(
-        decision.accountId,
-        decision.entityType,
-        decision.externalId,
-      )
-    ) {
-      throw new Error("安全保护：只能自动恢复曾由本工具关闭的对象。");
-    }
-    const context = await this.loadContext(
-      decision.accountId,
-      decision.providerKind,
-      account.timezone,
-    );
-    const result = await this.changeProviderStatus(context, [
-      {
-        entityType: decision.entityType,
-        externalId: decision.externalId,
-        action: decision.action,
-      },
-    ]);
-    const first = result[0];
-    const updated = this.store.updateAutomationDecision(
-      decision.id,
-      first?.ok ? "succeeded" : "failed",
-      first?.ok ? null : (first?.message ?? "Provider 未返回执行结果。"),
-    );
-    this.store.recordAdOperation({
-      accountId: decision.accountId,
-      providerKind: decision.providerKind,
-      entityType: decision.entityType,
-      externalId: decision.externalId,
-      entityName: decision.entityName,
-      action: decision.action,
-      source: "manual",
-      status: first?.ok ? "succeeded" : "failed",
-      message: first?.message ?? null,
-    });
-    return updated;
-  }
-
   async changeStatusManually(
     accountId: string,
     input: ManualStatusInput,
   ): Promise<StatusMutationResult> {
     const account = this.store.getAccount(accountId);
-    if (!account?.enabled) throw new Error("账户已停用，无法执行广告操作。");
+    if (!account) throw new Error("账号不存在。");
     const connection = this.store.getProviderConnection(
       accountId,
       account.providerKind,
     );
     if (!connection || connection.status !== "ready") {
       throw new Error("当前 Provider 尚未通过连接检测。");
-    }
-    const switches = this.store.getAutomationSwitches(accountId);
-    if (!switches[levelSwitch(input.entityType)]) {
-      throw new Error("对应层级的状态管理能力未开启。");
     }
     const context = await this.loadContext(
       accountId,
@@ -357,25 +345,20 @@ export class AutomationService {
       return `仍在 ${candidate.cooldownMinutes} 分钟冷却期内。`;
     }
     if (
-      this.store.hasPendingDecision(
-        accountId,
-        candidate.thresholdId,
-        candidate.entity.entityType,
-        candidate.entity.externalId,
-        candidate.action,
-      )
-    ) {
-      return "已有相同决策等待人工确认。";
-    }
-    if (
       candidate.action === "enable" &&
-      !this.store.wasDisabledByAutomation(
-        accountId,
-        candidate.entity.entityType,
-        candidate.entity.externalId,
-      )
+      candidate.entity.entityType === "ad" &&
+      candidate.entity.parentAdGroupId
     ) {
-      return "安全保护：只能自动恢复曾由本工具关闭的对象。";
+      const parent = this.store
+        .listManagedEntities(accountId, providerKind ?? "cookie")
+        .find(
+          (entity) =>
+            entity.entityType === "ad-group" &&
+            entity.externalId === candidate.entity.parentAdGroupId,
+        );
+      if (parent?.status === "disabled") {
+        return "父广告组处于关闭状态，不执行子广告开启。";
+      }
     }
     return null;
   }
@@ -458,6 +441,28 @@ export class AutomationService {
   }
 }
 
+const rulePriorities: ReadonlyMap<string, number> = new Map(
+  automationRuleDefinitions.map((definition) => [
+    definition.code,
+    definition.priority,
+  ]),
+);
+
+function compareAutomationCandidates(
+  left: AutomationCandidate,
+  right: AutomationCandidate,
+): number {
+  const priorityDifference =
+    (rulePriorities.get(left.thresholdCode) ?? Number.MAX_SAFE_INTEGER) -
+    (rulePriorities.get(right.thresholdCode) ?? Number.MAX_SAFE_INTEGER);
+  if (priorityDifference !== 0) return priorityDifference;
+  if (left.action !== right.action) return left.action === "disable" ? -1 : 1;
+  const layerOrder = { campaign: 0, "ad-group": 1, ad: 2 } as const;
+  return (
+    layerOrder[left.entity.entityType] - layerOrder[right.entity.entityType]
+  );
+}
+
 export class AutomationScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -508,14 +513,6 @@ export class AutomationScheduler {
       this.ticking = false;
     }
   }
-}
-
-function levelSwitch(
-  entityType: SyncEntityType,
-): "manageCampaignStatus" | "manageAdGroupStatus" | "manageAdStatus" {
-  if (entityType === "campaign") return "manageCampaignStatus";
-  if (entityType === "ad-group") return "manageAdGroupStatus";
-  return "manageAdStatus";
 }
 
 function safeMessage(cause: unknown): string {

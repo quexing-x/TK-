@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { createDefaultAutomationSwitches } from "@tk-auto/core";
 import { AutomationStore } from "./store.js";
 
@@ -17,12 +18,32 @@ describe("AutomationStore", () => {
     store.close();
   });
 
-  it("seeds an account and thresholds", () => {
+  it("seeds an account and the fixed global rules", () => {
     expect(store.listAccounts()).toHaveLength(1);
-    expect(store.listGlobalThresholds()).toHaveLength(6);
+    expect(store.getRuleConfiguration()).toMatchObject({
+      lookbackHours: 48,
+      layers: { campaign: false, adGroup: true, ad: true },
+    });
+    expect(store.getRuleConfiguration().rules).toHaveLength(9);
     expect(store.getGlobalAutomationSettings()).toMatchObject({
       pollingIntervalMinutes: 5,
       maxActionsPerRun: 15,
+    });
+  });
+
+  it("updates only the global rule configuration", () => {
+    const configuration = store.getRuleConfiguration();
+    configuration.layers.campaign = true;
+    configuration.rules[0]!.enabled = false;
+    configuration.rules[0]!.values.cpc = 0.9;
+
+    const updated = store.updateRuleConfiguration(configuration);
+
+    expect(updated.layers.campaign).toBe(true);
+    expect(updated.rules[0]).toMatchObject({
+      code: "CV1_CPC_CLOSE",
+      enabled: false,
+      values: { cpc: 0.9 },
     });
   });
 
@@ -51,6 +72,32 @@ describe("AutomationStore", () => {
     expect(
       reopenedStore.getAutomationSwitches("demo-account").manageAdStatus,
     ).toBe(false);
+    reopenedStore.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("migrates existing accounts to the default automatic execution mode", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-"));
+    const databasePath = join(directory, "automation.db");
+    const firstStore = new AutomationStore(databasePath);
+    firstStore.seed();
+    firstStore.close();
+
+    const legacyDatabase = new DatabaseSync(databasePath);
+    legacyDatabase
+      .prepare("UPDATE accounts SET execution_mode = 'manual-approval'")
+      .run();
+    legacyDatabase
+      .prepare(
+        "DELETE FROM schema_migrations WHERE migration_key = 'default-automatic-execution-v1'",
+      )
+      .run();
+    legacyDatabase.close();
+
+    const reopenedStore = new AutomationStore(databasePath);
+    expect(reopenedStore.getAccount("demo-account")?.executionMode).toBe(
+      "automatic",
+    );
     reopenedStore.close();
     rmSync(directory, { recursive: true, force: true });
   });
@@ -86,10 +133,10 @@ describe("AutomationStore", () => {
       accountType: "agency",
       enabled: true,
       providerKind: "official-api",
-      executionMode: "observe",
     });
 
     expect(account.accountType).toBe("agency");
+    expect(account.executionMode).toBe("automatic");
     expect(store.listGlobalThresholds()).toHaveLength(6);
     expect(store.getAutomationSwitches(account.id)).toMatchObject({
       manageCampaignStatus: true,

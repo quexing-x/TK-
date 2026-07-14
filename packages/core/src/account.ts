@@ -33,7 +33,6 @@ export const AccountSettingsUpdateSchema = AccountConfigSchema.pick({
   accountType: true,
   enabled: true,
   providerKind: true,
-  executionMode: true,
 });
 
 export type AccountSettingsUpdate = z.infer<typeof AccountSettingsUpdateSchema>;

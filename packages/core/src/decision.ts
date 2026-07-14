@@ -241,6 +241,7 @@ export function normalizeProviderEntity(
       clicks: firstNumber(source, ["click_cnt", "clicks"]),
       carts: firstNumber(source, [
         "time_attr_on_web_cart",
+        "onsite_on_web_cart",
         "on_web_cart",
         "carts",
       ]),

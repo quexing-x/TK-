@@ -28,6 +28,7 @@ describe("local API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().accounts).toHaveLength(1);
     expect(response.json().providers).toHaveLength(2);
+    expect(response.json()).not.toHaveProperty("switchDefinitions");
     expect(response.json().globalAutomationSettings).toMatchObject({
       pollingIntervalMinutes: 5,
       maxActionsPerRun: 15,
@@ -47,22 +48,58 @@ describe("local API", () => {
     });
   });
 
-  it("updates automation switches", async () => {
-    const existing = await app.inject({
-      method: "GET",
-      url: "/api/accounts/demo-account/switches",
-    });
+  it("returns and updates the nine global rules", async () => {
+    const existing = await app.inject({ method: "GET", url: "/api/rules" });
     const body = existing.json();
-    body.closeNoConversion = true;
+    expect(body.lookbackHours).toBe(48);
+    expect(body.rules).toHaveLength(9);
+    expect(body.layers).toEqual({ campaign: false, adGroup: true, ad: true });
 
-    const response = await app.inject({
+    body.layers.campaign = true;
+    body.rules[0].enabled = false;
+    body.rules[0].values.cpc = 0.9;
+    const updated = await app.inject({
       method: "PUT",
-      url: "/api/accounts/demo-account/switches",
+      url: "/api/rules",
       payload: body,
     });
 
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      lookbackHours: 48,
+      layers: { campaign: true, adGroup: true, ad: true },
+    });
+    expect(updated.json().rules[0]).toMatchObject({
+      code: "CV1_CPC_CLOSE",
+      enabled: false,
+      values: { conversions: 1, cpc: 0.9 },
+    });
+  });
+
+  it("uses the account enabled flag as the only account automation switch", async () => {
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/accounts/demo-account/settings",
+      payload: {
+        displayName: "演示广告账户",
+        accountType: "standard",
+        enabled: false,
+        providerKind: "cookie",
+      },
+    });
+
     expect(response.statusCode).toBe(200);
-    expect(response.json().closeNoConversion).toBe(true);
+    expect(response.json()).toMatchObject({
+      enabled: false,
+      executionMode: "automatic",
+    });
+
+    const run = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/automation/run",
+    });
+    expect(run.statusCode).toBe(409);
+    expect(run.json().message).toContain("账户自动化已关闭");
   });
 
   it("stores provider settings and an encrypted credential reference", async () => {
@@ -207,7 +244,6 @@ describe("local API", () => {
         accountType: "agency",
         enabled: true,
         providerKind: "official-api",
-        executionMode: "observe",
       },
     });
 
@@ -215,6 +251,7 @@ describe("local API", () => {
     expect(response.json()).toMatchObject({
       displayName: "第二账户",
       accountType: "agency",
+      executionMode: "automatic",
     });
     expect(store.listAccounts()).toHaveLength(2);
   });

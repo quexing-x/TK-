@@ -24,6 +24,16 @@ const capabilities = new Set<ProviderCapability>([
   "change-status",
 ]);
 
+export const OFFICIAL_REPORT_METRICS = [
+  "spend",
+  "impressions",
+  "clicks",
+  "cpc",
+  "conversion",
+  "cost_per_conversion",
+  "onsite_on_web_cart",
+] as const;
+
 export class OfficialApiAdsProvider implements AdsProvider {
   readonly kind = "official-api" as const;
   readonly displayName = "TikTok Marketing API";
@@ -204,14 +214,7 @@ async function requestOfficialReport(
     url.searchParams.set("dimensions", JSON.stringify([dimensions[entityType]]));
     url.searchParams.set(
       "metrics",
-      JSON.stringify([
-        "spend",
-        "impressions",
-        "clicks",
-        "cpc",
-        "conversion",
-        "cost_per_conversion",
-      ]),
+      JSON.stringify(OFFICIAL_REPORT_METRICS),
     );
     url.searchParams.set("start_date", date);
     url.searchParams.set("end_date", date);

@@ -1,8 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  createDefaultAutomationSwitches,
-  type ProviderEntity,
-} from "@tk-auto/core";
+import { type ProviderEntity } from "@tk-auto/core";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
@@ -18,30 +15,102 @@ class FakeProvider implements AdsProvider {
   readonly capabilities = new Set(["read-ad-groups", "change-status"] as const);
   readonly mutations: StatusMutation[] = [];
   shouldFail = false;
+  campaignCreatedAt = new Date().toISOString();
+  scenario: "default" | "parent-child" | "priority" = "default";
 
   async checkHealth() {
     return { ok: true, status: "ready" as const, message: "ready" };
   }
 
   async syncReadOnly() {
-    const entities: ProviderEntity[] = [
-      {
-        entityType: "ad-group",
-        externalId: "adgroup-1",
-        payload: {
-          ad_name: "测试广告组",
-          ad_primary_status: "enable",
-          row_data: { stat_cost: "20", cpc: "1.5", click_cnt: "10" },
+    const campaign: ProviderEntity = {
+      entityType: "campaign",
+      externalId: "campaign-1",
+      payload: {
+        campaign_id: "campaign-1",
+        campaign_name: "测试推广系列",
+        campaign_status: "enable",
+        create_time: this.campaignCreatedAt,
+      },
+    };
+    const defaultGroup: ProviderEntity = {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      payload: {
+        campaign_id: "campaign-1",
+        ad_name: "测试广告组",
+        ad_primary_status: "enable",
+        row_data: {
+          campaign_id: "campaign-1",
+          stat_cost: "20",
+          cpc: "1.5",
+          click_cnt: "10",
+          time_attr_convert_cnt: "0",
+          time_attr_on_web_cart: "0",
         },
       },
-    ];
+    };
+    const entities: ProviderEntity[] = [campaign, defaultGroup];
+    if (this.scenario === "parent-child") {
+      entities.push({
+        entityType: "ad",
+        externalId: "ad-1",
+        payload: {
+          campaign_id: "campaign-1",
+          adgroup_id: "adgroup-1",
+          ad_name: "测试子广告",
+          ad_primary_status: "disable",
+          row_data: {
+            campaign_id: "campaign-1",
+            adgroup_id: "adgroup-1",
+            stat_cost: "5",
+            cpc: "0.5",
+            time_attr_convert_cnt: "1",
+            time_attr_conversion_cost: "5",
+            time_attr_on_web_cart: "1",
+          },
+        },
+      });
+    }
+    if (this.scenario === "priority") {
+      defaultGroup.externalId = "adgroup-low-priority";
+      defaultGroup.payload.row_data = {
+        campaign_id: "campaign-1",
+        stat_cost: "3",
+        cpc: "0.4",
+        time_attr_convert_cnt: "0",
+        time_attr_on_web_cart: "0",
+      };
+      entities.push({
+        entityType: "ad-group",
+        externalId: "adgroup-high-priority",
+        payload: {
+          campaign_id: "campaign-1",
+          ad_name: "高优先级广告组",
+          ad_primary_status: "enable",
+          row_data: {
+            campaign_id: "campaign-1",
+            stat_cost: "5",
+            cpc: "1",
+            click_cnt: "10",
+            time_attr_convert_cnt: "1",
+            time_attr_conversion_cost: "5",
+            time_attr_on_web_cart: "1",
+          },
+        },
+      });
+    }
     const now = new Date().toISOString();
     return {
       entities,
       result: {
         startedAt: now,
         finishedAt: now,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: {
+          campaign: entities.filter((entity) => entity.entityType === "campaign").length,
+          "ad-group": entities.filter((entity) => entity.entityType === "ad-group").length,
+          ad: entities.filter((entity) => entity.entityType === "ad").length,
+        },
         warnings: [],
       },
     };
@@ -92,26 +161,6 @@ describe("AutomationService", () => {
     store.setProviderCredentialReference("demo-account", "cookie", reference);
     store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
 
-    const switches = createDefaultAutomationSwitches();
-    switches.manageAdGroupStatus = true;
-    store.updateAutomationSwitches("demo-account", switches);
-
-    const threshold = store.listGlobalThresholds()[1]!;
-    store.updateGlobalThreshold(threshold.id, {
-      code: threshold.code,
-      label: threshold.label,
-      metric: "cost_per_click",
-      operator: "gte",
-      value: 1,
-      unit: "账户币种",
-      stage: "stage-1",
-      enabled: true,
-      entityType: "ad-group",
-      action: "disable",
-      automationEnabled: true,
-      minimumSpend: 10,
-      cooldownMinutes: 60,
-    });
   });
 
   afterEach(() => store.close());
@@ -126,16 +175,7 @@ describe("AutomationService", () => {
     );
   });
 
-  it("executes matching decisions in automatic mode", async () => {
-    const account = store.getAccount("demo-account")!;
-    store.updateAccountSettings("demo-account", {
-      displayName: account.displayName,
-      accountType: account.accountType,
-      enabled: true,
-      providerKind: "cookie",
-      executionMode: "automatic",
-    });
-
+  it("executes matching decisions automatically by default", async () => {
     const run = await service.runAccount("demo-account", "manual");
 
     expect(run.successCount).toBe(1);
@@ -148,14 +188,6 @@ describe("AutomationService", () => {
   });
 
   it("marks the connection abnormal after a real status write fails", async () => {
-    const account = store.getAccount("demo-account")!;
-    store.updateAccountSettings("demo-account", {
-      displayName: account.displayName,
-      accountType: account.accountType,
-      enabled: true,
-      providerKind: "cookie",
-      executionMode: "automatic",
-    });
     provider.shouldFail = true;
 
     const run = await service.runAccount("demo-account", "manual");
@@ -164,6 +196,71 @@ describe("AutomationService", () => {
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       status: "failed",
       lastMessage: "真实启停失败：rejected",
+    });
+  });
+
+  it("does not evaluate campaigns older than 48 hours", async () => {
+    provider.campaignCreatedAt = new Date(Date.now() - 49 * 60 * 60 * 1_000).toISOString();
+
+    const run = await service.runAccount("demo-account", "preview");
+
+    expect(run.candidateCount).toBe(0);
+    expect(provider.mutations).toHaveLength(0);
+  });
+
+  it("does not run when the account automation switch is off", async () => {
+    const account = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: false,
+      providerKind: account.providerKind,
+    });
+
+    await expect(service.runAccount("demo-account", "manual")).rejects.toThrow(
+      "账户自动化已关闭",
+    );
+    expect(provider.mutations).toHaveLength(0);
+
+    const preview = await service.runAccount("demo-account", "preview");
+    expect(preview.candidateCount).toBe(1);
+    expect(provider.mutations).toHaveLength(0);
+  });
+
+  it("executes higher-priority rules before applying the per-run limit", async () => {
+    provider.scenario = "priority";
+    store.updateGlobalAutomationSettings({
+      pollingIntervalMinutes: 5,
+      maxActionsPerRun: 1,
+    });
+
+    await service.runAccount("demo-account", "manual");
+
+    expect(provider.mutations).toEqual([
+      {
+        entityType: "ad-group",
+        externalId: "adgroup-high-priority",
+        action: "disable",
+      },
+    ]);
+  });
+
+  it("does not open a child ad when its parent ad group closes in the same run", async () => {
+    provider.scenario = "parent-child";
+
+    const run = await service.runAccount("demo-account", "manual");
+
+    expect(run.candidateCount).toBe(2);
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]);
+    expect(
+      store
+        .listAutomationDecisions("demo-account")
+        .find((decision) => decision.externalId === "ad-1"),
+    ).toMatchObject({
+      status: "skipped",
+      errorMessage: "父广告组将在本轮关闭，不执行子广告开启。",
     });
   });
 });

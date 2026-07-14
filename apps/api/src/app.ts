@@ -5,17 +5,15 @@ import {
   AccountSettingsUpdateSchema,
   AccountCreateInputSchema,
   GlobalAutomationSettingsInputSchema,
-  AutomationSwitchesSchema,
   CookieCredentialInputSchema,
   ProviderConnectionSettingsSchema,
   ProviderCredentialInputSchema,
   ProviderKindSchema,
-  ThresholdInputSchema,
+  RuleConfigurationInputSchema,
   SyncEntityTypeSchema,
   IgnoreEntityInputSchema,
   ManualStatusInputSchema,
   AppealQueueInputSchema,
-  automationSwitchDefinitions,
   type ProviderKind,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -36,9 +34,6 @@ import {
 } from "./automation-service.js";
 
 const AccountParamsSchema = z.object({ accountId: z.string().min(1) });
-const ThresholdParamsSchema = AccountParamsSchema.extend({
-  thresholdId: z.string().min(1),
-});
 const ProviderParamsSchema = AccountParamsSchema.extend({
   providerKind: ProviderKindSchema,
 });
@@ -46,7 +41,6 @@ const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
   step: z.enum(["read", "status"]).optional(),
 });
-const DecisionParamsSchema = z.object({ decisionId: z.string().uuid() });
 const EntityParamsSchema = AccountParamsSchema.extend({
   entityType: SyncEntityTypeSchema,
   externalId: z.string().min(1).max(128),
@@ -123,7 +117,6 @@ export async function createApp(
     globalAutomationSettings:
       dependencies.store.getGlobalAutomationSettings(),
     providers: providers.list(),
-    switchDefinitions: automationSwitchDefinitions,
   }));
 
   app.put("/api/automation/settings", async (request) => {
@@ -131,37 +124,13 @@ export async function createApp(
     return dependencies.store.updateGlobalAutomationSettings(body);
   });
 
-  app.get("/api/thresholds", async () =>
-    dependencies.store.listGlobalThresholds(),
+  app.get("/api/rules", async () =>
+    dependencies.store.getRuleConfiguration(),
   );
 
-  app.post("/api/thresholds", async (request, reply) => {
-    const body = ThresholdInputSchema.parse(request.body);
-    return reply
-      .status(201)
-      .send(dependencies.store.createGlobalThreshold(body));
-  });
-
-  app.put("/api/thresholds/:thresholdId", async (request, reply) => {
-    const { thresholdId } = z
-      .object({ thresholdId: z.string().min(1) })
-      .parse(request.params);
-    const body = ThresholdInputSchema.parse(request.body);
-    const result = dependencies.store.updateGlobalThreshold(thresholdId, body);
-    if (!result) {
-      return reply.status(404).send({ message: "阈值配置不存在。" });
-    }
-    return result;
-  });
-
-  app.delete("/api/thresholds/:thresholdId", async (request, reply) => {
-    const { thresholdId } = z
-      .object({ thresholdId: z.string().min(1) })
-      .parse(request.params);
-    if (!dependencies.store.deleteGlobalThreshold(thresholdId)) {
-      return reply.status(404).send({ message: "阈值配置不存在。" });
-    }
-    return reply.status(204).send();
+  app.put("/api/rules", async (request) => {
+    const body = RuleConfigurationInputSchema.parse(request.body);
+    return dependencies.store.updateRuleConfiguration(body);
   });
 
   app.post("/api/accounts", async (request, reply) => {
@@ -452,18 +421,14 @@ export async function createApp(
     "/api/accounts/:accountId/automation/run",
     async (request, reply) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
+      if (!account.enabled) {
+        return reply.status(409).send({ message: "账户自动化已关闭，请先在用户管理中开启。" });
+      }
       return automation.runAccount(accountId, "manual");
-    },
-  );
-
-  app.post(
-    "/api/automation/decisions/:decisionId/approve",
-    async (request) => {
-      const { decisionId } = DecisionParamsSchema.parse(request.params);
-      return automation.approveDecision(decisionId);
     },
   );
 
@@ -548,9 +513,6 @@ export async function createApp(
       const { accountId } = AccountParamsSchema.parse(request.params);
       const account = dependencies.store.getAccount(accountId);
       if (!account) return reply.status(404).send({ message: "账号不存在。" });
-      if (!dependencies.store.getAutomationSwitches(accountId).appealAds) {
-        return reply.status(409).send({ message: "请先开启“申诉”能力开关。" });
-      }
       const body = AppealQueueInputSchema.parse(request.body);
       return reply.status(201).send(
         dependencies.store.queueAppeal(
@@ -635,72 +597,6 @@ export async function createApp(
         output.result,
       );
       return output.result;
-    },
-  );
-
-  app.get("/api/accounts/:accountId/switches", async (request, reply) => {
-    const { accountId } = AccountParamsSchema.parse(request.params);
-    if (!dependencies.store.getAccount(accountId)) {
-      return reply.status(404).send({ message: "账号不存在。" });
-    }
-    return dependencies.store.getAutomationSwitches(accountId);
-  });
-
-  app.put("/api/accounts/:accountId/switches", async (request, reply) => {
-    const { accountId } = AccountParamsSchema.parse(request.params);
-    if (!dependencies.store.getAccount(accountId)) {
-      return reply.status(404).send({ message: "账号不存在。" });
-    }
-    const switches = AutomationSwitchesSchema.parse(request.body);
-    return dependencies.store.updateAutomationSwitches(accountId, switches);
-  });
-
-  app.get("/api/accounts/:accountId/thresholds", async (request, reply) => {
-    const { accountId } = AccountParamsSchema.parse(request.params);
-    if (!dependencies.store.getAccount(accountId)) {
-      return reply.status(404).send({ message: "账号不存在。" });
-    }
-    return dependencies.store.listThresholds(accountId);
-  });
-
-  app.post("/api/accounts/:accountId/thresholds", async (request, reply) => {
-    const { accountId } = AccountParamsSchema.parse(request.params);
-    const input = ThresholdInputSchema.parse(request.body);
-    return reply
-      .status(201)
-      .send(dependencies.store.createThreshold(accountId, input));
-  });
-
-  app.put(
-    "/api/accounts/:accountId/thresholds/:thresholdId",
-    async (request, reply) => {
-      const { accountId, thresholdId } = ThresholdParamsSchema.parse(
-        request.params,
-      );
-      const input = ThresholdInputSchema.parse(request.body);
-      const threshold = dependencies.store.updateThreshold(
-        accountId,
-        thresholdId,
-        input,
-      );
-      if (!threshold) {
-        return reply.status(404).send({ message: "阈值配置不存在。" });
-      }
-      return threshold;
-    },
-  );
-
-  app.delete(
-    "/api/accounts/:accountId/thresholds/:thresholdId",
-    async (request, reply) => {
-      const { accountId, thresholdId } = ThresholdParamsSchema.parse(
-        request.params,
-      );
-      const deleted = dependencies.store.deleteThreshold(accountId, thresholdId);
-      if (!deleted) {
-        return reply.status(404).send({ message: "阈值配置不存在。" });
-      }
-      return reply.status(204).send();
     },
   );
 

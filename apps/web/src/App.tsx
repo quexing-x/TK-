@@ -9,7 +9,6 @@ import {
   CircleGauge,
   Database,
   Gauge,
-  KeyRound,
   Layers3,
   ListFilter,
   Plus,
@@ -20,7 +19,6 @@ import {
   Save,
   Settings2,
   ShieldCheck,
-  SlidersHorizontal,
   Trash2,
   UserRound,
   X,
@@ -38,7 +36,6 @@ import type {
   AccountSettingsUpdate,
   AccountCreateInput,
   GlobalAutomationSettings,
-  AutomationSwitches,
   AutomationDecisionRecord,
   AutomationRunRecord,
   AdOperationRecord,
@@ -47,16 +44,15 @@ import type {
   ProviderConnection,
   ProviderKind,
   ThresholdConfig,
-  ThresholdInput,
 } from "@tk-auto/core";
 import {
   api,
   type BootstrapPayload,
   type CookieConnectionReadiness,
-  type SwitchDefinition,
 } from "./api";
 import { ConnectionPage } from "./ConnectionPage";
 import { ManualPage } from "./ManualPage";
+import { RulesPage } from "./RulesPage";
 
 type PageKey =
   | "manual"
@@ -64,24 +60,7 @@ type PageKey =
   | "automation"
   | "ads"
   | "analytics"
-  | "switches"
-  | "thresholds";
-
-const emptyThreshold: ThresholdInput = {
-  code: "",
-  label: "",
-  metric: "cost_per_conversion",
-  operator: "gte",
-  value: 0,
-  unit: "账户币种",
-  stage: "stage-1",
-  enabled: true,
-  entityType: "ad-group",
-  action: "disable",
-  automationEnabled: false,
-  minimumSpend: 0,
-  cooldownMinutes: 60,
-};
+  | "rules";
 
 const navItems: Array<{
   key: PageKey;
@@ -120,15 +99,9 @@ const navItems: Array<{
     icon: BarChart3,
   },
   {
-    key: "switches",
-    label: "自动化开关",
-    description: "控制账户可执行能力",
-    icon: SlidersHorizontal,
-  },
-  {
-    key: "thresholds",
-    label: "阈值配置",
-    description: "定义自动化判断条件",
+    key: "rules",
+    label: "规则配置",
+    description: "九条全局自动化规则",
     icon: Gauge,
   },
 ];
@@ -241,8 +214,8 @@ export function App() {
             onChanged={loadBootstrap}
             onError={setError}
           />
-        ) : page === "thresholds" ? (
-          <ThresholdsPage
+        ) : page === "rules" ? (
+          <RulesPage
             settings={bootstrap.globalAutomationSettings}
             onSettingsSaved={loadBootstrap}
             onError={setError}
@@ -261,14 +234,6 @@ export function App() {
           <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
             <AnalyticsPage account={account} onError={setError} />
           </AccountScopedPage>
-        ) : page === "switches" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
-            <SwitchesPage
-              account={account}
-              definitions={bootstrap.switchDefinitions}
-              onError={setError}
-            />
-          </AccountScopedPage>
         ) : (
           <EmptyState text="页面不存在。" />
         )}
@@ -282,7 +247,6 @@ const defaultAccountInput: AccountCreateInput = {
   accountType: "standard",
   enabled: true,
   providerKind: "cookie",
-  executionMode: "manual-approval",
 };
 
 function UsersPage({
@@ -385,7 +349,7 @@ function UsersPage({
             <span className="panel-icon"><UserRound size={18} /></span>
             <div>
               <h2>TikTok 广告账户</h2>
-              <p>账户独立保存接入凭据和启用状态；自动化规则由全部账户共用。</p>
+              <p>账户开启自动化后默认按全局规则执行；接入凭据仍按账户独立保存。</p>
             </div>
           </div>
           <button className="primary-button" onClick={openNew} type="button">
@@ -399,9 +363,8 @@ function UsersPage({
                 <th>账户名称</th>
                 <th>账户类型</th>
                 <th>接入方式</th>
-                <th>执行模式</th>
                 <th>接入状态</th>
-                <th>自动化</th>
+                <th>自动化开关</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -411,14 +374,13 @@ function UsersPage({
                   <td><strong>{account.displayName}</strong><br /><small>{account.id}</small></td>
                   <td>{accountTypeLabel(account.accountType)}</td>
                   <td>{providerLabel(account.providerKind)}</td>
-                  <td>{executionModeLabel(account.executionMode)}</td>
                   <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
-                  <td><span className={account.enabled ? "status active" : "status"}>{account.enabled ? "启用" : "停用"}</span></td>
+                  <td><span className={account.enabled ? "status active" : "status"}>{account.enabled ? "已开启" : "已关闭"}</span></td>
                   <td>
                     <div className="row-actions">
                       <button type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
                       <button type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
-                      <button type="button" onClick={() => void toggleAccount(account)}>{account.enabled ? "停用" : "启用"}</button>
+                      <button type="button" onClick={() => void toggleAccount(account)}>{account.enabled ? "关闭自动化" : "开启自动化"}</button>
                     </div>
                   </td>
                 </tr>
@@ -452,14 +414,7 @@ function UsersPage({
                   <option value="official-api">Marketing API</option>
                 </select>
               </Field>
-              <Field label="执行模式">
-                <select value={form.executionMode} onChange={(event) => setForm({ ...form, executionMode: event.target.value as AccountCreateInput["executionMode"] })}>
-                  <option value="observe">仅观察</option>
-                  <option value="manual-approval">人工确认</option>
-                  <option value="automatic">全自动</option>
-                </select>
-              </Field>
-              <div className="field toggle-field"><span>启用账户</span><Toggle checked={form.enabled} label="启用账户" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
+              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
             </div>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
@@ -753,9 +708,8 @@ function AutomationPage({
   const execute = async (preview: boolean) => {
     if (
       !preview &&
-      account.executionMode === "automatic" &&
       !window.confirm(
-        `当前为全自动模式，本轮最多会执行 ${maxActionsPerRun} 个真实启停操作。确认继续吗？`,
+        `本轮最多会按已启用规则执行 ${maxActionsPerRun} 个真实启停操作。确认继续吗？`,
       )
     ) {
       return;
@@ -772,38 +726,18 @@ function AutomationPage({
     }
   };
 
-  const approve = async (decision: AutomationDecisionRecord) => {
-    if (
-      !window.confirm(
-        `确认${decision.action === "enable" ? "开启" : "关闭"}“${decision.entityName}”吗？`,
-      )
-    ) {
-      return;
-    }
-    try {
-      setBusy(decision.id);
-      await api.approveDecision(decision.id);
-      await load();
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   if (!runs || !decisions) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
   const latest = runs[0];
-  const pendingCount = decisions.filter((item) => item.status === "pending").length;
   return (
     <section className="page-stack">
       <div className="summary-grid">
         <SummaryCard
           icon={<CircleGauge size={20} />}
-          label="执行模式"
-          value={executionModeLabel(account.executionMode)}
+          label="账户自动化"
+          value={account.enabled ? "已开启" : "已关闭"}
           tone="blue"
         />
         <SummaryCard
@@ -814,8 +748,8 @@ function AutomationPage({
         />
         <SummaryCard
           icon={<Check size={20} />}
-          label="等待确认"
-          value={`${pendingCount} 项`}
+          label="最近执行"
+          value={`${latest?.successCount ?? 0} 成功 / ${latest?.failureCount ?? 0} 失败`}
           tone="green"
         />
       </div>
@@ -825,7 +759,7 @@ function AutomationPage({
           <span className="eyebrow">检测 → 判断 → 执行</span>
           <h2>自动化运行控制</h2>
           <p>
-            检测预览永远不会修改广告；按配置运行会遵循账户执行模式、层级开关、全局阈值、冷却时间和全局单轮操作上限。
+            检测预览永远不会修改广告；账户开关开启后，定时轮询和“立即执行”都会按已启用规则自动启停。
           </p>
         </div>
         <div className="automation-actions">
@@ -840,12 +774,13 @@ function AutomationPage({
           </button>
           <button
             className="primary-button"
-            disabled={busy !== null}
+            disabled={busy !== null || !account.enabled}
             onClick={() => void execute(false)}
             type="button"
+            title={account.enabled ? "按规则执行真实启停" : "请先在用户管理中开启账户自动化"}
           >
             <Play size={17} />
-            {busy === "run" ? "运行中…" : "按配置运行"}
+            {busy === "run" ? "运行中…" : "立即执行"}
           </button>
         </div>
       </div>
@@ -856,7 +791,7 @@ function AutomationPage({
             <span className="panel-icon"><Activity size={18} /></span>
             <div>
               <h2>最近决策</h2>
-              <p>每次命中、跳过、确认和执行结果都会保存在本地审计记录中。</p>
+              <p>每次命中、跳过和执行结果都会保存在本地审计记录中。</p>
             </div>
           </div>
           <button className="secondary-button" onClick={() => void load()} type="button">
@@ -873,12 +808,11 @@ function AutomationPage({
                 <th>动作</th>
                 <th>结果</th>
                 <th>时间</th>
-                <th>操作</th>
               </tr>
             </thead>
             <tbody>
               {decisions.length === 0 ? (
-                <tr><td colSpan={7}>暂无决策记录，请先执行“检测预览”。</td></tr>
+                <tr><td colSpan={6}>暂无决策记录，请先执行“检测预览”。</td></tr>
               ) : decisions.map((decision) => (
                 <tr key={decision.id}>
                   <td><strong>{decision.entityName}</strong><br /><small>{decision.externalId}</small></td>
@@ -892,540 +826,12 @@ function AutomationPage({
                     {decision.errorMessage && <small className="decision-error">{decision.errorMessage}</small>}
                   </td>
                   <td>{new Date(decision.createdAt).toLocaleString()}</td>
-                  <td>
-                    {decision.status === "pending" ? (
-                      <button
-                        className="primary-button compact-button"
-                        disabled={busy !== null}
-                        onClick={() => void approve(decision)}
-                        type="button"
-                      >
-                        确认执行
-                      </button>
-                    ) : "—"}
-                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </div>
-    </section>
-  );
-}
-
-function SwitchesPage({
-  account,
-  definitions,
-  onError,
-}: {
-  account: AccountConfig;
-  definitions: SwitchDefinition[];
-  onError: (message: string | null) => void;
-}) {
-  const [switches, setSwitches] = useState<AutomationSwitches | null>(null);
-  const [saved, setSaved] = useState<AutomationSwitches | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setSwitches(null);
-    void api
-      .getSwitches(account.id)
-      .then((payload) => {
-        setSwitches(payload);
-        setSaved(payload);
-      })
-      .catch((cause) => onError(getErrorMessage(cause)));
-  }, [account.id, onError]);
-
-  const dirty =
-    switches && saved ? JSON.stringify(switches) !== JSON.stringify(saved) : false;
-  const enabledCount = switches
-    ? Object.values(switches).filter(Boolean).length
-    : 0;
-
-  const save = async () => {
-    if (!switches) return;
-    try {
-      setSaving(true);
-      const result = await api.updateSwitches(account.id, switches);
-      setSwitches(result);
-      setSaved(result);
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!switches) return <EmptyState text="正在读取自动化开关…" loading />;
-
-  return (
-    <section className="page-stack">
-      <div className="summary-grid">
-        <SummaryCard
-          icon={<CircleGauge size={20} />}
-          label="已启用能力"
-          value={`${enabledCount} / ${definitions.length}`}
-          tone="blue"
-        />
-        <SummaryCard
-          icon={<KeyRound size={20} />}
-          label="当前接入"
-          value={providerLabel(account.providerKind)}
-          tone="violet"
-        />
-        <SummaryCard
-          icon={<ShieldCheck size={20} />}
-          label="执行模式"
-          value={executionModeLabel(account.executionMode)}
-          tone="green"
-        />
-      </div>
-
-      <div className="section-heading">
-        <div>
-          <h2>账户能力开关</h2>
-          <p>写入能力只有在阈值允许自动执行且账户处于全自动模式时才会生效。</p>
-        </div>
-        <button
-          className="primary-button"
-          disabled={!dirty || saving}
-          onClick={() => void save()}
-          type="button"
-        >
-          <Save size={17} />
-          {saving ? "保存中…" : dirty ? "保存更改" : "已保存"}
-        </button>
-      </div>
-
-      <div className="switch-grid">
-        {definitions.map((definition) => (
-          <article className="switch-card" key={definition.key}>
-            <div className="switch-card-copy">
-              <div className="switch-title-row">
-                <h3>{definition.label}</h3>
-                <RiskBadge risk={definition.risk} />
-              </div>
-              <p>{definition.description}</p>
-            </div>
-            <Toggle
-              checked={switches[definition.key]}
-              label={definition.label}
-              onChange={(checked) =>
-                setSwitches((current) =>
-                  current ? { ...current, [definition.key]: checked } : current,
-                )
-              }
-            />
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ThresholdsPage({
-  settings,
-  onSettingsSaved,
-  onError,
-}: {
-  settings: GlobalAutomationSettings;
-  onSettingsSaved: () => Promise<void>;
-  onError: (message: string | null) => void;
-}) {
-  const [thresholds, setThresholds] = useState<ThresholdConfig[] | null>(null);
-  const [editing, setEditing] = useState<ThresholdConfig | null>(null);
-  const [form, setForm] = useState<ThresholdInput>(emptyThreshold);
-  const [showForm, setShowForm] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [globalForm, setGlobalForm] = useState({
-    pollingIntervalMinutes: settings.pollingIntervalMinutes,
-    maxActionsPerRun: settings.maxActionsPerRun,
-  });
-
-  useEffect(() => {
-    setGlobalForm({
-      pollingIntervalMinutes: settings.pollingIntervalMinutes,
-      maxActionsPerRun: settings.maxActionsPerRun,
-    });
-  }, [settings]);
-
-  const saveGlobalSettings = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      setSaving(true);
-      await api.updateGlobalAutomationSettings(globalForm);
-      await onSettingsSaved();
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const load = useCallback(async () => {
-    try {
-      setThresholds(await api.getGlobalThresholds());
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    }
-  }, [onError]);
-
-  useEffect(() => {
-    setThresholds(null);
-    setShowForm(false);
-    void load();
-  }, [load]);
-
-  const openNew = () => {
-    setEditing(null);
-    setForm(emptyThreshold);
-    setShowForm(true);
-  };
-
-  const openEdit = (threshold: ThresholdConfig) => {
-    setEditing(threshold);
-    setForm({
-      code: threshold.code,
-      label: threshold.label,
-      metric: threshold.metric,
-      operator: threshold.operator,
-      value: threshold.value,
-      unit: threshold.unit,
-      stage: threshold.stage,
-      enabled: threshold.enabled,
-      entityType: threshold.entityType,
-      action: threshold.action,
-      automationEnabled: threshold.automationEnabled,
-      minimumSpend: threshold.minimumSpend,
-      cooldownMinutes: threshold.cooldownMinutes,
-    });
-    setShowForm(true);
-  };
-
-  const save = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      setSaving(true);
-      if (editing) {
-        await api.updateGlobalThreshold(editing.id, form);
-      } else {
-        await api.createGlobalThreshold(form);
-      }
-      await load();
-      setShowForm(false);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const remove = async (threshold: ThresholdConfig) => {
-    if (!window.confirm(`确定删除阈值“${threshold.label}”吗？`)) return;
-    try {
-      await api.deleteGlobalThreshold(threshold.id);
-      await load();
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    }
-  };
-
-  const stats = useMemo(() => {
-    const list = thresholds ?? [];
-    return {
-      enabled: list.filter((item) => item.enabled).length,
-      stageOne: list.filter((item) => item.stage === "stage-1").length,
-      stageTwo: list.filter((item) => item.stage === "stage-2").length,
-    };
-  }, [thresholds]);
-
-  if (!thresholds) return <EmptyState text="正在读取阈值配置…" loading />;
-
-  return (
-    <section className="page-stack">
-      <form className="panel form-panel" onSubmit={(event) => void saveGlobalSettings(event)}>
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><RefreshCcw size={18} /></span>
-            <div>
-              <h2>全部接入账户共用设置</h2>
-              <p>状态检测、规则轮询和单轮启停保护对所有账户统一生效。</p>
-            </div>
-          </div>
-          <button className="primary-button" disabled={saving} type="submit">
-            <Save size={17} /> 保存全局设置
-          </button>
-        </div>
-        <div className="form-grid">
-          <Field label="轮询间隔（分钟）">
-            <input min="1" max="1440" type="number" value={globalForm.pollingIntervalMinutes} onChange={(event) => setGlobalForm({ ...globalForm, pollingIntervalMinutes: Number(event.target.value) })} />
-          </Field>
-          <Field label="单轮最大启停数">
-            <input min="1" max="100" type="number" value={globalForm.maxActionsPerRun} onChange={(event) => setGlobalForm({ ...globalForm, maxActionsPerRun: Number(event.target.value) })} />
-          </Field>
-        </div>
-      </form>
-
-      <div className="summary-grid">
-        <SummaryCard
-          icon={<Check size={20} />}
-          label="启用阈值"
-          value={`${stats.enabled} 项`}
-          tone="green"
-        />
-        <SummaryCard
-          icon={<Layers3 size={20} />}
-          label="第一阶段"
-          value={`${stats.stageOne} 项`}
-          tone="blue"
-        />
-        <SummaryCard
-          icon={<Layers3 size={20} />}
-          label="第二阶段"
-          value={`${stats.stageTwo} 项`}
-          tone="violet"
-        />
-      </div>
-
-      <div className="panel table-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><Gauge size={18} /></span>
-            <div>
-              <h2>阈值列表</h2>
-              <p>以下规则由全部已接入账户共用；“允许自动执行”默认关闭。</p>
-            </div>
-          </div>
-          <button className="primary-button" onClick={openNew} type="button">
-            <Plus size={17} />
-            新增阈值
-          </button>
-        </div>
-
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>配置代码</th>
-                <th>名称</th>
-                <th>阶段</th>
-                <th>目标与动作</th>
-                <th>判断条件</th>
-                <th>自动执行</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {thresholds.map((threshold) => (
-                <tr key={threshold.id}>
-                  <td><code>{threshold.code}</code></td>
-                  <td><strong>{threshold.label}</strong></td>
-                  <td>{stageLabel(threshold.stage)}</td>
-                  <td>{entityTypeLabel(threshold.entityType)} · {threshold.action === "enable" ? "开启" : "关闭"}</td>
-                  <td>
-                    <span className="condition">
-                      {operatorLabel(threshold.operator)} {threshold.value} {threshold.unit}
-                    </span>
-                  </td>
-                  <td>
-                    <span className={threshold.automationEnabled ? "status active" : "status"}>
-                      {threshold.automationEnabled ? "允许" : "仅判断"}
-                    </span>
-                  </td>
-                  <td>
-                    <div className="row-actions">
-                      <button type="button" onClick={() => openEdit(threshold)}>编辑</button>
-                      <button
-                        className="danger-link"
-                        type="button"
-                        onClick={() => void remove(threshold)}
-                      >
-                        <Trash2 size={15} /> 删除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {showForm && (
-        <div className="modal-backdrop" onMouseDown={() => setShowForm(false)}>
-          <form
-            className="modal"
-            onMouseDown={(event) => event.stopPropagation()}
-            onSubmit={(event) => void save(event)}
-          >
-            <div className="modal-heading">
-              <div>
-                <span className="eyebrow">阈值配置</span>
-                <h2>{editing ? "编辑阈值" : "新增阈值"}</h2>
-              </div>
-              <button type="button" onClick={() => setShowForm(false)}>
-                <X size={20} />
-              </button>
-            </div>
-            <div className="form-grid">
-              <Field label="配置代码">
-                <input
-                  placeholder="例如 CPA_LEVEL1"
-                  value={form.code}
-                  onChange={(event) =>
-                    setForm({ ...form, code: event.target.value.toUpperCase() })
-                  }
-                />
-              </Field>
-              <Field label="显示名称">
-                <input
-                  value={form.label}
-                  onChange={(event) => setForm({ ...form, label: event.target.value })}
-                />
-              </Field>
-              <Field label="指标">
-                <select
-                  value={form.metric}
-                  onChange={(event) =>
-                    setForm({ ...form, metric: event.target.value as ThresholdInput["metric"] })
-                  }
-                >
-                  <option value="cost_per_conversion">平均转化成本</option>
-                  <option value="cost_per_click">平均点击成本</option>
-                  <option value="cost_per_cart">平均加购成本</option>
-                  <option value="budget">预算</option>
-                  <option value="spend">消耗</option>
-                  <option value="conversions">转化量</option>
-                  <option value="clicks">点击量</option>
-                  <option value="custom">自定义</option>
-                </select>
-              </Field>
-              <Field label="运算符">
-                <select
-                  value={form.operator}
-                  onChange={(event) =>
-                    setForm({ ...form, operator: event.target.value as ThresholdInput["operator"] })
-                  }
-                >
-                  <option value="gte">大于等于</option>
-                  <option value="gt">大于</option>
-                  <option value="lte">小于等于</option>
-                  <option value="lt">小于</option>
-                </select>
-              </Field>
-              <Field label="阈值">
-                <input
-                  min="0"
-                  step="0.01"
-                  type="number"
-                  value={form.value}
-                  onChange={(event) => setForm({ ...form, value: Number(event.target.value) })}
-                />
-              </Field>
-              <Field label="单位">
-                <input
-                  value={form.unit}
-                  onChange={(event) => setForm({ ...form, unit: event.target.value })}
-                />
-              </Field>
-              <Field label="阶段">
-                <select
-                  value={form.stage}
-                  onChange={(event) =>
-                    setForm({ ...form, stage: event.target.value as ThresholdInput["stage"] })
-                  }
-                >
-                  <option value="stage-1">第一阶段</option>
-                  <option value="stage-2">第二阶段</option>
-                  <option value="global">全局</option>
-                </select>
-              </Field>
-              <Field label="目标层级">
-                <select
-                  value={form.entityType}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      entityType: event.target.value as ThresholdInput["entityType"],
-                    })
-                  }
-                >
-                  <option value="campaign">广告系列</option>
-                  <option value="ad-group">广告组</option>
-                  <option value="ad">广告</option>
-                </select>
-              </Field>
-              <Field label="命中后动作">
-                <select
-                  value={form.action}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      action: event.target.value as ThresholdInput["action"],
-                    })
-                  }
-                >
-                  <option value="disable">关闭</option>
-                  <option value="enable">开启（仅恢复本工具关闭的对象）</option>
-                </select>
-              </Field>
-              <Field label="最小消耗保护">
-                <input
-                  min="0"
-                  step="0.01"
-                  type="number"
-                  value={form.minimumSpend}
-                  onChange={(event) =>
-                    setForm({ ...form, minimumSpend: Number(event.target.value) })
-                  }
-                />
-              </Field>
-              <Field label="冷却时间（分钟）">
-                <input
-                  min="0"
-                  max="43200"
-                  type="number"
-                  value={form.cooldownMinutes}
-                  onChange={(event) =>
-                    setForm({ ...form, cooldownMinutes: Number(event.target.value) })
-                  }
-                />
-              </Field>
-              <div className="field toggle-field">
-                <span>参与判断</span>
-                <Toggle
-                  checked={form.enabled}
-                  label="启用阈值"
-                  onChange={(enabled) => setForm({ ...form, enabled })}
-                />
-              </div>
-              <div className="field toggle-field">
-                <span>允许自动执行</span>
-                <Toggle
-                  checked={form.automationEnabled}
-                  label="允许自动执行"
-                  onChange={(automationEnabled) =>
-                    setForm({ ...form, automationEnabled })
-                  }
-                />
-              </div>
-            </div>
-            <div className="modal-actions">
-              <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>
-                取消
-              </button>
-              <button className="primary-button" disabled={saving} type="submit">
-                <Save size={17} /> {saving ? "保存中…" : "保存阈值"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
     </section>
   );
 }
@@ -1447,11 +853,6 @@ function SummaryCard({
       <div><span>{label}</span><strong>{value}</strong></div>
     </article>
   );
-}
-
-function RiskBadge({ risk }: { risk: SwitchDefinition["risk"] }) {
-  const labels = { read: "只读", write: "写入", destructive: "高风险" };
-  return <span className={`risk-badge ${risk}`}>{labels[risk]}</span>;
 }
 
 function Toggle({
@@ -1532,7 +933,6 @@ function settingsFromAccount(account: AccountConfig): AccountSettingsUpdate {
     accountType: account.accountType,
     enabled: account.enabled,
     providerKind: account.providerKind,
-    executionMode: account.executionMode,
   };
 }
 
@@ -1577,14 +977,6 @@ function accountTypeLabel(type: AccountConfig["accountType"]): string {
   return { standard: "普通广告账户", agency: "代理账户", shop: "TikTok Shop" }[
     type
   ];
-}
-
-function executionModeLabel(mode: AccountConfig["executionMode"]): string {
-  return { observe: "仅观察", "manual-approval": "人工确认", automatic: "全自动" }[mode];
-}
-
-function stageLabel(stage: ThresholdConfig["stage"]): string {
-  return { "stage-1": "第一阶段", "stage-2": "第二阶段", global: "全局" }[stage];
 }
 
 function operatorLabel(operator: ThresholdConfig["operator"]): string {

@@ -4,8 +4,6 @@ import type {
   AccountCreateInput,
   GlobalAutomationSettings,
   GlobalAutomationSettingsInput,
-  AutomationSwitchRisk,
-  AutomationSwitches,
   AutomationDecisionRecord,
   AutomationRunRecord,
   ProviderConnection,
@@ -13,8 +11,8 @@ import type {
   ProviderCredentialInput,
   ProviderKind,
   ReadOnlySyncResult,
-  ThresholdConfig,
-  ThresholdInput,
+  RuleConfiguration,
+  RuleConfigurationInput,
   AdOperationRecord,
   EntityMetricSnapshotRecord,
   ManagedEntityRecord,
@@ -23,13 +21,6 @@ import type {
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
 export type { CookieConnectionReadiness };
-
-export interface SwitchDefinition {
-  key: keyof AutomationSwitches;
-  label: string;
-  description: string;
-  risk: AutomationSwitchRisk;
-}
 
 export interface ProviderDescriptor {
   kind: ProviderKind;
@@ -42,7 +33,6 @@ export interface BootstrapPayload {
   accounts: AccountConfig[];
   globalAutomationSettings: GlobalAutomationSettings;
   providers: ProviderDescriptor[];
-  switchDefinitions: SwitchDefinition[];
 }
 
 export interface ManualStatusResult extends ManualStatusInput {
@@ -79,13 +69,6 @@ export const api = {
     request<AccountConfig>("/api/accounts", {
       method: "POST",
       body: JSON.stringify(input),
-    }),
-  getSwitches: (accountId: string) =>
-    request<AutomationSwitches>(`/api/accounts/${accountId}/switches`),
-  updateSwitches: (accountId: string, switches: AutomationSwitches) =>
-    request<AutomationSwitches>(`/api/accounts/${accountId}/switches`, {
-      method: "PUT",
-      body: JSON.stringify(switches),
     }),
   updateSettings: (accountId: string, settings: AccountSettingsUpdate) =>
     request<AccountConfig>(`/api/accounts/${accountId}/settings`, {
@@ -149,42 +132,12 @@ export const api = {
       `/api/accounts/${accountId}/connections/${providerKind}/sync`,
       { method: "POST" },
     ),
-  getThresholds: (accountId: string) =>
-    request<ThresholdConfig[]>(`/api/accounts/${accountId}/thresholds`),
-  createThreshold: (accountId: string, input: ThresholdInput) =>
-    request<ThresholdConfig>(`/api/accounts/${accountId}/thresholds`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-  updateThreshold: (
-    accountId: string,
-    thresholdId: string,
-    input: ThresholdInput,
-  ) =>
-    request<ThresholdConfig>(
-      `/api/accounts/${accountId}/thresholds/${thresholdId}`,
-      {
-        method: "PUT",
-        body: JSON.stringify(input),
-      },
-    ),
-  deleteThreshold: (accountId: string, thresholdId: string) =>
-    request<void>(`/api/accounts/${accountId}/thresholds/${thresholdId}`, {
-      method: "DELETE",
-    }),
-  getGlobalThresholds: () => request<ThresholdConfig[]>("/api/thresholds"),
-  createGlobalThreshold: (input: ThresholdInput) =>
-    request<ThresholdConfig>("/api/thresholds", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-  updateGlobalThreshold: (thresholdId: string, input: ThresholdInput) =>
-    request<ThresholdConfig>(`/api/thresholds/${thresholdId}`, {
+  getRuleConfiguration: () => request<RuleConfiguration>("/api/rules"),
+  updateRuleConfiguration: (input: RuleConfigurationInput) =>
+    request<RuleConfiguration>("/api/rules", {
       method: "PUT",
       body: JSON.stringify(input),
     }),
-  deleteGlobalThreshold: (thresholdId: string) =>
-    request<void>(`/api/thresholds/${thresholdId}`, { method: "DELETE" }),
   getAutomationRuns: (accountId: string) =>
     request<AutomationRunRecord[]>(
       `/api/accounts/${accountId}/automation/runs`,
@@ -201,11 +154,6 @@ export const api = {
   runAutomation: (accountId: string) =>
     request<AutomationRunRecord>(
       `/api/accounts/${accountId}/automation/run`,
-      { method: "POST" },
-    ),
-  approveDecision: (decisionId: string) =>
-    request<AutomationDecisionRecord>(
-      `/api/automation/decisions/${decisionId}/approve`,
       { method: "POST" },
     ),
   getManagedEntities: (accountId: string) =>
