@@ -114,15 +114,10 @@ export function ConnectionPage({
   const readCoveragePartial =
     readiness.readTargets.length > 0 && !readCoverageComplete;
   const cookieCoverage = describeCookieCoverage(readiness);
-  const verifiedCookieTargets = (["campaign", "ad-group", "ad"] as const).filter(
-    (target) =>
-      readiness.readTargets.includes(target) &&
-      readiness.statusTargets.includes(target),
-  );
   const cookieLayerCoverageIncomplete =
     providerKind === "cookie" &&
     readiness.statusTargets.length > 0 &&
-    verifiedCookieTargets.length < 3;
+    cookieCoverage.verifiedCount < 3;
   const cookieOnboardingIncomplete =
     providerKind === "cookie" &&
     (readiness.completedSteps < 2 || cookieLayerCoverageIncomplete);
@@ -130,7 +125,7 @@ export function ConnectionPage({
     ? "untested"
     : (connection?.status ?? "not-configured");
   const displayedConnectionLabel = cookieLayerCoverageIncomplete
-    ? `层级未完成（${verifiedCookieTargets.length}/3）`
+    ? `层级未完成（${cookieCoverage.verifiedCount}/3）`
     : cookieOnboardingIncomplete
       ? `接入未完成（${readiness.completedSteps}/2）`
     : providerKind === "cookie" && connection?.status === "ready"
@@ -371,7 +366,7 @@ export function ConnectionPage({
           <div className="quick-import-heading">
             <span className="quick-import-icon"><Sparkles size={21} /></span>
             <div>
-              <span className="eyebrow">完整层级 · {verifiedCookieTargets.length}/3</span>
+              <span className="eyebrow">完整层级 · {cookieCoverage.verifiedCount}/3</span>
               <h2>分两类导入 Cookie 请求</h2>
               <p>读取数据与启停请求分别校验；三个层级都具备读取和启停能力后，才算完整接入。</p>
             </div>
@@ -497,7 +492,7 @@ export function ConnectionPage({
               {!readiness.statusRequestImported && (
                 <div className="import-warning compact">
                   <AlertTriangle size={17} />
-                  <span>不要复制 list 请求；第 2 步只接受 /ad/update_status/? 的真实启停请求。</span>
+                  <span>不要复制 list 请求；此处只接受 /ad/update_status/? 或 /creative/update_status/? 的真实启停请求。</span>
                 </div>
               )}
               <textarea
@@ -505,7 +500,7 @@ export function ConnectionPage({
                 className="curl-input"
                 disabled={!readiness.dataRequestImported}
                 onChange={(event) => setStatusCurlCommand(event.target.value)}
-                placeholder={readiness.dataRequestImported ? "粘贴 /ad/update_status/? 请求的完整 cURL" : "请先完成第 1 步"}
+                placeholder={readiness.dataRequestImported ? "粘贴广告组或最终广告 update_status 请求的完整 cURL" : "请先完成第 1 步"}
                 rows={5}
                 spellCheck={false}
                 value={statusCurlCommand}

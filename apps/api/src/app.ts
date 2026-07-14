@@ -284,6 +284,33 @@ export async function createApp(
         throw cause;
       }
 
+      if (imported.summary.requiresEntityValidation) {
+        try {
+          const preview = await providers.syncReadOnly("cookie", {
+            accountId,
+            settings: imported.settings,
+            credential: imported.credential,
+            timezone:
+              dependencies.store.getAccount(accountId)?.timezone ?? "UTC",
+          });
+          const confirmedFinalAd = preview.entities.some(
+            (entity) =>
+              entity.entityType === "ad" &&
+              hasConfirmedFinalAdIdentity(entity.payload),
+          );
+          if (!confirmedFinalAd) {
+            return reply.status(400).send({
+              message:
+                "该 list 请求的响应中未识别到最终广告名称或广告 ID，请在最终“广告”页面重新选择 Response 含单条广告数据的请求。",
+            });
+          }
+        } catch (cause) {
+          return reply.status(400).send({
+            message: `最终广告列表候选验证失败：${getSafeProviderError(cause)}`,
+          });
+        }
+      }
+
       const previous = dependencies.store.getProviderConnection(
         accountId,
         "cookie",
@@ -854,4 +881,23 @@ async function loadProviderContext(
 function getSafeProviderError(cause: unknown): string {
   if (!(cause instanceof Error)) return "连接检测失败。";
   return cause.name === "TimeoutError" ? "连接检测超时。" : cause.message;
+}
+
+function hasConfirmedFinalAdIdentity(
+  payload: Record<string, unknown>,
+): boolean {
+  const hasSpecificId = ["creative_id", "creativeId", "ad_id", "adId"].some(
+    (key) =>
+      typeof payload[key] === "string" || typeof payload[key] === "number",
+  );
+  if (hasSpecificId) return true;
+  const hasGenericId =
+    typeof payload.id === "string" || typeof payload.id === "number";
+  const hasAdName = [
+    "creative_name",
+    "creativeName",
+    "ad_name",
+    "adName",
+  ].some((key) => typeof payload[key] === "string");
+  return hasGenericId && hasAdName;
 }

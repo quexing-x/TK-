@@ -150,8 +150,17 @@ describe("local API", () => {
       payload: { command: listCommand, step: "status" },
     });
     expect(wrongStep.statusCode).toBe(400);
-    expect(wrongStep.json().message).toContain("第 2 步只接受启停请求");
-    const statusCommand = `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"DISABLE"}'`;
+    expect(wrongStep.json().message).toContain("第 2 类只接受真实启停请求");
+    const multipart = [
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="ad_list"\r\n\r\n',
+      '["old-id"]\r\n',
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "disable\r\n",
+      "------TestBoundary--\r\n",
+    ].join("");
+    const statusCommand = `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: multipart/form-data; boundary=----TestBoundary' --data-raw $'${multipart}'`;
     const response = await app.inject({
       method: "POST",
       url: "/api/accounts/demo-account/connections/cookie/import-curl",
@@ -185,6 +194,59 @@ describe("local API", () => {
       statusTargets: ["campaign", "ad-group"],
       completedSteps: 1,
     });
+  });
+
+  it("validates an unknown final-ad list path against its live JSON response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 0,
+          data: {
+            list: [{ creative_id: "creative-1", creative_name: "测试广告" }],
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const command = `curl 'https://ads.tiktok.com/api/v4/i18n/statistics/op/creative/material/list/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie'`;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/connections/cookie/import-curl",
+      payload: { command, step: "read" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const readiness = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/connections/cookie/readiness",
+    });
+    expect(readiness.json().readTargets).toEqual(["ad"]);
+  });
+
+  it("rejects an unrelated generic list response as final-ad data", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ code: 0, data: { list: [{ id: "CN", name: "China" }] } }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const command = `curl 'https://ads.tiktok.com/api/v4/i18n/dictionary/country/list/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie'`;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/connections/cookie/import-curl",
+      payload: { command, step: "read" },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().message).toContain("最终广告");
   });
 
   it("creates an independent advertising account", async () => {

@@ -40,7 +40,7 @@
           "广告组启停请求使用 multipart/form-data，请求体包含 ad_list 和 operation=enable/disable；TikTok 内部 ad_list 对应界面广告组。",
           "启停第 2 条：进入最终广告层，复制 /creative/update_status/? 搜索词并粘贴到 Network Filter，切换一次测试广告开关。选择 POST /api/v2/i18n/overture/creative/update_status/ 并复制完整 cURL。",
           "最终广告启停请求使用 multipart/form-data，请求体包含 creative_list、aco_creative_list 和 operation=enable/disable。两条启停 cURL 都粘贴到同一个启停输入框，程序会合并层级能力。",
-          "读取数据如果显示 2/3，进入最终广告页面，在 Network 搜索 list 并刷新；选择 Response 中包含单条广告名称或广告 ID 的真实列表请求，复制完整 cURL 并粘贴到读取输入框继续导入。",
+        "读取数据如果显示 2/3，进入最终广告页面，在 Network 搜索 list 并刷新；选择 Response 中包含单条广告名称或广告 ID 的真实列表请求，复制完整 cURL 并粘贴到读取输入框继续导入。软件会实时请求并校验响应，不能识别最终广告数据时不会保存。",
           "只有读取数据和启停能力都覆盖广告系列、广告组、最终广告三个层级时，页面才显示完整连接正常。",
         "只有快速导入无法识别时，才展开高级手动接入填写各字段。"
       ],

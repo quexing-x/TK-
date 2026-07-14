@@ -48,12 +48,12 @@ describe("parseTikTokCurl", () => {
     const listCommand = `curl 'https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456' -H 'cookie: sessionid=test'`;
     const statusCommand = `curl 'https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=test' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"ENABLE"}'`;
 
-    expect(() => parseTikTokStatusCurl(listCommand)).toThrow("第 2 步只接受启停请求");
-    expect(() => parseTikTokReadCurl(statusCommand)).toThrow("第 1 步只接受列表请求");
+    expect(() => parseTikTokStatusCurl(listCommand)).toThrow("第 2 类只接受真实启停请求");
+    expect(() => parseTikTokReadCurl(statusCommand)).toThrow("第 1 类只接受列表请求");
   });
 
   it("labels a captured switch request by entity level and action", () => {
-    const imported = parseTikTokStatusCurl(
+    const imported = parseTikTokCurl(
       `curl 'https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_id":"old-id","status":0}'`,
     );
 
@@ -76,27 +76,12 @@ describe("parseTikTokCurl", () => {
     );
   });
 
-  it("recognizes the TikTok ad update_status request", () => {
-    const imported = parseTikTokStatusCurl(
-      `curl 'https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"DISABLE"}'`,
-    );
-
-    expect(imported.summary.target).toBe("ad-status");
-    expect(imported.credential.requestTemplates).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          target: "ad-status",
-          action: "disable",
-          derived: false,
-        }),
-        expect.objectContaining({
-          target: "ad-status",
-          action: "enable",
-          body: '{"ad_ids":["old-id"],"operation_status":"ENABLE"}',
-          derived: false,
-        }),
-      ]),
-    );
+  it("rejects an unconfirmed legacy status route from onboarding", () => {
+    expect(() =>
+      parseTikTokStatusCurl(
+        `curl 'https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_ids":["old-id"],"operation_status":"DISABLE"}'`,
+      ),
+    ).toThrow("/api/v3/i18n/overture/ad/update_status/");
   });
 
   it("decodes Chrome ANSI-C multipart update_status cURL", () => {
@@ -151,6 +136,7 @@ describe("parseTikTokCurl", () => {
     );
 
     expect(imported.summary.target).toBe("ad-status");
+    expect(imported.summary.requiresEntityValidation).toBe(false);
     const templates = imported.credential.requestTemplates ?? [];
     expect(templates).toHaveLength(2);
     expect(templates).toEqual(
@@ -167,5 +153,55 @@ describe("parseTikTokCurl", () => {
         }),
       ]),
     );
+  });
+
+  it("requires all confirmed final-ad multipart fields", () => {
+    const multipart = [
+      "------CreativeBoundary\r\n",
+      'Content-Disposition: form-data; name="creative_list"\r\n\r\n',
+      '["creative-old"]\r\n',
+      "------CreativeBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "disable\r\n",
+      "------CreativeBoundary--\r\n",
+    ].join("");
+
+    expect(() =>
+      parseTikTokStatusCurl(
+        `curl 'https://ads.tiktok.com/api/v2/i18n/overture/creative/update_status/?aadvid=123456' -H 'content-type: multipart/form-data; boundary=----CreativeBoundary' -b 'sessionid=authorized-test-cookie' --data-raw $'${multipart}'`,
+      ),
+    ).toThrow("aco_creative_list");
+  });
+
+  it("requires confirmed status routes to use POST", () => {
+    const multipart = [
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="ad_list"\r\n\r\n',
+      '["old-id"]\r\n',
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "enable\r\n",
+      "------TestBoundary--\r\n",
+    ].join("");
+
+    expect(() =>
+      parseTikTokStatusCurl(
+        `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456' -X GET -H 'content-type: multipart/form-data; boundary=----TestBoundary' -b 'sessionid=authorized-test-cookie' --data-raw $'${multipart}'`,
+      ),
+    ).toThrow("必须使用 POST");
+  });
+
+  it("marks an unknown TikTok list path as a final-ad candidate", () => {
+    const imported = parseTikTokReadCurl(
+      `curl 'https://ads.tiktok.com/api/v4/i18n/statistics/op/creative/material/list/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie'`,
+    );
+
+    expect(imported.summary).toMatchObject({
+      target: "ad",
+      requiresEntityValidation: true,
+    });
+    expect(imported.credential.requestTemplates).toEqual([
+      expect.objectContaining({ target: "ad", derived: false }),
+    ]);
   });
 });

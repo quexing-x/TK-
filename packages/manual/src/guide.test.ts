@@ -24,6 +24,7 @@ describe("user guide", () => {
     expect(cookieGuide?.steps.join(" ")).toContain("ad_list");
     expect(cookieGuide?.steps.join(" ")).toContain("creative_list");
     expect(cookieGuide?.steps.join(" ")).toContain("读取数据如果显示 2/3");
+    expect(cookieGuide?.steps.join(" ")).toContain("实时请求并校验响应");
     expect(cookieGuide?.steps.join(" ")).toContain("最终广告层");
     expect(cookieGuide?.notes.join(" ")).toContain("同一输入框可以连续导入");
     expect(cookieGuide?.notes.join(" ")).toContain("层级未完成");
