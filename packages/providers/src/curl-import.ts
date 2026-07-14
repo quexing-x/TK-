@@ -2,7 +2,9 @@ import {
   CookieConnectionSettingsSchema,
   CookieCredentialInputSchema,
   type CookieConnectionSettings,
+  type AutomationAction,
   type ProviderCredentialInput,
+  type SyncEntityType,
 } from "@tk-auto/core";
 
 const MAX_COMMAND_LENGTH = 262_144;
@@ -21,7 +23,40 @@ export interface TikTokCurlImportResult {
     advertiserId: string;
     method: "GET" | "POST";
     path: string;
-    target: "health" | "campaign" | "ad-group" | "ad";
+    target:
+      | "health"
+      | "campaign"
+      | "ad-group"
+      | "ad"
+      | "campaign-status"
+      | "ad-group-status"
+      | "ad-status";
+  };
+}
+
+export function parseTikTokStatusCurl(
+  command: string,
+  entityType: SyncEntityType,
+  action: AutomationAction,
+): TikTokCurlImportResult {
+  const imported = parseTikTokCurl(command);
+  const request = imported.credential.requestTemplates?.[0];
+  if (!request) {
+    throw new TikTokCurlImportError("没有在 cURL 中识别到请求模板。");
+  }
+  if (!request.url.includes("update") && !request.url.includes("status")) {
+    throw new TikTokCurlImportError(
+      "请选择在 TikTok 页面切换开关时产生的 update/status 请求。",
+    );
+  }
+  const target = `${entityType}-status` as const;
+  return {
+    ...imported,
+    credential: CookieCredentialInputSchema.parse({
+      ...imported.credential,
+      requestTemplates: [{ ...request, target, action }],
+    }),
+    summary: { ...imported.summary, target },
   };
 }
 
@@ -147,6 +182,14 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
   const target = classifyRequestTarget(url.pathname);
   const contentType = headers.get("content-type")?.value;
   const userAgent = headers.get("user-agent")?.value;
+  const capturedHeaders = Object.fromEntries(
+    [...headers.entries()]
+      .filter(
+        ([name]) =>
+          !["cookie", "content-length", "host", "user-agent"].includes(name),
+      )
+      .map(([name, header]) => [name, header.value]),
+  );
 
   const settings = CookieConnectionSettingsSchema.parse({
     kind: "cookie",
@@ -169,6 +212,7 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
         method,
         body,
         contentType,
+        headers: capturedHeaders,
       },
     ],
   });

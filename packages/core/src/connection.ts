@@ -52,11 +52,21 @@ export type ProviderConnectionSettings = z.infer<
 >;
 
 export const CapturedCookieRequestSchema = z.object({
-  target: z.enum(["health", "campaign", "ad-group", "ad"]),
+  target: z.enum([
+    "health",
+    "campaign",
+    "ad-group",
+    "ad",
+    "campaign-status",
+    "ad-group-status",
+    "ad-status",
+  ]),
+  action: z.enum(["enable", "disable"]).optional(),
   url: TikTokHttpsUrlSchema,
   method: z.enum(["GET", "POST"]),
   body: z.string().max(262_144).optional(),
   contentType: z.string().trim().max(256).optional(),
+  headers: z.record(z.string(), z.string().max(8192)).optional(),
 });
 
 export type CapturedCookieRequest = z.infer<
@@ -73,7 +83,7 @@ export const CookieCredentialInputSchema = z.object({
     .regex(/^[A-Za-z0-9-]+$/)
     .default("x-csrftoken"),
   userAgent: z.string().trim().max(1024).optional(),
-  requestTemplates: z.array(CapturedCookieRequestSchema).max(4).optional(),
+  requestTemplates: z.array(CapturedCookieRequestSchema).max(12).optional(),
 });
 
 export const OfficialApiCredentialInputSchema = z.object({

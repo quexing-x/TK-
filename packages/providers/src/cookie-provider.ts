@@ -11,6 +11,8 @@ import type {
   ProviderContext,
   ProviderHealth,
   ProviderSyncOutput,
+  StatusMutation,
+  StatusMutationResult,
 } from "./types.js";
 
 const capabilities = new Set<ProviderCapability>([
@@ -37,7 +39,9 @@ export class CookieAdsProvider implements AdsProvider {
   async checkHealth(context: ProviderContext): Promise<ProviderHealth> {
     const settings = CookieConnectionSettingsSchema.parse(context.settings);
     const credential = CookieCredentialInputSchema.parse(context.credential);
-    const captured = credential.requestTemplates?.[0];
+    const captured = credential.requestTemplates?.find((item) =>
+      ["health", "campaign", "ad-group", "ad"].includes(item.target),
+    );
     const request = captured ?? legacyRequest(settings.healthUrl);
     if (!request) {
       throw new Error("尚未配置连接检测请求，请使用 cURL 快速导入或高级设置。");
@@ -100,6 +104,46 @@ export class CookieAdsProvider implements AdsProvider {
       },
     };
   }
+
+  async changeStatus(
+    context: ProviderContext,
+    mutations: StatusMutation[],
+  ): Promise<StatusMutationResult[]> {
+    CookieConnectionSettingsSchema.parse(context.settings);
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const results: StatusMutationResult[] = [];
+
+    for (const mutation of mutations) {
+      const target = `${mutation.entityType}-status` as const;
+      const template = credential.requestTemplates?.find(
+        (item) => item.target === target && item.action === mutation.action,
+      );
+      if (!template) {
+        results.push({
+          ...mutation,
+          ok: false,
+          message: `缺少 ${mutation.entityType} ${mutation.action} 的状态 cURL 模板。`,
+        });
+        continue;
+      }
+      try {
+        const request = materializeStatusRequest(template, mutation);
+        await requestCookieJson(request, credential);
+        results.push({
+          ...mutation,
+          ok: true,
+          message: `Cookie 状态请求执行成功：${mutation.action}。`,
+        });
+      } catch (cause) {
+        results.push({
+          ...mutation,
+          ok: false,
+          message: cause instanceof Error ? cause.message : "Cookie 状态请求失败。",
+        });
+      }
+    }
+    return results;
+  }
 }
 
 async function requestCookieJson(
@@ -107,6 +151,7 @@ async function requestCookieJson(
   credential: ParsedCookieCredential,
 ): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = {
+    ...(request.headers ?? {}),
     accept: "application/json, text/plain, */*",
     cookie: credential.cookie,
   };
@@ -135,6 +180,100 @@ async function requestCookieJson(
     throw new Error(`TikTok 接口返回失败状态（code ${payload.code}）。`);
   }
   return payload;
+}
+
+function materializeStatusRequest(
+  template: CapturedCookieRequest,
+  mutation: StatusMutation,
+): CapturedCookieRequest {
+  const url = new URL(template.url);
+  let replacements = 0;
+  for (const key of [...url.searchParams.keys()]) {
+    if (isEntityIdKey(mutation.entityType, key)) {
+      url.searchParams.set(key, mutation.externalId);
+      replacements += 1;
+    }
+  }
+
+  let body = template.body;
+  if (body) {
+    const contentType = template.contentType?.toLowerCase() ?? "";
+    if (contentType.includes("json") || body.trim().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(body) as unknown;
+        const replaced = replaceEntityIds(parsed, mutation);
+        replacements += replaced.count;
+        body = JSON.stringify(replaced.value);
+      } catch {
+        throw new Error("状态 cURL 的 JSON 请求体无法解析，请重新导入。");
+      }
+    } else {
+      const params = new URLSearchParams(body);
+      for (const key of [...params.keys()]) {
+        if (isEntityIdKey(mutation.entityType, key)) {
+          params.set(key, mutation.externalId);
+          replacements += 1;
+        }
+      }
+      body = params.toString();
+    }
+  }
+
+  if (replacements === 0) {
+    throw new Error("状态 cURL 中未找到可替换的广告对象 ID。");
+  }
+  return { ...template, url: url.toString(), body };
+}
+
+function replaceEntityIds(
+  value: unknown,
+  mutation: StatusMutation,
+): { value: unknown; count: number } {
+  if (Array.isArray(value)) {
+    let count = 0;
+    const output = value.map((item) => {
+      const replaced = replaceEntityIds(item, mutation);
+      count += replaced.count;
+      return replaced.value;
+    });
+    return { value: output, count };
+  }
+  if (!isRecord(value)) return { value, count: 0 };
+
+  let count = 0;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (isEntityIdKey(mutation.entityType, key)) {
+      count += 1;
+      output[key] = Array.isArray(item)
+        ? [mutation.externalId]
+        : typeof item === "number"
+          ? Number(mutation.externalId)
+          : mutation.externalId;
+      continue;
+    }
+    const replaced = replaceEntityIds(item, mutation);
+    count += replaced.count;
+    output[key] = replaced.value;
+  }
+  return { value: output, count };
+}
+
+function isEntityIdKey(entityType: SyncEntityType, key: string): boolean {
+  const normalized = key.toLowerCase();
+  const keys: Record<SyncEntityType, string[]> = {
+    campaign: ["campaign_id", "campaign_ids"],
+    "ad-group": [
+      "adgroup_id",
+      "adgroup_ids",
+      "ad_group_id",
+      "ad_group_ids",
+      "ad_id",
+      "ad_ids",
+    ],
+    ad: ["ad_id", "ad_ids", "creative_id", "creative_ids"],
+  };
+  return keys[entityType].includes(normalized);
 }
 
 function legacyRequest(url: string): CapturedCookieRequest | undefined {

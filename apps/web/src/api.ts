@@ -3,11 +3,15 @@ import type {
   AccountSettingsUpdate,
   AutomationSwitchRisk,
   AutomationSwitches,
+  AutomationAction,
+  AutomationDecisionRecord,
+  AutomationRunRecord,
   ProviderConnection,
   ProviderConnectionSettings,
   ProviderCredentialInput,
   ProviderKind,
   ReadOnlySyncResult,
+  SyncEntityType,
   ThresholdConfig,
   ThresholdInput,
 } from "@tk-auto/core";
@@ -80,6 +84,19 @@ export const api = {
       `/api/accounts/${accountId}/connections/cookie/import-curl`,
       { method: "POST", body: JSON.stringify({ command }) },
     ),
+  importCookieStatusCurl: (
+    accountId: string,
+    command: string,
+    entityType: SyncEntityType,
+    action: AutomationAction,
+  ) =>
+    request<ProviderConnection>(
+      `/api/accounts/${accountId}/connections/cookie/import-status-curl`,
+      {
+        method: "POST",
+        body: JSON.stringify({ command, entityType, action }),
+      },
+    ),
   saveConnectionSettings: (
     accountId: string,
     providerKind: ProviderKind,
@@ -136,4 +153,27 @@ export const api = {
     request<void>(`/api/accounts/${accountId}/thresholds/${thresholdId}`, {
       method: "DELETE",
     }),
+  getAutomationRuns: (accountId: string) =>
+    request<AutomationRunRecord[]>(
+      `/api/accounts/${accountId}/automation/runs`,
+    ),
+  getAutomationDecisions: (accountId: string) =>
+    request<AutomationDecisionRecord[]>(
+      `/api/accounts/${accountId}/automation/decisions`,
+    ),
+  previewAutomation: (accountId: string) =>
+    request<AutomationRunRecord>(
+      `/api/accounts/${accountId}/automation/preview`,
+      { method: "POST" },
+    ),
+  runAutomation: (accountId: string) =>
+    request<AutomationRunRecord>(
+      `/api/accounts/${accountId}/automation/run`,
+      { method: "POST" },
+    ),
+  approveDecision: (decisionId: string) =>
+    request<AutomationDecisionRecord>(
+      `/api/automation/decisions/${decisionId}/approve`,
+      { method: "POST" },
+    ),
 };

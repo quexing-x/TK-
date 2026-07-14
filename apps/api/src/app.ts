@@ -3,23 +3,31 @@ import cors from "@fastify/cors";
 import { z } from "zod";
 import {
   AccountSettingsUpdateSchema,
+  AutomationActionSchema,
   AutomationSwitchesSchema,
   CookieCredentialInputSchema,
   ProviderConnectionSettingsSchema,
   ProviderCredentialInputSchema,
   ProviderKindSchema,
   ThresholdInputSchema,
+  SyncEntityTypeSchema,
   automationSwitchDefinitions,
   type ProviderKind,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
   parseTikTokCurl,
+  parseTikTokStatusCurl,
   ProviderRegistry,
   TikTokCurlImportError,
   type ProviderContext,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
+import {
+  AutomationBusyError,
+  AutomationScheduler,
+  AutomationService,
+} from "./automation-service.js";
 
 const AccountParamsSchema = z.object({ accountId: z.string().min(1) });
 const ThresholdParamsSchema = AccountParamsSchema.extend({
@@ -31,11 +39,18 @@ const ProviderParamsSchema = AccountParamsSchema.extend({
 const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
 });
+const StatusCurlImportBodySchema = CurlImportBodySchema.extend({
+  entityType: SyncEntityTypeSchema,
+  action: AutomationActionSchema,
+});
+const DecisionParamsSchema = z.object({ decisionId: z.string().uuid() });
 
 export interface AppDependencies {
   store: AutomationStore;
   vault: CredentialVault;
   providers?: ProviderRegistry;
+  automation?: AutomationService;
+  startScheduler?: boolean;
 }
 
 export async function createApp(
@@ -43,6 +58,12 @@ export async function createApp(
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const providers = dependencies.providers ?? new ProviderRegistry();
+  const automation =
+    dependencies.automation ??
+    new AutomationService(dependencies.store, dependencies.vault, providers);
+  const scheduler = new AutomationScheduler(dependencies.store, automation);
+  if (dependencies.startScheduler) scheduler.start();
+  app.addHook("onClose", async () => scheduler.stop());
 
   await app.register(cors, {
     origin: [/^http:\/\/127\.0\.0\.1(?::\d+)?$/],
@@ -54,6 +75,14 @@ export async function createApp(
         error: "VALIDATION_ERROR",
         message: "请求数据不符合配置规则。",
         details: error.flatten(),
+      });
+      return;
+    }
+
+    if (error instanceof AutomationBusyError) {
+      void reply.status(409).send({
+        error: "AUTOMATION_BUSY",
+        message: error.message,
       });
       return;
     }
@@ -155,7 +184,9 @@ export async function createApp(
                 ...credential,
                 requestTemplates: [
                   ...(parsedPrevious.requestTemplates ?? []).filter(
-                    (item) => item.target !== importedTarget,
+                    (item) =>
+                      item.target !== importedTarget ||
+                      item.action !== credential.requestTemplates?.[0]?.action,
                   ),
                   ...(credential.requestTemplates ?? []),
                 ],
@@ -209,6 +240,92 @@ export async function createApp(
           `cURL 已加密保存，但连接检测失败：${getSafeProviderError(cause)}`,
         );
       }
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/connections/cookie/import-status-curl",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      const body = StatusCurlImportBodySchema.parse(request.body);
+      let imported: ReturnType<typeof parseTikTokStatusCurl>;
+      try {
+        imported = parseTikTokStatusCurl(
+          body.command,
+          body.entityType,
+          body.action,
+        );
+      } catch (cause) {
+        if (cause instanceof TikTokCurlImportError) {
+          return reply.status(400).send({ message: cause.message });
+        }
+        throw cause;
+      }
+
+      const previous = dependencies.store.getProviderConnection(
+        accountId,
+        "cookie",
+      );
+      let credential = imported.credential;
+      if (previous?.credentialRef) {
+        const previousSecret = await dependencies.vault.read(
+          previous.credentialRef,
+        );
+        if (previousSecret) {
+          const parsedPrevious = ProviderCredentialInputSchema.parse(
+            JSON.parse(previousSecret),
+          );
+          if (parsedPrevious.kind === "cookie") {
+            const incoming = credential.requestTemplates?.[0];
+            credential = CookieCredentialInputSchema.parse({
+              ...credential,
+              requestTemplates: [
+                ...(parsedPrevious.requestTemplates ?? []).filter(
+                  (item) =>
+                    item.target !== incoming?.target ||
+                    item.action !== incoming?.action,
+                ),
+                ...(credential.requestTemplates ?? []),
+              ],
+            });
+          }
+        }
+      }
+
+      dependencies.store.saveProviderConnectionSettings(
+        accountId,
+        imported.settings,
+      );
+      const reference = await dependencies.vault.create(
+        JSON.stringify(credential),
+      );
+      try {
+        dependencies.store.setProviderCredentialReference(
+          accountId,
+          "cookie",
+          reference,
+        );
+      } catch (cause) {
+        await dependencies.vault.delete(reference);
+        throw cause;
+      }
+      if (previous?.credentialRef) {
+        await dependencies.vault.delete(previous.credentialRef);
+      }
+      if (previous?.status === "ready") {
+        return dependencies.store.updateProviderStatus(
+          accountId,
+          "cookie",
+          "ready",
+          `已导入 ${body.entityType} ${body.action} 状态模板。`,
+        );
+      }
+      return dependencies.store
+        .listProviderConnections(accountId)
+        .find((item) => item.kind === "cookie");
     },
   );
 
@@ -278,6 +395,55 @@ export async function createApp(
       );
       if (reference) await dependencies.vault.delete(reference);
       return reply.status(204).send();
+    },
+  );
+
+  app.get("/api/accounts/:accountId/automation/runs", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    if (!dependencies.store.getAccount(accountId)) {
+      return reply.status(404).send({ message: "账号不存在。" });
+    }
+    return dependencies.store.listAutomationRuns(accountId);
+  });
+
+  app.get(
+    "/api/accounts/:accountId/automation/decisions",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      return dependencies.store.listAutomationDecisions(accountId);
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/automation/preview",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      return automation.runAccount(accountId, "preview");
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/automation/run",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      return automation.runAccount(accountId, "manual");
+    },
+  );
+
+  app.post(
+    "/api/automation/decisions/:decisionId/approve",
+    async (request) => {
+      const { decisionId } = DecisionParamsSchema.parse(request.params);
+      return automation.approveDecision(decisionId);
     },
   );
 
@@ -427,6 +593,7 @@ async function loadProviderContext(
     accountId,
     settings: connection.settings,
     credential: ProviderCredentialInputSchema.parse(JSON.parse(secret)),
+    timezone: store.getAccount(accountId)?.timezone ?? "UTC",
   };
 }
 

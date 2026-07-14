@@ -18,6 +18,7 @@ export const AccountConfigSchema = z.object({
   credentialRef: z.string().trim().min(1).nullable(),
   timezone: z.string().trim().min(1),
   pollingIntervalMinutes: z.number().int().min(1).max(1440),
+  maxActionsPerRun: z.number().int().min(1).max(100),
   executionMode: ExecutionModeSchema,
   updatedAt: z.string().datetime(),
 });
@@ -30,8 +31,8 @@ export const AccountSettingsUpdateSchema = AccountConfigSchema.pick({
   providerKind: true,
   timezone: true,
   pollingIntervalMinutes: true,
+  maxActionsPerRun: true,
   executionMode: true,
 });
 
 export type AccountSettingsUpdate = z.infer<typeof AccountSettingsUpdateSchema>;
-

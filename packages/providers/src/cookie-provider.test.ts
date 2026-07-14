@@ -85,4 +85,55 @@ describe("CookieAdsProvider", () => {
       ]),
     );
   });
+
+  it("replays an encrypted status template with the target entity id", async () => {
+    let requestBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        requestBody = String(init?.body ?? "");
+        return new Response(JSON.stringify({ code: 0, data: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    const provider = new CookieAdsProvider();
+    const result = await provider.changeStatus(
+      {
+        accountId: "test-account",
+        settings: {
+          kind: "cookie",
+          advertiserId: "123456",
+          healthUrl: "",
+          campaignsUrl: "",
+          adGroupsUrl: "",
+          adsUrl: "",
+        },
+        credential: {
+          kind: "cookie",
+          cookie: "sessionid=test-cookie",
+          csrfHeaderName: "x-csrftoken",
+          requestTemplates: [
+            {
+              target: "ad-group-status",
+              action: "disable",
+              url: "https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456",
+              method: "POST",
+              body: '{"ad_id":"old-id","status":0}',
+              contentType: "application/json",
+            },
+          ],
+        },
+      },
+      [{ entityType: "ad-group", externalId: "new-id", action: "disable" }],
+    );
+
+    expect(result[0]).toMatchObject({ ok: true, externalId: "new-id" });
+    expect(JSON.parse(requestBody)).toMatchObject({
+      ad_id: "new-id",
+      status: 0,
+    });
+  });
 });

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseTikTokCurl, TikTokCurlImportError } from "./curl-import.js";
+import {
+  parseTikTokCurl,
+  parseTikTokStatusCurl,
+  TikTokCurlImportError,
+} from "./curl-import.js";
 
 describe("parseTikTokCurl", () => {
   it("imports a Chrome POST request without exposing secrets in settings", () => {
@@ -27,5 +31,18 @@ describe("parseTikTokCurl", () => {
         "curl 'https://example.com/list?aadvid=1' -H 'cookie: sessionid=test-value'",
       ),
     ).toThrow(TikTokCurlImportError);
+  });
+
+  it("labels a captured switch request by entity level and action", () => {
+    const imported = parseTikTokStatusCurl(
+      `curl 'https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_id":"old-id","status":0}'`,
+      "ad-group",
+      "disable",
+    );
+
+    expect(imported.credential.requestTemplates?.[0]).toMatchObject({
+      target: "ad-group-status",
+      action: "disable",
+    });
   });
 });

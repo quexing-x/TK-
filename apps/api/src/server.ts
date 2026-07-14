@@ -22,7 +22,7 @@ const vault = new WindowsDpapiCredentialVault(credentialDirectory);
 const proxyConfig = resolveOutboundProxy();
 const proxyAgent = installOutboundProxy(proxyConfig);
 
-const app = await createApp({ store, vault });
+const app = await createApp({ store, vault, startScheduler: true });
 if (proxyConfig) {
   app.log.info(
     { source: proxyConfig.source },

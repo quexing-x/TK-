@@ -72,7 +72,7 @@ async function startRuntime() {
   const vault = new WindowsDpapiCredentialVault(credentialDirectory);
   const proxyConfig = resolveOutboundProxy();
   const proxyAgent = installOutboundProxy(proxyConfig);
-  const server = await createApp({ store, vault });
+  const server = await createApp({ store, vault, startScheduler: true });
 
   const webRoot = app.isPackaged
     ? join(process.resourcesPath, "web")

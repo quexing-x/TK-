@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SyncEntityTypeSchema } from "./connection.js";
 
 export const ThresholdMetricSchema = z.enum([
   "cost_per_conversion",
@@ -13,6 +14,7 @@ export const ThresholdMetricSchema = z.enum([
 
 export const ThresholdOperatorSchema = z.enum(["gt", "gte", "lt", "lte"]);
 export const ThresholdStageSchema = z.enum(["stage-1", "stage-2", "global"]);
+export const ThresholdActionSchema = z.enum(["enable", "disable"]);
 
 export const ThresholdConfigSchema = z.object({
   id: z.string().min(1),
@@ -30,6 +32,11 @@ export const ThresholdConfigSchema = z.object({
   unit: z.string().trim().min(1).max(20),
   stage: ThresholdStageSchema,
   enabled: z.boolean(),
+  entityType: SyncEntityTypeSchema,
+  action: ThresholdActionSchema,
+  automationEnabled: z.boolean(),
+  minimumSpend: z.number().finite().min(0),
+  cooldownMinutes: z.number().int().min(0).max(43_200),
   updatedAt: z.string().datetime(),
 });
 
@@ -53,6 +60,11 @@ export const defaultThresholds: readonly ThresholdInput[] = [
     unit: "账户币种",
     stage: "stage-1",
     enabled: true,
+    entityType: "ad-group",
+    action: "disable",
+    automationEnabled: false,
+    minimumSpend: 0,
+    cooldownMinutes: 60,
   },
   {
     code: "CPC",
@@ -63,6 +75,11 @@ export const defaultThresholds: readonly ThresholdInput[] = [
     unit: "账户币种",
     stage: "stage-1",
     enabled: true,
+    entityType: "ad-group",
+    action: "disable",
+    automationEnabled: false,
+    minimumSpend: 0,
+    cooldownMinutes: 60,
   },
   {
     code: "TIME_ATTR_COST_PER_ON_WEB_CART",
@@ -73,6 +90,11 @@ export const defaultThresholds: readonly ThresholdInput[] = [
     unit: "账户币种",
     stage: "stage-1",
     enabled: true,
+    entityType: "ad-group",
+    action: "disable",
+    automationEnabled: false,
+    minimumSpend: 0,
+    cooldownMinutes: 60,
   },
   {
     code: "CPC_LEVEL2",
@@ -83,6 +105,11 @@ export const defaultThresholds: readonly ThresholdInput[] = [
     unit: "账户币种",
     stage: "stage-2",
     enabled: true,
+    entityType: "ad-group",
+    action: "disable",
+    automationEnabled: false,
+    minimumSpend: 0,
+    cooldownMinutes: 60,
   },
   {
     code: "TIME_ATTR_CONVERSION_COST_LEVEL2",
@@ -93,6 +120,11 @@ export const defaultThresholds: readonly ThresholdInput[] = [
     unit: "账户币种",
     stage: "stage-2",
     enabled: true,
+    entityType: "ad-group",
+    action: "disable",
+    automationEnabled: false,
+    minimumSpend: 0,
+    cooldownMinutes: 60,
   },
   {
     code: "BUDGET",
@@ -103,6 +135,10 @@ export const defaultThresholds: readonly ThresholdInput[] = [
     unit: "账户币种",
     stage: "global",
     enabled: true,
+    entityType: "campaign",
+    action: "disable",
+    automationEnabled: false,
+    minimumSpend: 0,
+    cooldownMinutes: 60,
   },
 ] as const;
-

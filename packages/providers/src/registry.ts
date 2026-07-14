@@ -7,6 +7,8 @@ import type {
   ProviderHealth,
   ProviderContext,
   ProviderSyncOutput,
+  StatusMutation,
+  StatusMutationResult,
 } from "./types.js";
 
 export class ProviderRegistry {
@@ -30,7 +32,7 @@ export class ProviderRegistry {
     return [...this.providers.values()].map((provider) => ({
       kind: provider.kind,
       displayName: provider.displayName,
-      implementationStatus: "scaffolded",
+      implementationStatus: "available",
       capabilities: [...provider.capabilities],
     }));
   }
@@ -47,6 +49,14 @@ export class ProviderRegistry {
     context: ProviderContext,
   ): Promise<ProviderSyncOutput> {
     return this.get(kind).syncReadOnly(context);
+  }
+
+  changeStatus(
+    kind: ProviderKind,
+    context: ProviderContext,
+    mutations: StatusMutation[],
+  ): Promise<StatusMutationResult[]> {
+    return this.get(kind).changeStatus(context, mutations);
   }
 }
 

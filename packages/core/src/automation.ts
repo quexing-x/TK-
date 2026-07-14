@@ -20,6 +20,24 @@ export const automationSwitchDefinitions = [
     risk: "read" as const,
   },
   {
+    key: "manageCampaignStatus",
+    label: "自动管理广告系列状态",
+    description: "允许规则引擎按已启用阈值开启或关闭广告系列。",
+    risk: "write" as const,
+  },
+  {
+    key: "manageAdGroupStatus",
+    label: "自动管理广告组状态",
+    description: "允许规则引擎按已启用阈值开启或关闭广告组。",
+    risk: "write" as const,
+  },
+  {
+    key: "manageAdStatus",
+    label: "自动管理广告状态",
+    description: "允许规则引擎按已启用阈值开启或关闭广告。",
+    risk: "write" as const,
+  },
+  {
     key: "copyAds",
     label: "复制广告",
     description: "允许规则引擎创建广告副本。",
