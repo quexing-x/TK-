@@ -2,11 +2,13 @@ import {
   CookieConnectionSettingsSchema,
   CookieCredentialInputSchema,
   type CookieConnectionSettings,
+  type CookieConnectionReadiness,
   type AutomationAction,
   type ProviderCredentialInput,
   type SyncEntityType,
 } from "@tk-auto/core";
 import {
+  copyMultipartField,
   isMultipartBody,
   parseMultipartFields,
   rewriteMultipartFields,
@@ -28,7 +30,6 @@ export interface TikTokCurlImportResult {
     advertiserId: string;
     method: "GET" | "POST";
     path: string;
-    requiresEntityValidation: boolean;
     target:
       | "health"
       | "campaign"
@@ -40,38 +41,67 @@ export interface TikTokCurlImportResult {
   };
 }
 
+export function getTikTokCookieImportReadiness(
+  credential?: Extract<ProviderCredentialInput, { kind: "cookie" }>,
+): CookieConnectionReadiness {
+  const templates = credential?.requestTemplates ?? [];
+  const listTemplate = templates.find(
+    (item) => item.target === "ad-group" && !item.derived,
+  );
+  const statusTemplate = templates.find(
+    (item) => item.target.endsWith("-status") && !item.derived,
+  );
+  const controlTemplatesReady = (
+    ["campaign-status", "ad-group-status", "ad-status"] as const
+  ).every((target) =>
+    (["enable", "disable"] as const).every((action) =>
+      templates.some(
+        (item) => item.target === target && item.action === action,
+      ),
+    ),
+  );
+  const hasDocumentedQuery = (
+    template: (typeof templates)[number] | undefined,
+  ) => {
+    if (!template) return false;
+    const url = new URL(template.url);
+    return url.search.length > 1 && url.searchParams.has("aadvid");
+  };
+  const requiredFields = {
+    listQuery: hasDocumentedQuery(listTemplate),
+    updateQuery: hasDocumentedQuery(statusTemplate),
+    copyQuery: hasDocumentedQuery(listTemplate),
+    csrfToken: Boolean(credential?.csrfToken?.trim()),
+    cookie: Boolean(credential?.cookie?.trim()),
+  };
+  const completedFields = Object.values(requiredFields).filter(Boolean).length;
+  return {
+    dataRequestImported: Boolean(listTemplate),
+    statusRequestImported: Boolean(statusTemplate) && controlTemplatesReady,
+    requiredFields,
+    completedFields,
+    totalFields: 5,
+    fieldsComplete: completedFields === 5,
+  };
+}
+
 export function parseTikTokStatusCurl(
   command: string,
 ): TikTokCurlImportResult {
-  const imported = parseTikTokCurl(command);
-  if (!imported.summary.target.endsWith("-status")) {
-    throw new TikTokCurlImportError(
-      "第 2 类只接受真实启停请求，请复制 /ad/update_status/? 或 /creative/update_status/? 对应的 POST cURL。",
-    );
-  }
-  validateConfirmedStatusRequest(imported);
+  const imported = parseTikTokCurl(command, "status");
+  validateDocumentedStatusRequest(imported);
   return imported;
 }
 
 export function parseTikTokReadCurl(
   command: string,
 ): TikTokCurlImportResult {
-  const imported = parseTikTokCurl(command, {
-    allowGenericFinalAdListCandidate: true,
-  });
-  if (!(["campaign", "ad-group", "ad"] as const).includes(
-    imported.summary.target as "campaign" | "ad-group" | "ad",
-  )) {
-    throw new TikTokCurlImportError(
-      "第 1 类只接受列表请求，请复制 /adgroup/list/?，或最终广告页中 Response 含单条广告名称或广告 ID 的 list cURL。",
-    );
-  }
-  return imported;
+  return parseTikTokCurl(command, "read");
 }
 
 export function parseTikTokCurl(
   command: string,
-  options: { allowGenericFinalAdListCandidate?: boolean } = {},
+  expectedKind?: "read" | "status",
 ): TikTokCurlImportResult {
   if (!command.trim()) {
     throw new TikTokCurlImportError("请粘贴从 Chrome 复制的 cURL 命令。");
@@ -192,12 +222,17 @@ export function parseTikTokCurl(
   const csrf = [...headers.entries()].find(([name]) =>
     ["x-csrftoken", "x-csrf-token"].includes(name),
   )?.[1];
-  const classifiedTarget = classifyRequestTarget(url.pathname);
-  const requiresEntityValidation =
-    options.allowGenericFinalAdListCandidate === true &&
-    classifiedTarget === "health" &&
-    isGenericListPath(url.pathname);
-  const target = requiresEntityValidation ? "ad" : classifiedTarget;
+  const target = classifyRequestTarget(url.pathname);
+  if (expectedKind === "read" && target !== "ad-group") {
+    throw new TikTokCurlImportError(
+      "第 1 段只接受 Network 中通过 /adgroup/list/? 搜索到的真实列表 cURL。",
+    );
+  }
+  if (expectedKind === "status" && !target.endsWith("-status")) {
+    throw new TikTokCurlImportError(
+      "第 2 段只接受真实启停请求，请复制 /ad/update_status/? 对应的 POST cURL。",
+    );
+  }
   const contentType = headers.get("content-type")?.value;
   const userAgent = headers.get("user-agent")?.value;
   const capturedHeaders = Object.fromEntries(
@@ -257,31 +292,18 @@ export function parseTikTokCurl(
       advertiserId,
       method,
       path: url.pathname,
-      requiresEntityValidation,
       target,
     },
   };
 }
 
-function validateConfirmedStatusRequest(
+function validateDocumentedStatusRequest(
   imported: TikTokCurlImportResult,
 ): void {
   const path = imported.summary.path.toLowerCase().replace(/\/+$/, "");
-  const contract =
-    imported.summary.target === "ad-group-status"
-      ? {
-          path: "/api/v3/i18n/overture/ad/update_status",
-          fields: ["ad_list", "operation"],
-        }
-      : imported.summary.target === "ad-status"
-        ? {
-            path: "/api/v2/i18n/overture/creative/update_status",
-            fields: ["creative_list", "aco_creative_list", "operation"],
-          }
-        : null;
-  if (!contract || path !== contract.path) {
+  if (!/\/(?:ad|creative)\/update_status$/.test(path)) {
     throw new TikTokCurlImportError(
-      "启停接入只接受已确认的 POST /api/v3/i18n/overture/ad/update_status/ 或 POST /api/v2/i18n/overture/creative/update_status/。",
+      "第 2 段只接受 Network 中通过 /ad/update_status/? 搜索到的真实启停 cURL。",
     );
   }
   if (imported.summary.method !== "POST") {
@@ -290,35 +312,37 @@ function validateConfirmedStatusRequest(
   const template = imported.credential.requestTemplates?.find(
     (item) => item.target === imported.summary.target && !item.derived,
   );
-  if (
-    !template?.body ||
-    !isMultipartBody(template.contentType, template.body)
-  ) {
+  if (!template) {
     throw new TikTokCurlImportError(
-      "真实启停 cURL 必须包含 multipart/form-data 请求体。",
+      "启停 cURL 未生成可用请求模板，请重新复制切换广告开关时出现的请求。",
     );
   }
-  const fields = parseMultipartFields(template.body);
-  const names = new Set(fields.map((field) => field.name.toLowerCase()));
-  const missing = contract.fields.filter((field) => !names.has(field));
-  if (missing.length > 0) {
+  const url = new URL(template.url);
+  if (!url.search || !url.searchParams.has("aadvid")) {
     throw new TikTokCurlImportError(
-      `真实启停 cURL 缺少必需字段：${missing.join("、")}。`,
+      "启停 cURL 缺少问号后的更新查询参数或 aadvid，请复制完整请求。",
     );
   }
-  const operation = fields
-    .find((field) => field.name.toLowerCase() === "operation")
-    ?.value.trim()
-    .toLowerCase();
-  if (operation !== "enable" && operation !== "disable") {
-    throw new TikTokCurlImportError(
-      "真实启停 cURL 的 operation 必须为 enable 或 disable。",
+  if (path.endsWith("/creative/update_status")) {
+    if (!template.body || !isMultipartBody(template.contentType, template.body)) {
+      throw new TikTokCurlImportError(
+        "最终广告启停 cURL 必须包含 multipart/form-data 请求体。",
+      );
+    }
+    const names = new Set(
+      parseMultipartFields(template.body).map((field) =>
+        field.name.toLowerCase(),
+      ),
     );
+    const missing = ["creative_list", "aco_creative_list", "operation"].filter(
+      (field) => !names.has(field),
+    );
+    if (missing.length > 0) {
+      throw new TikTokCurlImportError(
+        `最终广告启停 cURL 缺少必需字段：${missing.join("、")}。`,
+      );
+    }
   }
-}
-
-function isGenericListPath(pathname: string): boolean {
-  return /\/list\/?$/i.test(pathname);
 }
 
 function findAdvertiserId(body: string | undefined): string | null {
@@ -380,13 +404,10 @@ function classifyRequestTarget(
   | "ad-status" {
   const normalized = pathname.toLowerCase();
   const isStatus = normalized.includes("status") || normalized.includes("update");
-  const isOverture = normalized.includes("/overture/");
   if (isStatus && normalized.includes("adgroup")) return "ad-group-status";
   if (isStatus && normalized.includes("campaign")) return "campaign-status";
   if (isStatus && normalized.includes("/creative/")) return "ad-status";
-  if (isStatus && /\/ad(?:\/|_)/.test(normalized)) {
-    return isOverture ? "ad-group-status" : "ad-status";
-  }
+  if (isStatus && /\/ad(?:\/|_)/.test(normalized)) return "ad-group-status";
   if (normalized.includes("/adgroup/list")) return "ad-group";
   if (normalized.includes("/campaign/list")) return "campaign";
   if (normalized.includes("/creative/list")) return "ad";
@@ -438,7 +459,7 @@ function createAllStatusTemplatePairs(request: {
 }) {
   const targets: StatusTarget[] =
     request.target === "ad-group-status"
-      ? ["campaign-status", "ad-group-status"]
+      ? ["campaign-status", "ad-group-status", "ad-status"]
       : [request.target];
   return targets.flatMap((target) => {
     const adapted = adaptStatusRequest(request, target);
@@ -493,6 +514,22 @@ function adaptStatusRequest(
         );
       }
       body = renamed.body;
+      if (
+        target === "ad-status" &&
+        url.pathname.toLowerCase().includes("/overture/")
+      ) {
+        const copied = copyMultipartField(
+          body,
+          "creative_list",
+          "aco_creative_list",
+        );
+        if (!copied.added) {
+          throw new TikTokCurlImportError(
+            "启停 cURL 无法生成最终广告请求所需的 aco_creative_list 字段。",
+          );
+        }
+        body = copied.body;
+      }
     } else if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         body = JSON.stringify(renameEntityIdJson(JSON.parse(body), target));
@@ -517,16 +554,14 @@ function replaceStatusPathLevel(pathname: string, target: StatusTarget): string 
     "ad-group-status": isOverture ? "ad" : "adgroup",
     "ad-status": isOverture ? "creative" : "ad",
   }[target];
-  const replaced = pathname.replace(
-    /\/(campaign|adgroup|ad|creative)(?=\/.*(?:status|update)|\/(?:status|update))/i,
-    `/${segment}`,
-  );
-  if (replaced === pathname) {
+  const levelPattern =
+    /\/(campaign|adgroup|ad|creative)(?=\/[^/]*(?:status|update)[^/]*(?:\/|$))/i;
+  if (!levelPattern.test(pathname)) {
     throw new TikTokCurlImportError(
       "状态 cURL 路径无法安全扩展到三个层级，请重新复制标准 update/status 请求。",
     );
   }
-  return replaced;
+  return pathname.replace(levelPattern, `/${segment}`);
 }
 
 const entityIdKeys = new Set([

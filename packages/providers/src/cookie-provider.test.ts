@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  CookieAdsProvider,
-  isConfirmedFinalAdEntityPayload,
-} from "./cookie-provider.js";
+import { CookieAdsProvider } from "./cookie-provider.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -260,22 +257,5 @@ describe("CookieAdsProvider", () => {
     expect(requestBody).toContain(
       'name="aco_creative_list"\r\n\r\n["new-id"]',
     );
-  });
-});
-
-describe("isConfirmedFinalAdEntityPayload", () => {
-  it("accepts ad-specific ids and rejects unrelated generic list rows", () => {
-    expect(
-      isConfirmedFinalAdEntityPayload({
-        creative_id: "creative-1",
-        creative_name: "测试广告",
-      }),
-    ).toBe(true);
-    expect(
-      isConfirmedFinalAdEntityPayload({ id: "creative-2", ad_name: "测试广告" }),
-    ).toBe(true);
-    expect(
-      isConfirmedFinalAdEntityPayload({ id: "CN", name: "China" }),
-    ).toBe(false);
   });
 });

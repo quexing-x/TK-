@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.1.5
+## Windows 桌面版 1.1.6
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.1.5.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.1.6.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -26,7 +26,7 @@ pnpm desktop:dist
 - 阈值配置
 - Cookie / Official API 双 Provider 边界
 - Windows DPAPI 加密凭据库
-- 分步骤 cURL 快速导入（读取请求和启停请求使用独立输入框并分别校验）
+- 两段 cURL 快速导入（两个输入框、一个导入按钮、五个必要字段状态）
 - 单条状态 cURL 自动生成三个层级的开启、关闭模板
 - 多广告账户独立凭据与全账户共用自动化规则
 - 系列、广告组和广告分页检测与指标标准化

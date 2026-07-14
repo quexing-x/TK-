@@ -1547,28 +1547,15 @@ function connectionStateLabel(
 ): ReactNode {
   const connection = state?.connection;
   const cookieReadiness = state?.readiness;
-  const verifiedCookieTargets = (["campaign", "ad-group", "ad"] as const).filter(
-    (target) =>
-      cookieReadiness?.readTargets.includes(target) &&
-      cookieReadiness.statusTargets.includes(target),
-  );
-  if (
-    kind === "cookie" &&
-    (cookieReadiness?.statusTargets.length ?? 0) > 0 &&
-    verifiedCookieTargets.length < 3
-  ) {
+  if (kind === "cookie" && !cookieReadiness?.fieldsComplete) {
     return (
       <span className="status warning">
-        层级未完成 {verifiedCookieTargets.length}/3
+        待导入 {cookieReadiness?.completedFields ?? 0}/5
       </span>
     );
   }
-  if (kind === "cookie" && (state?.readiness?.completedSteps ?? 0) < 2) {
-    return (
-      <span className="status warning">
-        接入未完成 {state?.readiness?.completedSteps ?? 0}/2
-      </span>
-    );
+  if (kind === "cookie" && !cookieReadiness?.statusRequestImported) {
+    return <span className="status danger">启停能力未建立</span>;
   }
   if (!connection || connection.status === "not-configured") {
     return <span className="status">未接入</span>;

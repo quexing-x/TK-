@@ -83,6 +83,39 @@ export function rewriteMultipartFields(
   return { body: output, changes };
 }
 
+export function copyMultipartField(
+  body: string,
+  sourceName: string,
+  targetName: string,
+): { body: string; added: boolean } {
+  const fields = parseMultipartFields(body);
+  if (
+    fields.some(
+      (field) => field.name.toLowerCase() === targetName.toLowerCase(),
+    )
+  ) {
+    return { body, added: false };
+  }
+  const source = fields.find(
+    (field) => field.name.toLowerCase() === sourceName.toLowerCase(),
+  );
+  if (!source) return { body, added: false };
+
+  const newline = body.includes("\r\n") ? "\r\n" : "\n";
+  const firstLineEnd = body.indexOf(newline);
+  if (firstLineEnd <= 0) return { body, added: false };
+  const boundary = body.slice(0, firstLineEnd);
+  const closingMarker = `${newline}${boundary}--`;
+  const closingIndex = body.lastIndexOf(closingMarker);
+  if (closingIndex < 0) return { body, added: false };
+
+  const copiedPart = `${newline}${boundary}${newline}Content-Disposition: form-data; name="${targetName}"${newline}${newline}${source.value}`;
+  return {
+    body: body.slice(0, closingIndex) + copiedPart + body.slice(closingIndex),
+    added: true,
+  };
+}
+
 function findHeaderBreak(
   body: string,
   from: number,

@@ -1,18 +1,18 @@
 {
   "title": "TK Ads 自动化操作使用手册",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "updatedAt": "2026-07-15",
   "summary": "本手册覆盖 Windows 桌面版安装与升级、多账户、Cookie 与官方 API 接入、自动化检测与启停、广告管理、阈值配置和广告分析。",
   "sections": [
     {
       "id": "quick-start",
       "title": "1. Windows 桌面版安装与升级",
-      "intro": "1.1.5 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、调度器、数据库和加密凭据库均在本机运行。",
+      "intro": "1.1.6 是本地优先的 Windows x64 桌面程序，不依赖自建服务器。界面、本地 API、调度器、数据库和加密凭据库均在本机运行。",
       "steps": [
-        "双击 TK-Ads-Automation-Setup-1.1.5.exe，按安装向导完成当前 Windows 用户安装；已安装旧版本的用户可直接覆盖升级。",
+        "双击 TK-Ads-Automation-Setup-1.1.6.exe，按安装向导完成当前 Windows 用户安装；已安装旧版本的用户可直接覆盖升级。",
         "安装器会创建桌面和开始菜单快捷方式；启动“TK Ads Automation”即可进入管理界面。",
         "首次启动会在 %APPDATA%\\TK Ads Automation\\data 创建 SQLite 数据库和演示广告账户。Cookie 和 Token 使用当前 Windows 用户的 DPAPI 加密保存。",
-        "先进入用户管理创建广告账户，再点击该账户后的“接入”完成凭据导入和连接检测。",
+        "先进入用户管理创建广告账户，再点击该账户后的“接入”完成凭据导入和状态确认。",
         "安装新版前先关闭正在运行的软件，然后直接运行更高版本安装包；不要先卸载旧版。固定 App ID 会覆盖程序文件并保留用户数据。",
         "安装或升级后打开软件，确认版本、接入状态、自动化开关和阈值配置正常。"
       ],
@@ -27,30 +27,24 @@
     {
       "id": "cookie-provider",
       "title": "2. Cookie 会话接入",
-      "intro": "Cookie 方案适合自有、已授权的 TikTok Ads 账户。接入界面把读取请求和启停请求分成两个独立步骤、两个输入框，并分别校验请求类型。",
+      "intro": "Cookie 方案适合自有、已授权的 TikTok Ads 账户。只需复制 /adgroup/list/? 和 /ad/update_status/? 两段 cURL，粘贴到两个输入框后一次导入。",
       "steps": [
         "使用 Chrome 正常登录 TikTok Ads Manager，并切换到目标广告账户。",
         "按 F12 打开开发者工具，进入 Network，选择 Fetch/XHR。",
-          "第 1 步：在接入窗口点击复制 /adgroup/list/?，粘贴到 Network 左上角 Filter 输入框。",
-        "回到 TikTok 页面点击“广告组”，再点击页面上的“刷新数据”，或按 Shift + R 刷新数据。",
-        "Network 中应出现一到两条名称类似 list/?aadvid=... 的请求；选择最后一条状态为 200、Response 为 JSON 的请求。",
+        "第 1 段：在接入窗口点击复制 /adgroup/list/?，粘贴到 Network 左上角 Filter 输入框。",
+        "回到 TikTok 页面进入“广告组”并刷新数据。Network 中出现请求后，选择最后一条状态成功的 /adgroup/list/? 请求。",
         "在该请求上点击鼠标右键，选择 Copy → Copy as cURL (bash)。Copy as cURL (bash) 是右键菜单中的复制选项，不是请求名称。",
-          "将复制的列表 cURL 粘贴到“第 1 步 · 读取数据”的独立输入框，点击“导入第 1 步”。第 1 步只接受 list 请求。",
-          "启停第 1 条：进入广告组层级，复制 /ad/update_status/? 搜索词并粘贴到 Network Filter，切换一次测试广告组开关。选择 POST /api/v3/i18n/overture/ad/update_status/，右键 Copy → Copy as cURL (bash)。",
-          "广告组启停请求使用 multipart/form-data，请求体包含 ad_list 和 operation=enable/disable；TikTok 内部 ad_list 对应界面广告组。",
-          "启停第 2 条：进入最终广告层，复制 /creative/update_status/? 搜索词并粘贴到 Network Filter，切换一次测试广告开关。选择 POST /api/v2/i18n/overture/creative/update_status/ 并复制完整 cURL。",
-          "最终广告启停请求使用 multipart/form-data，请求体包含 creative_list、aco_creative_list 和 operation=enable/disable。两条启停 cURL 都粘贴到同一个启停输入框，程序会合并层级能力。",
-        "读取数据如果显示 2/3，进入最终广告页面，在 Network 搜索 list 并刷新；选择 Response 中包含单条广告名称或广告 ID 的真实列表请求，复制完整 cURL 并粘贴到读取输入框继续导入。软件会实时请求并校验响应，不能识别最终广告数据时不会保存。",
-          "只有读取数据和启停能力都覆盖广告系列、广告组、最终广告三个层级时，页面才显示完整连接正常。",
-        "只有快速导入无法识别时，才展开高级手动接入填写各字段。"
+        "将复制的完整 cURL 粘贴到左侧“广告组列表 cURL”输入框。",
+        "第 2 段：在接入窗口点击复制 /ad/update_status/?，替换 Network Filter 中的搜索内容。",
+        "进入一个广告组内的广告列表，切换任意一条测试广告的开关。选择刚出现的 POST /ad/update_status/? 请求，右键 Copy → Copy as cURL (bash)。完成后可把测试广告恢复原状态。",
+        "将第二段完整 cURL 粘贴到右侧“广告启停 cURL”输入框，点击“导入并检查”。",
+        "页面会显示五个必要字段：列表查询参数、更新查询参数、自动生成的复制查询参数、CSRF Token 和 Cookie。五项全部获取且账户读取正常、三级启停模板建立后，实时状态才显示“接入正常”。"
       ],
       "notes": [
         "Cookie 是登录凭据，只能用于本人或明确授权的账户，不要通过聊天、邮件或公开文档传递。",
-          "读取和启停分别使用独立输入框；同一输入框可以连续导入不同层级请求，程序会加密合并，不需要为三个层级创建独立账户配置。",
-          "只读请求、启停请求或任一目标层级未完成时，用户管理和接入窗口都会显示“接入未完成”或“层级未完成”，不会显示完整连接正常。",
-        "跨层级模板由真实状态请求自动扩展。如果 TikTok 拒绝某一层级，软件只会提示补充该层级的一条真实开关 cURL，不影响其他层级。",
-        "自动补全的只读列表请求失败时，也只需补充失败层级的一条列表 cURL。",
-        "完整 cURL 可能包含 msToken 和签名参数，系统不会把这些内容明文写入 SQLite。",
+        "必须复制完整 cURL，而不是只复制 Request URL；完整请求中需要包含 Cookie、CSRF、aadvid 和当前签名参数。",
+        "程序从第一段自动得到列表查询参数、复制查询参数、Cookie 和 CSRF，从第二段得到更新查询参数并在内部生成系列、广告组和广告的开启、关闭模板。用户不需要再复制第三条请求。",
+        "完整 cURL 可能包含 msToken 和签名参数，系统只在本机解码并使用 Windows DPAPI 加密，不会把这些内容明文写入 SQLite。",
         "程序按全局轮询间隔检测账户连接；Cookie 失效会在用户管理标红。重新登录后从该账户的“接入”覆盖导入即可。",
         "系统禁止把 Cookie 请求发送到非 TikTok 域名，并禁止自动跟随重定向。"
       ]
@@ -67,7 +61,7 @@
         "记录授权响应中的 advertiser_ids，选择要管理的 advertiser ID。",
         "进入用户管理，点击目标账户后的“接入”，切换到 Marketing API，填写 advertiser ID 并保存。",
         "将 Access Token 填入凭据区域并加密保存。App Secret 不需要保存在本工具中。",
-        "点击连接检测。系统会通过官方 campaign/get 只读接口验证 Token 与广告账户权限。",
+        "保存 Access Token 后，系统会自动通过官方 campaign/get 只读接口验证 Token 与广告账户权限。",
         "检测通过后执行检测，系统分页读取 campaign/get、adgroup/get、ad/get，并通过 report/integrated/get 读取当天指标。",
         "官方状态写入使用 campaign/status/update、adgroup/status/update 和 ad/status/update。"
       ],
@@ -82,7 +76,7 @@
       "title": "4. Cookie 与 API 自由切换",
       "intro": "两种 Provider 的参数和凭据按账户独立保存，切换不会删除另一种接入配置。",
       "steps": [
-        "在用户管理中点击账户后的“接入”，分别完成 Cookie 和 Marketing API 配置及连接检测。",
+        "在用户管理中点击账户后的“接入”，分别完成 Cookie 和 Marketing API 配置及状态验证。",
         "点击该账户的“编辑”，在默认接入方式中选择当前要使用的 Provider。",
         "保存配置后，自动化开关、阈值和未来规则引擎会使用选中的 Provider。",
         "切换前先确认目标 Provider 状态为连接正常；未通过检测时不要开启真实自动执行。"

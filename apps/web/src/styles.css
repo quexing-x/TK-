@@ -241,6 +241,14 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .quick-import-security { margin-top: 13px; color: #718096; font-size: 10px; }
 .import-feedback { margin-top: 13px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; color: #247356; border: 1px solid #c9e8da; border-radius: 9px; background: #effaf5; font-size: 11px; font-weight: 700; }
 .import-feedback.error { color: #a23b32; border-color: #f1bbb5; background: #fff1f0; }
+.curl-import-actions { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.curl-import-actions > span { color: #718096; font-size: 10px; }
+.required-field-panel { margin-top: 14px; padding: 14px; border: 1px solid #d7e0f3; border-radius: 11px; background: #fff; }
+.required-field-panel > div:first-child { display: flex; align-items: center; justify-content: space-between; color: #35445f; font-size: 11px; }
+.required-field-panel > div:first-child span { color: #718096; font-size: 10px; }
+.required-field-grid { margin-top: 10px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.required-field-grid > span { min-width: 0; padding: 9px 10px; display: flex; align-items: center; gap: 7px; color: #8a5b12; border: 1px solid #f1d392; border-radius: 8px; background: #fff9ea; font-size: 9px; }
+.required-field-grid > span.complete { color: #247356; border-color: #c9e8da; background: #effaf5; }
 .advanced-connection { overflow: hidden; }
 .advanced-connection > summary { padding: 17px 20px; display: flex; align-items: center; gap: 10px; color: #536178; cursor: pointer; list-style: none; background: #fafbfd; }
 .advanced-connection > summary::-webkit-details-marker { display: none; }
@@ -273,4 +281,5 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
   .automation-control-panel { align-items: flex-start; flex-direction: column; }
   .management-filters { grid-template-columns: 1fr 1fr; }
   .cookie-import-steps { grid-template-columns: 1fr; }
+  .required-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -407,22 +407,3 @@ function countEntities(
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-export function isConfirmedFinalAdEntityPayload(
-  payload: Record<string, unknown>,
-): boolean {
-  const hasSpecificId = ["creative_id", "creativeId", "ad_id", "adId"].some(
-    (key) =>
-      typeof payload[key] === "string" || typeof payload[key] === "number",
-  );
-  if (hasSpecificId) return true;
-  const hasGenericId =
-    typeof payload.id === "string" || typeof payload.id === "number";
-  const hasAdName = [
-    "creative_name",
-    "creativeName",
-    "ad_name",
-    "adName",
-  ].some((key) => typeof payload[key] === "string");
-  return hasGenericId && hasAdName;
-}

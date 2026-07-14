@@ -1,8 +1,6 @@
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronDown,
-  CloudDownload,
   Copy,
   KeyRound,
   Link2,
@@ -15,23 +13,11 @@ import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
   AccountConfig,
   CookieConnectionReadiness,
-  CookieConnectionSettings,
   OfficialApiConnectionSettings,
   ProviderConnection,
   ProviderKind,
-  ReadOnlySyncResult,
 } from "@tk-auto/core";
 import { api } from "./api";
-import { describeCookieCoverage } from "./cookie-coverage.js";
-
-const emptyCookieSettings: CookieConnectionSettings = {
-  kind: "cookie",
-  advertiserId: "",
-  healthUrl: "",
-  campaignsUrl: "",
-  adGroupsUrl: "",
-  adsUrl: "",
-};
 
 const emptyApiSettings: OfficialApiConnectionSettings = {
   kind: "official-api",
@@ -41,10 +27,25 @@ const emptyApiSettings: OfficialApiConnectionSettings = {
 const emptyReadiness: CookieConnectionReadiness = {
   dataRequestImported: false,
   statusRequestImported: false,
-  readTargets: [],
-  statusTargets: [],
-  completedSteps: 0,
+  requiredFields: {
+    listQuery: false,
+    updateQuery: false,
+    copyQuery: false,
+    csrfToken: false,
+    cookie: false,
+  },
+  completedFields: 0,
+  totalFields: 5,
+  fieldsComplete: false,
 };
+
+const requiredFieldLabels = [
+  ["listQuery", "/adgroup/list 查询参数"],
+  ["updateQuery", "/ad/update_status 更新参数"],
+  ["copyQuery", "/adgroup/list 复制参数（自动生成）"],
+  ["csrfToken", "CSRF Token"],
+  ["cookie", "Cookie"],
+] as const;
 
 export function ConnectionPage({
   account,
@@ -57,25 +58,17 @@ export function ConnectionPage({
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
   const [readiness, setReadiness] =
     useState<CookieConnectionReadiness>(emptyReadiness);
-  const [copiedFilter, setCopiedFilter] = useState<string | null>(null);
-  const [cookieSettings, setCookieSettings] =
-    useState<CookieConnectionSettings>(emptyCookieSettings);
   const [apiSettings, setApiSettings] =
     useState<OfficialApiConnectionSettings>(emptyApiSettings);
-  const [cookie, setCookie] = useState("");
-  const [csrfToken, setCsrfToken] = useState("");
-  const [csrfHeaderName, setCsrfHeaderName] = useState("x-csrftoken");
-  const [userAgent, setUserAgent] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [readCurlCommand, setReadCurlCommand] = useState("");
   const [statusCurlCommand, setStatusCurlCommand] = useState("");
+  const [copiedFilter, setCopiedFilter] = useState<string | null>(null);
   const [importFeedback, setImportFeedback] = useState<{
-    step: "read" | "status";
     message: string;
     ok: boolean;
   } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [syncResult, setSyncResult] = useState<ReadOnlySyncResult | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -85,13 +78,7 @@ export function ConnectionPage({
       ]);
       setConnections(list);
       setReadiness(nextReadiness);
-      const cookieConnection = list.find((item) => item.kind === "cookie");
       const apiConnection = list.find((item) => item.kind === "official-api");
-      setCookieSettings(
-        cookieConnection?.settings.kind === "cookie"
-          ? cookieConnection.settings
-          : emptyCookieSettings,
-      );
       setApiSettings(
         apiConnection?.settings.kind === "official-api"
           ? apiConnection.settings
@@ -104,63 +91,14 @@ export function ConnectionPage({
   }, [account.id, onError]);
 
   useEffect(() => {
-    setSyncResult(null);
     setImportFeedback(null);
+    setReadCurlCommand("");
+    setStatusCurlCommand("");
     void load();
   }, [load]);
 
   const connection = connections.find((item) => item.kind === providerKind);
-  const readCoverageComplete = readiness.readTargets.length === 3;
-  const readCoveragePartial =
-    readiness.readTargets.length > 0 && !readCoverageComplete;
-  const cookieCoverage = describeCookieCoverage(readiness);
-  const cookieLayerCoverageIncomplete =
-    providerKind === "cookie" &&
-    readiness.statusTargets.length > 0 &&
-    cookieCoverage.verifiedCount < 3;
-  const cookieOnboardingIncomplete =
-    providerKind === "cookie" &&
-    (readiness.completedSteps < 2 || cookieLayerCoverageIncomplete);
-  const displayedConnectionStatus = cookieOnboardingIncomplete
-    ? "untested"
-    : (connection?.status ?? "not-configured");
-  const displayedConnectionLabel = cookieLayerCoverageIncomplete
-    ? `层级未完成（${cookieCoverage.verifiedCount}/3）`
-    : cookieOnboardingIncomplete
-      ? `接入未完成（${readiness.completedSteps}/2）`
-    : providerKind === "cookie" && connection?.status === "ready"
-      ? "完整接入完成"
-      : connectionStatusLabel(connection?.status);
-  const displayedConnectionMessage = cookieLayerCoverageIncomplete
-    ? `${cookieCoverage.message}${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
-    : cookieOnboardingIncomplete
-      ? readiness.dataRequestImported && connection?.status === "ready"
-      ? "第 1 步只读连接正常；第 2 步启停请求尚未导入，自动启停暂不可用。"
-      : `Cookie 完整接入尚未完成。${connection?.lastMessage ? ` ${connection.lastMessage}` : ""}`
-    : (connection?.lastMessage ?? "尚未保存此 Provider 的接入参数。");
-
-  const importCurl = async (step: "read" | "status") => {
-    const command = step === "read" ? readCurlCommand : statusCurlCommand;
-    try {
-      setBusy(`import-${step}`);
-      setImportFeedback(null);
-      const result = await api.importCookieCurl(account.id, command.trim(), step);
-      if (step === "read") setReadCurlCommand("");
-      else setStatusCurlCommand("");
-      setImportFeedback({
-        step,
-        message: result.lastMessage ?? "请求已加密保存，请查看连接状态。",
-        ok: true,
-      });
-      await load();
-    } catch (cause) {
-      const message = getErrorMessage(cause);
-      setImportFeedback({ step, message, ok: false });
-      onError(message);
-    } finally {
-      setBusy(null);
-    }
-  };
+  const cookieState = describeCookieState(readiness, connection);
 
   const copyNetworkFilter = async (value: string) => {
     try {
@@ -172,15 +110,58 @@ export function ConnectionPage({
     }
   };
 
-  const saveSettings = async (event: FormEvent) => {
+  const importBothCurls = async () => {
+    try {
+      setBusy("import");
+      setImportFeedback(null);
+      let result = connection;
+      if (readCurlCommand.trim()) {
+        result = await api.importCookieCurl(
+          account.id,
+          readCurlCommand.trim(),
+          "read",
+        );
+        setReadCurlCommand("");
+        await load();
+      }
+      if (statusCurlCommand.trim()) {
+        result = await api.importCookieCurl(
+          account.id,
+          statusCurlCommand.trim(),
+          "status",
+        );
+        setStatusCurlCommand("");
+      }
+      await load();
+      setImportFeedback({
+        ok: result?.status === "ready",
+        message:
+          result?.status === "ready"
+            ? "两段 cURL 已解码并加密保存，必要字段与启停能力均已建立。"
+            : result?.lastMessage ?? "字段已保存，但当前连接异常。",
+      });
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      setImportFeedback({ message, ok: false });
+      onError(message);
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveApiSettings = async (event: FormEvent) => {
     event.preventDefault();
     try {
       setBusy("settings");
       await api.saveConnectionSettings(
         account.id,
-        providerKind,
-        providerKind === "cookie" ? cookieSettings : apiSettings,
+        "official-api",
+        apiSettings,
       );
+      if (connection?.hasCredential) {
+        await api.testConnection(account.id, "official-api");
+      }
       await load();
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -189,51 +170,19 @@ export function ConnectionPage({
     }
   };
 
-  const saveCredential = async () => {
+  const saveApiCredential = async () => {
     try {
       setBusy("credential");
-      await api.saveCredential(
-        account.id,
-        providerKind,
-        providerKind === "cookie"
-          ? {
-              kind: "cookie",
-              cookie,
-              csrfToken: csrfToken || undefined,
-              csrfHeaderName,
-              userAgent: userAgent || undefined,
-            }
-          : { kind: "official-api", accessToken },
-      );
-      setCookie("");
-      setCsrfToken("");
+      await api.saveCredential(account.id, "official-api", {
+        kind: "official-api",
+        accessToken,
+      });
       setAccessToken("");
+      await api.testConnection(account.id, "official-api");
       await load();
     } catch (cause) {
       onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const testConnection = async () => {
-    try {
-      setBusy("test");
-      await api.testConnection(account.id, providerKind);
       await load();
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const sync = async () => {
-    try {
-      setBusy("sync");
-      setSyncResult(await api.syncReadOnly(account.id, providerKind));
-    } catch (cause) {
-      onError(getErrorMessage(cause));
     } finally {
       setBusy(null);
     }
@@ -252,319 +201,329 @@ export function ConnectionPage({
     }
   };
 
-  const forms = (
-    <div className="connection-columns">
-      <form className="panel form-panel" onSubmit={(event) => void saveSettings(event)}>
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><Link2 size={18} /></span>
-            <div>
-              <h2>接入参数</h2>
-              <p>非敏感参数保存在本地 SQLite。</p>
-            </div>
-          </div>
-        </div>
-        {providerKind === "cookie" ? (
-          <div className="form-grid single-column">
-            <ConnectionField label="Advertiser ID">
-              <input value={cookieSettings.advertiserId} onChange={(event) => setCookieSettings({ ...cookieSettings, advertiserId: event.target.value })} />
-            </ConnectionField>
-            <ConnectionField label="连接检测 URL">
-              <input placeholder="https://ads.tiktok.com/..." value={cookieSettings.healthUrl} onChange={(event) => setCookieSettings({ ...cookieSettings, healthUrl: event.target.value })} />
-            </ConnectionField>
-            <ConnectionField label="系列只读 URL（可选）">
-              <input value={cookieSettings.campaignsUrl} onChange={(event) => setCookieSettings({ ...cookieSettings, campaignsUrl: event.target.value })} />
-            </ConnectionField>
-            <ConnectionField label="广告组只读 URL（可选）">
-              <input value={cookieSettings.adGroupsUrl} onChange={(event) => setCookieSettings({ ...cookieSettings, adGroupsUrl: event.target.value })} />
-            </ConnectionField>
-            <ConnectionField label="广告只读 URL（可选）">
-              <input value={cookieSettings.adsUrl} onChange={(event) => setCookieSettings({ ...cookieSettings, adsUrl: event.target.value })} />
-            </ConnectionField>
-          </div>
-        ) : (
-          <div className="form-grid single-column">
-            <ConnectionField label="Advertiser ID">
-              <input value={apiSettings.advertiserId} onChange={(event) => setApiSettings({ ...apiSettings, advertiserId: event.target.value })} />
-            </ConnectionField>
-            <div className="provider-endpoint-note">
-              官方端点固定使用 business-api.tiktok.com/open_api/v1.3，无需手动填写。
-            </div>
-          </div>
-        )}
-        <div className="form-actions">
-          <button className="primary-button" disabled={busy !== null} type="submit">
-            <Save size={17} /> {busy === "settings" ? "保存中…" : "保存接入参数"}
-          </button>
-        </div>
-      </form>
-
-      <div className="panel form-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><KeyRound size={18} /></span>
-            <div>
-              <h2>加密凭据</h2>
-              <p>使用 Windows 当前用户 DPAPI 加密。</p>
-            </div>
-          </div>
-        </div>
-        {providerKind === "cookie" ? (
-          <div className="form-grid single-column">
-            <ConnectionField label="Cookie">
-              <textarea rows={5} value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder="仅粘贴本人或已授权账户的 Cookie" />
-            </ConnectionField>
-            <ConnectionField label="CSRF Token（可选）">
-              <input value={csrfToken} onChange={(event) => setCsrfToken(event.target.value)} />
-            </ConnectionField>
-            <ConnectionField label="CSRF 请求头名称">
-              <input value={csrfHeaderName} onChange={(event) => setCsrfHeaderName(event.target.value)} />
-            </ConnectionField>
-            <ConnectionField label="User-Agent（可选）">
-              <input value={userAgent} onChange={(event) => setUserAgent(event.target.value)} />
-            </ConnectionField>
-          </div>
-        ) : (
-          <div className="form-grid single-column">
-            <ConnectionField label="长期 Access Token">
-              <textarea rows={5} value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="不要填写 App Secret" />
-            </ConnectionField>
-          </div>
-        )}
-        <div className="form-actions split-actions">
-          {connection?.hasCredential && (
-            <button className="danger-button" disabled={busy !== null} onClick={() => void deleteCredential()} type="button">
-              <Trash2 size={16} /> 删除凭据
-            </button>
-          )}
-          <button
-            className="primary-button"
-            disabled={busy !== null || (providerKind === "cookie" ? cookie.length < 10 : accessToken.length < 10)}
-            onClick={() => void saveCredential()}
-            type="button"
-          >
-            <Save size={17} /> {busy === "credential" ? "加密中…" : connection?.hasCredential ? "覆盖保存凭据" : "加密保存凭据"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
   return (
     <section className="page-stack">
       <div className="provider-tabs">
-        <button className={providerKind === "cookie" ? "active" : ""} onClick={() => setProviderKind("cookie")} type="button">
+        <button
+          className={providerKind === "cookie" ? "active" : ""}
+          onClick={() => setProviderKind("cookie")}
+          type="button"
+        >
           <KeyRound size={18} /> Cookie 会话
         </button>
-        <button className={providerKind === "official-api" ? "active" : ""} onClick={() => setProviderKind("official-api")} type="button">
+        <button
+          className={providerKind === "official-api" ? "active" : ""}
+          onClick={() => setProviderKind("official-api")}
+          type="button"
+        >
           <ShieldCheck size={18} /> Marketing API
         </button>
       </div>
 
-      {providerKind === "cookie" && (
-        <div className="quick-import panel">
-          <div className="quick-import-heading">
-            <span className="quick-import-icon"><Sparkles size={21} /></span>
-            <div>
-              <span className="eyebrow">完整层级 · {cookieCoverage.verifiedCount}/3</span>
-              <h2>分两类导入 Cookie 请求</h2>
-              <p>读取数据与启停请求分别校验；三个层级都具备读取和启停能力后，才算完整接入。</p>
+      {providerKind === "cookie" ? (
+        <>
+          <div className="quick-import panel">
+            <div className="quick-import-heading">
+              <span className="quick-import-icon"><Sparkles size={21} /></span>
+              <div>
+                <span className="eyebrow">最少操作 · 两段 cURL</span>
+                <h2>导入 Cookie 接入信息</h2>
+                <p>程序只提取并加密保存必要字段，不显示 Cookie、Token 或完整请求内容。</p>
+              </div>
+            </div>
+
+            <div className="cookie-import-steps">
+              <CurlStep
+                complete={readiness.dataRequestImported}
+                copiedFilter={copiedFilter}
+                filter="/adgroup/list/?"
+                label="第 1 段 · 获取账户数据"
+                onCopy={copyNetworkFilter}
+                reminder="进入广告组页面后刷新，选择最后一条成功请求，再右键 Copy → Copy as cURL (bash)。"
+                title="广告组列表 cURL"
+              >
+                <textarea
+                  aria-label="广告组列表 cURL"
+                  className="curl-input"
+                  onChange={(event) => setReadCurlCommand(event.target.value)}
+                  placeholder="粘贴 /adgroup/list/? 请求的完整 cURL"
+                  rows={6}
+                  spellCheck={false}
+                  value={readCurlCommand}
+                />
+              </CurlStep>
+
+              <CurlStep
+                complete={readiness.statusRequestImported}
+                copiedFilter={copiedFilter}
+                filter="/ad/update_status/?"
+                label="第 2 段 · 获取启停能力"
+                onCopy={copyNetworkFilter}
+                reminder="切换任意一条测试广告的开关，选择刚出现的 POST 请求，再右键 Copy → Copy as cURL (bash)。完成后可把测试广告恢复原状态。"
+                title="广告启停 cURL"
+              >
+                <textarea
+                  aria-label="广告启停 cURL"
+                  className="curl-input"
+                  onChange={(event) => setStatusCurlCommand(event.target.value)}
+                  placeholder="粘贴 /ad/update_status/? 请求的完整 cURL"
+                  rows={6}
+                  spellCheck={false}
+                  value={statusCurlCommand}
+                />
+              </CurlStep>
+            </div>
+
+            <div className="curl-import-actions">
+              <span>两段内容会在本机解码，并通过 Windows DPAPI 加密保存。</span>
+              <button
+                className="primary-button"
+                disabled={
+                  busy !== null ||
+                  (!readCurlCommand.trim() && !statusCurlCommand.trim()) ||
+                  (Boolean(readCurlCommand.trim()) &&
+                    !readCurlCommand.trim().startsWith("curl")) ||
+                  (Boolean(statusCurlCommand.trim()) &&
+                    !statusCurlCommand.trim().startsWith("curl")) ||
+                  (!readiness.dataRequestImported &&
+                    !readCurlCommand.trim().startsWith("curl")) ||
+                  (!readiness.statusRequestImported &&
+                    !statusCurlCommand.trim().startsWith("curl"))
+                }
+                onClick={() => void importBothCurls()}
+                type="button"
+              >
+                <Sparkles size={17} />
+                {busy === "import" ? "正在导入…" : "导入并检查"}
+              </button>
+            </div>
+
+            {importFeedback && (
+              <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>
+                {importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+                {importFeedback.message}
+              </div>
+            )}
+
+            <div className="required-field-panel">
+              <div>
+                <strong>必要字段</strong>
+                <span>{readiness.completedFields}/{readiness.totalFields} 已获取</span>
+              </div>
+              <div className="required-field-grid">
+                {requiredFieldLabels.map(([key, label]) => (
+                  <span
+                    className={readiness.requiredFields[key] ? "complete" : ""}
+                    key={key}
+                  >
+                    {readiness.requiredFields[key]
+                      ? <CheckCircle2 size={15} />
+                      : <AlertTriangle size={15} />}
+                    {label}
+                  </span>
+                ))}
+              </div>
             </div>
           </div>
-          <div className="cookie-import-steps">
-            <article className={`cookie-import-step ${readCoverageComplete ? "complete" : readCoveragePartial ? "partial" : ""}`}>
-              <header>
-                <span className="cookie-step-number">{readCoverageComplete ? "✓" : "1"}</span>
+
+          <div className="connection-summary panel">
+            <div>
+              <span className={`connection-state ${cookieState.status}`} />
+              <div>
+                <span className="eyebrow">实时接入状态</span>
+                <h2>{cookieState.label}</h2>
+                <p>{cookieState.message}</p>
+              </div>
+            </div>
+            {connection?.hasCredential && (
+              <button
+                className="danger-button"
+                disabled={busy !== null}
+                onClick={() => void deleteCredential()}
+                type="button"
+              >
+                <Trash2 size={16} /> 删除本机凭据
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="connection-columns">
+            <form className="panel form-panel" onSubmit={(event) => void saveApiSettings(event)}>
+              <div className="panel-heading">
                 <div>
-                  <span className="eyebrow">第 1 类 · 读取数据</span>
-                  <h3>导入真实列表 cURL</h3>
+                  <span className="panel-icon"><Link2 size={18} /></span>
+                  <div>
+                    <h2>Marketing API 接入参数</h2>
+                    <p>非敏感参数保存在本地 SQLite。</p>
+                  </div>
                 </div>
-                <strong className="cookie-step-state">
-                  {readCoverageComplete
-                    ? "完成 3/3"
-                    : readCoveragePartial
-                      ? `部分完成 ${readiness.readTargets.length}/3`
-                      : "未完成"}
-                </strong>
-              </header>
-              <p>在 TikTok Ads 的 Network 左上角 Filter 搜索以下内容，刷新广告组页面后复制对应请求。</p>
-              <div className="network-filter-row">
-                <span>Network 搜索内容</span>
-                <button
-                  aria-label="复制过滤词 /adgroup/list/?"
-                  className={copiedFilter === "/adgroup/list/?" ? "copied" : ""}
-                  onClick={() => void copyNetworkFilter("/adgroup/list/?")}
-                  type="button"
-                >
-                  <code>/adgroup/list/?</code>
-                  {copiedFilter === "/adgroup/list/?" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                  <span>{copiedFilter === "/adgroup/list/?" ? "已复制" : "复制"}</span>
+              </div>
+              <div className="form-grid single-column">
+                <ConnectionField label="Advertiser ID">
+                  <input
+                    onChange={(event) => setApiSettings({ ...apiSettings, advertiserId: event.target.value })}
+                    value={apiSettings.advertiserId}
+                  />
+                </ConnectionField>
+                <div className="provider-endpoint-note">
+                  官方端点固定使用 business-api.tiktok.com/open_api/v1.3，无需手动填写。
+                </div>
+              </div>
+              <div className="form-actions">
+                <button className="primary-button" disabled={busy !== null} type="submit">
+                  <Save size={17} /> {busy === "settings" ? "保存中…" : "保存接入参数"}
                 </button>
               </div>
-              {readCoveragePartial && (
-                <div className="network-filter-row">
-                  <span>最终广告列表候选</span>
+            </form>
+
+            <div className="panel form-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="panel-icon"><KeyRound size={18} /></span>
+                  <div>
+                    <h2>Access Token</h2>
+                    <p>使用 Windows 当前用户 DPAPI 加密；保存后自动验证权限。</p>
+                  </div>
+                </div>
+              </div>
+              <div className="form-grid single-column">
+                <ConnectionField label="长期 Access Token">
+                  <textarea
+                    onChange={(event) => setAccessToken(event.target.value)}
+                    placeholder="不要填写 App Secret"
+                    rows={5}
+                    value={accessToken}
+                  />
+                </ConnectionField>
+              </div>
+              <div className="form-actions split-actions">
+                {connection?.hasCredential && (
                   <button
-                    aria-label="复制过滤词 list"
-                    className={copiedFilter === "list" ? "copied" : ""}
-                    onClick={() => void copyNetworkFilter("list")}
+                    className="danger-button"
+                    disabled={busy !== null}
+                    onClick={() => void deleteCredential()}
                     type="button"
                   >
-                    <code>list</code>
-                    {copiedFilter === "list" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                    <span>{copiedFilter === "list" ? "已复制" : "复制"}</span>
+                    <Trash2 size={16} /> 删除凭据
                   </button>
-                </div>
-              )}
-              <textarea
-                aria-label="第 1 步列表 cURL"
-                className="curl-input"
-                onChange={(event) => setReadCurlCommand(event.target.value)}
-                placeholder={readCoveragePartial ? "继续粘贴最终广告层的真实列表 cURL" : "粘贴 /adgroup/list/? 请求的完整 cURL"}
-                rows={5}
-                spellCheck={false}
-                value={readCurlCommand}
-              />
-              <div className="cookie-step-footer">
-                <span>此处只接受 list 列表请求。</span>
-                <button className="primary-button" disabled={busy !== null || !readCurlCommand.trim().startsWith("curl")} onClick={() => void importCurl("read")} type="button">
-                  <Sparkles size={17} /> {busy === "import-read" ? "正在导入…" : readCoveragePartial ? "补充读取请求" : "导入第 1 类"}
-                </button>
-              </div>
-              {importFeedback?.step === "read" && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />} {importFeedback.message}</div>}
-              {readCoveragePartial && (
-                <div className="import-warning compact">
-                  <AlertTriangle size={17} />
-                  <span>最终广告启停已接入，但列表数据仍缺失。进入最终“广告”页面，在 Network 搜索 <code>list</code> 并刷新；选择 Response 中含单条广告名称或广告 ID 的真实列表请求，复制完整 cURL 后粘贴到上方继续导入。</span>
-                </div>
-              )}
-            </article>
-
-            <article className={`cookie-import-step ${readiness.statusRequestImported ? "complete" : ""}`}>
-              <header>
-                <span className="cookie-step-number">{readiness.statusRequestImported ? "✓" : "2"}</span>
-                <div>
-                  <span className="eyebrow">第 2 类 · 开启和关闭</span>
-                  <h3>导入真实启停 cURL</h3>
-                </div>
-                <strong className="cookie-step-state">
-                  {readiness.statusRequestImported
-                    ? "已完成"
-                    : readiness.statusTargets.length > 0
-                      ? `部分完成 ${readiness.statusTargets.length}/3`
-                      : "未完成"}
-                </strong>
-              </header>
-              <p>广告组与最终广告各需要一条真实启停请求；两条请求都粘贴到同一个输入框，程序按真实路径自动合并层级能力。</p>
-              <div className="network-filter-row">
-                <span>广告组搜索内容</span>
+                )}
                 <button
-                  aria-label="复制过滤词 /ad/update_status/?"
-                  className={copiedFilter === "/ad/update_status/?" ? "copied" : ""}
-                  onClick={() => void copyNetworkFilter("/ad/update_status/?")}
+                  className="primary-button"
+                  disabled={busy !== null || accessToken.length < 10}
+                  onClick={() => void saveApiCredential()}
                   type="button"
                 >
-                  <code>/ad/update_status/?</code>
-                  {copiedFilter === "/ad/update_status/?" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                  <span>{copiedFilter === "/ad/update_status/?" ? "已复制" : "复制"}</span>
+                  <Save size={17} />
+                  {busy === "credential" ? "保存并验证中…" : "加密保存并验证"}
                 </button>
               </div>
-              <div className="network-filter-row">
-                <span>最终广告搜索内容</span>
-                <button
-                  aria-label="复制过滤词 /creative/update_status/?"
-                  className={copiedFilter === "/creative/update_status/?" ? "copied" : ""}
-                  onClick={() => void copyNetworkFilter("/creative/update_status/?")}
-                  type="button"
-                >
-                  <code>/creative/update_status/?</code>
-                  {copiedFilter === "/creative/update_status/?" ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                  <span>{copiedFilter === "/creative/update_status/?" ? "已复制" : "复制"}</span>
-                </button>
-              </div>
-              <div className="request-contract">
-                <strong>已确认的两种真实启停请求</strong>
-                <span>广告组：<code>POST /api/v3/i18n/overture/ad/update_status/</code>，包含 <code>ad_list</code></span>
-                <span>最终广告：<code>POST /api/v2/i18n/overture/creative/update_status/</code>，包含 <code>creative_list</code> 与 <code>aco_creative_list</code></span>
-                <span>两者都必须包含 <code>operation=enable/disable</code></span>
-                <span>必须复制完整 cURL，以保留 Cookie、boundary、aadvid 和签名参数</span>
-              </div>
-              {!readiness.statusRequestImported && (
-                <div className="import-warning compact">
-                  <AlertTriangle size={17} />
-                  <span>不要复制 list 请求；此处只接受 /ad/update_status/? 或 /creative/update_status/? 的真实启停请求。</span>
-                </div>
-              )}
-              <textarea
-                aria-label="第 2 步启停 cURL"
-                className="curl-input"
-                disabled={!readiness.dataRequestImported}
-                onChange={(event) => setStatusCurlCommand(event.target.value)}
-                placeholder={readiness.dataRequestImported ? "粘贴广告组或最终广告 update_status 请求的完整 cURL" : "请先完成第 1 步"}
-                rows={5}
-                spellCheck={false}
-                value={statusCurlCommand}
-              />
-              <div className="cookie-step-footer">
-                <span>此处只接受 update_status 启停请求。</span>
-                <button className="primary-button" disabled={busy !== null || !readiness.dataRequestImported || !statusCurlCommand.trim().startsWith("curl")} onClick={() => void importCurl("status")} type="button">
-                  <Sparkles size={17} /> {busy === "import-status" ? "正在导入…" : "导入第 2 步"}
-                </button>
-              </div>
-              {importFeedback?.step === "status" && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />} {importFeedback.message}</div>}
-              {readiness.statusTargets.length > 0 && !readiness.statusRequestImported && (
-                <div className="import-warning compact">
-                  <AlertTriangle size={17} />
-                  <span>已确认广告系列和广告组启停；最终广告层请求尚未导入，因此完整接入仍未完成。</span>
-                </div>
-              )}
-            </article>
+            </div>
           </div>
-          <div className="quick-import-security">完整请求仅进入本机 DPAPI 加密保险库，不写入 SQLite 明文。</div>
-          {readiness.statusRequestImported && (
-            <div className="import-feedback"><CheckCircle2 size={17} /> 三个层级的启停模板均已就绪；读取数据当前覆盖 {readiness.readTargets.length}/3，补齐最终广告列表后才是完整接入。</div>
-          )}
-        </div>
-      )}
 
-      <div className="connection-summary panel">
-        <div>
-          <span className={`connection-state ${displayedConnectionStatus}`} />
-          <div>
-            <span className="eyebrow">完整接入状态</span>
-            <h2>{displayedConnectionLabel}</h2>
-            <p>{displayedConnectionMessage}</p>
+          <div className="connection-summary panel">
+            <div>
+              <span className={`connection-state ${connection?.status ?? "not-configured"}`} />
+              <div>
+                <span className="eyebrow">Marketing API 状态</span>
+                <h2>{connectionStatusLabel(connection?.status)}</h2>
+                <p>{connection?.lastMessage ?? "尚未保存 Marketing API 接入参数。"}</p>
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="connection-actions">
-          <button className="secondary-button" disabled={!connection?.hasCredential || busy !== null} onClick={() => void testConnection()} type="button">
-            <Link2 size={17} /> {busy === "test" ? "检测中…" : "连接检测"}
-          </button>
-          <button className="primary-button" disabled={connection?.status !== "ready" || busy !== null} onClick={() => void sync()} type="button">
-            <CloudDownload size={17} /> {busy === "sync" ? "同步中…" : "只读同步"}
-          </button>
-        </div>
-      </div>
-
-      {providerKind === "cookie" ? (
-        <details className="advanced-connection panel">
-          <summary><ChevronDown size={18} /><span><strong>高级手动接入</strong><small>仅在快速导入无法识别时使用</small></span></summary>
-          <div className="advanced-connection-content">{forms}</div>
-        </details>
-      ) : forms}
-
-      {syncResult && (
-        <div className="sync-result panel">
-          <CheckCircle2 size={22} />
-          <div>
-            <h3>只读同步完成</h3>
-            <p>系列 {syncResult.counts.campaign} · 广告组 {syncResult.counts["ad-group"]} · 广告 {syncResult.counts.ad}</p>
-            {syncResult.warnings.map((warning) => <span key={warning}>{warning}</span>)}
-          </div>
-        </div>
+        </>
       )}
     </section>
   );
+}
+
+function CurlStep({
+  complete,
+  copiedFilter,
+  filter,
+  label,
+  onCopy,
+  reminder,
+  title,
+  children,
+}: {
+  complete: boolean;
+  copiedFilter: string | null;
+  filter: string;
+  label: string;
+  onCopy: (value: string) => Promise<void>;
+  reminder: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  const copied = copiedFilter === filter;
+  return (
+    <article className={`cookie-import-step ${complete ? "complete" : ""}`}>
+      <header>
+        <span className="cookie-step-number">{complete ? "✓" : label.includes("1") ? "1" : "2"}</span>
+        <div>
+          <span className="eyebrow">{label}</span>
+          <h3>{title}</h3>
+        </div>
+        <strong className="cookie-step-state">{complete ? "已获取" : "待导入"}</strong>
+      </header>
+      <p>{reminder}</p>
+      <div className="network-filter-row">
+        <span>Network 搜索内容</span>
+        <button
+          aria-label={`复制过滤词 ${filter}`}
+          className={copied ? "copied" : ""}
+          onClick={() => void onCopy(filter)}
+          type="button"
+        >
+          <code>{filter}</code>
+          {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+          <span>{copied ? "已复制" : "复制"}</span>
+        </button>
+      </div>
+      {children}
+    </article>
+  );
+}
+
+function describeCookieState(
+  readiness: CookieConnectionReadiness,
+  connection?: ProviderConnection,
+) {
+  if (!readiness.fieldsComplete) {
+    return {
+      status: "untested",
+      label: `等待导入（${readiness.completedFields}/${readiness.totalFields}）`,
+      message: "请粘贴两段完整 cURL；只有五个必要字段全部获取后，才会显示接入正常。",
+    };
+  }
+  if (!readiness.statusRequestImported) {
+    return {
+      status: "failed",
+      label: "启停能力未建立",
+      message: "必要字段已获取，但启停请求未能生成完整控制模板，请重新复制 /ad/update_status/? 的 POST cURL。",
+    };
+  }
+  if (connection?.status === "ready") {
+    return {
+      status: "ready",
+      label: "接入正常",
+      message: "广告账户可正常读取，系列、广告组和广告的开启与关闭能力均已建立。",
+    };
+  }
+  if (connection?.status === "failed") {
+    return {
+      status: "failed",
+      label: "Cookie 已失效或连接异常",
+      message: connection.lastMessage ?? "请重新获取并导入两段 cURL。",
+    };
+  }
+  return {
+    status: "untested",
+    label: "字段已获取，等待连接结果",
+    message: connection?.lastMessage ?? "正在等待本机完成连接状态更新。",
+  };
 }
 
 function ConnectionField({ label, children }: { label: string; children: React.ReactNode }) {
@@ -574,7 +533,7 @@ function ConnectionField({ label, children }: { label: string; children: React.R
 function connectionStatusLabel(status?: ProviderConnection["status"]): string {
   return {
     "not-configured": "尚未配置",
-    untested: "等待检测",
+    untested: "等待验证",
     ready: "连接正常",
     failed: "连接失败",
   }[status ?? "not-configured"];

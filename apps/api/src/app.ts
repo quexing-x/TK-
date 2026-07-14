@@ -24,9 +24,9 @@ import {
   parseTikTokCurl,
   parseTikTokReadCurl,
   parseTikTokStatusCurl,
+  getTikTokCookieImportReadiness,
   ProviderRegistry,
   TikTokCurlImportError,
-  isConfirmedFinalAdEntityPayload,
   type ProviderContext,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
@@ -216,13 +216,7 @@ export async function createApp(
         "cookie",
       );
       if (!connection?.credentialRef) {
-        return {
-          dataRequestImported: false,
-          statusRequestImported: false,
-          readTargets: [],
-          statusTargets: [],
-          completedSteps: 0,
-        };
+        return getTikTokCookieImportReadiness();
       }
       const secret = await dependencies.vault.read(connection.credentialRef);
       if (!secret) {
@@ -232,33 +226,7 @@ export async function createApp(
       if (credential.kind !== "cookie") {
         return reply.status(409).send({ message: "当前凭据不是 Cookie 类型。" });
       }
-      const templates = credential.requestTemplates ?? [];
-      const readTargets = (["campaign", "ad-group", "ad"] as const).filter(
-        (target) => templates.some((item) => item.target === target),
-      );
-      const statusTargets = (["campaign", "ad-group", "ad"] as const).filter(
-        (target) =>
-          (["enable", "disable"] as const).every((action) =>
-            templates.some(
-              (item) =>
-                item.target === `${target}-status` && item.action === action,
-            ),
-          ),
-      );
-      const dataRequestImported = readTargets.length > 0;
-      const statusRequestImported =
-        statusTargets.length === 3 &&
-        templates.some(
-          (item) => item.target.endsWith("-status") && !item.derived,
-        );
-      return {
-        dataRequestImported,
-        statusRequestImported,
-        readTargets,
-        statusTargets,
-        completedSteps:
-          Number(dataRequestImported) + Number(statusRequestImported),
-      };
+      return getTikTokCookieImportReadiness(credential);
     },
   );
 
@@ -283,33 +251,6 @@ export async function createApp(
           return reply.status(400).send({ message: cause.message });
         }
         throw cause;
-      }
-
-      if (imported.summary.requiresEntityValidation) {
-        try {
-          const preview = await providers.syncReadOnly("cookie", {
-            accountId,
-            settings: imported.settings,
-            credential: imported.credential,
-            timezone:
-              dependencies.store.getAccount(accountId)?.timezone ?? "UTC",
-          });
-          const confirmedFinalAd = preview.entities.some(
-            (entity) =>
-              entity.entityType === "ad" &&
-              isConfirmedFinalAdEntityPayload(entity.payload),
-          );
-          if (!confirmedFinalAd) {
-            return reply.status(400).send({
-              message:
-                "该 list 请求的响应中未识别到最终广告名称或广告 ID，请在最终“广告”页面重新选择 Response 含单条广告数据的请求。",
-            });
-          }
-        } catch (cause) {
-          return reply.status(400).send({
-            message: `最终广告列表候选验证失败：${getSafeProviderError(cause)}`,
-          });
-        }
       }
 
       const previous = dependencies.store.getProviderConnection(
@@ -338,6 +279,12 @@ export async function createApp(
               ].includes(imported.summary.target);
               credential = CookieCredentialInputSchema.parse({
                 ...credential,
+                csrfToken:
+                  credential.csrfToken ?? parsedPrevious.csrfToken,
+                csrfHeaderName: credential.csrfToken
+                  ? credential.csrfHeaderName
+                  : parsedPrevious.csrfHeaderName,
+                userAgent: credential.userAgent ?? parsedPrevious.userAgent,
                 requestTemplates: [
                   ...(parsedPrevious.requestTemplates ?? []).filter(
                     (item) =>
@@ -379,8 +326,8 @@ export async function createApp(
       }
 
       const importMessage = imported.summary.target.endsWith("-status")
-        ? "已识别为真实启停 cURL（第 2 步），已保存该请求及可安全确认的层级模板。"
-        : "已识别为列表 cURL（第 1 步），没有识别到启停动作。第 2 步请复制包含 update/status 的真实开关请求。";
+        ? "第 2 段启停 cURL 已解码，更新查询参数和三级启停模板已加密保存。"
+        : "第 1 段列表 cURL 已解码，列表查询参数、复制查询参数、Cookie 和 CSRF 已加密保存。";
 
       try {
         const context = await loadProviderContext(
