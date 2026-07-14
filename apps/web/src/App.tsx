@@ -8,7 +8,6 @@ import {
   Check,
   ChevronDown,
   CircleGauge,
-  Database,
   Gauge,
   Layers3,
   ListFilter,
@@ -40,11 +39,12 @@ import type {
   AutomationDecisionRecord,
   AutomationRunRecord,
   AdOperationRecord,
-  EntityMetricSnapshotRecord,
+  MetricBatchRecord,
   ManagedEntityRecord,
   ProviderConnection,
   ProviderKind,
   ThresholdConfig,
+  ScheduledEntityActionRecord,
 } from "@tk-auto/core";
 import {
   api,
@@ -55,6 +55,14 @@ import { ConnectionPage } from "./ConnectionPage";
 import { ManualPage } from "./ManualPage";
 import { NotificationsPage } from "./NotificationsPage";
 import { RulesPage } from "./RulesPage";
+import { AuthGate, useAuth } from "./AuthGate";
+import { SystemUsersPage } from "./SystemUsersPage";
+import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
+import { LaunchPage } from "./LaunchPage";
+import {
+  resolveAnalysisRange,
+  type AnalysisPreset,
+} from "./analytics";
 
 type PageKey =
   | "manual"
@@ -63,7 +71,9 @@ type PageKey =
   | "ads"
   | "analytics"
   | "rules"
-  | "notifications";
+  | "notifications"
+  | "launch"
+  | "system-users";
 
 const navItems: Array<{
   key: PageKey;
@@ -71,12 +81,6 @@ const navItems: Array<{
   description: string;
   icon: typeof Settings2;
 }> = [
-  {
-    key: "manual",
-    label: "操作手册",
-    description: "API 与 Cookie 详细教程",
-    icon: BookOpen,
-  },
   {
     key: "users",
     label: "用户管理",
@@ -113,9 +117,30 @@ const navItems: Array<{
     description: "邮箱、企业微信与飞书",
     icon: BellRing,
   },
+  {
+    key: "launch",
+    label: "创建广告",
+    description: "相同广告多账户投放",
+    icon: Plus,
+  },
+  {
+    key: "system-users",
+    label: "系统权限",
+    description: "登录账户与角色权限",
+    icon: ShieldCheck,
+  },
 ];
 
 export function App() {
+  return (
+    <AuthGate>
+      <ConsoleApp />
+    </AuthGate>
+  );
+}
+
+function ConsoleApp() {
+  const auth = useAuth();
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [page, setPage] = useState<PageKey>("manual");
@@ -163,6 +188,27 @@ export function App() {
           </div>
         </div>
 
+        <button
+          className={bootstrap.systemRuntime.enabled ? "system-master active" : "system-master paused"}
+          disabled={!auth.status.permissions.includes("system:control")}
+          onClick={async () => {
+            try {
+              await api.updateSystemRuntime(!bootstrap.systemRuntime.enabled);
+              await loadBootstrap();
+            } catch (cause) {
+              setError(getErrorMessage(cause));
+            }
+          }}
+          type="button"
+        >
+          <span className="system-master-light" />
+          <span>
+            <strong>{bootstrap.systemRuntime.enabled ? "系统运行中" : "系统已暂停"}</strong>
+            <small>{bootstrap.systemRuntime.enabled ? "检测、定时与启停已启用" : "所有后台任务和写入已停止"}</small>
+          </span>
+          <span className={bootstrap.systemRuntime.enabled ? "master-switch checked" : "master-switch"}><i /></span>
+        </button>
+
         <div className="phase-card">
           <span className="phase-dot" />
           <div>
@@ -172,7 +218,7 @@ export function App() {
         </div>
 
         <nav className="nav-list">
-          {navItems.map((item) => {
+          {navItems.filter((item) => item.key !== "system-users" || auth.status.permissions.includes("users:manage")).map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -191,6 +237,8 @@ export function App() {
           })}
         </nav>
 
+        <button className={page === "manual" ? "nav-item manual-launch active" : "nav-item manual-launch"} onClick={() => setPage("manual")} type="button"><BookOpen size={19} /><span><strong>操作手册</strong><small>API 与 Cookie 详细教程</small></span></button>
+
         <div className="sidebar-footer">
           <ShieldCheck size={18} />
           <span>本地模式 · 仅监听 127.0.0.1</span>
@@ -201,7 +249,11 @@ export function App() {
         <header className="topbar">
           <div>
             <span className="eyebrow">核心控制台</span>
-            <h1>{navItems.find((item) => item.key === page)?.label}</h1>
+            <h1>{page === "manual" ? "操作手册" : navItems.find((item) => item.key === page)?.label}</h1>
+          </div>
+          <div className="topbar-user">
+            <span><strong>{auth.status.user?.displayName}</strong><small>{auth.status.user?.role}</small></span>
+            <button type="button" onClick={() => void auth.logout()}>退出</button>
           </div>
         </header>
 
@@ -217,6 +269,8 @@ export function App() {
 
         {page === "manual" ? (
           <ManualPage />
+        ) : page === "system-users" ? (
+          <SystemUsersPage onError={setError} />
         ) : page === "users" ? (
           <UsersPage
             accounts={bootstrap.accounts}
@@ -231,12 +285,14 @@ export function App() {
           />
         ) : page === "notifications" ? (
           <NotificationsPage onError={setError} />
+        ) : page === "launch" ? (
+          <LaunchPage accounts={bootstrap.accounts} onError={setError} />
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
+          <section className="page-stack"><AutomationFeaturesPage onError={setError} /><AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
             <AutomationPage account={account} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} onError={setError} />
-          </AccountScopedPage>
+          </AccountScopedPage></section>
         ) : page === "ads" ? (
           <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
             <AdsManagementPage account={account} onError={setError} />
@@ -459,19 +515,28 @@ function AdsManagementPage({
 }) {
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
+  const [schedules, setSchedules] = useState<ScheduledEntityActionRecord[]>([]);
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>("all");
   const [busy, setBusy] = useState<string | null>(null);
+  const [scheduling, setScheduling] = useState<ManagedEntityRecord | null>(null);
+  const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
+  const [scheduledAction, setScheduledAction] = useState<"enable" | "disable">("disable");
+  const [runAt, setRunAt] = useState("");
+  const [disableAt, setDisableAt] = useState("");
+  const [enableAt, setEnableAt] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const [nextEntities, nextOperations] = await Promise.all([
+      const [nextEntities, nextOperations, nextSchedules] = await Promise.all([
         api.getManagedEntities(account.id),
         api.getAdOperations(account.id),
+        api.getSchedules(account.id),
       ]);
       setEntities(nextEntities);
       setOperations(nextOperations);
+      setSchedules(nextSchedules);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -553,6 +618,46 @@ function AdsManagementPage({
     }
   };
 
+  const saveSchedule = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!scheduling) return;
+    try {
+      setBusy(`${scheduling.externalId}:schedule`);
+      if (scheduleKind === "once") {
+        await api.createOneTimeSchedule(account.id, {
+          externalId: scheduling.externalId,
+          action: scheduledAction,
+          runAt: new Date(runAt).toISOString(),
+        });
+      } else {
+        await api.createOvernightSchedule(account.id, {
+          externalId: scheduling.externalId,
+          disableAt: new Date(disableAt).toISOString(),
+          enableAt: new Date(enableAt).toISOString(),
+        });
+      }
+      setScheduling(null);
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const cancelSchedule = async (schedule: ScheduledEntityActionRecord) => {
+    try {
+      if (schedule.groupId) {
+        await api.cancelOvernightSchedule(account.id, schedule.groupId);
+      } else {
+        await api.cancelSchedule(account.id, schedule.id);
+      }
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    }
+  };
+
   if (!entities) return <EmptyState text="正在读取广告对象…" loading />;
 
   return (
@@ -604,6 +709,7 @@ function AdsManagementPage({
                     <td><div className="row-actions">
                       <button disabled={busy !== null || entity.status === "unknown"} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>
                       <button disabled={busy !== null} onClick={() => void toggleIgnore(entity)} type="button"><Ban size={14} /> {entity.ignored ? "取消忽略" : "忽略"}</button>
+                      {entity.entityType === "ad-group" && <button disabled={busy !== null} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
                       {entity.entityType === "ad" && <button disabled={busy !== null} onClick={() => void queueAppeal(entity)} type="button">加入申诉</button>}
                     </div></td>
                   </tr>
@@ -615,19 +721,36 @@ function AdsManagementPage({
       </div>
 
       <div className="panel table-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务</h2><p>单次定时只执行一次；过夜开关会每日按设置时间关闭和开启。账户自动化或软件总开关关闭时不会执行。</p></div></div></div>
+        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" onClick={() => void cancelSchedule(schedule)} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
+      </div>
+
+      <div className="panel table-panel">
         <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>广告操作记录</h2><p>手动和自动启停、忽略名单变更均记录在本机。</p></div></div></div>
         <div className="table-wrap"><table>
           <thead><tr><th>对象</th><th>动作</th><th>来源</th><th>结果</th><th>信息</th><th>时间</th></tr></thead>
           <tbody>{operations.length === 0 ? <tr><td colSpan={6}>暂无操作记录。</td></tr> : operations.slice(0, 50).map((operation) => <tr key={operation.id}>
             <td>{operation.entityName}<br /><small>{operation.externalId}</small></td>
             <td>{operationActionLabel(operation.action)}</td>
-            <td>{operation.source === "automation" ? "自动化" : "手动"}</td>
+            <td>{operation.source === "automation" ? "自动化" : operation.source === "scheduled" ? "定时" : "手动"}</td>
             <td><span className={operation.status === "succeeded" ? "status active" : "status"}>{operation.status === "succeeded" ? "成功" : operation.status === "pending" ? "等待" : "失败"}</span></td>
             <td>{operation.message ?? "—"}</td>
             <td>{new Date(operation.createdAt).toLocaleString()}</td>
           </tr>)}</tbody>
         </table></div>
       </div>
+
+      {scheduling && (
+        <div className="modal-backdrop" onMouseDown={() => setScheduling(null)}>
+          <form className="modal schedule-modal" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void saveSchedule(event)}>
+            <div className="modal-heading"><div><span className="eyebrow">广告组定时</span><h2>{scheduling.name}</h2></div><button type="button" onClick={() => setScheduling(null)}><X size={20} /></button></div>
+            <div className="schedule-kind-tabs"><button className={scheduleKind === "once" ? "active" : ""} onClick={() => setScheduleKind("once")} type="button">单次定时</button><button className={scheduleKind === "overnight" ? "active" : ""} onClick={() => setScheduleKind("overnight")} type="button">每日过夜</button></div>
+            {scheduleKind === "once" ? <div className="form-grid"><Field label="执行动作"><select value={scheduledAction} onChange={(event) => setScheduledAction(event.target.value as typeof scheduledAction)}><option value="enable">开启</option><option value="disable">关闭</option></select></Field><Field label="执行时间"><input required type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} /></Field></div> : <div className="form-grid"><Field label="每日关闭时间（首次）"><input required type="datetime-local" value={disableAt} onChange={(event) => setDisableAt(event.target.value)} /></Field><Field label="每日开启时间（首次）"><input required type="datetime-local" value={enableAt} onChange={(event) => setEnableAt(event.target.value)} /></Field></div>}
+            <p className="provider-endpoint-note">时间使用本机时区。未到时间前不会写入 TikTok；执行时仍要求账户连接正常且两个自动化总开关均开启。</p>
+            <div className="modal-actions"><button className="secondary-button" onClick={() => setScheduling(null)} type="button">取消</button><button className="primary-button" disabled={busy !== null} type="submit">保存任务</button></div>
+          </form>
+        </div>
+      )}
     </section>
   );
 }
@@ -639,36 +762,65 @@ function AnalyticsPage({
   account: AccountConfig;
   onError: (message: string | null) => void;
 }) {
-  const [days, setDays] = useState(7);
-  const [level, setLevel] = useState<"all" | EntityMetricSnapshotRecord["entityType"]>("ad-group");
-  const [snapshots, setSnapshots] = useState<EntityMetricSnapshotRecord[] | null>(null);
+  const today = formatDateInput(new Date());
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+  const [preset, setPreset] = useState<AnalysisPreset>("7d");
+  const [customFrom, setCustomFrom] = useState(formatDateInput(sevenDaysAgo));
+  const [customTo, setCustomTo] = useState(today);
+  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("ad-group");
+  const [barMetric, setBarMetric] = useState<BatchBarMetric>("spend");
+  const [lineMetric, setLineMetric] = useState<BatchLineMetric>("cpc");
+  const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
+  const range = useMemo(
+    () => {
+      try {
+        return resolveAnalysisRange(preset, customFrom, customTo);
+      } catch {
+        return null;
+      }
+    },
+    [customFrom, customTo, preset],
+  );
 
   useEffect(() => {
-    setSnapshots(null);
+    if (account.providerKind === "cookie" && level === "ad") setLevel("ad-group");
+  }, [account.providerKind, level]);
+
+  useEffect(() => {
+    if (!range) return;
+    setBatches(null);
     void api
-      .getAnalytics(account.id, days, level === "all" ? undefined : level)
+      .getAnalytics(account.id, range, level === "all" ? undefined : level)
       .then((result) => {
-        setSnapshots(result);
+        setBatches(result);
         onError(null);
       })
       .catch((cause) => onError(getErrorMessage(cause)));
-  }, [account.id, days, level, onError]);
+  }, [account.id, level, onError, range?.from, range?.to]);
 
-  const analysis = useMemo(() => analyzeSnapshots(snapshots ?? []), [snapshots]);
-  if (!snapshots) return <EmptyState text="正在分析指标快照…" loading />;
+  const analysis = useMemo(() => analyzeMetricBatches(batches ?? []), [batches]);
+  if (!batches) return <EmptyState text="正在分析指标快照…" loading />;
 
   return (
     <section className="page-stack">
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
-          <Field label="时间范围"><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={1}>最近 1 天</option><option value={7}>最近 7 天</option><option value={30}>最近 30 天</option><option value={90}>最近 90 天</option></select></Field>
-          <Field label="分析层级"><select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}><option value="all">全部层级</option><option value="campaign">广告系列</option><option value="ad-group">广告组</option><option value="ad">广告</option></select></Field>
+          <Field label="时间范围"><select value={preset} onChange={(event) => setPreset(event.target.value as AnalysisPreset)}><option value="today">今天</option><option value="yesterday">昨天</option><option value="3d">三天</option><option value="7d">七天</option><option value="30d">三十天</option><option value="custom">自定义</option></select></Field>
+          <Field label="分析层级"><select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}><option value="all">全部层级</option><option value="campaign">广告系列</option><option value="ad-group">广告组</option>{account.providerKind === "official-api" && <option value="ad">广告</option>}</select></Field>
+          {preset === "custom" && <><Field label="开始日期"><input type="date" max={customTo || today} value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></Field><Field label="结束日期"><input type="date" min={customFrom} max={today} value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></Field></>}
         </div>
+        {!range && <p className="error-text">请选择有效日期，且范围不超过 90 天。</p>}
+        <p className="retention-note">本地指标快照默认保留 90 天。Cookie 接入当前不展示广告层级分析，因为其广告 list 并非独立真实列表请求。</p>
       </div>
       <div className="summary-grid">
         <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
         <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
         <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+      </div>
+      <div className="panel batch-chart-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>批次数据透视</h2><p>数据与下方“检测批次趋势”完全一致；柱状和折线在同一张图中按各自刻度展示。</p></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
+        <BatchTrendChart batches={analysis.batches} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
       <div className="panel table-panel">
         <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次趋势</h2><p>相同检测时间的对象聚合为一个批次，避免把多次累计指标重复相加。</p></div></div></div>
@@ -679,6 +831,76 @@ function AnalyticsPage({
       </div>
     </section>
   );
+}
+
+type BatchBarMetric = "spend" | "clicks" | "conversions";
+type BatchLineMetric = "cpc" | "cpa";
+type AnalyticsBatch = MetricBatchRecord;
+
+function BatchTrendChart({ batches, barMetric, lineMetric }: { batches: AnalyticsBatch[]; barMetric: BatchBarMetric; lineMetric: BatchLineMetric }) {
+  const points = batches.slice(0, 24).reverse().map((batch) => ({
+    ...batch,
+    barValue: batch[barMetric],
+    lineValue: lineMetric === "cpc"
+      ? (batch.clicks > 0 ? batch.spend / batch.clicks : null)
+      : (batch.conversions > 0 ? batch.spend / batch.conversions : null),
+  }));
+  if (points.length === 0) return <div className="chart-empty">暂无批次数据，请先执行检测。</div>;
+  const width = 920;
+  const height = 286;
+  const left = 54;
+  const right = 54;
+  const top = 20;
+  const bottom = 52;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const barMaximum = Math.max(...points.map((point) => point.barValue), 1);
+  const lineMaximum = Math.max(...points.map((point) => point.lineValue ?? 0), 1);
+  const step = plotWidth / points.length;
+  const barWidth = Math.min(34, Math.max(7, step * 0.55));
+  const lineSegments: string[] = [];
+  let currentSegment: string[] = [];
+  points.forEach((point, index) => {
+    if (point.lineValue === null) {
+      if (currentSegment.length > 1) lineSegments.push(currentSegment.join(" "));
+      currentSegment = [];
+      return;
+    }
+    const x = left + step * index + step / 2;
+    const y = top + plotHeight - (point.lineValue / lineMaximum) * plotHeight;
+    currentSegment.push(`${x},${y}`);
+  });
+  if (currentSegment.length > 1) lineSegments.push(currentSegment.join(" "));
+  const barLabel = { spend: "消耗", clicks: "点击", conversions: "转化" }[barMetric];
+  const lineLabel = lineMetric === "cpc" ? "平均 CPC" : "平均转化成本";
+
+  return <div className="batch-chart-wrap">
+    <div className="chart-legend"><span className="bar-key">{barLabel}（柱）</span><span className="line-key">{lineLabel}（线）</span><small>最多显示最近 24 个检测批次</small></div>
+    <svg aria-label={`${barLabel}柱状图与${lineLabel}折线图`} className="batch-combo-chart" role="img" viewBox={`0 0 ${width} ${height}`}>
+      {[0, .25, .5, .75, 1].map((ratio) => {
+        const y = top + plotHeight * (1 - ratio);
+        return <g key={ratio}><line className="chart-grid-line" x1={left} x2={width - right} y1={y} y2={y} /><text className="chart-axis-label" textAnchor="end" x={left - 8} y={y + 4}>{formatMetric(barMaximum * ratio)}</text><text className="chart-axis-label" textAnchor="start" x={width - right + 8} y={y + 4}>{formatMetric(lineMaximum * ratio)}</text></g>;
+      })}
+      {points.map((point, index) => {
+        const x = left + step * index + step / 2;
+        const barHeight = (point.barValue / barMaximum) * plotHeight;
+        const labelEvery = Math.max(1, Math.ceil(points.length / 8));
+        return <g key={point.capturedAt}><rect className="chart-bar" height={barHeight} rx="3" width={barWidth} x={x - barWidth / 2} y={top + plotHeight - barHeight}><title>{new Date(point.capturedAt).toLocaleString()} · {barLabel} {formatMetric(point.barValue)} · {lineLabel} {formatMetric(point.lineValue)}</title></rect>{index % labelEvery === 0 && <text className="chart-x-label" textAnchor="middle" x={x} y={height - 24}>{formatChartTime(point.capturedAt)}</text>}</g>;
+      })}
+      {lineSegments.map((segment, index) => <polyline className="chart-line" fill="none" key={index} points={segment} />)}
+      {points.map((point, index) => {
+        if (point.lineValue === null) return null;
+        const x = left + step * index + step / 2;
+        const y = top + plotHeight - (point.lineValue / lineMaximum) * plotHeight;
+        return <circle className="chart-line-dot" cx={x} cy={y} key={point.capturedAt} r="3.5"><title>{new Date(point.capturedAt).toLocaleString()} · {lineLabel} {formatMetric(point.lineValue)}</title></circle>;
+      })}
+    </svg>
+  </div>;
+}
+
+function formatChartTime(value: string): string {
+  const date = new Date(value);
+  return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function AutomationPage({
@@ -1041,45 +1263,31 @@ function operationActionLabel(action: AdOperationRecord["action"]): string {
   }[action];
 }
 
+function scheduleStatusLabel(status: ScheduledEntityActionRecord["status"]): string {
+  return { scheduled: "等待执行", completed: "已完成", failed: "失败", cancelled: "已取消" }[status];
+}
+
 function formatMetric(value: number | null): string {
   return value === null || !Number.isFinite(value)
     ? "—"
     : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
 
-function analyzeSnapshots(snapshots: EntityMetricSnapshotRecord[]) {
-  const latestByEntity = new Map<string, EntityMetricSnapshotRecord>();
-  const grouped = new Map<
-    string,
-    { capturedAt: string; count: number; spend: number; clicks: number; conversions: number }
-  >();
-  for (const snapshot of snapshots) {
-    const key = `${snapshot.entityType}:${snapshot.externalId}`;
-    if (!latestByEntity.has(key)) latestByEntity.set(key, snapshot);
-    const batch = grouped.get(snapshot.capturedAt) ?? {
-      capturedAt: snapshot.capturedAt,
-      count: 0,
-      spend: 0,
-      clicks: 0,
-      conversions: 0,
-    };
-    batch.count += 1;
-    batch.spend += snapshot.metrics.spend ?? 0;
-    batch.clicks += snapshot.metrics.clicks ?? 0;
-    batch.conversions += snapshot.metrics.conversions ?? 0;
-    grouped.set(snapshot.capturedAt, batch);
-  }
-  const latest = [...latestByEntity.values()];
+function formatDateInput(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function analyzeMetricBatches(batches: MetricBatchRecord[]) {
+  const sorted = [...batches].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
+  const latest = sorted[0];
   return {
-    latestSpend: latest.reduce((sum, item) => sum + (item.metrics.spend ?? 0), 0),
-    latestClicks: latest.reduce((sum, item) => sum + (item.metrics.clicks ?? 0), 0),
-    latestConversions: latest.reduce(
-      (sum, item) => sum + (item.metrics.conversions ?? 0),
-      0,
-    ),
-    batches: [...grouped.values()].sort((a, b) =>
-      b.capturedAt.localeCompare(a.capturedAt),
-    ),
+    latestSpend: latest?.spend ?? 0,
+    latestClicks: latest?.clicks ?? 0,
+    latestConversions: latest?.conversions ?? 0,
+    batches: sorted,
   };
 }
 

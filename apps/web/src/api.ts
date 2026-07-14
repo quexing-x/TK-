@@ -14,7 +14,7 @@ import type {
   RuleConfiguration,
   RuleConfigurationInput,
   AdOperationRecord,
-  EntityMetricSnapshotRecord,
+  MetricBatchRecord,
   ManagedEntityRecord,
   ManualStatusInput,
   NotificationChannelKind,
@@ -23,6 +23,21 @@ import type {
   NotificationCredentialInput,
   NotificationDeliveryRecord,
   PollCycleRecord,
+  AuthStatus,
+  InitialDeveloperInput,
+  LoginInput,
+  LocalUserCreateInput,
+  LocalUserRecord,
+  LocalUserUpdateInput,
+  PasswordChangeInput,
+  SystemRuntimeState,
+  AutomationFeatureSettings,
+  AutomationFeatureSettingsInput,
+  ScheduledEntityActionRecord,
+  OneTimeScheduleInput,
+  OvernightScheduleInput,
+  MultiAccountLaunchPlanInput,
+  MultiAccountLaunchPlanRecord,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -38,6 +53,7 @@ export interface ProviderDescriptor {
 export interface BootstrapPayload {
   accounts: AccountConfig[];
   globalAutomationSettings: GlobalAutomationSettings;
+  systemRuntime: SystemRuntimeState;
   providers: ProviderDescriptor[];
 }
 
@@ -46,11 +62,22 @@ export interface ManualStatusResult extends ManualStatusInput {
   message: string;
 }
 
+let csrfToken: string | null = null;
+
+export function setAuthSession(status: AuthStatus | null): void {
+  csrfToken = status?.csrfToken ?? null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
+      ...(csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)
+        ? { "x-csrf-token": csrfToken }
+        : {}),
       ...init?.headers,
     },
   });
@@ -70,6 +97,97 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authStatus: async () => {
+    const status = await request<AuthStatus>("/api/auth/status");
+    setAuthSession(status);
+    return status;
+  },
+  setupDeveloper: async (input: InitialDeveloperInput) => {
+    const status = await request<AuthStatus>("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    setAuthSession(status);
+    return status;
+  },
+  login: async (input: LoginInput) => {
+    const status = await request<AuthStatus>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    setAuthSession(status);
+    return status;
+  },
+  logout: async () => {
+    const result = await request<{ ok: boolean }>("/api/auth/logout", {
+      method: "POST",
+    });
+    setAuthSession(null);
+    return result;
+  },
+  changePassword: (input: PasswordChangeInput) =>
+    request<{ ok: boolean; reauthenticationRequired: boolean }>(
+      "/api/auth/password",
+      { method: "PUT", body: JSON.stringify(input) },
+    ),
+  getLocalUsers: () => request<LocalUserRecord[]>("/api/local-users"),
+  createLocalUser: (input: LocalUserCreateInput) =>
+    request<LocalUserRecord>("/api/local-users", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateLocalUser: (userId: string, input: LocalUserUpdateInput) =>
+    request<LocalUserRecord>(`/api/local-users/${userId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  updateSystemRuntime: (enabled: boolean) =>
+    request<SystemRuntimeState>("/api/system/runtime", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  getAutomationFeatures: () =>
+    request<AutomationFeatureSettings>("/api/automation/features"),
+  updateAutomationFeatures: (input: AutomationFeatureSettingsInput) =>
+    request<AutomationFeatureSettings>("/api/automation/features", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  getSchedules: (accountId: string) =>
+    request<ScheduledEntityActionRecord[]>(
+      `/api/accounts/${accountId}/schedules`,
+    ),
+  createOneTimeSchedule: (accountId: string, input: OneTimeScheduleInput) =>
+    request<ScheduledEntityActionRecord>(
+      `/api/accounts/${accountId}/schedules/once`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  createOvernightSchedule: (
+    accountId: string,
+    input: OvernightScheduleInput,
+  ) =>
+    request<ScheduledEntityActionRecord[]>(
+      `/api/accounts/${accountId}/schedules/overnight`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  cancelSchedule: (accountId: string, scheduleId: string) =>
+    request<void>(`/api/accounts/${accountId}/schedules/${scheduleId}`, {
+      method: "DELETE",
+    }),
+  cancelOvernightSchedule: (accountId: string, groupId: string) =>
+    request<void>(
+      `/api/accounts/${accountId}/overnight-schedules/${groupId}`,
+      { method: "DELETE" },
+    ),
+  getLaunchPlans: () =>
+    request<MultiAccountLaunchPlanRecord[]>("/api/launch-plans"),
+  createLaunchPlan: (input: MultiAccountLaunchPlanInput) =>
+    request<MultiAccountLaunchPlanRecord>("/api/launch-plans", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  cancelLaunchPlan: (planId: string) =>
+    request<void>(`/api/launch-plans/${planId}`, { method: "DELETE" }),
   bootstrap: () => request<BootstrapPayload>("/api/bootstrap"),
   createAccount: (input: AccountCreateInput) =>
     request<AccountConfig>("/api/accounts", {
@@ -229,12 +347,12 @@ export const api = {
     }),
   getAnalytics: (
     accountId: string,
-    days: number,
+    range: { from: string; to: string },
     entityType?: ManualStatusInput["entityType"],
   ) => {
-    const query = new URLSearchParams({ days: String(days) });
+    const query = new URLSearchParams({ from: range.from, to: range.to });
     if (entityType) query.set("entityType", entityType);
-    return request<EntityMetricSnapshotRecord[]>(
+    return request<MetricBatchRecord[]>(
       `/api/accounts/${accountId}/analytics?${query.toString()}`,
     );
   },

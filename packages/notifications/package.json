@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@tk-auto/core": "workspace:*",
-    "nodemailer": "^7.0.10"
+    "nodemailer": "^9.0.3"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

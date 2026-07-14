@@ -20,6 +20,7 @@ import {
   type AutomationTrigger,
   type AdOperationRecord,
   type EntityMetricSnapshotRecord,
+  type MetricBatchRecord,
   type IgnoredEntityRecord,
   type ManagedEntityRecord,
   normalizeProviderEntity,
@@ -41,6 +42,28 @@ import {
   RuleConfigurationSchema,
   type RuleConfiguration,
   type RuleConfigurationInput,
+  METRIC_RETENTION_DAYS,
+  SystemRuntimeStateSchema,
+  type SystemRuntimeState,
+  type SystemRuntimeUpdate,
+  AutomationFeatureSettingsInputSchema,
+  AutomationFeatureSettingsSchema,
+  defaultAutomationFeatureSettings,
+  type AutomationFeatureSettings,
+  type AutomationFeatureSettingsInput,
+  OneTimeScheduleInputSchema,
+  OvernightScheduleInputSchema,
+  ScheduledEntityActionRecordSchema,
+  type OneTimeScheduleInput,
+  type OvernightScheduleInput,
+  type ScheduledEntityActionRecord,
+  MultiAccountLaunchPlanInputSchema,
+  MultiAccountLaunchPlanRecordSchema,
+  type MultiAccountLaunchPlanInput,
+  type MultiAccountLaunchPlanRecord,
+  LocalUserRecordSchema,
+  type LocalUserRecord,
+  type LocalUserRole,
   NotificationChannelKindSchema,
   NotificationChannelSettingsSchema,
   NotificationDeliveryRecordSchema,
@@ -59,6 +82,21 @@ type SqlRow = Record<string, unknown>;
 
 export interface StoredProviderConnection extends ProviderConnection {
   credentialRef: string | null;
+}
+
+export interface StoredLocalUser extends LocalUserRecord {
+  passwordHash: string;
+  passwordSalt: string;
+}
+
+export interface StoredAuthSession {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  csrfToken: string;
+  expiresAt: string;
+  createdAt: string;
+  lastSeenAt: string;
 }
 
 export interface StoredNotificationChannel extends NotificationChannelRecord {
@@ -595,6 +633,215 @@ export class AutomationStore {
     return this.getRuleConfiguration();
   }
 
+  getSystemRuntimeState(): SystemRuntimeState {
+    this.ensureGlobalDefaults();
+    const row = this.db
+      .prepare("SELECT * FROM global_runtime_state WHERE id = 1")
+      .get() as SqlRow;
+    return SystemRuntimeStateSchema.parse({
+      enabled: fromSqlBoolean(row.enabled),
+      updatedAt: row.updated_at,
+    });
+  }
+
+  updateSystemRuntimeState(input: SystemRuntimeUpdate): SystemRuntimeState {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE global_runtime_state SET enabled = ?, updated_at = ? WHERE id = 1",
+      )
+      .run(toSqlBoolean(input.enabled), now);
+    this.writeSystemAudit("global.runtime.updated", input);
+    return this.getSystemRuntimeState();
+  }
+
+  getAutomationFeatureSettings(): AutomationFeatureSettings {
+    this.ensureGlobalDefaults();
+    const row = this.db
+      .prepare("SELECT * FROM automation_feature_settings WHERE id = 1")
+      .get() as SqlRow;
+    return AutomationFeatureSettingsSchema.parse({
+      ...JSON.parse(String(row.settings_json)),
+      updatedAt: row.updated_at,
+    });
+  }
+
+  updateAutomationFeatureSettings(
+    input: AutomationFeatureSettingsInput,
+  ): AutomationFeatureSettings {
+    const settings = AutomationFeatureSettingsInputSchema.parse(input);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE automation_feature_settings
+         SET settings_json = ?, updated_at = ? WHERE id = 1`,
+      )
+      .run(JSON.stringify(settings), now);
+    this.writeSystemAudit("global.feature-settings.updated", settings);
+    return this.getAutomationFeatureSettings();
+  }
+
+  countLocalUsers(): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM local_users")
+      .get() as SqlRow;
+    return Number(row.count);
+  }
+
+  listLocalUsers(): LocalUserRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM local_users ORDER BY created_at ASC")
+      .all() as SqlRow[];
+    return rows.map(mapLocalUser);
+  }
+
+  getStoredLocalUserByUsername(username: string): StoredLocalUser | null {
+    const row = this.db
+      .prepare("SELECT * FROM local_users WHERE username = ?")
+      .get(username) as SqlRow | undefined;
+    return row ? mapStoredLocalUser(row) : null;
+  }
+
+  getStoredLocalUser(userId: string): StoredLocalUser | null {
+    const row = this.db
+      .prepare("SELECT * FROM local_users WHERE id = ?")
+      .get(userId) as SqlRow | undefined;
+    return row ? mapStoredLocalUser(row) : null;
+  }
+
+  createLocalUser(input: {
+    username: string;
+    displayName: string;
+    role: LocalUserRole;
+    passwordHash: string;
+    passwordSalt: string;
+  }): LocalUserRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO local_users (
+          id, username, display_name, role, enabled, password_hash,
+          password_salt, last_login_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, NULL, ?, ?)`,
+      )
+      .run(
+        id,
+        input.username,
+        input.displayName,
+        input.role,
+        input.passwordHash,
+        input.passwordSalt,
+        now,
+        now,
+      );
+    this.writeSystemAudit("local-user.created", {
+      id,
+      username: input.username,
+      role: input.role,
+    });
+    return mapLocalUser(
+      this.db.prepare("SELECT * FROM local_users WHERE id = ?").get(id) as SqlRow,
+    );
+  }
+
+  updateLocalUser(
+    userId: string,
+    input: { displayName: string; role: LocalUserRole; enabled: boolean },
+  ): LocalUserRecord | null {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE local_users SET display_name = ?, role = ?, enabled = ?,
+         updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        input.displayName,
+        input.role,
+        toSqlBoolean(input.enabled),
+        now,
+        userId,
+      );
+    if (result.changes === 0) return null;
+    if (!input.enabled) {
+      this.db.prepare("DELETE FROM auth_sessions WHERE user_id = ?").run(userId);
+    }
+    this.writeSystemAudit("local-user.updated", { userId, ...input });
+    return mapLocalUser(
+      this.db.prepare("SELECT * FROM local_users WHERE id = ?").get(userId) as SqlRow,
+    );
+  }
+
+  updateLocalUserPassword(
+    userId: string,
+    passwordHash: string,
+    passwordSalt: string,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE local_users SET password_hash = ?, password_salt = ?,
+         updated_at = ? WHERE id = ?`,
+      )
+      .run(passwordHash, passwordSalt, new Date().toISOString(), userId);
+    if (result.changes > 0) {
+      this.db.prepare("DELETE FROM auth_sessions WHERE user_id = ?").run(userId);
+      this.writeSystemAudit("local-user.password.updated", { userId });
+    }
+    return result.changes > 0;
+  }
+
+  recordLocalUserLogin(userId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE local_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(now, now, userId);
+  }
+
+  createAuthSession(input: StoredAuthSession): void {
+    this.cleanupExpiredAuthSessions();
+    this.db
+      .prepare(
+        `INSERT INTO auth_sessions (
+          id, user_id, token_hash, csrf_token, expires_at, created_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.userId,
+        input.tokenHash,
+        input.csrfToken,
+        input.expiresAt,
+        input.createdAt,
+        input.lastSeenAt,
+      );
+  }
+
+  getAuthSession(tokenHash: string): StoredAuthSession | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM auth_sessions
+         WHERE token_hash = ? AND expires_at > ?`,
+      )
+      .get(tokenHash, new Date().toISOString()) as SqlRow | undefined;
+    if (!row) return null;
+    this.db
+      .prepare("UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), String(row.id));
+    return mapAuthSession(row);
+  }
+
+  deleteAuthSession(tokenHash: string): void {
+    this.db.prepare("DELETE FROM auth_sessions WHERE token_hash = ?").run(tokenHash);
+  }
+
+  cleanupExpiredAuthSessions(): void {
+    this.db
+      .prepare("DELETE FROM auth_sessions WHERE expires_at <= ?")
+      .run(new Date().toISOString());
+  }
+
   listProviderConnections(accountId: string): ProviderConnection[] {
     const rows = this.db
       .prepare(
@@ -759,7 +1006,9 @@ export class AutomationStore {
         )
         .run(
           accountId,
-          new Date(Date.now() - 90 * 24 * 60 * 60_000).toISOString(),
+          new Date(
+            Date.now() - METRIC_RETENTION_DAYS * 24 * 60 * 60_000,
+          ).toISOString(),
         );
       this.db
         .prepare(
@@ -999,28 +1248,263 @@ export class AutomationStore {
     });
   }
 
+  createOneTimeSchedule(
+    accountId: string,
+    input: OneTimeScheduleInput,
+  ): ScheduledEntityActionRecord {
+    const schedule = OneTimeScheduleInputSchema.parse(input);
+    return this.insertScheduledAction(accountId, {
+      externalId: schedule.externalId,
+      action: schedule.action,
+      nextRunAt: schedule.runAt,
+      scheduleType: "once",
+      repeatDaily: false,
+      groupId: null,
+    });
+  }
+
+  createOvernightSchedule(
+    accountId: string,
+    input: OvernightScheduleInput,
+  ): ScheduledEntityActionRecord[] {
+    const schedule = OvernightScheduleInputSchema.parse(input);
+    this.cancelOvernightSchedulesForEntity(accountId, schedule.externalId);
+    const groupId = randomUUID();
+    return [
+      this.insertScheduledAction(accountId, {
+        externalId: schedule.externalId,
+        action: "disable",
+        nextRunAt: schedule.disableAt,
+        scheduleType: "overnight",
+        repeatDaily: true,
+        groupId,
+      }),
+      this.insertScheduledAction(accountId, {
+        externalId: schedule.externalId,
+        action: "enable",
+        nextRunAt: schedule.enableAt,
+        scheduleType: "overnight",
+        repeatDaily: true,
+        groupId,
+      }),
+    ];
+  }
+
+  listScheduledActions(
+    accountId: string,
+    limit = 200,
+  ): ScheduledEntityActionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM scheduled_entity_actions
+         WHERE account_id = ?
+         ORDER BY CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END,
+                  next_run_at ASC, created_at DESC
+         LIMIT ?`,
+      )
+      .all(accountId, limit) as SqlRow[];
+    return rows.map(mapScheduledEntityAction);
+  }
+
+  listDueScheduledActions(
+    accountId: string,
+    asOf = new Date().toISOString(),
+    limit = 20,
+  ): ScheduledEntityActionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM scheduled_entity_actions
+         WHERE account_id = ? AND status = 'scheduled' AND next_run_at <= ?
+         ORDER BY next_run_at ASC LIMIT ?`,
+      )
+      .all(accountId, asOf, limit) as SqlRow[];
+    return rows.map(mapScheduledEntityAction);
+  }
+
+  cancelScheduledAction(accountId: string, scheduleId: string): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE scheduled_entity_actions
+         SET status = 'cancelled', updated_at = ?
+         WHERE id = ? AND account_id = ? AND status = 'scheduled'`,
+      )
+      .run(now, scheduleId, accountId);
+    if (result.changes > 0) {
+      this.writeAudit("local-user", accountId, "schedule.cancelled", {
+        scheduleId,
+      });
+    }
+    return result.changes > 0;
+  }
+
+  cancelOvernightSchedule(accountId: string, groupId: string): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE scheduled_entity_actions
+         SET status = 'cancelled', updated_at = ?
+         WHERE account_id = ? AND group_id = ? AND status = 'scheduled'`,
+      )
+      .run(now, accountId, groupId);
+    if (result.changes > 0) {
+      this.writeAudit("local-user", accountId, "overnight-schedule.cancelled", {
+        groupId,
+      });
+    }
+    return result.changes > 0;
+  }
+
+  completeScheduledAction(
+    scheduleId: string,
+    result: "succeeded" | "failed",
+    message: string,
+    completedAt = new Date().toISOString(),
+  ): ScheduledEntityActionRecord {
+    const row = this.db
+      .prepare("SELECT * FROM scheduled_entity_actions WHERE id = ?")
+      .get(scheduleId) as SqlRow | undefined;
+    if (!row) throw new Error("Scheduled action not found");
+    const current = mapScheduledEntityAction(row);
+    const nextRunAt = current.repeatDaily
+      ? advanceDailyRun(current.nextRunAt, completedAt)
+      : current.nextRunAt;
+    const status = current.repeatDaily
+      ? "scheduled"
+      : result === "succeeded"
+        ? "completed"
+        : "failed";
+    this.db
+      .prepare(
+        `UPDATE scheduled_entity_actions SET
+          next_run_at = ?, status = ?, last_result = ?, last_message = ?,
+          last_run_at = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        nextRunAt,
+        status,
+        result,
+        message,
+        completedAt,
+        completedAt,
+        scheduleId,
+      );
+    const updated = this.db
+      .prepare("SELECT * FROM scheduled_entity_actions WHERE id = ?")
+      .get(scheduleId) as SqlRow;
+    return mapScheduledEntityAction(updated);
+  }
+
+  listMultiAccountLaunchPlans(
+    limit = 100,
+  ): MultiAccountLaunchPlanRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM multi_account_launch_plans ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(limit) as SqlRow[];
+    return rows.map(mapMultiAccountLaunchPlan);
+  }
+
+  createMultiAccountLaunchPlan(
+    input: MultiAccountLaunchPlanInput,
+  ): MultiAccountLaunchPlanRecord {
+    const plan = MultiAccountLaunchPlanInputSchema.parse(input);
+    const sourceAccount = this.getAccount(plan.sourceAccountId);
+    if (!sourceAccount) throw new Error("源广告账户不存在。");
+    const sourceAd = this.listManagedEntities(
+      plan.sourceAccountId,
+      sourceAccount.providerKind,
+    ).find(
+      (entity) =>
+        entity.entityType === "ad" && entity.externalId === plan.sourceAdId,
+    );
+    if (!sourceAd) throw new Error("源广告不存在，请先同步源账户数据。");
+    const targetAccountIds = [
+      ...new Set(
+        plan.targetAccountIds.filter((accountId) => accountId !== plan.sourceAccountId),
+      ),
+    ];
+    if (targetAccountIds.length === 0) {
+      throw new Error("至少选择一个不同于源账户的目标账户。");
+    }
+    for (const accountId of targetAccountIds) {
+      if (!this.getAccount(accountId)) throw new Error("目标广告账户不存在。");
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const taskCount = Math.max(plan.launchRows?.length ?? 0, 1);
+    const message =
+      `已保存 ${taskCount} 条投放配置；真实复制执行器需要目标账户的创建接口或复制 cURL，当前不会写入 TikTok。`;
+    this.db
+      .prepare(
+        `INSERT INTO multi_account_launch_plans (
+          id, source_account_id, source_ad_id, source_ad_name,
+          target_account_ids_json, naming_template, start_paused,
+          launch_rows_json, status, message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'blocked', ?, ?, ?)`,
+      )
+      .run(
+        id,
+        plan.sourceAccountId,
+        plan.sourceAdId,
+        sourceAd.name,
+        JSON.stringify(targetAccountIds),
+        plan.namingTemplate,
+        toSqlBoolean(plan.startPaused),
+        JSON.stringify(plan.launchRows ?? []),
+        message,
+        now,
+        now,
+      );
+    this.writeAudit("local-user", plan.sourceAccountId, "launch-plan.created", {
+      id,
+      targetAccountIds,
+      startPaused: plan.startPaused,
+      taskCount,
+    });
+    return this.listMultiAccountLaunchPlans().find(
+      (item) => item.id === id,
+    ) as MultiAccountLaunchPlanRecord;
+  }
+
+  cancelMultiAccountLaunchPlan(planId: string): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE multi_account_launch_plans
+         SET status = 'cancelled', updated_at = ?
+         WHERE id = ? AND status IN ('draft', 'blocked')`,
+      )
+      .run(now, planId);
+    return result.changes > 0;
+  }
+
   listMetricSnapshots(
     accountId: string,
     kind: ProviderKind,
     since: string,
     entityType?: ProviderEntity["entityType"],
     limit = 5000,
+    until = new Date().toISOString(),
   ): EntityMetricSnapshotRecord[] {
     const rows = entityType
       ? (this.db
           .prepare(
             `SELECT * FROM entity_metric_snapshots
              WHERE account_id = ? AND provider_kind = ? AND captured_at >= ?
-               AND entity_type = ? ORDER BY captured_at DESC LIMIT ?`,
-          )
-          .all(accountId, kind, since, entityType, limit) as SqlRow[])
+               AND captured_at <= ? AND entity_type = ?
+             ORDER BY captured_at DESC LIMIT ?`,
+           )
+          .all(accountId, kind, since, until, entityType, limit) as SqlRow[])
       : (this.db
           .prepare(
             `SELECT * FROM entity_metric_snapshots
              WHERE account_id = ? AND provider_kind = ? AND captured_at >= ?
+               AND captured_at <= ?
              ORDER BY captured_at DESC LIMIT ?`,
-          )
-          .all(accountId, kind, since, limit) as SqlRow[]);
+           )
+          .all(accountId, kind, since, until, limit) as SqlRow[]);
     return rows.map((row) => ({
       id: String(row.id),
       accountId: String(row.account_id),
@@ -1035,6 +1519,119 @@ export class AutomationStore {
       ) as EntityMetricSnapshotRecord["metrics"],
       capturedAt: String(row.captured_at),
     }));
+  }
+
+  listMetricBatches(
+    accountId: string,
+    kind: ProviderKind,
+    since: string,
+    entityType?: ProviderEntity["entityType"],
+    until = new Date().toISOString(),
+  ): MetricBatchRecord[] {
+    const rows = entityType
+      ? this.db.prepare(
+          `SELECT captured_at,
+             COUNT(*) AS entity_count,
+             SUM(COALESCE(CAST(json_extract(metrics_json, '$.spend') AS REAL), 0)) AS spend,
+             SUM(COALESCE(CAST(json_extract(metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+             SUM(COALESCE(CAST(json_extract(metrics_json, '$.conversions') AS REAL), 0)) AS conversions
+           FROM entity_metric_snapshots
+           WHERE account_id = ? AND provider_kind = ? AND captured_at >= ?
+             AND captured_at <= ? AND entity_type = ?
+           GROUP BY captured_at ORDER BY captured_at DESC`,
+        ).all(accountId, kind, since, until, entityType) as SqlRow[]
+      : this.db.prepare(
+          `SELECT captured_at,
+             COUNT(*) AS entity_count,
+             SUM(COALESCE(CAST(json_extract(metrics_json, '$.spend') AS REAL), 0)) AS spend,
+             SUM(COALESCE(CAST(json_extract(metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+             SUM(COALESCE(CAST(json_extract(metrics_json, '$.conversions') AS REAL), 0)) AS conversions
+           FROM entity_metric_snapshots
+           WHERE account_id = ? AND provider_kind = ? AND captured_at >= ?
+             AND captured_at <= ?
+           GROUP BY captured_at ORDER BY captured_at DESC`,
+        ).all(accountId, kind, since, until) as SqlRow[];
+    return rows.map((row) => ({
+      capturedAt: String(row.captured_at),
+      count: Number(row.entity_count),
+      spend: Number(row.spend),
+      clicks: Number(row.clicks),
+      conversions: Number(row.conversions),
+    }));
+  }
+
+  private insertScheduledAction(
+    accountId: string,
+    input: {
+      externalId: string;
+      action: "enable" | "disable";
+      nextRunAt: string;
+      scheduleType: "once" | "overnight";
+      repeatDaily: boolean;
+      groupId: string | null;
+    },
+  ): ScheduledEntityActionRecord {
+    const account = this.getAccount(accountId);
+    if (!account) throw new Error("账号不存在。");
+    const entity = this.listManagedEntities(
+      accountId,
+      account.providerKind,
+    ).find(
+      (item) =>
+        item.entityType === "ad-group" && item.externalId === input.externalId,
+    );
+    if (!entity) throw new Error("广告组不存在，请先同步账户数据。");
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO scheduled_entity_actions (
+          id, group_id, account_id, provider_kind, entity_type, external_id,
+          entity_name, action, schedule_type, repeat_daily, next_run_at,
+          status, last_result, last_message, last_run_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'ad-group', ?, ?, ?, ?, ?, ?, 'scheduled',
+                  NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(
+        id,
+        input.groupId,
+        accountId,
+        account.providerKind,
+        input.externalId,
+        entity.name,
+        input.action,
+        input.scheduleType,
+        toSqlBoolean(input.repeatDaily),
+        input.nextRunAt,
+        now,
+        now,
+      );
+    this.writeAudit("local-user", accountId, "schedule.created", {
+      id,
+      groupId: input.groupId,
+      action: input.action,
+      scheduleType: input.scheduleType,
+      nextRunAt: input.nextRunAt,
+    });
+    const row = this.db
+      .prepare("SELECT * FROM scheduled_entity_actions WHERE id = ?")
+      .get(id) as SqlRow;
+    return mapScheduledEntityAction(row);
+  }
+
+  private cancelOvernightSchedulesForEntity(
+    accountId: string,
+    externalId: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE scheduled_entity_actions
+         SET status = 'cancelled', updated_at = ?
+         WHERE account_id = ? AND entity_type = 'ad-group'
+           AND external_id = ? AND schedule_type = 'overnight'
+           AND status = 'scheduled'`,
+      )
+      .run(new Date().toISOString(), accountId, externalId);
   }
 
   private findEntityName(
@@ -1644,6 +2241,44 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS global_runtime_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS automation_feature_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        settings_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS local_users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('developer', 'admin', 'operator', 'viewer')),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        last_login_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES local_users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        csrf_token TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS auth_sessions_lookup
+      ON auth_sessions (token_hash, expires_at);
+
       CREATE TABLE IF NOT EXISTS global_thresholds (
         id TEXT PRIMARY KEY,
         code TEXT NOT NULL UNIQUE,
@@ -1722,6 +2357,44 @@ export class AutomationStore {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS scheduled_entity_actions (
+        id TEXT PRIMARY KEY,
+        group_id TEXT,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        provider_kind TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK (entity_type = 'ad-group'),
+        external_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('enable', 'disable')),
+        schedule_type TEXT NOT NULL CHECK (schedule_type IN ('once', 'overnight')),
+        repeat_daily INTEGER NOT NULL CHECK (repeat_daily IN (0, 1)),
+        next_run_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('scheduled', 'completed', 'failed', 'cancelled')),
+        last_result TEXT CHECK (last_result IS NULL OR last_result IN ('succeeded', 'failed')),
+        last_message TEXT,
+        last_run_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS scheduled_entity_actions_due
+      ON scheduled_entity_actions (account_id, status, next_run_at);
+
+      CREATE TABLE IF NOT EXISTS multi_account_launch_plans (
+        id TEXT PRIMARY KEY,
+        source_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        source_ad_id TEXT NOT NULL,
+        source_ad_name TEXT NOT NULL,
+        target_account_ids_json TEXT NOT NULL,
+        naming_template TEXT NOT NULL,
+        start_paused INTEGER NOT NULL CHECK (start_paused IN (0, 1)),
+        launch_rows_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK (status IN ('draft', 'blocked', 'cancelled', 'completed')),
+        message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS entity_metric_snapshots (
         id TEXT PRIMARY KEY,
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -1791,6 +2464,7 @@ export class AutomationStore {
       ON automation_decisions (
         account_id, entity_type, external_id, action, status, executed_at
       );
+
       CREATE TABLE IF NOT EXISTS notification_channels (
         channel_kind TEXT PRIMARY KEY CHECK (channel_kind IN ('email', 'wecom', 'feishu')),
         settings_json TEXT NOT NULL,
@@ -1874,6 +2548,11 @@ export class AutomationStore {
       "cooldown_minutes",
       "INTEGER NOT NULL DEFAULT 60",
     );
+    this.ensureColumn(
+      "multi_account_launch_plans",
+      "launch_rows_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
     this.applyMigration("enable-all-status-levels-v1", () => {
       this.db
         .prepare(
@@ -1942,6 +2621,21 @@ export class AutomationStore {
         JSON.stringify(defaultRuleConfiguration.rules),
         now,
       );
+
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO global_runtime_state (id, enabled, updated_at)
+         VALUES (1, 1, ?)`,
+      )
+      .run(now);
+
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO automation_feature_settings (
+          id, settings_json, updated_at
+        ) VALUES (1, ?, ?)`,
+      )
+      .run(JSON.stringify(defaultAutomationFeatureSettings), now);
 
     const count = this.db
       .prepare("SELECT COUNT(*) AS count FROM global_thresholds")
@@ -2182,6 +2876,78 @@ function mapAdOperation(row: SqlRow): AdOperationRecord {
   };
 }
 
+function mapLocalUser(row: SqlRow): LocalUserRecord {
+  return LocalUserRecordSchema.parse({
+    id: row.id,
+    username: row.username,
+    displayName: row.display_name,
+    role: row.role,
+    enabled: fromSqlBoolean(row.enabled),
+    lastLoginAt: row.last_login_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function mapStoredLocalUser(row: SqlRow): StoredLocalUser {
+  return {
+    ...mapLocalUser(row),
+    passwordHash: String(row.password_hash),
+    passwordSalt: String(row.password_salt),
+  };
+}
+
+function mapAuthSession(row: SqlRow): StoredAuthSession {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    tokenHash: String(row.token_hash),
+    csrfToken: String(row.csrf_token),
+    expiresAt: String(row.expires_at),
+    createdAt: String(row.created_at),
+    lastSeenAt: String(row.last_seen_at),
+  };
+}
+
+function mapScheduledEntityAction(row: SqlRow): ScheduledEntityActionRecord {
+  return ScheduledEntityActionRecordSchema.parse({
+    id: row.id,
+    groupId: row.group_id ?? null,
+    accountId: row.account_id,
+    providerKind: row.provider_kind,
+    entityType: row.entity_type,
+    externalId: row.external_id,
+    entityName: row.entity_name,
+    action: row.action,
+    scheduleType: row.schedule_type,
+    repeatDaily: fromSqlBoolean(row.repeat_daily),
+    nextRunAt: row.next_run_at,
+    status: row.status,
+    lastResult: row.last_result ?? null,
+    lastMessage: row.last_message ?? null,
+    lastRunAt: row.last_run_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
+  return MultiAccountLaunchPlanRecordSchema.parse({
+    id: row.id,
+    sourceAccountId: row.source_account_id,
+    sourceAdId: row.source_ad_id,
+    sourceAdName: row.source_ad_name,
+    targetAccountIds: JSON.parse(String(row.target_account_ids_json)),
+    namingTemplate: row.naming_template,
+    startPaused: fromSqlBoolean(row.start_paused),
+    launchRows: JSON.parse(String(row.launch_rows_json ?? "[]")),
+    status: row.status,
+    message: row.message ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
 function mapProviderConnection(row: SqlRow): ProviderConnection {
   return ProviderConnectionSchema.parse({
     accountId: row.account_id,
@@ -2216,4 +2982,13 @@ function toSqlBoolean(value: boolean): number {
 
 function fromSqlBoolean(value: unknown): boolean {
   return Number(value) === 1;
+}
+
+function advanceDailyRun(current: string, completedAt: string): string {
+  let next = new Date(current).getTime();
+  const completed = new Date(completedAt).getTime();
+  do {
+    next += 24 * 60 * 60_000;
+  } while (next <= completed);
+  return new Date(next).toISOString();
 }

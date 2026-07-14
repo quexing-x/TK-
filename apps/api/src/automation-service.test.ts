@@ -19,6 +19,7 @@ class FakeProvider implements AdsProvider {
   readonly capabilities = new Set(["read-ad-groups", "change-status"] as const);
   readonly mutations: StatusMutation[] = [];
   shouldFail = false;
+  afterSync: (() => void | Promise<void>) | null = null;
   campaignCreatedAt = new Date().toISOString();
   scenario: "default" | "parent-child" | "priority" = "default";
 
@@ -105,6 +106,7 @@ class FakeProvider implements AdsProvider {
       });
     }
     const now = new Date().toISOString();
+    await this.afterSync?.();
     return {
       entities,
       result: {
@@ -229,6 +231,79 @@ describe("AutomationService", () => {
     const preview = await service.runAccount("demo-account", "preview");
     expect(preview.candidateCount).toBe(1);
     expect(provider.mutations).toHaveLength(0);
+  });
+
+  it("stops detection and writes while the software master switch is off", async () => {
+    store.updateSystemRuntimeState({ enabled: false });
+    await expect(service.runAccount("demo-account", "preview")).rejects.toThrow(
+      "软件总开关已关闭",
+    );
+    const scheduler = new AutomationScheduler(store, service);
+    await scheduler.tick();
+    expect(provider.mutations).toHaveLength(0);
+    expect(store.listPollCycles()).toHaveLength(0);
+  });
+
+  it("rechecks the master switch immediately before a provider write", async () => {
+    provider.afterSync = () => {
+      store.updateSystemRuntimeState({ enabled: false });
+    };
+
+    const run = await service.runAccount("demo-account", "manual");
+
+    expect(run.failureCount).toBe(1);
+    expect(provider.mutations).toHaveLength(0);
+    expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
+      status: "failed",
+      errorMessage: "软件总开关已关闭，真实广告写入已暂停。",
+    });
+  });
+
+  it("executes a due one-time ad-group schedule and records its source", async () => {
+    await service.runAccount("demo-account", "preview");
+    const schedule = store.createOneTimeSchedule("demo-account", {
+      externalId: "adgroup-1",
+      action: "disable",
+      runAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await service.runDueScheduledActions("demo-account");
+
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]);
+    expect(
+      store.listScheduledActions("demo-account").find((item) => item.id === schedule.id),
+    ).toMatchObject({ status: "completed", lastResult: "succeeded" });
+    expect(store.listAdOperations("demo-account")[0]).toMatchObject({
+      source: "scheduled",
+      action: "disable",
+    });
+  });
+
+  it("does not run a due schedule while the same account is syncing", async () => {
+    await service.runAccount("demo-account", "preview");
+    const schedule = store.createOneTimeSchedule("demo-account", {
+      externalId: "adgroup-1",
+      action: "disable",
+      runAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    let releaseSync!: () => void;
+    let syncStarted!: () => void;
+    const started = new Promise<void>((resolve) => { syncStarted = resolve; });
+    provider.afterSync = () => new Promise<void>((resolve) => {
+      releaseSync = resolve;
+      syncStarted();
+    });
+
+    const running = service.runAccount("demo-account", "preview");
+    await started;
+    await service.runDueScheduledActions("demo-account");
+
+    expect(store.listScheduledActions("demo-account").find((item) => item.id === schedule.id)?.status).toBe("scheduled");
+    expect(provider.mutations).toHaveLength(0);
+    releaseSync();
+    await running;
   });
 
   it("executes higher-priority rules before applying the per-run limit", async () => {

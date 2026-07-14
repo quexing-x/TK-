@@ -235,4 +235,158 @@ describe("AutomationStore", () => {
       metrics: { spend: 12.5, cost_per_click: 1.25 },
     });
   });
+
+  it("persists the global runtime, extension settings, and ad-group schedules", () => {
+    expect(store.getSystemRuntimeState().enabled).toBe(true);
+    expect(store.updateSystemRuntimeState({ enabled: false }).enabled).toBe(false);
+
+    const features = store.getAutomationFeatureSettings();
+    features.appeal.retryLimit = 2;
+    expect(store.updateAutomationFeatureSettings(features).appeal.retryLimit).toBe(2);
+
+    saveEntity(store, "ad-group", "group-1", "测试广告组");
+    const once = store.createOneTimeSchedule("demo-account", {
+      externalId: "group-1",
+      action: "disable",
+      runAt: "2026-07-16T15:00:00.000Z",
+    });
+    const overnight = store.createOvernightSchedule("demo-account", {
+      externalId: "group-1",
+      disableAt: "2026-07-16T15:30:00.000Z",
+      enableAt: "2026-07-17T00:00:00.000Z",
+    });
+    expect(once.scheduleType).toBe("once");
+    expect(overnight).toHaveLength(2);
+    expect(store.listScheduledActions("demo-account")).toHaveLength(3);
+    expect(
+      store.listDueScheduledActions(
+        "demo-account",
+        "2026-07-16T16:00:00.000Z",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("stores a non-executing multi-account launch plan", () => {
+    saveEntity(store, "ad", "ad-1", "源广告");
+    const target = store.createAccount({
+      displayName: "目标账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    const plan = store.createMultiAccountLaunchPlan({
+      sourceAccountId: "demo-account",
+      sourceAdId: "ad-1",
+      targetAccountIds: [target.id],
+      namingTemplate: "{source_name}-{account_name}",
+      startPaused: true,
+    });
+    expect(plan.status).toBe("blocked");
+    expect(plan.message).toContain("不会写入 TikTok");
+  });
+
+  it("stores spreadsheet launch rows without duplicating account selection", () => {
+    saveEntity(store, "ad", "ad-sheet", "表格源广告");
+    const target = store.createAccount({
+      displayName: "表格目标账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    const plan = store.createMultiAccountLaunchPlan({
+      sourceAccountId: "demo-account",
+      sourceAdId: "ad-sheet",
+      targetAccountIds: [target.id],
+      namingTemplate: "表格内名称",
+      startPaused: true,
+      launchRows: [{
+        rowNumber: 2,
+        taskName: "首批",
+        campaignName: "测试系列",
+        adGroupName: "测试组",
+        adName: "测试广告",
+        dailyBudget: 100,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        initialStatus: "disabled",
+      }],
+    });
+
+    expect(plan.launchRows).toHaveLength(1);
+    expect(plan.launchRows[0]?.campaignName).toBe("测试系列");
+    expect(store.listMultiAccountLaunchPlans()[0]?.launchRows).toEqual(plan.launchRows);
+  });
+
+  it("removes metric snapshots older than the 90-day retention window", () => {
+    const old = new Date(Date.now() - 91 * 24 * 60 * 60_000).toISOString();
+    saveEntity(store, "ad-group", "old-group", "旧广告组", old);
+    expect(
+      store.listMetricSnapshots(
+        "demo-account",
+        "cookie",
+        "2020-01-01T00:00:00.000Z",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("aggregates a complete detection batch beyond the old 5000-row limit", () => {
+    const capturedAt = new Date().toISOString();
+    const entities = Array.from({ length: 5_101 }, (_, index) => ({
+      entityType: "ad-group" as const,
+      externalId: `large-${index}`,
+      payload: {
+        adgroup_name: `广告组 ${index}`,
+        adgroup_primary_status: "enable",
+        row_data: { stat_cost: "1", click_cnt: "2", time_attr_convert_cnt: "3" },
+      },
+    }));
+    store.saveReadOnlySync("demo-account", "cookie", entities, {
+      startedAt: capturedAt,
+      finishedAt: capturedAt,
+      counts: { campaign: 0, "ad-group": entities.length, ad: 0 },
+      warnings: [],
+    });
+
+    expect(store.listMetricBatches("demo-account", "cookie", "2020-01-01T00:00:00.000Z")[0]).toMatchObject({
+      capturedAt,
+      count: 5_101,
+      spend: 5_101,
+      clicks: 10_202,
+      conversions: 15_303,
+    });
+  });
 });
+
+function saveEntity(
+  store: AutomationStore,
+  entityType: "ad-group" | "ad",
+  externalId: string,
+  name: string,
+  capturedAt = new Date().toISOString(),
+): void {
+  store.saveReadOnlySync(
+    "demo-account",
+    "cookie",
+    [{
+      entityType,
+      externalId,
+      payload: {
+        ad_name: name,
+        adgroup_name: name,
+        ad_primary_status: "enable",
+        row_data: { stat_cost: "1" },
+      },
+    }],
+    {
+      startedAt: capturedAt,
+      finishedAt: capturedAt,
+      counts: {
+        campaign: 0,
+        "ad-group": entityType === "ad-group" ? 1 : 0,
+        ad: entityType === "ad" ? 1 : 0,
+      },
+      warnings: [],
+    },
+  );
+}

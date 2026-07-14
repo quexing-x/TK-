@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.2.0
+## Windows 桌面版 1.3.0
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.2.0.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.3.0.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -26,6 +26,8 @@ pnpm desktop:dist
 - 九条全局规则配置（数值可修改、单条可启停）
 - Cookie / Official API 双 Provider 边界
 - Windows DPAPI 加密凭据库
+- 首次启动开发者账户、本机登录、角色权限、HttpOnly 会话与 CSRF 保护
+- 左上角软件总开关：关闭后暂停检测、定时任务、通知和真实广告写入
 - 两段 cURL 快速导入（两个输入框、一个导入按钮、五个必要字段状态）
 - 单条状态 cURL 自动生成三个层级的开启、关闭模板
 - 多广告账户独立凭据与全账户共用自动化规则
@@ -33,7 +35,12 @@ pnpm desktop:dist
 - 账户启用后默认自动执行；检测预览始终只读
 - Cookie 真实状态 cURL 模板与官方状态更新 API
 - 忽略名单、手动启停、申诉队列和操作记录
-- 90 天指标快照与广告分析
+- 广告组单次定时和每日过夜开关
+- 90 天指标快照、日历范围与检测批次柱线组合图
+- 邮箱、企业微信和飞书轮询结果通知
+- 自动申诉、复制和删除的全局配置骨架（真实执行器待 Provider 请求）
+- Excel/CSV 批量创建配置：账户统一选择、空白继承、逐行校验和多账户分发
+- 相同广告多账户投放计划（真实创建执行器待 Provider 请求）
 - 本地 SQLite 持久化、调度器和审计记录
 - Web 置顶操作手册与自动生成 Markdown 手册
 
@@ -70,7 +77,7 @@ pnpm dev
 - 管理界面：http://127.0.0.1:5173
 - 本地 API：http://127.0.0.1:3100
 
-首次启动会在 `data/` 创建 SQLite 数据库和一个演示账号。
+首次启动先在页面创建本机开发者账户；随后在 `data/` 使用 SQLite 数据库和演示广告账号。
 
 详细使用方式见 [docs/USER_GUIDE.md](docs/USER_GUIDE.md)。新增用户可见功能时，
 必须按 [docs/FEATURE_DEVELOPMENT_CHECKLIST.md](docs/FEATURE_DEVELOPMENT_CHECKLIST.md)
@@ -83,6 +90,8 @@ pnpm docs:generate
 ## 安全边界
 
 - API 默认只监听 `127.0.0.1`。
+- 所有业务 API 默认要求登录；写操作同时校验 CSRF 和服务端角色权限。
+- 密码使用 scrypt 随机盐哈希保存，会话只在 SQLite 保存不可逆令牌哈希。
 - 不在数据库中保存明文 Cookie 或 Token。
 - SQLite 的 `credentialRef` 只保存 Windows DPAPI 凭据文件的随机引用。
 - cURL 中的 Cookie、CSRF、msToken、签名、完整 URL 和 Payload 均进入 DPAPI

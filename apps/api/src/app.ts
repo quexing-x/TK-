@@ -1,4 +1,7 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+} from "fastify";
 import cors from "@fastify/cors";
 import { z } from "zod";
 import {
@@ -17,6 +20,17 @@ import {
   NotificationChannelKindSchema,
   NotificationChannelSettingsSchema,
   NotificationCredentialInputSchema,
+  InitialDeveloperInputSchema,
+  LocalUserCreateInputSchema,
+  LocalUserUpdateInputSchema,
+  LoginInputSchema,
+  PasswordChangeInputSchema,
+  SystemRuntimeUpdateSchema,
+  OneTimeScheduleInputSchema,
+  OvernightScheduleInputSchema,
+  AutomationFeatureSettingsInputSchema,
+  MultiAccountLaunchPlanInputSchema,
+  type AppPermission,
   type ProviderKind,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -36,6 +50,20 @@ import {
   AutomationService,
 } from "./automation-service.js";
 import { NotificationService } from "./notification-service.js";
+import {
+  AuthenticationError,
+  AuthorizationError,
+  AuthService,
+  LoginRateLimitError,
+  authCookie,
+  type AuthenticatedSession,
+} from "./auth-service.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    authSession: AuthenticatedSession | null;
+  }
+}
 
 const AccountParamsSchema = z.object({ accountId: z.string().min(1) });
 const ProviderParamsSchema = AccountParamsSchema.extend({
@@ -51,7 +79,17 @@ const EntityParamsSchema = AccountParamsSchema.extend({
 });
 const AnalyticsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).default(7),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
   entityType: SyncEntityTypeSchema.optional(),
+}).superRefine((value, context) => {
+  if (value.from && value.to && new Date(value.from) > new Date(value.to)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "开始日期不能晚于结束日期。",
+      path: ["from"],
+    });
+  }
 });
 const NotificationParamsSchema = z.object({
   channelKind: NotificationChannelKindSchema,
@@ -64,6 +102,8 @@ export interface AppDependencies {
   automation?: AutomationService;
   notifications?: NotificationService;
   startScheduler?: boolean;
+  /** Only for isolated unit tests. Production authentication is always enabled. */
+  disableAuth?: boolean;
 }
 
 export async function createApp(
@@ -77,6 +117,7 @@ export async function createApp(
   const notifications =
     dependencies.notifications ??
     new NotificationService(dependencies.store, dependencies.vault);
+  const auth = new AuthService(dependencies.store);
   const scheduler = new AutomationScheduler(
     dependencies.store,
     automation,
@@ -84,9 +125,68 @@ export async function createApp(
   );
   if (dependencies.startScheduler) scheduler.start();
   app.addHook("onClose", async () => scheduler.stop());
+  app.decorateRequest("authSession", null);
 
   await app.register(cors, {
     origin: [/^http:\/\/127\.0\.0\.1(?::\d+)?$/],
+    credentials: true,
+  });
+
+  app.addHook("onSend", async (_request, reply, payload) => {
+    reply
+      .header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+      .header("x-content-type-options", "nosniff")
+      .header("x-frame-options", "DENY")
+      .header("referrer-policy", "no-referrer")
+      .header("permissions-policy", "camera=(), microphone=(), geolocation=()")
+      .header("cache-control", "no-store");
+    return payload;
+  });
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (!request.url.startsWith("/api/")) return;
+    const token = readCookie(request.headers.cookie, authCookie.name);
+    request.authSession = auth.authenticate(token);
+    if (dependencies.disableAuth || isPublicApi(request.method, request.url)) {
+      return;
+    }
+    if (!request.authSession) {
+      return reply.status(401).send({
+        error: "AUTHENTICATION_REQUIRED",
+        message: "请先登录本地管理账户。",
+      });
+    }
+    if (isMutation(request.method)) {
+      const csrf = request.headers["x-csrf-token"];
+      if (
+        typeof csrf !== "string" ||
+        csrf !== request.authSession.csrfToken
+      ) {
+        return reply.status(403).send({
+          error: "CSRF_INVALID",
+          message: "安全校验失败，请刷新页面后重试。",
+        });
+      }
+    }
+    const permission = requiredPermission(request.method, request.url);
+    if (
+      permission &&
+      !request.authSession.permissions.includes(permission)
+    ) {
+      return reply.status(403).send({
+        error: "PERMISSION_DENIED",
+        message: "当前账户没有执行此操作的权限。",
+      });
+    }
+    if (
+      !dependencies.store.getSystemRuntimeState().enabled &&
+      isRuntimeOperation(request.method, request.url)
+    ) {
+      return reply.status(423).send({
+        error: "SYSTEM_PAUSED",
+        message: "软件总开关已关闭，后台检测和广告操作均已暂停。",
+      });
+    }
   });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -102,6 +202,30 @@ export async function createApp(
     if (error instanceof AutomationBusyError) {
       void reply.status(409).send({
         error: "AUTOMATION_BUSY",
+        message: error.message,
+      });
+      return;
+    }
+
+    if (error instanceof LoginRateLimitError) {
+      void reply.status(429).send({
+        error: "LOGIN_RATE_LIMITED",
+        message: error.message,
+      });
+      return;
+    }
+
+    if (error instanceof AuthenticationError) {
+      void reply.status(401).send({
+        error: "AUTHENTICATION_FAILED",
+        message: error.message,
+      });
+      return;
+    }
+
+    if (error instanceof AuthorizationError) {
+      void reply.status(403).send({
+        error: "PERMISSION_DENIED",
         message: error.message,
       });
       return;
@@ -127,12 +251,108 @@ export async function createApp(
     service: "tk-auto-local-api",
   }));
 
+  app.get("/api/auth/status", async (request) =>
+    auth.status(request.authSession),
+  );
+
+  app.post("/api/auth/setup", async (request, reply) => {
+    const session = await auth.setupInitialDeveloper(
+      InitialDeveloperInputSchema.parse(request.body),
+    );
+    setSessionCookie(reply, session.token);
+    return reply.status(201).send(auth.status(session));
+  });
+
+  app.post("/api/auth/login", async (request, reply) => {
+    const session = await auth.login(LoginInputSchema.parse(request.body), request.ip);
+    setSessionCookie(reply, session.token);
+    return auth.status(session);
+  });
+
+  app.post("/api/auth/logout", async (request, reply) => {
+    auth.logout(request.authSession);
+    clearSessionCookie(reply);
+    return { ok: true };
+  });
+
+  app.put("/api/auth/password", async (request, reply) => {
+    if (!request.authSession) return reply.status(401).send();
+    await auth.changePassword(
+      request.authSession.user,
+      PasswordChangeInputSchema.parse(request.body),
+    );
+    clearSessionCookie(reply);
+    return { ok: true, reauthenticationRequired: true };
+  });
+
+  app.get("/api/local-users", async () => dependencies.store.listLocalUsers());
+
+  app.post("/api/local-users", async (request, reply) => {
+    if (!request.authSession) return reply.status(401).send();
+    const created = await auth.createUser(
+      request.authSession.user,
+      LocalUserCreateInputSchema.parse(request.body),
+    );
+    return reply.status(201).send(created);
+  });
+
+  app.put("/api/local-users/:userId", async (request, reply) => {
+    if (!request.authSession) return reply.status(401).send();
+    const { userId } = z.object({ userId: z.string().min(1) }).parse(request.params);
+    return auth.updateUser(
+      request.authSession.user,
+      userId,
+      LocalUserUpdateInputSchema.parse(request.body),
+    );
+  });
+
   app.get("/api/bootstrap", async () => ({
     accounts: dependencies.store.listAccounts(),
     globalAutomationSettings:
       dependencies.store.getGlobalAutomationSettings(),
+    systemRuntime: dependencies.store.getSystemRuntimeState(),
     providers: providers.list(),
   }));
+
+  app.get("/api/system/runtime", async () =>
+    dependencies.store.getSystemRuntimeState(),
+  );
+
+  app.put("/api/system/runtime", async (request) =>
+    dependencies.store.updateSystemRuntimeState(
+      SystemRuntimeUpdateSchema.parse(request.body),
+    ),
+  );
+
+  app.get("/api/automation/features", async () =>
+    dependencies.store.getAutomationFeatureSettings(),
+  );
+
+  app.put("/api/automation/features", async (request) =>
+    dependencies.store.updateAutomationFeatureSettings(
+      AutomationFeatureSettingsInputSchema.parse(request.body),
+    ),
+  );
+
+  app.get("/api/launch-plans", async () =>
+    dependencies.store.listMultiAccountLaunchPlans(),
+  );
+
+  app.post("/api/launch-plans", async (request, reply) =>
+    reply.status(201).send(
+      dependencies.store.createMultiAccountLaunchPlan(
+        MultiAccountLaunchPlanInputSchema.parse(request.body),
+      ),
+    ),
+  );
+
+  app.delete("/api/launch-plans/:planId", async (request, reply) => {
+    const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
+    if (!dependencies.store.cancelMultiAccountLaunchPlan(planId)) {
+      return reply.status(404).send({ message: "投放计划不存在或已结束。" });
+    }
+    return reply.status(204).send();
+  });
 
   app.put("/api/automation/settings", async (request) => {
     const body = GlobalAutomationSettingsInputSchema.parse(request.body);
@@ -598,6 +818,82 @@ export async function createApp(
     },
   );
 
+  app.get("/api/accounts/:accountId/schedules", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    if (!dependencies.store.getAccount(accountId)) {
+      return reply.status(404).send({ message: "账号不存在。" });
+    }
+    return dependencies.store.listScheduledActions(accountId);
+  });
+
+  app.post(
+    "/api/accounts/:accountId/schedules/once",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      return reply.status(201).send(
+        dependencies.store.createOneTimeSchedule(
+          accountId,
+          OneTimeScheduleInputSchema.parse(request.body),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/schedules/overnight",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      return reply.status(201).send(
+        dependencies.store.createOvernightSchedule(
+          accountId,
+          OvernightScheduleInputSchema.parse(request.body),
+        ),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/accounts/:accountId/schedules/:scheduleId",
+    async (request, reply) => {
+      const params = AccountParamsSchema.extend({
+        scheduleId: z.string().min(1),
+      }).parse(request.params);
+      if (
+        !dependencies.store.cancelScheduledAction(
+          params.accountId,
+          params.scheduleId,
+        )
+      ) {
+        return reply.status(404).send({ message: "定时任务不存在或已结束。" });
+      }
+      return reply.status(204).send();
+    },
+  );
+
+  app.delete(
+    "/api/accounts/:accountId/overnight-schedules/:groupId",
+    async (request, reply) => {
+      const params = AccountParamsSchema.extend({
+        groupId: z.string().min(1),
+      }).parse(request.params);
+      if (
+        !dependencies.store.cancelOvernightSchedule(
+          params.accountId,
+          params.groupId,
+        )
+      ) {
+        return reply.status(404).send({ message: "过夜任务不存在或已结束。" });
+      }
+      return reply.status(204).send();
+    },
+  );
+
   app.post(
     "/api/accounts/:accountId/appeals",
     async (request, reply) => {
@@ -621,12 +917,19 @@ export async function createApp(
     const account = dependencies.store.getAccount(accountId);
     if (!account) return reply.status(404).send({ message: "账号不存在。" });
     const query = AnalyticsQuerySchema.parse(request.query);
-    const since = new Date(Date.now() - query.days * 24 * 60 * 60_000).toISOString();
-    return dependencies.store.listMetricSnapshots(
+    const until = query.to ?? new Date().toISOString();
+    const since = query.from ?? new Date(
+      new Date(until).getTime() - query.days * 24 * 60 * 60_000,
+    ).toISOString();
+    if (new Date(until).getTime() - new Date(since).getTime() > 90 * 24 * 60 * 60_000) {
+      return reply.status(400).send({ message: "自定义分析范围最多为 90 天。" });
+    }
+    return dependencies.store.listMetricBatches(
       accountId,
       account.providerKind,
       since,
       query.entityType,
+      until,
     );
   });
 
@@ -717,4 +1020,93 @@ async function loadProviderContext(
 function getSafeProviderError(cause: unknown): string {
   if (!(cause instanceof Error)) return "连接检测失败。";
   return cause.name === "TimeoutError" ? "连接检测超时。" : cause.message;
+}
+
+function isMutation(method: string): boolean {
+  return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+}
+
+function isPublicApi(method: string, rawUrl: string): boolean {
+  const path = rawUrl.split("?", 1)[0] ?? rawUrl;
+  return (
+    (method === "GET" && ["/api/health", "/api/auth/status"].includes(path)) ||
+    (method === "POST" && ["/api/auth/setup", "/api/auth/login"].includes(path))
+  );
+}
+
+function isRuntimeOperation(method: string, rawUrl: string): boolean {
+  if (!isMutation(method)) return false;
+  const path = rawUrl.split("?", 1)[0] ?? rawUrl;
+  return (
+    path.endsWith("/automation/preview") ||
+    path.endsWith("/automation/run") ||
+    path.endsWith("/entities/status") ||
+    path.endsWith("/sync") ||
+    path.endsWith("/test")
+  );
+}
+
+function requiredPermission(
+  method: string,
+  rawUrl: string,
+): AppPermission | null {
+  const path = rawUrl.split("?", 1)[0] ?? rawUrl;
+  if (!isMutation(method)) {
+    return path.startsWith("/api/local-users") ? "users:manage" : null;
+  }
+  if (path.startsWith("/api/local-users")) return "users:manage";
+  if (path.startsWith("/api/system/")) return "system:control";
+  if (
+    path === "/api/rules" ||
+    path.startsWith("/api/automation/settings") ||
+    path.startsWith("/api/automation/features")
+  ) {
+    return "rules:manage";
+  }
+  if (path.startsWith("/api/notifications/")) return "rules:manage";
+  if (path.includes("/automation/")) return "automation:execute";
+  if (
+    path.includes("/entities/status") ||
+    path.includes("/ignore") ||
+    path.includes("/appeals") ||
+    path.includes("/schedules")
+  ) {
+    return "ads:operate";
+  }
+  if (path.startsWith("/api/launch-plans")) return "launch:manage";
+  if (path.startsWith("/api/accounts")) return "accounts:manage";
+  return method === "DELETE" ? "system:control" : null;
+}
+
+function readCookie(
+  header: string | undefined,
+  name: string,
+): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) continue;
+    const key = part.slice(0, separator).trim();
+    if (key !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function setSessionCookie(reply: FastifyReply, token: string): void {
+  reply.header(
+    "set-cookie",
+    `${authCookie.name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${authCookie.maxAgeSeconds}`,
+  );
+}
+
+function clearSessionCookie(reply: FastifyReply): void {
+  reply.header(
+    "set-cookie",
+    `${authCookie.name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
+  );
 }

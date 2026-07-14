@@ -44,7 +44,7 @@ export interface AdOperationRecord {
   externalId: string;
   entityName: string;
   action: "enable" | "disable" | "ignore" | "unignore" | "appeal";
-  source: "manual" | "automation";
+  source: "manual" | "automation" | "scheduled";
   status: "succeeded" | "failed" | "pending";
   message: string | null;
   createdAt: string;
@@ -60,4 +60,12 @@ export interface EntityMetricSnapshotRecord {
   status: "enabled" | "disabled" | "unknown";
   metrics: ManagedEntitySnapshot["metrics"];
   capturedAt: string;
+}
+
+export interface MetricBatchRecord {
+  capturedAt: string;
+  count: number;
+  spend: number;
+  clicks: number;
+  conversions: number;
 }

@@ -38,6 +38,9 @@ export class AutomationService {
     accountId: string,
     trigger: AutomationTrigger,
   ): Promise<AutomationRunRecord> {
+    if (!this.store.getSystemRuntimeState().enabled) {
+      throw new Error("软件总开关已关闭，自动化检测和执行均已暂停。");
+    }
     if (this.runningAccounts.has(accountId)) {
       throw new AutomationBusyError("该账户已有检测任务正在运行。");
     }
@@ -170,7 +173,18 @@ export class AutomationService {
             "pending",
           );
           actionCount += 1;
-          const result = await this.executeCandidate(context, candidate);
+          let result: StatusMutationResult;
+          try {
+            result = await this.executeCandidate(context, candidate);
+          } catch (cause) {
+            result = {
+              entityType: candidate.entity.entityType,
+              externalId: candidate.entity.externalId,
+              action: candidate.action,
+              ok: false,
+              message: safeMessage(cause),
+            };
+          }
           if (result.ok) {
             successCount += 1;
             consecutiveFailures = 0;
@@ -268,6 +282,66 @@ export class AutomationService {
     accountId: string,
     input: ManualStatusInput,
   ): Promise<StatusMutationResult> {
+    if (this.runningAccounts.has(accountId)) {
+      throw new AutomationBusyError("该账户已有任务正在执行，请稍后重试。");
+    }
+    this.runningAccounts.add(accountId);
+    try {
+      return await this.changeStatus(accountId, input, "manual");
+    } finally {
+      this.runningAccounts.delete(accountId);
+    }
+  }
+
+  async runDueScheduledActions(
+    accountId: string,
+    asOf = new Date().toISOString(),
+  ): Promise<void> {
+    if (!this.store.getSystemRuntimeState().enabled) return;
+    const account = this.store.getAccount(accountId);
+    if (!account?.enabled) return;
+    if (this.runningAccounts.has(accountId)) return;
+    this.runningAccounts.add(accountId);
+    try {
+      for (const schedule of this.store.listDueScheduledActions(accountId, asOf)) {
+        try {
+          const result = await this.changeStatus(
+            accountId,
+            {
+              entityType: "ad-group",
+              externalId: schedule.externalId,
+              action: schedule.action,
+            },
+            "scheduled",
+          );
+          this.store.completeScheduledAction(
+            schedule.id,
+            result.ok ? "succeeded" : "failed",
+            result.message,
+            asOf,
+          );
+        } catch (cause) {
+          this.store.completeScheduledAction(
+            schedule.id,
+            "failed",
+            safeMessage(cause),
+            asOf,
+          );
+        }
+      }
+    } finally {
+      this.runningAccounts.delete(accountId);
+    }
+  }
+
+  private async changeStatus(
+    accountId: string,
+    input: ManualStatusInput,
+    source: "manual" | "scheduled",
+  ): Promise<StatusMutationResult> {
+    if (!this.store.getSystemRuntimeState().enabled) {
+      throw new Error("软件总开关已关闭，广告启停操作已暂停。");
+    }
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
     const connection = this.store.getProviderConnection(
@@ -282,7 +356,11 @@ export class AutomationService {
       account.providerKind,
       account.timezone,
     );
-    const results = await this.changeProviderStatus(context, [input]);
+    const results = await this.changeProviderStatus(
+      context,
+      [input],
+      source === "scheduled",
+    );
     const result =
       results[0] ?? { ...input, ok: false, message: "Provider 未返回执行结果。" };
     const entity = this.store
@@ -299,7 +377,7 @@ export class AutomationService {
       externalId: input.externalId,
       entityName: entity?.name ?? input.externalId,
       action: input.action,
-      source: "manual",
+      source,
       status: result.ok ? "succeeded" : "failed",
       message: result.message,
     });
@@ -379,7 +457,7 @@ export class AutomationService {
         externalId: candidate.entity.externalId,
         action: candidate.action,
       },
-    ]);
+    ], true);
     return (
       results[0] ?? {
         entityType: candidate.entity.entityType,
@@ -394,7 +472,9 @@ export class AutomationService {
   private async changeProviderStatus(
     context: ProviderContext,
     mutations: StatusMutation[],
+    requireAccountEnabled = false,
   ): Promise<StatusMutationResult[]> {
+    this.assertWriteAllowed(context.accountId, requireAccountEnabled);
     try {
       const results = await this.providers.changeStatus(
         context.settings.kind,
@@ -412,6 +492,20 @@ export class AutomationService {
     } catch (cause) {
       this.markProviderWriteFailure(context, safeMessage(cause));
       throw cause;
+    }
+  }
+
+  private assertWriteAllowed(
+    accountId: string,
+    requireAccountEnabled: boolean,
+  ): void {
+    if (!this.store.getSystemRuntimeState().enabled) {
+      throw new Error("软件总开关已关闭，真实广告写入已暂停。");
+    }
+    const account = this.store.getAccount(accountId);
+    if (!account) throw new Error("账号不存在。");
+    if (requireAccountEnabled && !account.enabled) {
+      throw new Error("账户自动化已关闭，真实广告写入已暂停。");
     }
   }
 
@@ -495,6 +589,7 @@ export class AutomationScheduler {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      if (!this.store.getSystemRuntimeState().enabled) return;
       try {
         await this.notifications?.flushPending();
       } catch {
@@ -502,6 +597,19 @@ export class AutomationScheduler {
       }
       const { pollingIntervalMinutes } =
         this.store.getGlobalAutomationSettings();
+      for (const account of this.store.listAccounts()) {
+        const connection = this.store.getProviderConnection(
+          account.id,
+          account.providerKind,
+        );
+        if (
+          account.enabled &&
+          connection?.hasCredential &&
+          connection.status === "ready"
+        ) {
+          await this.service.runDueScheduledActions(account.id);
+        }
+      }
       const dueAccounts = this.store.listAccounts().filter((account) => {
         const connection = this.store.getProviderConnection(
           account.id,

@@ -13,7 +13,7 @@ describe("local API", () => {
     store = new AutomationStore(":memory:");
     store.seed();
     vault = new InMemoryCredentialVault();
-    app = await createApp({ store, vault });
+    app = await createApp({ store, vault, disableAuth: true });
   });
 
   afterEach(async () => {
@@ -54,6 +54,7 @@ describe("local API", () => {
       url: "/api/notifications/channels",
     });
     expect(initial.json()).toHaveLength(3);
+
     const settings = await app.inject({
       method: "PUT",
       url: "/api/notifications/channels/email/settings",
@@ -68,6 +69,7 @@ describe("local API", () => {
       },
     });
     expect(settings.statusCode).toBe(200);
+
     const credential = await app.inject({
       method: "PUT",
       url: "/api/notifications/channels/email/credential",
@@ -294,6 +296,46 @@ describe("local API", () => {
     expect(store.listAccounts()).toHaveLength(2);
   });
 
+  it("creates a validated spreadsheet launch plan", async () => {
+    const now = new Date().toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [{ entityType: "ad", externalId: "source-ad", payload: { ad_name: "源广告" } }],
+      { startedAt: now, finishedAt: now, counts: { campaign: 0, "ad-group": 0, ad: 1 }, warnings: [] },
+    );
+    const target = store.createAccount({ displayName: "目标", accountType: "standard", enabled: true, providerKind: "cookie" });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans",
+      payload: {
+        sourceAccountId: "demo-account",
+        sourceAdId: "source-ad",
+        targetAccountIds: [target.id],
+        namingTemplate: "表格内名称",
+        startPaused: true,
+        launchRows: [{
+          rowNumber: 2,
+          taskName: "任务-1",
+          campaignName: "系列 A",
+          adGroupName: "组 A",
+          adName: "广告 A",
+          dailyBudget: 100,
+          bid: null,
+          startAt: null,
+          endAt: null,
+          initialStatus: "disabled",
+        }],
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      status: "blocked",
+      launchRows: [{ campaignName: "系列 A", dailyBudget: 100 }],
+    });
+  });
+
   it("lists detected entities and manages the ignore list", async () => {
     const now = new Date().toISOString();
     store.saveReadOnlySync(
@@ -333,5 +375,25 @@ describe("local API", () => {
       externalId: "adgroup-1",
       ignored: true,
     });
+  });
+
+  it("returns detection-batch aggregates for analytics", async () => {
+    const capturedAt = new Date().toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [
+        { entityType: "ad-group", externalId: "g1", payload: { adgroup_name: "组 1", row_data: { stat_cost: "3", click_cnt: "2" } } },
+        { entityType: "ad-group", externalId: "g2", payload: { adgroup_name: "组 2", row_data: { stat_cost: "5", click_cnt: "4" } } },
+      ],
+      { startedAt: capturedAt, finishedAt: capturedAt, counts: { campaign: 0, "ad-group": 2, ad: 0 }, warnings: [] },
+    );
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/accounts/demo-account/analytics?from=${encodeURIComponent(new Date(new Date(capturedAt).getTime() - 86_400_000).toISOString())}&to=${encodeURIComponent(capturedAt)}&entityType=ad-group`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([{ capturedAt, count: 2, spend: 8, clicks: 6, conversions: 0 }]);
   });
 });

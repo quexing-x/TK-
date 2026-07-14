@@ -7,3 +7,8 @@ export * from "./threshold.js";
 export * from "./rules.js";
 export * from "./rule-evaluator.js";
 export * from "./notification.js";
+export * from "./runtime.js";
+export * from "./scheduling.js";
+export * from "./feature-config.js";
+export * from "./launch.js";
+export * from "./auth.js";
