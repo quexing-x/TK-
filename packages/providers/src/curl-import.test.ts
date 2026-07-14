@@ -17,7 +17,7 @@ describe("parseTikTokCurl", () => {
 
     expect(imported.settings.advertiserId).toBe("123456");
     expect(JSON.stringify(imported.settings)).not.toContain("ephemeral-token");
-    expect(imported.credential.requestTemplates).toHaveLength(2);
+    expect(imported.credential.requestTemplates).toHaveLength(3);
     expect(imported.credential.requestTemplates).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -29,6 +29,10 @@ describe("parseTikTokCurl", () => {
           method: "POST",
           body: '{"page":1}',
           derived: false,
+        }),
+        expect.objectContaining({
+          target: "ad",
+          derived: true,
         }),
       ]),
     );

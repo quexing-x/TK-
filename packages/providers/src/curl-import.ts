@@ -429,7 +429,7 @@ type ReadTemplateRequest = {
 function createAllReadTemplates(request: ReadTemplateRequest) {
   const targets: ReadTarget[] =
     request.target === "ad-group"
-      ? ["campaign", "ad-group"]
+      ? ["campaign", "ad-group", "ad"]
       : [request.target];
   return targets.map((target) => {
     if (target === request.target) return { ...request, derived: false };
