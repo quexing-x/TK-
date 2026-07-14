@@ -21,6 +21,10 @@ const lines = [
 for (const section of guide.sections) {
   lines.push(`## ${section.title}`, "", section.intro, "");
   section.steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
+  if (section.links?.length > 0) {
+    lines.push("", "相关官方文档：", "");
+    section.links.forEach((link) => lines.push(`- [${link.label}](${link.url})`));
+  }
   if (section.notes.length > 0) {
     lines.push("", "注意事项：", "");
     section.notes.forEach((note) => lines.push(`- ${note}`));

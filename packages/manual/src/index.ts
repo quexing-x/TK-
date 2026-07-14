@@ -6,6 +6,10 @@ export interface ManualSection {
   intro: string;
   steps: string[];
   notes: string[];
+  links?: Array<{
+    label: string;
+    url: string;
+  }>;
 }
 
 export interface UserGuide {
@@ -17,4 +21,3 @@ export interface UserGuide {
 }
 
 export const userGuide = guide as UserGuide;
-

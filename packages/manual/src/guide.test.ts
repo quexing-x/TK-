@@ -3,14 +3,22 @@ import { userGuide } from "./index.js";
 
 describe("user guide", () => {
   it("contains both provider tutorials and the update policy", () => {
-    expect(userGuide.version).toBe("1.2.0");
+    expect(userGuide.version).toBe("1.3.0");
     const ids = userGuide.sections.map((section) => section.id);
     expect(ids).toContain("cookie-provider");
     expect(ids).toContain("official-api-provider");
     expect(ids).toContain("automation-center");
     expect(ids).toContain("ad-management");
     expect(ids).toContain("analytics");
+    expect(ids).toContain("notifications");
     expect(ids).toContain("development-policy");
+
+    const notificationGuide = userGuide.sections.find(
+      (section) => section.id === "notifications",
+    );
+    expect(notificationGuide?.steps.join(" ")).toContain("没有到期账户");
+    expect(notificationGuide?.notes.join(" ")).toContain("DPAPI");
+    expect(notificationGuide?.links).toHaveLength(3);
 
     const cookieGuide = userGuide.sections.find(
       (section) => section.id === "cookie-provider",

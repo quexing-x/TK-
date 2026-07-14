@@ -1,4 +1,10 @@
-import { BookOpen, CalendarDays, Info, ShieldAlert } from "lucide-react";
+import {
+  BookOpen,
+  CalendarDays,
+  ExternalLink,
+  Info,
+  ShieldAlert,
+} from "lucide-react";
 import { userGuide } from "@tk-auto/manual";
 
 export function ManualPage() {
@@ -42,6 +48,15 @@ export function ManualPage() {
             <ol>
               {section.steps.map((step) => <li key={step}>{step}</li>)}
             </ol>
+            {section.links && section.links.length > 0 && (
+              <div className="manual-links">
+                {section.links.map((link) => (
+                  <a href={link.url} key={link.url} rel="noreferrer" target="_blank">
+                    {link.label} <ExternalLink size={13} />
+                  </a>
+                ))}
+              </div>
+            )}
             {section.notes.length > 0 && (
               <div className="manual-notes">
                 <ShieldAlert size={18} />

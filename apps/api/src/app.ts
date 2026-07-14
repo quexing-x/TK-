@@ -14,6 +14,9 @@ import {
   IgnoreEntityInputSchema,
   ManualStatusInputSchema,
   AppealQueueInputSchema,
+  NotificationChannelKindSchema,
+  NotificationChannelSettingsSchema,
+  NotificationCredentialInputSchema,
   type ProviderKind,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -32,6 +35,7 @@ import {
   AutomationScheduler,
   AutomationService,
 } from "./automation-service.js";
+import { NotificationService } from "./notification-service.js";
 
 const AccountParamsSchema = z.object({ accountId: z.string().min(1) });
 const ProviderParamsSchema = AccountParamsSchema.extend({
@@ -49,12 +53,16 @@ const AnalyticsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).default(7),
   entityType: SyncEntityTypeSchema.optional(),
 });
+const NotificationParamsSchema = z.object({
+  channelKind: NotificationChannelKindSchema,
+});
 
 export interface AppDependencies {
   store: AutomationStore;
   vault: CredentialVault;
   providers?: ProviderRegistry;
   automation?: AutomationService;
+  notifications?: NotificationService;
   startScheduler?: boolean;
 }
 
@@ -66,7 +74,14 @@ export async function createApp(
   const automation =
     dependencies.automation ??
     new AutomationService(dependencies.store, dependencies.vault, providers);
-  const scheduler = new AutomationScheduler(dependencies.store, automation);
+  const notifications =
+    dependencies.notifications ??
+    new NotificationService(dependencies.store, dependencies.vault);
+  const scheduler = new AutomationScheduler(
+    dependencies.store,
+    automation,
+    notifications,
+  );
   if (dependencies.startScheduler) scheduler.start();
   app.addHook("onClose", async () => scheduler.stop());
 
@@ -123,6 +138,82 @@ export async function createApp(
     const body = GlobalAutomationSettingsInputSchema.parse(request.body);
     return dependencies.store.updateGlobalAutomationSettings(body);
   });
+
+  app.get("/api/notifications/channels", async () =>
+    dependencies.store.listNotificationChannels(),
+  );
+
+  app.put(
+    "/api/notifications/channels/:channelKind/settings",
+    async (request, reply) => {
+      const { channelKind } = NotificationParamsSchema.parse(request.params);
+      const settings = NotificationChannelSettingsSchema.parse(request.body);
+      if (settings.kind !== channelKind) {
+        return reply.status(400).send({ message: "通知渠道类型不一致。" });
+      }
+      return dependencies.store.saveNotificationChannelSettings(settings);
+    },
+  );
+
+  app.put(
+    "/api/notifications/channels/:channelKind/credential",
+    async (request, reply) => {
+      const { channelKind } = NotificationParamsSchema.parse(request.params);
+      const credential = NotificationCredentialInputSchema.parse(request.body);
+      if (credential.kind !== channelKind) {
+        return reply.status(400).send({ message: "通知凭据类型不一致。" });
+      }
+      const channel = dependencies.store.getNotificationChannel(channelKind);
+      if (!channel?.settings) {
+        return reply.status(409).send({ message: "请先保存通知渠道参数。" });
+      }
+      const reference = await dependencies.vault.create(
+        JSON.stringify(credential),
+      );
+      try {
+        dependencies.store.setNotificationCredentialReference(
+          channelKind,
+          reference,
+        );
+      } catch (cause) {
+        await dependencies.vault.delete(reference);
+        throw cause;
+      }
+      if (channel.credentialRef) {
+        await dependencies.vault.delete(channel.credentialRef);
+      }
+      return dependencies.store
+        .listNotificationChannels()
+        .find((item) => item.kind === channelKind);
+    },
+  );
+
+  app.delete(
+    "/api/notifications/channels/:channelKind/credential",
+    async (request) => {
+      const { channelKind } = NotificationParamsSchema.parse(request.params);
+      const reference =
+        dependencies.store.clearNotificationCredential(channelKind);
+      if (reference) await dependencies.vault.delete(reference);
+      return { ok: true };
+    },
+  );
+
+  app.post(
+    "/api/notifications/channels/:channelKind/test",
+    async (request) => {
+      const { channelKind } = NotificationParamsSchema.parse(request.params);
+      return notifications.testChannel(channelKind);
+    },
+  );
+
+  app.get("/api/notifications/deliveries", async () =>
+    dependencies.store.listNotificationDeliveries(),
+  );
+
+  app.get("/api/notifications/cycles", async () =>
+    dependencies.store.listPollCycles(),
+  );
 
   app.get("/api/rules", async () =>
     dependencies.store.getRuleConfiguration(),

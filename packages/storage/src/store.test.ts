@@ -47,6 +47,56 @@ describe("AutomationStore", () => {
     });
   });
 
+  it("stores notification settings without exposing credential references", () => {
+    expect(store.listNotificationChannels()).toHaveLength(3);
+    store.saveNotificationChannelSettings({
+      kind: "email",
+      enabled: true,
+      smtpHost: "smtp.example.com",
+      smtpPort: 465,
+      secure: true,
+      from: "sender@example.com",
+      recipients: ["owner@example.com"],
+    });
+    store.setNotificationCredentialReference("email", "vault-reference");
+
+    const channel = store
+      .listNotificationChannels()
+      .find((item) => item.kind === "email");
+    expect(channel).toMatchObject({
+      hasCredential: true,
+      status: "untested",
+    });
+    expect(JSON.stringify(channel)).not.toContain("vault-reference");
+  });
+
+  it("persists poll results and queues one delivery per ready channel", () => {
+    store.saveNotificationChannelSettings({
+      kind: "wecom",
+      enabled: true,
+      mentionAll: false,
+    });
+    store.setNotificationCredentialReference("wecom", "vault-reference");
+    store.updateNotificationChannelStatus("wecom", "ready", "ready");
+    const cycle = store.createPollCycle();
+    store.savePollAccountResult(cycle.id, {
+      accountId: "demo-account",
+      accountName: "演示广告账户",
+      runId: null,
+      status: "no-action",
+      enabledCount: 0,
+      disabledCount: 0,
+      failureCount: 0,
+      message: null,
+    });
+    const completed = store.finishPollCycle(cycle.id);
+    const deliveries = store.enqueueNotificationDeliveries(cycle.id);
+
+    expect(completed.accounts[0]?.status).toBe("no-action");
+    expect(deliveries).toHaveLength(1);
+    expect(store.listDueNotificationDeliveries()).toHaveLength(1);
+  });
+
   it("persists automation switches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.closeNoConversion = true;

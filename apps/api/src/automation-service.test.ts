@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ProviderEntity } from "@tk-auto/core";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -7,7 +7,11 @@ import {
   type StatusMutation,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
-import { AutomationService } from "./automation-service.js";
+import {
+  AutomationScheduler,
+  AutomationService,
+  type PollNotificationDispatcher,
+} from "./automation-service.js";
 
 class FakeProvider implements AdsProvider {
   readonly kind = "cookie" as const;
@@ -243,6 +247,51 @@ describe("AutomationService", () => {
         action: "disable",
       },
     ]);
+  });
+
+  it("summarizes one due scheduler cycle and dispatches it once", async () => {
+    const cycles: Parameters<PollNotificationDispatcher["enqueueAndDispatch"]>[0][] = [];
+    const dispatcher: PollNotificationDispatcher = {
+      flushPending: vi.fn(async () => undefined),
+      enqueueAndDispatch: vi.fn(async (cycle) => {
+        cycles.push(cycle);
+      }),
+    };
+    const scheduler = new AutomationScheduler(store, service, dispatcher);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+
+    await scheduler.tick();
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.accounts[0]).toMatchObject({
+      accountName: "演示广告账户",
+      status: "changed",
+      enabledCount: 0,
+      disabledCount: 1,
+    });
+  });
+
+  it("continues polling when notification delivery is unavailable", async () => {
+    const dispatcher: PollNotificationDispatcher = {
+      flushPending: vi.fn(async () => {
+        throw new Error("notification storage unavailable");
+      }),
+      enqueueAndDispatch: vi.fn(async () => {
+        throw new Error("notification delivery unavailable");
+      }),
+    };
+    const scheduler = new AutomationScheduler(store, service, dispatcher);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+
+    await expect(scheduler.tick()).resolves.toBeUndefined();
+
+    vi.useRealTimers();
+    expect(store.listPollCycles()).toHaveLength(1);
+    expect(store.listAutomationRuns("demo-account")).toHaveLength(1);
   });
 
   it("does not open a child ad when its parent ad group closes in the same run", async () => {

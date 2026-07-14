@@ -71,4 +71,61 @@ describe("web API client", () => {
       }),
     );
   });
+
+  it("stores notification settings without sending credentials in the same request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          kind: "wecom",
+          settings: { kind: "wecom", enabled: true, mentionAll: false },
+          hasCredential: false,
+          status: "not-configured",
+          lastMessage: null,
+          lastTestedAt: null,
+          updatedAt: "2026-07-15T00:00:00.000Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.saveNotificationSettings("wecom", {
+      kind: "wecom",
+      enabled: true,
+      mentionAll: false,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/notifications/channels/wecom/settings",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          kind: "wecom",
+          enabled: true,
+          mentionAll: false,
+        }),
+      }),
+    );
+  });
+
+  it("sends notification credentials only to the credential endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ kind: "wecom", hasCredential: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.saveNotificationCredential("wecom", {
+      kind: "wecom",
+      webhookUrl:
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/notifications/channels/wecom/credential",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
 });

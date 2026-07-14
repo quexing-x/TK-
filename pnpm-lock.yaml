@@ -26,6 +26,9 @@ importers:
       '@tk-auto/credentials':
         specifier: workspace:*
         version: link:../../packages/credentials
+      '@tk-auto/notifications':
+        specifier: workspace:*
+        version: link:../../packages/notifications
       '@tk-auto/providers':
         specifier: workspace:*
         version: link:../../packages/providers
@@ -129,6 +132,22 @@ importers:
         version: 24.13.3
 
   packages/manual: {}
+
+  packages/notifications:
+    dependencies:
+      '@tk-auto/core':
+        specifier: workspace:*
+        version: link:../core
+      nodemailer:
+        specifier: ^7.0.10
+        version: 7.0.13
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
+      '@types/nodemailer':
+        specifier: ^7.0.4
+        version: 7.0.12
 
   packages/providers:
     dependencies:
@@ -716,6 +735,9 @@ packages:
 
   '@types/node@24.13.3':
     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
+
+  '@types/nodemailer@7.0.12':
+    resolution: {integrity: sha512-80vKwiIsVSyFA1rRovH59jNPLBOuc6dRZIHEu40gXTkBkZnQv8vog1xSGEb9j5q/tdMAs5ivvDR2pLTU0hGHXA==}
 
   '@types/react-dom@19.2.3':
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
@@ -1582,6 +1604,10 @@ packages:
 
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
+
+  nodemailer@7.0.13:
+    resolution: {integrity: sha512-PNDFSJdP+KFgdsG3ZzMXCgquO7I6McjY2vlqILjtJd0hy8wEvtugS9xKRF2NWlPNGxvLCXlTNIae4serI7dinw==}
+    engines: {node: '>=6.0.0'}
 
   nopt@9.0.0:
     resolution: {integrity: sha512-Zhq3a+yFKrYwSBluL4H9XP3m3y5uvQkB/09CwDruCiRmR/UJYnn9W4R48ry0uGC70aeTPKLynBtscP9efFFcPw==}
@@ -2666,6 +2692,10 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
+  '@types/nodemailer@7.0.12':
+    dependencies:
+      '@types/node': 24.13.3
+
   '@types/react-dom@19.2.3(@types/react@19.2.17)':
     dependencies:
       '@types/react': 19.2.17
@@ -3624,6 +3654,8 @@ snapshots:
       which: 6.0.1
 
   node-int64@0.4.0: {}
+
+  nodemailer@7.0.13: {}
 
   nopt@9.0.0:
     dependencies:

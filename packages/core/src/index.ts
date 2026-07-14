@@ -6,3 +6,4 @@ export * from "./management.js";
 export * from "./threshold.js";
 export * from "./rules.js";
 export * from "./rule-evaluator.js";
+export * from "./notification.js";

@@ -41,11 +41,27 @@ import {
   RuleConfigurationSchema,
   type RuleConfiguration,
   type RuleConfigurationInput,
+  NotificationChannelKindSchema,
+  NotificationChannelSettingsSchema,
+  NotificationDeliveryRecordSchema,
+  PollAccountResultSchema,
+  PollCycleRecordSchema,
+  type NotificationChannelKind,
+  type NotificationChannelRecord,
+  type NotificationChannelSettings,
+  type NotificationConnectionStatus,
+  type NotificationDeliveryRecord,
+  type PollAccountResult,
+  type PollCycleRecord,
 } from "@tk-auto/core";
 
 type SqlRow = Record<string, unknown>;
 
 export interface StoredProviderConnection extends ProviderConnection {
+  credentialRef: string | null;
+}
+
+export interface StoredNotificationChannel extends NotificationChannelRecord {
   credentialRef: string | null;
 }
 
@@ -208,6 +224,342 @@ export class AutomationStore {
       .run(input.pollingIntervalMinutes, input.maxActionsPerRun, now);
     this.writeSystemAudit("global.automation-settings.updated", input);
     return this.getGlobalAutomationSettings();
+  }
+
+  listNotificationChannels(): NotificationChannelRecord[] {
+    return NotificationChannelKindSchema.options.map((kind) => {
+      const stored = this.getNotificationChannel(kind);
+      return stored
+        ? toPublicNotificationChannel(stored)
+        : emptyNotificationChannel(kind);
+    });
+  }
+
+  getNotificationChannel(
+    kind: NotificationChannelKind,
+  ): StoredNotificationChannel | null {
+    const row = this.db
+      .prepare("SELECT * FROM notification_channels WHERE channel_kind = ?")
+      .get(kind) as SqlRow | undefined;
+    return row ? mapStoredNotificationChannel(row) : null;
+  }
+
+  saveNotificationChannelSettings(
+    input: NotificationChannelSettings,
+  ): NotificationChannelRecord {
+    const settings = NotificationChannelSettingsSchema.parse(input);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO notification_channels (
+          channel_kind, settings_json, credential_ref, status, last_message,
+          last_tested_at, updated_at
+        ) VALUES (?, ?, NULL, 'not-configured', NULL, NULL, ?)
+        ON CONFLICT(channel_kind) DO UPDATE SET
+          settings_json = excluded.settings_json,
+          status = CASE WHEN notification_channels.credential_ref IS NULL
+            THEN 'not-configured' ELSE 'untested' END,
+          last_message = NULL,
+          last_tested_at = NULL,
+          updated_at = excluded.updated_at`,
+      )
+      .run(settings.kind, JSON.stringify(settings), now);
+    this.writeSystemAudit("notification.settings.updated", {
+      channelKind: settings.kind,
+      enabled: settings.enabled,
+    });
+    return toPublicNotificationChannel(
+      this.getNotificationChannel(settings.kind) as StoredNotificationChannel,
+    );
+  }
+
+  setNotificationCredentialReference(
+    kind: NotificationChannelKind,
+    credentialRef: string,
+  ): NotificationChannelRecord {
+    const result = this.db
+      .prepare(
+        `UPDATE notification_channels SET
+          credential_ref = ?, status = 'untested', last_message = NULL,
+          last_tested_at = NULL, updated_at = ?
+        WHERE channel_kind = ?`,
+      )
+      .run(credentialRef, new Date().toISOString(), kind);
+    if (result.changes === 0) {
+      throw new Error("请先保存通知渠道参数，再保存凭据。");
+    }
+    this.writeSystemAudit("notification.credential.updated", {
+      channelKind: kind,
+    });
+    return toPublicNotificationChannel(
+      this.getNotificationChannel(kind) as StoredNotificationChannel,
+    );
+  }
+
+  clearNotificationCredential(kind: NotificationChannelKind): string | null {
+    const previous = this.getNotificationChannel(kind);
+    if (!previous) return null;
+    this.db
+      .prepare(
+        `UPDATE notification_channels SET
+          credential_ref = NULL, status = 'not-configured',
+          last_message = NULL, last_tested_at = NULL, updated_at = ?
+        WHERE channel_kind = ?`,
+      )
+      .run(new Date().toISOString(), kind);
+    this.writeSystemAudit("notification.credential.deleted", {
+      channelKind: kind,
+    });
+    return previous.credentialRef;
+  }
+
+  updateNotificationChannelStatus(
+    kind: NotificationChannelKind,
+    status: NotificationConnectionStatus,
+    message: string,
+  ): NotificationChannelRecord {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE notification_channels SET
+          status = ?, last_message = ?, last_tested_at = ?, updated_at = ?
+        WHERE channel_kind = ?`,
+      )
+      .run(status, message.slice(0, 1000), now, now, kind);
+    if (result.changes === 0) throw new Error("通知渠道尚未配置。");
+    return toPublicNotificationChannel(
+      this.getNotificationChannel(kind) as StoredNotificationChannel,
+    );
+  }
+
+  createPollCycle(): PollCycleRecord {
+    const id = randomUUID();
+    const startedAt = new Date().toISOString();
+    const retentionCutoff = new Date(
+      Date.now() - 90 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    this.db
+      .prepare("DELETE FROM poll_cycles WHERE started_at < ?")
+      .run(retentionCutoff);
+    this.db
+      .prepare(
+        `INSERT INTO poll_cycles (id, status, started_at, finished_at)
+         VALUES (?, 'running', ?, NULL)`,
+      )
+      .run(id, startedAt);
+    return this.getPollCycle(id) as PollCycleRecord;
+  }
+
+  savePollAccountResult(cycleId: string, input: PollAccountResult): void {
+    const result = PollAccountResultSchema.parse(input);
+    this.db
+      .prepare(
+        `INSERT INTO poll_cycle_accounts (
+          cycle_id, account_id, account_name, run_id, result_status,
+          enabled_count, disabled_count, failure_count, message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cycle_id, account_id) DO UPDATE SET
+          account_name = excluded.account_name,
+          run_id = excluded.run_id,
+          result_status = excluded.result_status,
+          enabled_count = excluded.enabled_count,
+          disabled_count = excluded.disabled_count,
+          failure_count = excluded.failure_count,
+          message = excluded.message`,
+      )
+      .run(
+        cycleId,
+        result.accountId,
+        result.accountName,
+        result.runId,
+        result.status,
+        result.enabledCount,
+        result.disabledCount,
+        result.failureCount,
+        result.message,
+      );
+  }
+
+  finishPollCycle(cycleId: string): PollCycleRecord {
+    const result = this.db
+      .prepare(
+        `UPDATE poll_cycles SET status = 'completed', finished_at = ?
+         WHERE id = ?`,
+      )
+      .run(new Date().toISOString(), cycleId);
+    if (result.changes === 0) throw new Error("轮询批次不存在。");
+    return this.getPollCycle(cycleId) as PollCycleRecord;
+  }
+
+  getPollCycle(cycleId: string): PollCycleRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM poll_cycles WHERE id = ?")
+      .get(cycleId) as SqlRow | undefined;
+    if (!row) return null;
+    const accounts = this.db
+      .prepare(
+        `SELECT * FROM poll_cycle_accounts WHERE cycle_id = ?
+         ORDER BY account_name`,
+      )
+      .all(cycleId) as SqlRow[];
+    return PollCycleRecordSchema.parse({
+      id: row.id,
+      status: row.status,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at ?? null,
+      accounts: accounts.map(mapPollAccountResult),
+    });
+  }
+
+  listPollCycles(limit = 20): PollCycleRecord[] {
+    const rows = this.db
+      .prepare("SELECT id FROM poll_cycles ORDER BY started_at DESC LIMIT ?")
+      .all(limit) as SqlRow[];
+    return rows
+      .map((row) => this.getPollCycle(String(row.id)))
+      .filter((cycle): cycle is PollCycleRecord => Boolean(cycle));
+  }
+
+  summarizeAutomationRun(
+    runId: string,
+  ): Pick<
+    PollAccountResult,
+    "enabledCount" | "disabledCount" | "failureCount"
+  > {
+    const rows = this.db
+      .prepare(
+        `SELECT action, status, COUNT(*) AS count
+         FROM automation_decisions WHERE run_id = ?
+         GROUP BY action, status`,
+      )
+      .all(runId) as SqlRow[];
+    let enabledCount = 0;
+    let disabledCount = 0;
+    let failureCount = 0;
+    for (const row of rows) {
+      const count = Number(row.count);
+      if (row.status === "succeeded" && row.action === "enable") {
+        enabledCount += count;
+      }
+      if (row.status === "succeeded" && row.action === "disable") {
+        disabledCount += count;
+      }
+      if (row.status === "failed") failureCount += count;
+    }
+    return { enabledCount, disabledCount, failureCount };
+  }
+
+  enqueueNotificationDeliveries(cycleId: string): NotificationDeliveryRecord[] {
+    const now = new Date().toISOString();
+    for (const channel of this.listNotificationChannels()) {
+      if (
+        !channel.settings?.enabled ||
+        !channel.hasCredential ||
+        channel.status !== "ready"
+      ) {
+        continue;
+      }
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO notification_deliveries (
+            id, cycle_id, channel_kind, status, attempt_count, last_error,
+            next_attempt_at, created_at, updated_at, sent_at
+          ) VALUES (?, ?, ?, 'queued', 0, NULL, NULL, ?, ?, NULL)`,
+        )
+        .run(randomUUID(), cycleId, channel.kind, now, now);
+    }
+    return this.listNotificationDeliveries(100).filter(
+      (delivery) => delivery.cycleId === cycleId,
+    );
+  }
+
+  listDueNotificationDeliveries(limit = 20): NotificationDeliveryRecord[] {
+    const now = new Date().toISOString();
+    const stale = new Date(Date.now() - 5 * 60_000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM notification_deliveries
+         WHERE attempt_count < 3 AND (
+           status = 'queued'
+           OR (status = 'failed' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+           OR (status = 'sending' AND updated_at <= ?)
+         )
+         ORDER BY created_at LIMIT ?`,
+      )
+      .all(now, stale, limit) as SqlRow[];
+    return rows.map(mapNotificationDelivery);
+  }
+
+  markNotificationDeliverySending(id: string): NotificationDeliveryRecord {
+    const result = this.db
+      .prepare(
+        `UPDATE notification_deliveries SET
+          status = 'sending', attempt_count = attempt_count + 1,
+          updated_at = ?, next_attempt_at = NULL
+        WHERE id = ?`,
+      )
+      .run(new Date().toISOString(), id);
+    if (result.changes === 0) throw new Error("通知发送记录不存在。");
+    return this.getNotificationDelivery(id) as NotificationDeliveryRecord;
+  }
+
+  markNotificationDeliverySent(id: string): NotificationDeliveryRecord {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE notification_deliveries SET
+          status = 'sent', last_error = NULL, next_attempt_at = NULL,
+          updated_at = ?, sent_at = ? WHERE id = ?`,
+      )
+      .run(now, now, id);
+    return this.getNotificationDelivery(id) as NotificationDeliveryRecord;
+  }
+
+  markNotificationDeliveryFailed(
+    id: string,
+    message: string,
+  ): NotificationDeliveryRecord {
+    const existing = this.getNotificationDelivery(id);
+    if (!existing) throw new Error("通知发送记录不存在。");
+    const delayMinutes = Math.min(
+      30,
+      2 ** Math.max(0, existing.attemptCount - 1),
+    );
+    const nextAttemptAt = new Date(
+      Date.now() + delayMinutes * 60_000,
+    ).toISOString();
+    this.db
+      .prepare(
+        `UPDATE notification_deliveries SET
+          status = 'failed', last_error = ?, next_attempt_at = ?, updated_at = ?
+        WHERE id = ?`,
+      )
+      .run(
+        message.slice(0, 1000),
+        nextAttemptAt,
+        new Date().toISOString(),
+        id,
+      );
+    return this.getNotificationDelivery(id) as NotificationDeliveryRecord;
+  }
+
+  listNotificationDeliveries(limit = 50): NotificationDeliveryRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM notification_deliveries
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(limit) as SqlRow[];
+    return rows.map(mapNotificationDelivery);
+  }
+
+  private getNotificationDelivery(
+    id: string,
+  ): NotificationDeliveryRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM notification_deliveries WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    return row ? mapNotificationDelivery(row) : null;
   }
 
   getRuleConfiguration(): RuleConfiguration {
@@ -1439,6 +1791,52 @@ export class AutomationStore {
       ON automation_decisions (
         account_id, entity_type, external_id, action, status, executed_at
       );
+      CREATE TABLE IF NOT EXISTS notification_channels (
+        channel_kind TEXT PRIMARY KEY CHECK (channel_kind IN ('email', 'wecom', 'feishu')),
+        settings_json TEXT NOT NULL,
+        credential_ref TEXT,
+        status TEXT NOT NULL CHECK (status IN ('not-configured', 'untested', 'ready', 'failed')),
+        last_message TEXT,
+        last_tested_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS poll_cycles (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('running', 'completed')),
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS poll_cycle_accounts (
+        cycle_id TEXT NOT NULL REFERENCES poll_cycles(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL,
+        account_name TEXT NOT NULL,
+        run_id TEXT,
+        result_status TEXT NOT NULL CHECK (result_status IN ('changed', 'no-action', 'failed', 'skipped')),
+        enabled_count INTEGER NOT NULL DEFAULT 0,
+        disabled_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        message TEXT,
+        PRIMARY KEY (cycle_id, account_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS notification_deliveries (
+        id TEXT PRIMARY KEY,
+        cycle_id TEXT NOT NULL REFERENCES poll_cycles(id) ON DELETE CASCADE,
+        channel_kind TEXT NOT NULL CHECK (channel_kind IN ('email', 'wecom', 'feishu')),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'sending', 'sent', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_attempt_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        sent_at TEXT,
+        UNIQUE (cycle_id, channel_kind)
+      );
+
+      CREATE INDEX IF NOT EXISTS notification_deliveries_due
+      ON notification_deliveries (status, next_attempt_at, created_at);
     `);
 
     this.ensureColumn(
@@ -1593,6 +1991,76 @@ export class AutomationStore {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
+}
+
+function emptyNotificationChannel(
+  kind: NotificationChannelKind,
+): NotificationChannelRecord {
+  return {
+    kind,
+    settings: null,
+    hasCredential: false,
+    status: "not-configured",
+    lastMessage: null,
+    lastTestedAt: null,
+    updatedAt: null,
+  };
+}
+
+function mapStoredNotificationChannel(
+  row: SqlRow,
+): StoredNotificationChannel {
+  const credentialRef =
+    typeof row.credential_ref === "string" ? row.credential_ref : null;
+  return {
+    kind: NotificationChannelKindSchema.parse(row.channel_kind),
+    settings: NotificationChannelSettingsSchema.parse(
+      JSON.parse(String(row.settings_json)),
+    ),
+    hasCredential: Boolean(credentialRef),
+    credentialRef,
+    status: row.status as NotificationConnectionStatus,
+    lastMessage:
+      typeof row.last_message === "string" ? row.last_message : null,
+    lastTestedAt:
+      typeof row.last_tested_at === "string" ? row.last_tested_at : null,
+    updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
+  };
+}
+
+function toPublicNotificationChannel(
+  stored: StoredNotificationChannel,
+): NotificationChannelRecord {
+  const { credentialRef: _credentialRef, ...record } = stored;
+  return record;
+}
+
+function mapPollAccountResult(row: SqlRow): PollAccountResult {
+  return PollAccountResultSchema.parse({
+    accountId: row.account_id,
+    accountName: row.account_name,
+    runId: row.run_id ?? null,
+    status: row.result_status,
+    enabledCount: Number(row.enabled_count),
+    disabledCount: Number(row.disabled_count),
+    failureCount: Number(row.failure_count),
+    message: row.message ?? null,
+  });
+}
+
+function mapNotificationDelivery(row: SqlRow): NotificationDeliveryRecord {
+  return NotificationDeliveryRecordSchema.parse({
+    id: row.id,
+    cycleId: row.cycle_id,
+    channelKind: row.channel_kind,
+    status: row.status,
+    attemptCount: Number(row.attempt_count),
+    lastError: row.last_error ?? null,
+    nextAttemptAt: row.next_attempt_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    sentAt: row.sent_at ?? null,
+  });
 }
 
 function mapAccount(row: SqlRow): AccountConfig {

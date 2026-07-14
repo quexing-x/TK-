@@ -7,6 +7,7 @@ import {
   type AutomationRunRecord,
   type AutomationTrigger,
   type ManualStatusInput,
+  type PollCycleRecord,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -18,6 +19,11 @@ import {
 import { AutomationStore } from "@tk-auto/storage";
 
 export class AutomationBusyError extends Error {}
+
+export interface PollNotificationDispatcher {
+  flushPending(): Promise<void>;
+  enqueueAndDispatch(cycle: PollCycleRecord): Promise<void>;
+}
 
 export class AutomationService {
   private readonly runningAccounts = new Set<string>();
@@ -470,6 +476,7 @@ export class AutomationScheduler {
   constructor(
     private readonly store: AutomationStore,
     private readonly service: AutomationService,
+    private readonly notifications?: PollNotificationDispatcher,
   ) {}
 
   start(): void {
@@ -488,26 +495,95 @@ export class AutomationScheduler {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      try {
+        await this.notifications?.flushPending();
+      } catch {
+        // Notification delivery is best-effort and must never block ad polling.
+      }
       const { pollingIntervalMinutes } =
         this.store.getGlobalAutomationSettings();
-      for (const account of this.store.listAccounts()) {
+      const dueAccounts = this.store.listAccounts().filter((account) => {
         const connection = this.store.getProviderConnection(
           account.id,
           account.providerKind,
         );
-        if (!connection?.hasCredential) continue;
+        if (!connection?.hasCredential) return false;
         const dueAt = connection.lastTestedAt
           ? new Date(connection.lastTestedAt).getTime() +
             pollingIntervalMinutes * 60_000
           : 0;
-        if (Date.now() < dueAt) continue;
-        await this.service.checkAccountConnection(account.id);
-        const refreshed = this.store.getProviderConnection(
-          account.id,
-          account.providerKind,
-        );
-        if (!account.enabled || refreshed?.status !== "ready") continue;
-        await this.service.runAccount(account.id, "scheduler");
+        return Date.now() >= dueAt;
+      });
+      if (dueAccounts.length === 0) return;
+
+      const cycle = this.store.createPollCycle();
+      for (const account of dueAccounts) {
+        try {
+          await this.service.checkAccountConnection(account.id);
+          const refreshed = this.store.getProviderConnection(
+            account.id,
+            account.providerKind,
+          );
+          if (!account.enabled) {
+            this.store.savePollAccountResult(cycle.id, {
+              accountId: account.id,
+              accountName: account.displayName,
+              runId: null,
+              status: "skipped",
+              enabledCount: 0,
+              disabledCount: 0,
+              failureCount: 0,
+              message: "账户自动化已关闭。",
+            });
+            continue;
+          }
+          if (refreshed?.status !== "ready") {
+            this.store.savePollAccountResult(cycle.id, {
+              accountId: account.id,
+              accountName: account.displayName,
+              runId: null,
+              status: "failed",
+              enabledCount: 0,
+              disabledCount: 0,
+              failureCount: 1,
+              message: refreshed?.lastMessage ?? "账户连接检测失败。",
+            });
+            continue;
+          }
+          const run = await this.service.runAccount(account.id, "scheduler");
+          const counts = this.store.summarizeAutomationRun(run.id);
+          const failed = run.status === "failed" || counts.failureCount > 0;
+          this.store.savePollAccountResult(cycle.id, {
+            accountId: account.id,
+            accountName: account.displayName,
+            runId: run.id,
+            status: failed
+              ? "failed"
+              : counts.enabledCount + counts.disabledCount > 0
+                ? "changed"
+                : "no-action",
+            ...counts,
+            failureCount: Math.max(counts.failureCount, run.failureCount),
+            message: run.errorMessage,
+          });
+        } catch (cause) {
+          this.store.savePollAccountResult(cycle.id, {
+            accountId: account.id,
+            accountName: account.displayName,
+            runId: null,
+            status: "failed",
+            enabledCount: 0,
+            disabledCount: 0,
+            failureCount: 1,
+            message: safeMessage(cause),
+          });
+        }
+      }
+      const completed = this.store.finishPollCycle(cycle.id);
+      try {
+        await this.notifications?.enqueueAndDispatch(completed);
+      } catch {
+        // The completed poll cycle remains available for audit and retry.
       }
     } finally {
       this.ticking = false;

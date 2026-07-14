@@ -48,6 +48,44 @@ describe("local API", () => {
     });
   });
 
+  it("stores notification credentials without returning their plaintext", async () => {
+    const initial = await app.inject({
+      method: "GET",
+      url: "/api/notifications/channels",
+    });
+    expect(initial.json()).toHaveLength(3);
+    const settings = await app.inject({
+      method: "PUT",
+      url: "/api/notifications/channels/email/settings",
+      payload: {
+        kind: "email",
+        enabled: true,
+        smtpHost: "smtp.example.com",
+        smtpPort: 465,
+        secure: true,
+        from: "sender@example.com",
+        recipients: ["owner@example.com"],
+      },
+    });
+    expect(settings.statusCode).toBe(200);
+    const credential = await app.inject({
+      method: "PUT",
+      url: "/api/notifications/channels/email/credential",
+      payload: {
+        kind: "email",
+        username: "sender@example.com",
+        password: "app-password-secret",
+      },
+    });
+    expect(credential.statusCode).toBe(200);
+    expect(credential.json()).toMatchObject({
+      kind: "email",
+      hasCredential: true,
+      status: "untested",
+    });
+    expect(credential.body).not.toContain("app-password-secret");
+  });
+
   it("returns and updates the nine global rules", async () => {
     const existing = await app.inject({ method: "GET", url: "/api/rules" });
     const body = existing.json();

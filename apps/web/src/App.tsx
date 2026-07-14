@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   BarChart3,
   Ban,
+  BellRing,
   BookOpen,
   Check,
   ChevronDown,
@@ -52,6 +53,7 @@ import {
 } from "./api";
 import { ConnectionPage } from "./ConnectionPage";
 import { ManualPage } from "./ManualPage";
+import { NotificationsPage } from "./NotificationsPage";
 import { RulesPage } from "./RulesPage";
 
 type PageKey =
@@ -60,7 +62,8 @@ type PageKey =
   | "automation"
   | "ads"
   | "analytics"
-  | "rules";
+  | "rules"
+  | "notifications";
 
 const navItems: Array<{
   key: PageKey;
@@ -103,6 +106,12 @@ const navItems: Array<{
     label: "规则配置",
     description: "九条全局自动化规则",
     icon: Gauge,
+  },
+  {
+    key: "notifications",
+    label: "消息推送",
+    description: "邮箱、企业微信与飞书",
+    icon: BellRing,
   },
 ];
 
@@ -220,6 +229,8 @@ export function App() {
             onSettingsSaved={loadBootstrap}
             onError={setError}
           />
+        ) : page === "notifications" ? (
+          <NotificationsPage onError={setError} />
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (

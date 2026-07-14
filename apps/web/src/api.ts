@@ -17,6 +17,12 @@ import type {
   EntityMetricSnapshotRecord,
   ManagedEntityRecord,
   ManualStatusInput,
+  NotificationChannelKind,
+  NotificationChannelRecord,
+  NotificationChannelSettings,
+  NotificationCredentialInput,
+  NotificationDeliveryRecord,
+  PollCycleRecord,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -80,6 +86,38 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  getNotificationChannels: () =>
+    request<NotificationChannelRecord[]>("/api/notifications/channels"),
+  saveNotificationSettings: (
+    kind: NotificationChannelKind,
+    settings: NotificationChannelSettings,
+  ) =>
+    request<NotificationChannelRecord>(
+      `/api/notifications/channels/${kind}/settings`,
+      { method: "PUT", body: JSON.stringify(settings) },
+    ),
+  saveNotificationCredential: (
+    kind: NotificationChannelKind,
+    credential: NotificationCredentialInput,
+  ) =>
+    request<NotificationChannelRecord>(
+      `/api/notifications/channels/${kind}/credential`,
+      { method: "PUT", body: JSON.stringify(credential) },
+    ),
+  deleteNotificationCredential: (kind: NotificationChannelKind) =>
+    request<{ ok: boolean }>(
+      `/api/notifications/channels/${kind}/credential`,
+      { method: "DELETE" },
+    ),
+  testNotificationChannel: (kind: NotificationChannelKind) =>
+    request<NotificationChannelRecord>(
+      `/api/notifications/channels/${kind}/test`,
+      { method: "POST" },
+    ),
+  getNotificationDeliveries: () =>
+    request<NotificationDeliveryRecord[]>("/api/notifications/deliveries"),
+  getPollCycles: () =>
+    request<PollCycleRecord[]>("/api/notifications/cycles"),
   providerHealth: (accountId: string) =>
     request<ProviderConnection | null>(
       `/api/accounts/${accountId}/provider-health`,
