@@ -12,6 +12,7 @@ import {
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
   AccountConfig,
+  CookieConnectionReadiness,
   CookieConnectionSettings,
   OfficialApiConnectionSettings,
   ProviderConnection,
@@ -34,6 +35,14 @@ const emptyApiSettings: OfficialApiConnectionSettings = {
   advertiserId: "",
 };
 
+const emptyReadiness: CookieConnectionReadiness = {
+  dataRequestImported: false,
+  statusRequestImported: false,
+  readTargets: [],
+  statusTargets: [],
+  completedSteps: 0,
+};
+
 export function ConnectionPage({
   account,
   onError,
@@ -43,6 +52,8 @@ export function ConnectionPage({
 }) {
   const [providerKind, setProviderKind] = useState<ProviderKind>("cookie");
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
+  const [readiness, setReadiness] =
+    useState<CookieConnectionReadiness>(emptyReadiness);
   const [cookieSettings, setCookieSettings] =
     useState<CookieConnectionSettings>(emptyCookieSettings);
   const [apiSettings, setApiSettings] =
@@ -59,8 +70,12 @@ export function ConnectionPage({
 
   const load = useCallback(async () => {
     try {
-      const list = await api.getConnections(account.id);
+      const [list, nextReadiness] = await Promise.all([
+        api.getConnections(account.id),
+        api.getCookieReadiness(account.id),
+      ]);
       setConnections(list);
+      setReadiness(nextReadiness);
       const cookieConnection = list.find((item) => item.kind === "cookie");
       const apiConnection = list.find((item) => item.kind === "official-api");
       setCookieSettings(
@@ -94,9 +109,7 @@ export function ConnectionPage({
       const result = await api.importCookieCurl(account.id, curlCommand.trim());
       setCurlCommand("");
       setImportFeedback(
-        result.status === "ready"
-          ? "导入完成，Cookie 连接检测已通过。"
-          : (result.lastMessage ?? "请求已加密保存，请查看连接状态。"),
+        result.lastMessage ?? "请求已加密保存，请查看连接状态。",
       );
       await load();
     } catch (cause) {
@@ -300,15 +313,20 @@ export function ConnectionPage({
           <div className="quick-import-heading">
             <span className="quick-import-icon"><Sparkles size={21} /></span>
             <div>
-              <span className="eyebrow">推荐方式 · 一次复制</span>
-              <h2>粘贴 cURL，自动导入并检测</h2>
-              <p>列表请求用于读取数据；真实启停请求会自动生成开启、关闭两个模板。</p>
+              <span className="eyebrow">最快接入 · {readiness.completedSteps}/2</span>
+              <h2>同一个输入框，两条 cURL 完成 Cookie 接入</h2>
+              <p>不需要选择广告层级；完成后默认具备系列、广告组和广告三级管理能力。</p>
             </div>
           </div>
           <ol className="quick-import-steps">
-            <li>读取数据时复制列表请求；启停功能只需复制一次真实开关请求</li>
-            <li>右键该请求，选择 Copy → Copy as cURL (bash)</li>
-            <li>粘贴到下面并点击“加密导入并检测”</li>
+            <li className={readiness.dataRequestImported ? "complete" : ""}>
+              <strong>{readiness.dataRequestImported ? "已完成" : "第 1 条"}</strong>
+              复制一条广告组列表 cURL，用于 Cookie、账户和数据读取
+            </li>
+            <li className={readiness.statusRequestImported ? "complete" : ""}>
+              <strong>{readiness.statusRequestImported ? "已完成" : "第 2 条"}</strong>
+              任意切换一次测试对象，复制真实开关 cURL；自动扩展全部三级启停
+            </li>
           </ol>
           <textarea
             aria-label="cURL 命令"
@@ -326,6 +344,9 @@ export function ConnectionPage({
             </button>
           </div>
           {importFeedback && <div className="import-feedback"><CheckCircle2 size={17} /> {importFeedback}</div>}
+          {readiness.completedSteps === 2 && (
+            <div className="import-feedback"><CheckCircle2 size={17} /> Cookie 接入完成，三个层级的启停模板均已就绪。</div>
+          )}
         </div>
       )}
 

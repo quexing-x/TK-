@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.1.0
+## Windows 桌面版 1.1.1
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.1.0.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.1.1.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -27,7 +27,7 @@ pnpm desktop:dist
 - Cookie / Official API 双 Provider 边界
 - Windows DPAPI 加密凭据库
 - 统一 cURL 快速导入（自动解析账号、读请求或状态请求、Payload 与凭据）
-- 单条状态 cURL 自动生成同层级开启、关闭双模板
+- 单条状态 cURL 自动生成三个层级的开启、关闭模板
 - 多广告账户独立凭据与全账户共用自动化规则
 - 系列、广告组和广告分页检测与指标标准化
 - 仅观察、人工确认和全自动三种执行模式
@@ -37,8 +37,8 @@ pnpm desktop:dist
 - 本地 SQLite 持久化、调度器和审计记录
 - Web 置顶操作手册与自动生成 Markdown 手册
 
-程序不会自动读取浏览器 Cookie。Cookie 用户需明确导入列表 cURL；每个实际使用
-层级只需导入一条真实启停 cURL，系统明确识别状态字段后生成双向模板。已有阈值升级后
+程序不会自动读取浏览器 Cookie。Cookie 用户通常只需导入一条列表 cURL 和一条任意
+层级的真实启停 cURL，系统会扩展三个层级的双向模板。已有阈值升级后
 默认仅判断，必须同时开启层级能力、阈值自动执行和全自动模式才会真实写入。
 
 ## 架构

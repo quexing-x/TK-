@@ -39,9 +39,11 @@ export class CookieAdsProvider implements AdsProvider {
   async checkHealth(context: ProviderContext): Promise<ProviderHealth> {
     const settings = CookieConnectionSettingsSchema.parse(context.settings);
     const credential = CookieCredentialInputSchema.parse(context.credential);
-    const captured = credential.requestTemplates?.find((item) =>
+    const readTemplates = credential.requestTemplates?.filter((item) =>
       ["health", "campaign", "ad-group", "ad"].includes(item.target),
     );
+    const captured =
+      readTemplates?.find((item) => !item.derived) ?? readTemplates?.[0];
     const request = captured ?? legacyRequest(settings.healthUrl);
     if (!request) {
       throw new Error("尚未配置连接检测请求，请使用 cURL 快速导入或高级设置。");
@@ -76,7 +78,16 @@ export class CookieAdsProvider implements AdsProvider {
         warnings.push(`${entityType} 尚未导入只读请求。`);
         continue;
       }
-      const payload = await requestCookieJson(request, credential);
+      let payload: Record<string, unknown>;
+      try {
+        payload = await requestCookieJson(request, credential);
+      } catch (cause) {
+        if (!request.derived) throw cause;
+        warnings.push(
+          `${entityType} 自动补全请求失败；如需该层级数据，请补充一条真实列表 cURL。`,
+        );
+        continue;
+      }
       const extracted = extractEntities(payload, entityType);
       entities.push(...extracted);
       if (entityType === "ad-group") {
@@ -132,13 +143,17 @@ export class CookieAdsProvider implements AdsProvider {
         results.push({
           ...mutation,
           ok: true,
-          message: `Cookie 状态请求执行成功：${mutation.action}。`,
+          message: `Cookie 状态请求执行成功：${mutation.action}${template.derived ? "（自动扩展模板）" : ""}。`,
         });
       } catch (cause) {
+        const detail =
+          cause instanceof Error ? cause.message : "Cookie 状态请求失败。";
         results.push({
           ...mutation,
           ok: false,
-          message: cause instanceof Error ? cause.message : "Cookie 状态请求失败。",
+          message: template.derived
+            ? `${detail} 自动扩展模板被拒绝；请只补充此层级的一条真实开关 cURL。`
+            : detail,
         });
       }
     }

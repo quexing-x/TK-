@@ -151,10 +151,25 @@ describe("local API", () => {
     };
     expect(secret.requestTemplates).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ target: "campaign-status", action: "disable" }),
+        expect.objectContaining({ target: "campaign-status", action: "enable" }),
         expect.objectContaining({ target: "ad-group-status", action: "disable" }),
         expect.objectContaining({ target: "ad-group-status", action: "enable" }),
+        expect.objectContaining({ target: "ad-status", action: "disable" }),
+        expect.objectContaining({ target: "ad-status", action: "enable" }),
       ]),
     );
+    const readiness = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/connections/cookie/readiness",
+    });
+    expect(readiness.statusCode).toBe(200);
+    expect(readiness.json()).toMatchObject({
+      dataRequestImported: true,
+      statusRequestImported: true,
+      statusTargets: ["campaign", "ad-group", "ad"],
+      completedSteps: 2,
+    });
   });
 
   it("creates an independent advertising account", async () => {

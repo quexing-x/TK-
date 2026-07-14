@@ -15,11 +15,22 @@ describe("parseTikTokCurl", () => {
 
     expect(imported.settings.advertiserId).toBe("123456");
     expect(JSON.stringify(imported.settings)).not.toContain("ephemeral-token");
-    expect(imported.credential.requestTemplates?.[0]).toMatchObject({
-      target: "ad-group",
-      method: "POST",
-      body: '{"page":1}',
-    });
+    expect(imported.credential.requestTemplates).toHaveLength(3);
+    expect(imported.credential.requestTemplates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "campaign",
+          derived: true,
+        }),
+        expect.objectContaining({
+          target: "ad-group",
+          method: "POST",
+          body: '{"page":1}',
+          derived: false,
+        }),
+        expect.objectContaining({ target: "ad", derived: true }),
+      ]),
+    );
     expect(imported.credential.cookie).toBe(
       "sessionid=authorized-test-cookie",
     );
@@ -38,14 +49,28 @@ describe("parseTikTokCurl", () => {
       `curl 'https://ads.tiktok.com/api/v4/i18n/adgroup/status/update/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie' -H 'content-type: application/json' --data-raw '{"ad_id":"old-id","status":0}'`,
     );
 
-    expect(imported.credential.requestTemplates?.[0]).toMatchObject({
-      target: "ad-group-status",
-      action: "disable",
-    });
-    expect(imported.credential.requestTemplates?.[1]).toMatchObject({
-      target: "ad-group-status",
-      action: "enable",
-      body: '{"ad_id":"old-id","status":1}',
-    });
+    expect(imported.credential.requestTemplates).toHaveLength(6);
+    expect(imported.credential.requestTemplates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "ad-group-status",
+          action: "enable",
+          body: '{"ad_id":"old-id","status":1}',
+          derived: false,
+        }),
+        expect.objectContaining({
+          target: "campaign-status",
+          action: "disable",
+          body: '{"campaign_id":"old-id","status":0}',
+          derived: true,
+        }),
+        expect.objectContaining({
+          target: "ad-status",
+          action: "enable",
+          body: '{"ad_id":"old-id","status":1}',
+          derived: true,
+        }),
+      ]),
+    );
   });
 });

@@ -67,6 +67,7 @@ export const CapturedCookieRequestSchema = z.object({
   body: z.string().max(262_144).optional(),
   contentType: z.string().trim().max(256).optional(),
   headers: z.record(z.string(), z.string().max(8192)).optional(),
+  derived: z.boolean().optional(),
 });
 
 export type CapturedCookieRequest = z.infer<
@@ -119,6 +120,17 @@ export const ProviderConnectionSchema = z.object({
 });
 
 export type ProviderConnection = z.infer<typeof ProviderConnectionSchema>;
+
+export const CookieConnectionReadinessSchema = z.object({
+  dataRequestImported: z.boolean(),
+  statusRequestImported: z.boolean(),
+  readTargets: z.array(z.enum(["campaign", "ad-group", "ad"])),
+  statusTargets: z.array(z.enum(["campaign", "ad-group", "ad"])),
+  completedSteps: z.number().int().min(0).max(2),
+});
+export type CookieConnectionReadiness = z.infer<
+  typeof CookieConnectionReadinessSchema
+>;
 
 export const SyncEntityTypeSchema = z.enum([
   "campaign",

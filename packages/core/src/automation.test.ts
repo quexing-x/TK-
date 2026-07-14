@@ -15,13 +15,15 @@ describe("automation switches", () => {
     expect(AutomationSwitchesSchema.parse(defaults)).toEqual(defaults);
   });
 
-  it("enables read-only switches by default", () => {
+  it("enables reading and all three status levels by default", () => {
     const defaults = createDefaultAutomationSwitches();
 
     expect(defaults.parseCampaigns).toBe(true);
     expect(defaults.parseAdGroups).toBe(true);
     expect(defaults.parseAds).toBe(true);
+    expect(defaults.manageCampaignStatus).toBe(true);
+    expect(defaults.manageAdGroupStatus).toBe(true);
+    expect(defaults.manageAdStatus).toBe(true);
     expect(defaults.deleteAdGroups).toBe(false);
   });
 });
-

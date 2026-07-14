@@ -3,7 +3,7 @@ import { userGuide } from "./index.js";
 
 describe("user guide", () => {
   it("contains both provider tutorials and the update policy", () => {
-    expect(userGuide.version).toBe("1.1.0");
+    expect(userGuide.version).toBe("1.1.1");
     const ids = userGuide.sections.map((section) => section.id);
     expect(ids).toContain("cookie-provider");
     expect(ids).toContain("official-api-provider");
@@ -19,7 +19,8 @@ describe("user guide", () => {
     expect(cookieGuide?.steps.join(" ")).toContain("/adgroup/list/?");
     expect(cookieGuide?.steps.join(" ")).toContain("/campaign/list/?");
     expect(cookieGuide?.steps.join(" ")).toContain("report、batch 或 append");
-    expect(cookieGuide?.notes.join(" ")).toContain("生成双向模板");
+    expect(cookieGuide?.steps.join(" ")).toContain("Cookie 接入完成");
+    expect(cookieGuide?.notes.join(" ")).toContain("一条任意层级状态 cURL");
 
     const quickStart = userGuide.sections.find(
       (section) => section.id === "quick-start",

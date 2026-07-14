@@ -204,6 +204,61 @@ export async function createApp(
     return dependencies.store.listProviderConnections(accountId);
   });
 
+  app.get(
+    "/api/accounts/:accountId/connections/cookie/readiness",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      const connection = dependencies.store.getProviderConnection(
+        accountId,
+        "cookie",
+      );
+      if (!connection?.credentialRef) {
+        return {
+          dataRequestImported: false,
+          statusRequestImported: false,
+          readTargets: [],
+          statusTargets: [],
+          completedSteps: 0,
+        };
+      }
+      const secret = await dependencies.vault.read(connection.credentialRef);
+      if (!secret) {
+        return reply.status(409).send({ message: "Cookie 凭据引用已失效。" });
+      }
+      const credential = ProviderCredentialInputSchema.parse(JSON.parse(secret));
+      if (credential.kind !== "cookie") {
+        return reply.status(409).send({ message: "当前凭据不是 Cookie 类型。" });
+      }
+      const templates = credential.requestTemplates ?? [];
+      const readTargets = (["campaign", "ad-group", "ad"] as const).filter(
+        (target) => templates.some((item) => item.target === target),
+      );
+      const statusTargets = (["campaign", "ad-group", "ad"] as const).filter(
+        (target) =>
+          (["enable", "disable"] as const).every((action) =>
+            templates.some(
+              (item) =>
+                item.target === `${target}-status` && item.action === action,
+            ),
+          ),
+      );
+      const dataRequestImported = readTargets.length > 0;
+      const statusRequestImported =
+        statusTargets.length === 3 &&
+        templates.some(
+          (item) => item.target.endsWith("-status") && !item.derived,
+        );
+      return {
+        dataRequestImported,
+        statusRequestImported,
+        readTargets,
+        statusTargets,
+        completedSteps:
+          Number(dataRequestImported) + Number(statusRequestImported),
+      };
+    },
+  );
+
   app.post(
     "/api/accounts/:accountId/connections/cookie/import-curl",
     async (request, reply) => {
@@ -291,7 +346,7 @@ export async function createApp(
           accountId,
           "cookie",
           health.status,
-          `${imported.summary.target.endsWith("-status") ? "已识别层级和动作，并自动生成开启、关闭模板" : "数据请求导入成功"}：${imported.summary.method} ${imported.summary.path}。${health.message}`,
+          `${imported.summary.target.endsWith("-status") ? "已识别状态请求，并自动生成三个层级的开启、关闭模板" : "数据请求导入成功"}：${imported.summary.method} ${imported.summary.path}。${health.message}`,
         );
       } catch (cause) {
         return dependencies.store.updateProviderStatus(
@@ -380,7 +435,7 @@ export async function createApp(
           accountId,
           "cookie",
           "ready",
-          `已识别并生成 ${imported.summary.target} 的开启、关闭模板。`,
+          "已识别并生成三个层级的开启、关闭模板。",
         );
       }
       return dependencies.store

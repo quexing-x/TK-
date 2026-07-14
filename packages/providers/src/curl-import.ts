@@ -203,8 +203,13 @@ export function parseTikTokCurl(command: string): TikTokCurlImportResult {
     headers: capturedHeaders,
   } as const;
   const requestTemplates = target.endsWith("-status")
-    ? createStatusTemplatePair({ ...request, target: target as StatusTarget })
-    : [request];
+    ? createAllStatusTemplatePairs({
+        ...request,
+        target: target as StatusTarget,
+      })
+    : ["campaign", "ad-group", "ad"].includes(target)
+      ? createAllReadTemplates(request as ReadTemplateRequest)
+      : [request];
   const credential = CookieCredentialInputSchema.parse({
     kind: "cookie",
     cookie,
@@ -295,8 +300,37 @@ function classifyRequestTarget(
 }
 
 type StatusTarget = "campaign-status" | "ad-group-status" | "ad-status";
+type ReadTarget = "campaign" | "ad-group" | "ad";
+type ReadTemplateRequest = {
+  target: ReadTarget;
+  url: string;
+  method: "GET" | "POST";
+  body: string | undefined;
+  contentType: string | undefined;
+  headers: Record<string, string>;
+};
 
-function createStatusTemplatePair(request: {
+function createAllReadTemplates(request: ReadTemplateRequest) {
+  const targets: ReadTarget[] = ["campaign", "ad-group", "ad"];
+  return targets.map((target) => {
+    if (target === request.target) return { ...request, derived: false };
+    const url = new URL(request.url);
+    const segment = {
+      campaign: "campaign",
+      "ad-group": "adgroup",
+      ad: "ad",
+    }[target];
+    const replaced = url.pathname.replace(
+      /\/(campaign|adgroup|ad)\/list(?=\/|$)/i,
+      `/${segment}/list`,
+    );
+    if (replaced === url.pathname) return { ...request, derived: false };
+    url.pathname = replaced;
+    return { ...request, target, url: url.toString(), derived: true };
+  });
+}
+
+function createAllStatusTemplatePairs(request: {
   target: StatusTarget;
   url: string;
   method: "GET" | "POST";
@@ -304,21 +338,129 @@ function createStatusTemplatePair(request: {
   contentType: string | undefined;
   headers: Record<string, string>;
 }) {
-  const transformed = transformStatusRequest(request.url, request.body);
-  return [
+  const targets: StatusTarget[] = [
+    "campaign-status",
+    "ad-group-status",
+    "ad-status",
+  ];
+  return targets.flatMap((target) => {
+    const adapted = adaptStatusRequest(request, target);
+    const transformed = transformStatusRequest(adapted.url, adapted.body);
+    const derived = target !== request.target;
+    return [
     {
-      ...request,
+      ...adapted,
       url: transformed.originalUrl,
       body: transformed.originalBody,
       action: transformed.originalAction,
+      derived,
     },
     {
-      ...request,
+      ...adapted,
       url: transformed.oppositeUrl,
       body: transformed.oppositeBody,
       action: oppositeAction(transformed.originalAction),
+      derived,
     },
-  ];
+    ];
+  });
+}
+
+function adaptStatusRequest(
+  request: {
+    target: StatusTarget;
+    url: string;
+    method: "GET" | "POST";
+    body: string | undefined;
+    contentType: string | undefined;
+    headers: Record<string, string>;
+  },
+  target: StatusTarget,
+) {
+  if (target === request.target) return request;
+  const url = new URL(request.url);
+  url.pathname = replaceStatusPathLevel(url.pathname, target);
+  renameEntityIdParams(url.searchParams, target);
+  let body = request.body;
+  if (body) {
+    const trimmed = body.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        body = JSON.stringify(renameEntityIdJson(JSON.parse(body), target));
+      } catch {
+        throw new TikTokCurlImportError(
+          "状态 cURL 的 JSON 请求体无法解析，请重新复制单个请求。",
+        );
+      }
+    } else {
+      const params = new URLSearchParams(body);
+      renameEntityIdParams(params, target);
+      body = params.toString();
+    }
+  }
+  return { ...request, target, url: url.toString(), body };
+}
+
+function replaceStatusPathLevel(pathname: string, target: StatusTarget): string {
+  const segment = {
+    "campaign-status": "campaign",
+    "ad-group-status": "adgroup",
+    "ad-status": "ad",
+  }[target];
+  const replaced = pathname.replace(
+    /\/(campaign|adgroup|ad|creative)(?=\/.*(?:status|update)|\/(?:status|update))/i,
+    `/${segment}`,
+  );
+  if (replaced === pathname) {
+    throw new TikTokCurlImportError(
+      "状态 cURL 路径无法安全扩展到三个层级，请重新复制标准 update/status 请求。",
+    );
+  }
+  return replaced;
+}
+
+const entityIdKeys = new Set([
+  "campaign_id",
+  "campaign_ids",
+  "adgroup_id",
+  "adgroup_ids",
+  "ad_group_id",
+  "ad_group_ids",
+  "ad_id",
+  "ad_ids",
+  "creative_id",
+  "creative_ids",
+]);
+
+function targetEntityIdKey(target: StatusTarget, plural: boolean): string {
+  if (target === "campaign-status") return plural ? "campaign_ids" : "campaign_id";
+  return plural ? "ad_ids" : "ad_id";
+}
+
+function renameEntityIdParams(params: URLSearchParams, target: StatusTarget): void {
+  for (const key of [...params.keys()]) {
+    if (!entityIdKeys.has(key.toLowerCase())) continue;
+    const values = params.getAll(key);
+    params.delete(key);
+    const nextKey = targetEntityIdKey(target, key.toLowerCase().endsWith("_ids"));
+    for (const value of values) params.append(nextKey, value);
+  }
+}
+
+function renameEntityIdJson(value: unknown, target: StatusTarget): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => renameEntityIdJson(item, target));
+  }
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      const normalized = key.toLowerCase();
+      const nextKey = entityIdKeys.has(normalized)
+        ? targetEntityIdKey(target, normalized.endsWith("_ids"))
+        : key;
+      return [nextKey, renameEntityIdJson(item, target)];
+    }),
+  );
 }
 
 function transformStatusRequest(urlValue: string, body: string | undefined): {

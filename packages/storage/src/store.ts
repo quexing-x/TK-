@@ -1265,6 +1265,11 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        migration_key TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY,
         actor TEXT NOT NULL,
@@ -1426,7 +1431,37 @@ export class AutomationStore {
       "cooldown_minutes",
       "INTEGER NOT NULL DEFAULT 60",
     );
+    this.applyMigration("enable-all-status-levels-v1", () => {
+      this.db
+        .prepare(
+          `UPDATE automation_switches SET enabled = 1, updated_at = ?
+           WHERE switch_key IN (
+             'manageCampaignStatus', 'manageAdGroupStatus', 'manageAdStatus'
+           )`,
+        )
+        .run(new Date().toISOString());
+    });
     this.ensureGlobalDefaults();
+  }
+
+  private applyMigration(key: string, migrate: () => void): void {
+    const applied = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE migration_key = ?")
+      .get(key);
+    if (applied) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      migrate();
+      this.db
+        .prepare(
+          "INSERT INTO schema_migrations (migration_key, applied_at) VALUES (?, ?)",
+        )
+        .run(key, new Date().toISOString());
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
   }
 
   private ensureGlobalDefaults(): void {

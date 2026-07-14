@@ -2,6 +2,7 @@ import type {
   AccountConfig,
   AccountSettingsUpdate,
   AccountCreateInput,
+  CookieConnectionReadiness,
   GlobalAutomationSettings,
   GlobalAutomationSettingsInput,
   AutomationSwitchRisk,
@@ -100,6 +101,10 @@ export const api = {
     ),
   getConnections: (accountId: string) =>
     request<ProviderConnection[]>(`/api/accounts/${accountId}/connections`),
+  getCookieReadiness: (accountId: string) =>
+    request<CookieConnectionReadiness>(
+      `/api/accounts/${accountId}/connections/cookie/readiness`,
+    ),
   importCookieCurl: (accountId: string, command: string) =>
     request<ProviderConnection>(
       `/api/accounts/${accountId}/connections/cookie/import-curl`,

@@ -205,9 +205,12 @@ td code { padding: 4px 7px; color: #4b5f7e; border-radius: 6px; background: #f0f
 .quick-import-icon { width: 44px; height: 44px; min-width: 44px; display: grid; place-items: center; color: #fff; border-radius: 13px; background: linear-gradient(135deg, #5479ee, #765ce7); box-shadow: 0 8px 20px #4f70e535; }
 .quick-import-heading h2 { margin: 5px 0 4px; font-size: 20px; }
 .quick-import-heading p { margin: 0; color: #6f7c91; font-size: 12px; }
-.quick-import-steps { margin: 20px 0 15px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; counter-reset: import-step; list-style: none; }
+.quick-import-steps { margin: 20px 0 15px; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; counter-reset: import-step; list-style: none; }
 .quick-import-steps li { min-height: 54px; padding: 11px 12px 11px 42px; position: relative; display: flex; align-items: center; color: #526078; border: 1px solid #dbe3fa; border-radius: 10px; background: #ffffffc9; font-size: 11px; line-height: 1.45; }
 .quick-import-steps li::before { content: counter(import-step); counter-increment: import-step; width: 23px; height: 23px; position: absolute; left: 11px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: #5a76df; font-size: 10px; font-weight: 800; }
+.quick-import-steps li strong { margin-right: 7px; color: #31415f; white-space: nowrap; }
+.quick-import-steps li.complete { border-color: #a8e3c9; background: #f0fbf6; }
+.quick-import-steps li.complete::before { content: "✓"; background: #24a36a; }
 .curl-input { width: 100%; padding: 13px 14px; resize: vertical; border: 1px solid #cfd9f3; border-radius: 10px; color: #253147; background: #fff; outline: none; font: 11px/1.55 "Cascadia Code", Consolas, monospace; }
 .curl-input:focus { border-color: #6f8bea; box-shadow: 0 0 0 3px #5478eb15; }
 .quick-import-footer { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }

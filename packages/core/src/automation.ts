@@ -102,10 +102,15 @@ export const AutomationSwitchesSchema: z.ZodType<AutomationSwitches> =
   z.object(automationSwitchShape).strict();
 
 export function createDefaultAutomationSwitches(): AutomationSwitches {
+  const defaultStatusManagement = new Set<AutomationSwitchKey>([
+    "manageCampaignStatus",
+    "manageAdGroupStatus",
+    "manageAdStatus",
+  ]);
   return Object.fromEntries(
     automationSwitchDefinitions.map((item) => [
       item.key,
-      item.risk === "read",
+      item.risk === "read" || defaultStatusManagement.has(item.key),
     ]),
   ) as AutomationSwitches;
 }

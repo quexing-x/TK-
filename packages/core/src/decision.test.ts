@@ -69,10 +69,12 @@ describe("evaluateAutomation", () => {
   });
 
   it("requires the level write switch", () => {
+    const switches = createDefaultAutomationSwitches();
+    switches.manageAdGroupStatus = false;
     const result = evaluateAutomation(
       [entity],
       [threshold],
-      createDefaultAutomationSwitches(),
+      switches,
     );
 
     expect(result.candidates).toHaveLength(0);

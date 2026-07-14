@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDefaultAutomationSwitches } from "@tk-auto/core";
 import { AutomationStore } from "./store.js";
 
@@ -32,6 +35,24 @@ describe("AutomationStore", () => {
     expect(store.getAutomationSwitches("demo-account").closeNoConversion).toBe(
       true,
     );
+  });
+
+  it("does not re-enable a status permission after the one-time migration", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-"));
+    const databasePath = join(directory, "automation.db");
+    const firstStore = new AutomationStore(databasePath);
+    firstStore.seed();
+    const switches = firstStore.getAutomationSwitches("demo-account");
+    switches.manageAdStatus = false;
+    firstStore.updateAutomationSwitches("demo-account", switches);
+    firstStore.close();
+
+    const reopenedStore = new AutomationStore(databasePath);
+    expect(
+      reopenedStore.getAutomationSwitches("demo-account").manageAdStatus,
+    ).toBe(false);
+    reopenedStore.close();
+    rmSync(directory, { recursive: true, force: true });
   });
 
   it("keeps cookie and official API connections independent", () => {
@@ -70,7 +91,11 @@ describe("AutomationStore", () => {
 
     expect(account.accountType).toBe("agency");
     expect(store.listGlobalThresholds()).toHaveLength(6);
-    expect(store.getAutomationSwitches(account.id).manageAdStatus).toBe(false);
+    expect(store.getAutomationSwitches(account.id)).toMatchObject({
+      manageCampaignStatus: true,
+      manageAdGroupStatus: true,
+      manageAdStatus: true,
+    });
   });
 
   it("stores metric snapshots and excludes ignored entities", () => {
