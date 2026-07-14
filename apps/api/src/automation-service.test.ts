@@ -17,6 +17,7 @@ class FakeProvider implements AdsProvider {
   readonly displayName = "Fake Cookie";
   readonly capabilities = new Set(["read-ad-groups", "change-status"] as const);
   readonly mutations: StatusMutation[] = [];
+  shouldFail = false;
 
   async checkHealth() {
     return { ok: true, status: "ready" as const, message: "ready" };
@@ -50,8 +51,8 @@ class FakeProvider implements AdsProvider {
     this.mutations.push(...mutations);
     return mutations.map((mutation) => ({
       ...mutation,
-      ok: true,
-      message: "accepted",
+      ok: !this.shouldFail,
+      message: this.shouldFail ? "rejected" : "accepted",
     }));
   }
 }
@@ -144,5 +145,25 @@ describe("AutomationService", () => {
     expect(store.listAutomationDecisions("demo-account")[0]?.status).toBe(
       "succeeded",
     );
+  });
+
+  it("marks the connection abnormal after a real status write fails", async () => {
+    const account = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: "cookie",
+      executionMode: "automatic",
+    });
+    provider.shouldFail = true;
+
+    const run = await service.runAccount("demo-account", "manual");
+
+    expect(run.failureCount).toBe(1);
+    expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
+      status: "failed",
+      lastMessage: "真实启停失败：rejected",
+    });
   });
 });

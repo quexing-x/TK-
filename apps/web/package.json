@@ -12,6 +12,7 @@
   "dependencies": {
     "@tk-auto/core": "workspace:*",
     "@tk-auto/manual": "workspace:*",
+    "@tk-auto/providers": "workspace:*",
     "@vitejs/plugin-react": "latest",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",

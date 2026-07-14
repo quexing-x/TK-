@@ -12,6 +12,7 @@ import type { CredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
   type ProviderContext,
+  type StatusMutation,
   type StatusMutationResult,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
@@ -238,17 +239,13 @@ export class AutomationService {
       decision.providerKind,
       account.timezone,
     );
-    const result = await this.providers.changeStatus(
-      decision.providerKind,
-      context,
-      [
-        {
-          entityType: decision.entityType,
-          externalId: decision.externalId,
-          action: decision.action,
-        },
-      ],
-    );
+    const result = await this.changeProviderStatus(context, [
+      {
+        entityType: decision.entityType,
+        externalId: decision.externalId,
+        action: decision.action,
+      },
+    ]);
     const first = result[0];
     const updated = this.store.updateAutomationDecision(
       decision.id,
@@ -291,11 +288,7 @@ export class AutomationService {
       account.providerKind,
       account.timezone,
     );
-    const results = await this.providers.changeStatus(
-      account.providerKind,
-      context,
-      [input],
-    );
+    const results = await this.changeProviderStatus(context, [input]);
     const result =
       results[0] ?? { ...input, ok: false, message: "Provider 未返回执行结果。" };
     const entity = this.store
@@ -391,17 +384,13 @@ export class AutomationService {
     context: ProviderContext,
     candidate: AutomationCandidate,
   ): Promise<StatusMutationResult> {
-    const results = await this.providers.changeStatus(
-      context.settings.kind,
-      context,
-      [
-        {
-          entityType: candidate.entity.entityType,
-          externalId: candidate.entity.externalId,
-          action: candidate.action,
-        },
-      ],
-    );
+    const results = await this.changeProviderStatus(context, [
+      {
+        entityType: candidate.entity.entityType,
+        externalId: candidate.entity.externalId,
+        action: candidate.action,
+      },
+    ]);
     return (
       results[0] ?? {
         entityType: candidate.entity.entityType,
@@ -410,6 +399,42 @@ export class AutomationService {
         ok: false,
         message: "Provider 未返回执行结果。",
       }
+    );
+  }
+
+  private async changeProviderStatus(
+    context: ProviderContext,
+    mutations: StatusMutation[],
+  ): Promise<StatusMutationResult[]> {
+    try {
+      const results = await this.providers.changeStatus(
+        context.settings.kind,
+        context,
+        mutations,
+      );
+      const failure = results.find((result) => !result.ok);
+      if (failure || results.length < mutations.length) {
+        this.markProviderWriteFailure(
+          context,
+          failure?.message ?? "Provider 未返回完整执行结果。",
+        );
+      }
+      return results;
+    } catch (cause) {
+      this.markProviderWriteFailure(context, safeMessage(cause));
+      throw cause;
+    }
+  }
+
+  private markProviderWriteFailure(
+    context: ProviderContext,
+    message: string,
+  ): void {
+    this.store.updateProviderStatus(
+      context.accountId,
+      context.settings.kind,
+      "failed",
+      `真实启停失败：${message}`,
     );
   }
 

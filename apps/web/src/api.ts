@@ -20,21 +20,9 @@ import type {
   ManagedEntityRecord,
   ManualStatusInput,
 } from "@tk-auto/core";
+import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
-export interface CookieConnectionReadiness {
-  dataRequestImported: boolean;
-  statusRequestImported: boolean;
-  requiredFields: {
-    listQuery: boolean;
-    updateQuery: boolean;
-    copyQuery: boolean;
-    csrfToken: boolean;
-    cookie: boolean;
-  };
-  completedFields: number;
-  totalFields: 5;
-  fieldsComplete: boolean;
-}
+export type { CookieConnectionReadiness };
 
 export interface SwitchDefinition {
   key: keyof AutomationSwitches;
