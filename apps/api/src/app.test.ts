@@ -246,6 +246,9 @@ describe("local API", () => {
     };
     expect(secret.requestTemplates).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ target: "campaign", derived: true }),
+        expect.objectContaining({ target: "ad-group", derived: false }),
+        expect.objectContaining({ target: "ad", derived: true }),
         expect.objectContaining({ target: "campaign-status", action: "disable" }),
         expect.objectContaining({ target: "campaign-status", action: "enable" }),
         expect.objectContaining({ target: "ad-group-status", action: "disable" }),
@@ -310,16 +313,18 @@ describe("local API", () => {
       url: "/api/launch-plans",
       payload: {
         sourceAccountId: "demo-account",
-        sourceAdId: "source-ad",
+        mode: "single",
+        sourceAdId: null,
         targetAccountIds: [target.id],
-        namingTemplate: "表格内名称",
-        startPaused: true,
+        launchPresetId: "default-launch-preset",
         launchRows: [{
           rowNumber: 2,
-          taskName: "任务-1",
           campaignName: "系列 A",
+          videoCode: "video-001",
+          productUrl: "https://example.com/product",
           adGroupName: "组 A",
           adName: "广告 A",
+          region: "malicious-region",
           dailyBudget: 100,
           bid: null,
           startAt: null,
@@ -332,8 +337,63 @@ describe("local API", () => {
     expect(response.statusCode).toBe(201);
     expect(response.json()).toMatchObject({
       status: "blocked",
-      launchRows: [{ campaignName: "系列 A", dailyBudget: 100 }],
+      launchRows: [{ campaignName: "系列 A", videoCode: "video-001", productUrl: "https://example.com/product", region: "未设置", dailyBudget: 100, initialStatus: "enabled" }],
     });
+  });
+
+  it("executes a multi-account creation plan with each account's own Cookie session", async () => {
+    const second = store.createAccount({ displayName: "第二测试账户", accountType: "standard", enabled: true, providerKind: "cookie" });
+    const creationConfig = {
+      objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0,
+      pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null,
+      identityType: 1, identityId: "test-identity", callToActionId: "SHOP_NOW",
+      countryCodes: [840], placementIds: [1], smartTargeting: true,
+      commentDisabled: false, shareDisabled: false,
+    };
+    store.updateLaunchPreset("default-launch-preset", {
+      name: "创建测试预设", region: "US", dailyBudget: 100, bid: null,
+      startAt: null, endAt: null, initialStatus: "enabled", creationConfig,
+    });
+    for (const [accountId, advertiserId, cookie] of [["demo-account", "1001", "sessionid=first-test-session"], [second.id, "1002", "sessionid=second-test-session"]] as const) {
+      store.saveProviderConnectionSettings(accountId, {
+        kind: "cookie", advertiserId, healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+      });
+      const reference = await vault.create(JSON.stringify({
+        kind: "cookie", cookie, csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{ target: "ad-group", url: `https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=${advertiserId}`, method: "POST", body: '{"start_date":"2026-07-01","end_date":"2026-07-07"}', contentType: "application/json" }],
+      }));
+      store.setProviderCredentialReference(accountId, "cookie", reference);
+      store.updateProviderStatus(accountId, "cookie", "ready", "test ready");
+    }
+    const cookies: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      const cookie = new Headers(init?.headers).get("cookie");
+      if (cookie) cookies.push(cookie);
+      const data = url.includes("campaign_snap/save")
+        ? { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }
+        : url.includes("ad_snap/save")
+          ? { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }
+          : url.includes("creative_snap/save")
+            ? { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }
+            : url.includes("create_by_snap")
+              ? { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "ad" }
+              : { list: [] };
+      return new Response(JSON.stringify({ code: 0, data }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const created = await app.inject({ method: "POST", url: "/api/launch-plans", payload: {
+      mode: "multi", sourceAccountId: "demo-account", sourceAdId: null,
+      targetAccountIds: ["demo-account", second.id], launchPresetId: "default-launch-preset",
+      launchRows: [{ rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "same-video-code", productUrl: "https://example.com/product", region: "US", dailyBudget: 1, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }],
+    } });
+    expect(created.statusCode).toBe(201);
+    const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${created.json().id}/execute` });
+
+    expect(executed.statusCode).toBe(200);
+    expect(executed.json()).toMatchObject({ plan: { status: "completed", executionResults: [{ accountId: "demo-account", ok: true, createdCount: 1, failedCount: 0 }, { accountId: second.id, ok: true, createdCount: 1, failedCount: 0 }] }, results: [{ accountId: "demo-account", ok: true }, { accountId: second.id, ok: true }] });
+    expect(cookies).toContain("sessionid=first-test-session");
+    expect(cookies).toContain("sessionid=second-test-session");
   });
 
   it("lists detected entities and manages the ignore list", async () => {
@@ -369,11 +429,19 @@ describe("local API", () => {
       method: "GET",
       url: "/api/accounts/demo-account/entities",
     });
+    const latestSync = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/automation/latest-sync",
+    });
 
     expect(ignore.statusCode).toBe(200);
     expect(entities.json()[0]).toMatchObject({
       externalId: "adgroup-1",
       ignored: true,
+    });
+    expect(latestSync.json()).toMatchObject({
+      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      warnings: [],
     });
   });
 

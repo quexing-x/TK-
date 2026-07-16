@@ -236,6 +236,22 @@ describe("AutomationStore", () => {
     });
   });
 
+  it("returns the newest three-level sync result for automation observability", () => {
+    store.saveReadOnlySync("demo-account", "cookie", [], {
+      startedAt: "2026-07-16T01:00:00.000Z",
+      finishedAt: "2026-07-16T01:01:00.000Z",
+      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      warnings: [],
+    });
+
+    expect(store.getLatestReadOnlySync("demo-account", "cookie")).toEqual({
+      startedAt: "2026-07-16T01:00:00.000Z",
+      finishedAt: "2026-07-16T01:01:00.000Z",
+      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      warnings: [],
+    });
+  });
+
   it("persists the global runtime, extension settings, and ad-group schedules", () => {
     expect(store.getSystemRuntimeState().enabled).toBe(true);
     expect(store.updateSystemRuntimeState({ enabled: false }).enabled).toBe(false);
@@ -275,14 +291,28 @@ describe("AutomationStore", () => {
       providerKind: "cookie",
     });
     const plan = store.createMultiAccountLaunchPlan({
+      mode: "copy",
       sourceAccountId: "demo-account",
       sourceAdId: "ad-1",
       targetAccountIds: [target.id],
-      namingTemplate: "{source_name}-{account_name}",
-      startPaused: true,
+      launchPresetId: "default-launch-preset",
+      launchRows: [{
+        rowNumber: 2,
+        campaignName: "测试系列",
+        videoCode: "video-001",
+        productUrl: "https://example.com/product",
+        adGroupName: "测试广告组",
+        adName: "260716:001",
+        region: "未设置",
+        dailyBudget: 100,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        initialStatus: "disabled",
+      }],
     });
     expect(plan.status).toBe("blocked");
-    expect(plan.message).toContain("不会写入 TikTok");
+    expect(plan.message).toContain("等待创建执行器发布");
   });
 
   it("stores spreadsheet launch rows without duplicating account selection", () => {
@@ -294,17 +324,19 @@ describe("AutomationStore", () => {
       providerKind: "cookie",
     });
     const plan = store.createMultiAccountLaunchPlan({
+      mode: "copy",
       sourceAccountId: "demo-account",
       sourceAdId: "ad-sheet",
       targetAccountIds: [target.id],
-      namingTemplate: "表格内名称",
-      startPaused: true,
+      launchPresetId: "default-launch-preset",
       launchRows: [{
         rowNumber: 2,
-        taskName: "首批",
         campaignName: "测试系列",
+        videoCode: "video-001",
+        productUrl: "https://example.com/product",
         adGroupName: "测试组",
         adName: "测试广告",
+        region: "未设置",
         dailyBudget: 100,
         bid: null,
         startAt: null,
@@ -316,6 +348,50 @@ describe("AutomationStore", () => {
     expect(plan.launchRows).toHaveLength(1);
     expect(plan.launchRows[0]?.campaignName).toBe("测试系列");
     expect(store.listMultiAccountLaunchPlans()[0]?.launchRows).toEqual(plan.launchRows);
+  });
+
+  it("keeps legacy plans with no imported rows readable after an upgrade", () => {
+    (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db
+      .prepare(`INSERT INTO multi_account_launch_plans (
+        id, source_account_id, source_ad_id, source_ad_name, target_account_ids_json,
+        naming_template, start_paused, launch_mode, launch_preset_id, preset_name, preset_snapshot_json,
+        launch_rows_json, status, message, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        "legacy-empty-plan", "demo-account", "__new__", "从零创建", JSON.stringify(["demo-account"]),
+        "YYMMDD:XXX", 1, "single", "default-launch-preset", "基础预设", null,
+        "[]", "blocked", "旧版本计划", "2026-07-16T00:00:00.000Z", "2026-07-16T00:00:00.000Z",
+      );
+
+    expect(store.listMultiAccountLaunchPlans().find((plan) => plan.id === "legacy-empty-plan"))
+      .toMatchObject({ sourceAdId: null, launchRows: [] });
+  });
+
+  it("uses the saved preset as the server authority and allocates unique automatic names", () => {
+    saveEntity(store, "ad", "ad-preset", "预设源广告");
+    const target = store.createAccount({ displayName: "预设目标", accountType: "standard", enabled: true, providerKind: "cookie" });
+    const preset = store.createLaunchPreset({
+      name: "美国预设", region: "US", dailyBudget: 250, bid: 2.5,
+      startAt: "2026-07-20T08:00:00.000Z", endAt: null, initialStatus: "disabled",
+    });
+    const input = {
+      mode: "copy" as const,
+      sourceAccountId: "demo-account", sourceAdId: "ad-preset", targetAccountIds: [target.id], launchPresetId: preset.id,
+      launchRows: [{ rowNumber: 2, campaignName: "系列", adGroupName: "组", videoCode: "v-1", productUrl: "https://example.com/p", adName: "client-provided", region: "wrong", dailyBudget: 1, bid: 99, startAt: null, endAt: null, initialStatus: "enabled" as const }],
+    };
+    const first = store.createMultiAccountLaunchPlan(input);
+    const second = store.createMultiAccountLaunchPlan(input);
+
+    expect(first.launchRows[0]).toMatchObject({ region: "US", dailyBudget: 250, bid: 2.5, startAt: "2026-07-20T08:00:00.000Z", initialStatus: "disabled" });
+    expect(first.launchRows[0]?.adName).toMatch(/^\d{6}:\d{3}$/);
+    expect(second.launchRows[0]?.adName).not.toBe(first.launchRows[0]?.adName);
+
+    // Databases written before the region field was introduced must remain readable.
+    const legacyRows = first.launchRows.map(({ region: _region, ...row }) => row);
+    (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db
+      .prepare("UPDATE multi_account_launch_plans SET launch_rows_json = ? WHERE id = ?")
+      .run(JSON.stringify(legacyRows), first.id);
+    expect(store.listMultiAccountLaunchPlans().find((plan) => plan.id === first.id)?.launchRows[0]?.region).toBe("未设置");
   });
 
   it("removes metric snapshots older than the 90-day retention window", () => {

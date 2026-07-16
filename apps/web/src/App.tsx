@@ -43,6 +43,7 @@ import type {
   ManagedEntityRecord,
   ProviderConnection,
   ProviderKind,
+  ReadOnlySyncResult,
   ThresholdConfig,
   ScheduledEntityActionRecord,
 } from "@tk-auto/core";
@@ -916,16 +917,19 @@ function AutomationPage({
   const [decisions, setDecisions] = useState<
     AutomationDecisionRecord[] | null
   >(null);
+  const [latestSync, setLatestSync] = useState<ReadOnlySyncResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [nextRuns, nextDecisions] = await Promise.all([
+      const [nextRuns, nextDecisions, nextSync] = await Promise.all([
         api.getAutomationRuns(account.id),
         api.getAutomationDecisions(account.id),
+        api.getLatestAutomationSync(account.id),
       ]);
       setRuns(nextRuns);
       setDecisions(nextDecisions);
+      setLatestSync(nextSync);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -935,18 +939,11 @@ function AutomationPage({
   useEffect(() => {
     setRuns(null);
     setDecisions(null);
+    setLatestSync(null);
     void load();
   }, [load]);
 
   const execute = async (preview: boolean) => {
-    if (
-      !preview &&
-      !window.confirm(
-        `本轮最多会按已启用规则执行 ${maxActionsPerRun} 个真实启停操作。确认继续吗？`,
-      )
-    ) {
-      return;
-    }
     try {
       setBusy(preview ? "preview" : "run");
       if (preview) await api.previewAutomation(account.id);
@@ -1016,6 +1013,11 @@ function AutomationPage({
             {busy === "run" ? "运行中…" : "立即执行"}
           </button>
         </div>
+      </div>
+
+      <div className="panel automation-sync-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><Layers3 size={18} /></span><div><h2>最近一次三层同步</h2><p>只有同步到的层级才会进入规则判断；检测预览与轮询都会更新此状态。</p></div></div></div>
+        {latestSync ? <><div className="sync-count-grid"><span>系列 <strong>{latestSync.counts.campaign}</strong></span><span>广告组 <strong>{latestSync.counts["ad-group"]}</strong></span><span>广告 <strong>{latestSync.counts.ad}</strong></span><small>{new Date(latestSync.finishedAt).toLocaleString()}</small></div>{latestSync.warnings.length > 0 ? <div className="sheet-issues warning"><strong>同步告警</strong><ul>{latestSync.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : <p className="retention-note">三层同步正常，本轮可以按规则参与判断。</p>}</> : <p className="inline-empty">尚未有同步记录。点击“检测预览”后将在此显示系列、广告组和广告的实际数量。</p>}
       </div>
 
       <div className="panel table-panel">

@@ -9,6 +9,8 @@ import type {
   ProviderSyncOutput,
   StatusMutation,
   StatusMutationResult,
+  CreationMutation,
+  CreationMutationResult,
 } from "./types.js";
 
 export class ProviderRegistry {
@@ -57,6 +59,18 @@ export class ProviderRegistry {
     mutations: StatusMutation[],
   ): Promise<StatusMutationResult[]> {
     return this.get(kind).changeStatus(context, mutations);
+  }
+
+  async createFromPreset(
+    kind: ProviderKind,
+    context: ProviderContext,
+    mutations: CreationMutation[],
+  ): Promise<CreationMutationResult[]> {
+    const provider = this.get(kind);
+    if (!provider.createFromPreset) {
+      throw new Error(`${provider.displayName} 暂不支持通过预设创建广告。`);
+    }
+    return provider.createFromPreset(context, mutations);
   }
 }
 

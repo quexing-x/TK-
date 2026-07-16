@@ -6,6 +6,8 @@ import type {
   ReadOnlySyncResult,
   AutomationAction,
   SyncEntityType,
+  CreationPresetConfig,
+  LaunchConfigurationRow,
 } from "@tk-auto/core";
 
 export type ProviderCapability =
@@ -48,6 +50,20 @@ export interface StatusMutationResult extends StatusMutation {
   message: string;
 }
 
+export interface CreationMutation {
+  row: LaunchConfigurationRow;
+  preset: CreationPresetConfig;
+  initialStatus: "enabled" | "disabled";
+}
+
+export interface CreationMutationResult extends CreationMutation {
+  ok: boolean;
+  campaignId?: string;
+  adGroupId?: string;
+  adId?: string;
+  message: string;
+}
+
 export interface AdsProvider {
   readonly kind: ProviderKind;
   readonly displayName: string;
@@ -58,6 +74,10 @@ export interface AdsProvider {
     context: ProviderContext,
     mutations: StatusMutation[],
   ): Promise<StatusMutationResult[]>;
+  createFromPreset?(
+    context: ProviderContext,
+    mutations: CreationMutation[],
+  ): Promise<CreationMutationResult[]>;
 }
 
 export interface ProviderDescriptor {

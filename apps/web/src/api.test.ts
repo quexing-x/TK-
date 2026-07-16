@@ -30,7 +30,24 @@ describe("web API client", () => {
     expect(fetch).toHaveBeenCalledWith(
       "/api/bootstrap",
       expect.objectContaining({
-        headers: expect.objectContaining({ "Content-Type": "application/json" }),
+        headers: expect.not.objectContaining({ "Content-Type": "application/json" }),
+      }),
+    );
+  });
+
+  it("does not send an empty JSON body header for automation preview", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.previewAutomation("account-1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1/automation/preview",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.not.objectContaining({ "Content-Type": "application/json" }),
       }),
     );
   });

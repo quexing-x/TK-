@@ -57,10 +57,15 @@ import {
   type OneTimeScheduleInput,
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
+  automaticName,
   MultiAccountLaunchPlanInputSchema,
   MultiAccountLaunchPlanRecordSchema,
   type MultiAccountLaunchPlanInput,
   type MultiAccountLaunchPlanRecord,
+  LaunchPresetInputSchema,
+  LaunchPresetRecordSchema,
+  type LaunchPresetInput,
+  type LaunchPresetRecord,
   LocalUserRecordSchema,
   type LocalUserRecord,
   type LocalUserRole,
@@ -1038,6 +1043,28 @@ export class AutomationStore {
     });
   }
 
+  getLatestReadOnlySync(
+    accountId: string,
+    kind: ProviderKind,
+  ): ReadOnlySyncResult | null {
+    const row = this.db
+      .prepare(
+        `SELECT started_at, finished_at, counts_json, warnings_json
+         FROM sync_runs
+         WHERE account_id = ? AND provider_kind = ?
+         ORDER BY finished_at DESC
+         LIMIT 1`,
+      )
+      .get(accountId, kind) as SqlRow | undefined;
+    if (!row) return null;
+    return {
+      startedAt: String(row.started_at),
+      finishedAt: String(row.finished_at),
+      counts: JSON.parse(String(row.counts_json)) as ReadOnlySyncResult["counts"],
+      warnings: JSON.parse(String(row.warnings_json)) as string[],
+    };
+  }
+
   listProviderEntities(
     accountId: string,
     kind: ProviderKind,
@@ -1406,23 +1433,92 @@ export class AutomationStore {
     return rows.map(mapMultiAccountLaunchPlan);
   }
 
+  getMultiAccountLaunchPlan(planId: string): MultiAccountLaunchPlanRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM multi_account_launch_plans WHERE id = ?")
+      .get(planId) as SqlRow | undefined;
+    return row ? mapMultiAccountLaunchPlan(row) : null;
+  }
+
+  updateMultiAccountLaunchPlanResult(
+    planId: string,
+    status: "blocked" | "completed",
+    message: string,
+    executionResults: MultiAccountLaunchPlanRecord["executionResults"],
+  ): MultiAccountLaunchPlanRecord {
+    const result = this.db
+      .prepare(
+        `UPDATE multi_account_launch_plans
+         SET status = ?, message = ?, execution_results_json = ?, updated_at = ?
+         WHERE id = ? AND status IN ('draft', 'blocked')`,
+      )
+      .run(status, message.slice(0, 2000), JSON.stringify(executionResults), new Date().toISOString(), planId);
+    if (result.changes === 0) throw new Error("投放计划不存在、已取消或已完成。");
+    return this.getMultiAccountLaunchPlan(planId) as MultiAccountLaunchPlanRecord;
+  }
+
+  listLaunchPresets(): LaunchPresetRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM launch_presets ORDER BY updated_at DESC, name")
+      .all() as SqlRow[];
+    return rows.map(mapLaunchPreset);
+  }
+
+  createLaunchPreset(input: LaunchPresetInput): LaunchPresetRecord {
+    const preset = LaunchPresetInputSchema.parse(input);
+    if (preset.startAt && preset.endAt && preset.endAt <= preset.startAt) {
+      throw new Error("结束时间必须晚于创建时间。");
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO launch_presets (
+          id, name, region, daily_budget, bid, start_at, end_at, initial_status, creation_config_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.initialStatus, JSON.stringify(preset.creationConfig), now, now);
+    return this.listLaunchPresets().find((item) => item.id === id) as LaunchPresetRecord;
+  }
+
+  updateLaunchPreset(id: string, input: LaunchPresetInput): LaunchPresetRecord {
+    const preset = LaunchPresetInputSchema.parse(input);
+    if (preset.startAt && preset.endAt && preset.endAt <= preset.startAt) {
+      throw new Error("结束时间必须晚于创建时间。");
+    }
+    const result = this.db
+      .prepare(
+        `UPDATE launch_presets SET
+          name = ?, region = ?, daily_budget = ?, bid = ?, start_at = ?, end_at = ?, initial_status = ?, creation_config_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.initialStatus, JSON.stringify(preset.creationConfig), new Date().toISOString(), id);
+    if (result.changes === 0) throw new Error("广告预设不存在。");
+    return this.listLaunchPresets().find((item) => item.id === id) as LaunchPresetRecord;
+  }
+
+  deleteLaunchPreset(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM launch_presets WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
   createMultiAccountLaunchPlan(
     input: MultiAccountLaunchPlanInput,
   ): MultiAccountLaunchPlanRecord {
     const plan = MultiAccountLaunchPlanInputSchema.parse(input);
+    const preset = this.listLaunchPresets().find((item) => item.id === plan.launchPresetId);
+    if (!preset) throw new Error("请选择有效的广告预设。");
     const sourceAccount = this.getAccount(plan.sourceAccountId);
     if (!sourceAccount) throw new Error("源广告账户不存在。");
-    const sourceAd = this.listManagedEntities(
-      plan.sourceAccountId,
-      sourceAccount.providerKind,
-    ).find(
-      (entity) =>
-        entity.entityType === "ad" && entity.externalId === plan.sourceAdId,
-    );
-    if (!sourceAd) throw new Error("源广告不存在，请先同步源账户数据。");
+    const sourceAd = plan.mode === "copy"
+      ? this.listManagedEntities(plan.sourceAccountId, sourceAccount.providerKind).find(
+        (entity) => entity.entityType === "ad" && entity.externalId === plan.sourceAdId,
+      )
+      : undefined;
+    if (plan.mode === "copy" && !sourceAd) throw new Error("源广告不存在，请先同步源账户数据。");
     const targetAccountIds = [
       ...new Set(
-        plan.targetAccountIds.filter((accountId) => accountId !== plan.sourceAccountId),
+        plan.mode === "copy" ? plan.targetAccountIds.filter((accountId) => accountId !== plan.sourceAccountId) : plan.targetAccountIds,
       ),
     ];
     if (targetAccountIds.length === 0) {
@@ -1431,28 +1527,47 @@ export class AutomationStore {
     for (const accountId of targetAccountIds) {
       if (!this.getAccount(accountId)) throw new Error("目标广告账户不存在。");
     }
-    const id = randomUUID();
     const now = new Date().toISOString();
-    const taskCount = Math.max(plan.launchRows?.length ?? 0, 1);
+    const id = randomUUID();
+    const launchRows = applyPresetToLaunchRows(
+      plan.launchRows,
+      preset,
+      this.listMultiAccountLaunchPlans(10_000),
+      new Date(now),
+    );
+    const taskCount = Math.max(launchRows.length, 1);
     const message =
-      `已保存 ${taskCount} 条投放配置；真实复制执行器需要目标账户的创建接口或复制 cURL，当前不会写入 TikTok。`;
+      `已保存 ${taskCount} 条${plan.mode === "copy" ? "复制迁移" : "创建"}配置；等待创建执行器发布。`;
     this.db
       .prepare(
         `INSERT INTO multi_account_launch_plans (
           id, source_account_id, source_ad_id, source_ad_name,
-          target_account_ids_json, naming_template, start_paused,
+          target_account_ids_json, naming_template, start_paused, launch_mode, launch_preset_id, preset_name, preset_snapshot_json,
           launch_rows_json, status, message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'blocked', ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', ?, ?, ?)`,
       )
       .run(
         id,
         plan.sourceAccountId,
-        plan.sourceAdId,
-        sourceAd.name,
+        plan.sourceAdId ?? "__new__",
+        sourceAd?.name ?? "从零创建",
         JSON.stringify(targetAccountIds),
-        plan.namingTemplate,
-        toSqlBoolean(plan.startPaused),
-        JSON.stringify(plan.launchRows ?? []),
+        "YYMMDD:XXX",
+        toSqlBoolean(launchRows.every((row) => row.initialStatus === "disabled")),
+        plan.mode,
+        plan.launchPresetId,
+        preset.name,
+        JSON.stringify({
+          name: preset.name,
+          region: preset.region,
+          dailyBudget: preset.dailyBudget,
+          bid: preset.bid,
+          startAt: preset.startAt,
+          endAt: preset.endAt,
+          initialStatus: preset.initialStatus,
+          creationConfig: preset.creationConfig,
+        }),
+        JSON.stringify(launchRows),
         message,
         now,
         now,
@@ -1460,7 +1575,7 @@ export class AutomationStore {
     this.writeAudit("local-user", plan.sourceAccountId, "launch-plan.created", {
       id,
       targetAccountIds,
-      startPaused: plan.startPaused,
+      launchPresetId: plan.launchPresetId,
       taskCount,
     });
     return this.listMultiAccountLaunchPlans().find(
@@ -2388,9 +2503,26 @@ export class AutomationStore {
         target_account_ids_json TEXT NOT NULL,
         naming_template TEXT NOT NULL,
         start_paused INTEGER NOT NULL CHECK (start_paused IN (0, 1)),
+        launch_mode TEXT NOT NULL DEFAULT 'copy',
+        preset_snapshot_json TEXT,
+        creation_config_json TEXT NOT NULL DEFAULT '{}',
         launch_rows_json TEXT NOT NULL DEFAULT '[]',
+        execution_results_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL CHECK (status IN ('draft', 'blocked', 'cancelled', 'completed')),
         message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS launch_presets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        region TEXT NOT NULL DEFAULT '未设置',
+        daily_budget REAL NOT NULL,
+        bid REAL,
+        start_at TEXT,
+        end_at TEXT,
+        initial_status TEXT NOT NULL CHECK (initial_status IN ('enabled', 'disabled')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -2553,6 +2685,41 @@ export class AutomationStore {
       "launch_rows_json",
       "TEXT NOT NULL DEFAULT '[]'",
     );
+    this.ensureColumn(
+      "multi_account_launch_plans",
+      "launch_mode",
+      "TEXT NOT NULL DEFAULT 'copy'",
+    );
+    this.ensureColumn(
+      "multi_account_launch_plans",
+      "preset_snapshot_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "launch_presets",
+      "region",
+      "TEXT NOT NULL DEFAULT '未设置'",
+    );
+    this.ensureColumn(
+      "launch_presets",
+      "creation_config_json",
+      "TEXT NOT NULL DEFAULT '{}'",
+    );
+    this.ensureColumn(
+      "multi_account_launch_plans",
+      "launch_preset_id",
+      "TEXT NOT NULL DEFAULT 'default-launch-preset'",
+    );
+    this.ensureColumn(
+      "multi_account_launch_plans",
+      "execution_results_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    this.ensureColumn(
+      "multi_account_launch_plans",
+      "preset_name",
+      "TEXT NOT NULL DEFAULT '基础预设'",
+    );
     this.applyMigration("enable-all-status-levels-v1", () => {
       this.db
         .prepare(
@@ -2602,6 +2769,13 @@ export class AutomationStore {
 
   private ensureGlobalDefaults(): void {
     const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO launch_presets (
+          id, name, region, daily_budget, bid, start_at, end_at, initial_status, created_at, updated_at
+        ) VALUES ('default-launch-preset', '基础预设', '未设置', 100, NULL, NULL, NULL, 'enabled', ?, ?)`,
+      )
+      .run(now, now);
     this.db
       .prepare(
         `INSERT OR IGNORE INTO global_automation_settings (
@@ -2935,14 +3109,69 @@ function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
   return MultiAccountLaunchPlanRecordSchema.parse({
     id: row.id,
     sourceAccountId: row.source_account_id,
-    sourceAdId: row.source_ad_id,
+    sourceAdId: row.source_ad_id === "__new__" ? null : row.source_ad_id,
     sourceAdName: row.source_ad_name,
+    mode: row.launch_mode ?? "copy",
     targetAccountIds: JSON.parse(String(row.target_account_ids_json)),
-    namingTemplate: row.naming_template,
-    startPaused: fromSqlBoolean(row.start_paused),
+    launchPresetId: row.launch_preset_id,
+    presetName: row.preset_name,
+    presetSnapshot: row.preset_snapshot_json
+      ? JSON.parse(String(row.preset_snapshot_json))
+      : null,
     launchRows: JSON.parse(String(row.launch_rows_json ?? "[]")),
+    executionResults: JSON.parse(String(row.execution_results_json ?? "[]")),
     status: row.status,
     message: row.message ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+/**
+ * The browser preview is not an authority for execution settings.  Reapply the
+ * saved preset here so requests cannot bypass the selected region, budget,
+ * bid, schedule, or initial-paused setting.  The server also allocates names
+ * to keep YYMMDD:XXX unique across separately imported plans on the same day.
+ */
+function applyPresetToLaunchRows(
+  rows: MultiAccountLaunchPlanInput["launchRows"],
+  preset: LaunchPresetRecord,
+  existingPlans: MultiAccountLaunchPlanRecord[],
+  now: Date,
+) {
+  const prefix = automaticName(now, 1).slice(0, 6);
+  let nextSerial = 1;
+  for (const plan of existingPlans) {
+    for (const row of plan.launchRows) {
+      const match = new RegExp(`^${prefix}:(\\d+)$`).exec(row.adName);
+      if (match) nextSerial = Math.max(nextSerial, Number(match[1]) + 1);
+    }
+  }
+  return rows.map((row, index) => ({
+    ...row,
+    adName: automaticName(now, nextSerial + index),
+    region: preset.region,
+    dailyBudget: preset.dailyBudget,
+    bid: preset.bid,
+    startAt: preset.startAt,
+    endAt: preset.endAt,
+    initialStatus: preset.initialStatus,
+  }));
+}
+
+function mapLaunchPreset(row: SqlRow): LaunchPresetRecord {
+  return LaunchPresetRecordSchema.parse({
+    id: row.id,
+    name: row.name,
+    region: row.region,
+    dailyBudget: Number(row.daily_budget),
+    bid: row.bid === null ? null : Number(row.bid),
+    startAt: row.start_at ?? null,
+    endAt: row.end_at ?? null,
+    initialStatus: row.initial_status,
+    creationConfig: row.creation_config_json
+      ? JSON.parse(String(row.creation_config_json))
+      : {},
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

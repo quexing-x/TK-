@@ -1,6 +1,9 @@
 import {
   CookieConnectionSettingsSchema,
   CookieCredentialInputSchema,
+  buildDraftPayloads,
+  buildPublishInput,
+  deriveTikTokCreationRequest,
   type CapturedCookieRequest,
   type ProviderEntity,
   type SyncEntityType,
@@ -13,6 +16,8 @@ import type {
   ProviderSyncOutput,
   StatusMutation,
   StatusMutationResult,
+  CreationMutation,
+  CreationMutationResult,
 } from "./types.js";
 import {
   isMultipartBody,
@@ -24,11 +29,8 @@ const capabilities = new Set<ProviderCapability>([
   "read-ad-groups",
   "read-ads",
   "read-reports",
-  "create-campaigns",
-  "copy-ads",
   "change-status",
-  "delete-ad-groups",
-  "appeal-ads",
+  "create-campaigns",
 ]);
 
 type ParsedCookieCredential = ReturnType<
@@ -72,19 +74,36 @@ export class CookieAdsProvider implements AdsProvider {
       "ad-group": settings.adGroupsUrl,
       ad: settings.adsUrl,
     };
+    const importedAdGroupRead = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
 
     for (const entityType of ["campaign", "ad-group", "ad"] as const) {
       const captured = credential.requestTemplates?.find(
         (item) => item.target === entityType,
       );
-      const request = captured ?? legacyRequest(legacyEndpoints[entityType]);
+      const request =
+        captured ??
+        (entityType === "ad"
+          ? deriveFinalAdReadRequest(importedAdGroupRead)
+          : undefined) ??
+        legacyRequest(legacyEndpoints[entityType]);
       if (!request) {
         warnings.push(`${entityType} 尚未导入只读请求。`);
         continue;
       }
+      // A captured list cURL may have been copied while the TikTok UI was set
+      // to 3/7/30 days.  Rules must never evaluate those accumulated metrics.
+      // Rewrite the recognised report window on every poll, in the account's
+      // own timezone, instead of trusting the date range captured in cURL.
+      const todayRequest = withTodayMetricWindow(
+        request,
+        context.timezone ?? "UTC",
+        new Date(),
+      );
       let payload: Record<string, unknown>;
       try {
-        payload = await requestCookieJson(request, credential);
+        payload = await requestCookieJson(todayRequest, credential);
       } catch (cause) {
         if (!request.derived) throw cause;
         warnings.push(
@@ -163,6 +182,208 @@ export class CookieAdsProvider implements AdsProvider {
     }
     return results;
   }
+
+  async createFromPreset(
+    context: ProviderContext,
+    mutations: CreationMutation[],
+  ): Promise<CreationMutationResult[]> {
+    CookieConnectionSettingsSchema.parse(context.settings);
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      return mutations.map((mutation) => ({
+        ...mutation,
+        ok: false,
+        message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。",
+      }));
+    }
+    const results: CreationMutationResult[] = [];
+    for (const mutation of mutations) {
+      try {
+        results.push(await createCookieDraftChain(sessionRequest, credential, mutation));
+      } catch (cause) {
+        results.push({
+          ...mutation,
+          ok: false,
+          message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
+        });
+      }
+    }
+    return results;
+  }
+}
+
+function withTodayMetricWindow(
+  request: CapturedCookieRequest,
+  timezone: string,
+  now: Date,
+): CapturedCookieRequest {
+  const date = formatDateInTimezone(now, timezone);
+  let changed = false;
+  const url = new URL(request.url);
+  for (const key of ["start_date", "end_date", "startDate", "endDate"]) {
+    if (!url.searchParams.has(key)) continue;
+    url.searchParams.set(key, date);
+    changed = true;
+  }
+
+  let body = request.body;
+  if (body && request.contentType?.toLowerCase().includes("json")) {
+    try {
+      const value = JSON.parse(body) as unknown;
+      changed = rewriteJsonDateWindow(value, date) || changed;
+      body = JSON.stringify(value);
+    } catch {
+      // Do not modify non-JSON bodies. The explicit check below prevents a
+      // multi-day request from silently reaching the rule engine.
+    }
+  }
+  if (!changed) {
+    throw new Error("读取 cURL 未包含可识别的日期范围，已停止规则判断；请重新导入含日期范围的 /adgroup/list/ 请求。");
+  }
+  return { ...request, url: url.toString(), ...(body === undefined ? {} : { body }) };
+}
+
+function rewriteJsonDateWindow(value: unknown, date: string): boolean {
+  if (Array.isArray(value)) {
+    let changed = false;
+    for (const item of value) changed = rewriteJsonDateWindow(item, date) || changed;
+    return changed;
+  }
+  if (!isRecord(value)) return false;
+  let changed = false;
+  for (const [key, item] of Object.entries(value)) {
+    if (["start_date", "end_date", "startDate", "endDate"].includes(key)) {
+      value[key] = date;
+      changed = true;
+    } else if (isRecord(item) || Array.isArray(item)) {
+      changed = rewriteJsonDateWindow(item, date) || changed;
+    }
+  }
+  return changed;
+}
+
+function formatDateInTimezone(date: Date, timezone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(date);
+    const fields = Object.fromEntries(parts.map((item) => [item.type, item.value]));
+    return `${fields.year}-${fields.month}-${fields.day}`;
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+async function createCookieDraftChain(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutation: CreationMutation,
+): Promise<CreationMutationResult> {
+  const drafts = buildDraftPayloads(mutation.row, mutation.preset);
+  const campaign = await requestCookieJson(
+    creationRequest(sessionRequest, "campaign_snap/save", drafts.campaign),
+    credential,
+  );
+  const campaignSnapId = requiredResponseId(campaign, "campaign_snap_id");
+  const campaignSketchId = requiredResponseId(campaign, "campaign_sketch_id");
+
+  const adGroup = await requestCookieJson(
+    creationRequest(sessionRequest, "ad_snap/save", {
+      ...drafts.adGroup,
+      campaign_id: responseId(campaign, "campaign_id") ?? "",
+    }),
+    credential,
+  );
+  const adSnapId = requiredResponseId(adGroup, "ad_snap_id");
+  const adSketchId = requiredResponseId(adGroup, "ad_sketch_id");
+
+  const creative = await requestCookieJson(
+    creationRequest(sessionRequest, "creative_snap/save", {
+      ...drafts.creative,
+      ad_snap_id: adSnapId,
+      ad_sketch_id: adSketchId,
+    }),
+    credential,
+  );
+  const creativeSnapId = requiredResponseId(creative, "creative_snap_id");
+  const creativeSketchId = requiredResponseId(creative, "creative_sketch_id");
+
+  const published = await requestCookieJson(
+    creationRequest(
+      sessionRequest,
+      "async_creation/create_by_snap",
+      buildPublishInput({
+        campaignSnapId,
+        campaignSketchId,
+        adAndCreativeSnapInfoList: [{
+          ad_id: "",
+          ad_snap_id: adSnapId,
+          ad_sketch_id: adSketchId,
+          creative_snap_info_list: [{
+            creative_id: "",
+            creative_snap_id: creativeSnapId,
+            creative_sketch_id: creativeSketchId,
+          }],
+          need_publish: true,
+        }],
+      }, mutation.initialStatus),
+    ),
+    credential,
+  );
+  const campaignId = responseId(published, "campaign_id");
+  const adGroupId = responseId(published, "adgroup_id") ?? responseId(published, "ad_id");
+  const adId = responseId(published, "creative_id");
+  return {
+    ...mutation,
+    ok: true,
+    ...(campaignId ? { campaignId } : {}),
+    ...(adGroupId ? { adGroupId } : {}),
+    ...(adId ? { adId } : {}),
+    message: "TikTok 已接受创建请求，正在同步最终状态。",
+  };
+}
+
+function creationRequest(
+  sessionRequest: CapturedCookieRequest,
+  step: "campaign_snap/save" | "ad_snap/save" | "creative_snap/save" | "async_creation/create_by_snap",
+  body: unknown,
+): CapturedCookieRequest {
+  const base = deriveTikTokCreationRequest(sessionRequest, step);
+  return {
+    target: "health",
+    url: base.url,
+    method: "POST",
+    body: JSON.stringify(body),
+    contentType: "application/json",
+    ...(base.headers ? { headers: base.headers } : {}),
+  };
+}
+
+function requiredResponseId(payload: Record<string, unknown>, key: string): string {
+  const value = responseId(payload, key);
+  if (!value) throw new Error(`TikTok 返回中缺少 ${key}，已停止后续发布。`);
+  return value;
+}
+
+function responseId(value: unknown, key: string): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = responseId(item, key);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  const direct = value[key];
+  if (typeof direct === "string" || typeof direct === "number") return String(direct);
+  for (const nested of Object.values(value)) {
+    const found = responseId(nested, key);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 async function requestCookieJson(
@@ -348,6 +569,23 @@ function legacyRequest(url: string): CapturedCookieRequest | undefined {
   return url
     ? { target: "health", url, method: "GET" }
     : undefined;
+}
+
+function deriveFinalAdReadRequest(
+  request: CapturedCookieRequest | undefined,
+): CapturedCookieRequest | undefined {
+  if (!request) return undefined;
+  const url = new URL(request.url);
+  // The two-step Cookie onboarding captures the statistics ad-group list.
+  // The matching final-ad list for that endpoint family is ad/list.
+  if (!url.pathname.toLowerCase().includes("/statistics/op/")) return undefined;
+  const pathname = url.pathname.replace(
+    /\/adgroup\/list(?=\/|$)/i,
+    "/ad/list",
+  );
+  if (pathname === url.pathname) return undefined;
+  url.pathname = pathname;
+  return { ...request, target: "ad", url: url.toString(), derived: true };
 }
 
 function extractEntities(

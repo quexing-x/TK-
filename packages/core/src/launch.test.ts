@@ -1,49 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { parseLaunchSheetTable } from "./launch.js";
+import { automaticName, parseLaunchSheetTable } from "./launch.js";
+
+const preset = {
+  name: "测试预设",
+  region: "US",
+  dailyBudget: 100,
+  bid: 1.25,
+  startAt: null,
+  endAt: null,
+  initialStatus: "disabled" as const,
+};
 
 describe("parseLaunchSheetTable", () => {
-  it("accepts header aliases and inherits unchanged cells", () => {
-    const result = parseLaunchSheetTable([
-      ["任务", "系列名称", "广告组预算", "出价", "开始时间", "状态"],
-      ["首批", "夏季系列", 100, "自动", "2026-07-16 09:00", "关闭"],
-      ["第二批", "", "", 1.25, "", "开启"],
-    ]);
+  it("only accepts campaign and video-code columns, then applies the preset", () => {
+    const result = parseLaunchSheetTable(
+      [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["夏季系列", "夏季广告组", "video-001", "https://example.com/product"]],
+      preset,
+      new Date("2026-07-16T09:00:00.000Z"),
+    );
 
     expect(result.errors).toEqual([]);
-    expect(result.rows).toHaveLength(2);
-    expect(result.rows[1]).toMatchObject({
-      taskName: "第二批",
+    expect(result.rows).toEqual([expect.objectContaining({
       campaignName: "夏季系列",
+      videoCode: "video-001",
+      productUrl: "https://example.com/product",
+      adGroupName: "夏季广告组",
+      adName: "260716:001",
+      region: "US",
       dailyBudget: 100,
       bid: 1.25,
-      initialStatus: "enabled",
-    });
-  });
-
-  it("generates names and reports them as warnings", () => {
-    const result = parseLaunchSheetTable([
-      ["推广系列名称", "广告组日预算"],
-      ["测试系列", 88],
-    ]);
-
-    expect(result.errors).toEqual([]);
-    expect(result.rows[0]).toMatchObject({
-      adGroupName: "测试系列-广告组",
-      adName: "测试系列-广告组-广告",
       initialStatus: "disabled",
-    });
-    expect(result.warnings).toHaveLength(2);
+    })]);
   });
 
-  it("rejects missing required headers and invalid row values", () => {
-    const result = parseLaunchSheetTable([
-      ["广告名称", "广告组日预算", "结束时间", "创建时间"],
-      ["无系列", -1, "2026-07-15 08:00", "2026-07-16 08:00"],
-    ]);
-
+  it("reports missing required columns and values", () => {
+    const result = parseLaunchSheetTable([["推广系列名称", "广告组名称"], ["夏季系列", "夏季广告组"]], preset);
     expect(result.rows).toEqual([]);
-    expect(result.errors.map((issue) => issue.field)).toEqual(
-      expect.arrayContaining(["推广系列名称", "广告组日预算", "结束时间"]),
-    );
+    expect(result.errors.map((issue) => issue.field)).toContain("视频代码");
+  });
+
+  it("formats automatic names as YYMMDD:XXX", () => {
+    expect(automaticName(new Date("2026-07-16T09:00:00.000Z"), 7)).toBe("260716:007");
   });
 });

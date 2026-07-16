@@ -295,6 +295,8 @@ function normalizeStatus(
       normalized === "enable" ||
       normalized === "enabled" ||
       normalized === "active" ||
+      normalized === "delivery_ok" ||
+      normalized.endsWith("_delivery_ok") ||
       normalized.endsWith("_enable")
     ) {
       return "enabled";

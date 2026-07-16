@@ -11,4 +11,5 @@ export * from "./runtime.js";
 export * from "./scheduling.js";
 export * from "./feature-config.js";
 export * from "./launch.js";
+export * from "./creation-protocol.js";
 export * from "./auth.js";

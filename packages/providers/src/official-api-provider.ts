@@ -19,8 +19,6 @@ const capabilities = new Set<ProviderCapability>([
   "read-ad-groups",
   "read-ads",
   "read-reports",
-  "create-campaigns",
-  "copy-ads",
   "change-status",
 ]);
 

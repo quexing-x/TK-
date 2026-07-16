@@ -15,4 +15,14 @@ describe("ProviderRegistry", () => {
     const registry = new ProviderRegistry();
     expect(registry.get("cookie").displayName).toBe("Cookie 会话");
   });
+
+  it("only advertises capabilities with an implemented provider operation", () => {
+    const registry = new ProviderRegistry();
+    for (const provider of registry.list()) {
+      expect(provider.capabilities).toContain("change-status");
+      expect(provider.capabilities).not.toContain("copy-ads");
+    }
+    expect(registry.get("cookie").capabilities).toContain("create-campaigns");
+    expect(registry.get("official-api").capabilities).not.toContain("create-campaigns");
+  });
 });

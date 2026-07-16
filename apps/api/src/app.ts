@@ -30,6 +30,7 @@ import {
   OvernightScheduleInputSchema,
   AutomationFeatureSettingsInputSchema,
   MultiAccountLaunchPlanInputSchema,
+  LaunchPresetInputSchema,
   type AppPermission,
   type ProviderKind,
 } from "@tk-auto/core";
@@ -58,6 +59,8 @@ import {
   authCookie,
   type AuthenticatedSession,
 } from "./auth-service.js";
+
+export { AuthService };
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -104,6 +107,8 @@ export interface AppDependencies {
   startScheduler?: boolean;
   /** Only for isolated unit tests. Production authentication is always enabled. */
   disableAuth?: boolean;
+  /** Enable only when the application is reached through HTTPS. */
+  secureCookies?: boolean;
 }
 
 export async function createApp(
@@ -259,19 +264,19 @@ export async function createApp(
     const session = await auth.setupInitialDeveloper(
       InitialDeveloperInputSchema.parse(request.body),
     );
-    setSessionCookie(reply, session.token);
+    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false);
     return reply.status(201).send(auth.status(session));
   });
 
   app.post("/api/auth/login", async (request, reply) => {
     const session = await auth.login(LoginInputSchema.parse(request.body), request.ip);
-    setSessionCookie(reply, session.token);
+    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false);
     return auth.status(session);
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
     auth.logout(request.authSession);
-    clearSessionCookie(reply);
+    clearSessionCookie(reply, dependencies.secureCookies ?? false);
     return { ok: true };
   });
 
@@ -281,7 +286,7 @@ export async function createApp(
       request.authSession.user,
       PasswordChangeInputSchema.parse(request.body),
     );
-    clearSessionCookie(reply);
+    clearSessionCookie(reply, dependencies.secureCookies ?? false);
     return { ok: true, reauthenticationRequired: true };
   });
 
@@ -338,6 +343,32 @@ export async function createApp(
     dependencies.store.listMultiAccountLaunchPlans(),
   );
 
+  app.get("/api/launch-presets", async () =>
+    dependencies.store.listLaunchPresets(),
+  );
+
+  app.post("/api/launch-presets", async (request, reply) =>
+    reply.status(201).send(
+      dependencies.store.createLaunchPreset(LaunchPresetInputSchema.parse(request.body)),
+    ),
+  );
+
+  app.put("/api/launch-presets/:presetId", async (request) => {
+    const { presetId } = z.object({ presetId: z.string().min(1) }).parse(request.params);
+    return dependencies.store.updateLaunchPreset(
+      presetId,
+      LaunchPresetInputSchema.parse(request.body),
+    );
+  });
+
+  app.delete("/api/launch-presets/:presetId", async (request, reply) => {
+    const { presetId } = z.object({ presetId: z.string().min(1) }).parse(request.params);
+    if (!dependencies.store.deleteLaunchPreset(presetId)) {
+      return reply.status(404).send({ message: "广告预设不存在。" });
+    }
+    return reply.status(204).send();
+  });
+
   app.post("/api/launch-plans", async (request, reply) =>
     reply.status(201).send(
       dependencies.store.createMultiAccountLaunchPlan(
@@ -345,6 +376,72 @@ export async function createApp(
       ),
     ),
   );
+
+  app.post("/api/launch-plans/:planId/execute", async (request, reply) => {
+    const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
+    const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
+    if (!plan) return reply.status(404).send({ message: "投放计划不存在。" });
+    if (plan.status === "cancelled" || plan.status === "completed") {
+      return reply.status(409).send({ message: "该投放计划不能再次执行。" });
+    }
+    if (!plan.presetSnapshot) {
+      return reply.status(409).send({ message: "这是旧版本计划，缺少冻结的创建预设；请重新导入表格后创建。" });
+    }
+    if (plan.mode === "copy") {
+      return reply.status(409).send({ message: "旧版复制计划不可执行；请改用多账户新建。同一视频代码会由每个目标账户自己的素材库分别解析，不能迁移源账户素材 ID。" });
+    }
+
+    // Each target account supplies its own Cookie session, so the same video
+    // code is resolved against that account's material library.
+    const results: Array<Record<string, unknown>> = [];
+    for (const accountId of plan.targetAccountIds) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
+        results.push({ accountId, ok: false, message: "目标广告账户不存在。" });
+        continue;
+      }
+      const connection = dependencies.store.getProviderConnection(accountId, account.providerKind);
+      if (!connection || connection.status !== "ready") {
+        results.push({ accountId, ok: false, message: "账户未完成连接验证。" });
+        continue;
+      }
+      try {
+        const context = await loadProviderContext(dependencies.store, dependencies.vault, accountId, account.providerKind);
+        const created = await providers.createFromPreset(
+          account.providerKind,
+          context,
+          plan.launchRows.map((row) => ({ row, preset: plan.presetSnapshot!.creationConfig, initialStatus: row.initialStatus })),
+        );
+        const sync = await providers.syncReadOnly(account.providerKind, context);
+        dependencies.store.saveReadOnlySync(accountId, account.providerKind, sync.entities, sync.result);
+        results.push({
+          accountId,
+          ok: created.every((item) => item.ok),
+          created,
+          sync: sync.result,
+        });
+      } catch (cause) {
+        results.push({ accountId, ok: false, message: getSafeProviderError(cause) });
+      }
+    }
+    const ok = results.length > 0 && results.every((item) => item.ok === true);
+    const updated = dependencies.store.updateMultiAccountLaunchPlanResult(
+      plan.id,
+      ok ? "completed" : "blocked",
+      ok ? "已提交 TikTok 创建请求并完成结果回读。" : "部分或全部创建失败；请查看执行结果并修正后重试。",
+      results.map((result) => {
+        const created = Array.isArray(result.created) ? result.created : [];
+        return {
+          accountId: String(result.accountId),
+          ok: result.ok === true,
+          message: typeof result.message === "string" ? result.message : null,
+          createdCount: created.filter((item) => typeof item === "object" && item !== null && (item as { ok?: unknown }).ok === true).length,
+          failedCount: created.filter((item) => typeof item !== "object" || item === null || (item as { ok?: unknown }).ok !== true).length,
+        };
+      }),
+    );
+    return { plan: updated, results };
+  });
 
   app.delete("/api/launch-plans/:planId", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
@@ -548,10 +645,6 @@ export async function createApp(
                   (item) => `${item.target}:${item.action ?? ""}`,
                 ),
               );
-              const discardStaleAutoExpandedAd = [
-                "ad-group",
-                "ad-group-status",
-              ].includes(imported.summary.target);
               credential = CookieCredentialInputSchema.parse({
                 ...credential,
                 csrfToken:
@@ -562,13 +655,7 @@ export async function createApp(
                 userAgent: credential.userAgent ?? parsedPrevious.userAgent,
                 requestTemplates: [
                   ...(parsedPrevious.requestTemplates ?? []).filter(
-                    (item) =>
-                      !incomingKeys.has(`${item.target}:${item.action ?? ""}`) &&
-                      !(
-                        discardStaleAutoExpandedAd &&
-                        item.derived &&
-                        ["ad", "ad-status"].includes(item.target)
-                      ),
+                    (item) => !incomingKeys.has(`${item.target}:${item.action ?? ""}`),
                   ),
                   ...(credential.requestTemplates ?? []),
                 ],
@@ -704,6 +791,13 @@ export async function createApp(
       return reply.status(404).send({ message: "账号不存在。" });
     }
     return dependencies.store.listAutomationRuns(accountId);
+  });
+
+  app.get("/api/accounts/:accountId/automation/latest-sync", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账户不存在。" });
+    return dependencies.store.getLatestReadOnlySync(accountId, account.providerKind);
   });
 
   app.get(
@@ -1064,6 +1158,7 @@ function requiredPermission(
     return "rules:manage";
   }
   if (path.startsWith("/api/notifications/")) return "rules:manage";
+  if (path.startsWith("/api/launch-plans/") && path.endsWith("/execute")) return "ads:operate";
   if (path.includes("/automation/")) return "automation:execute";
   if (
     path.includes("/entities/status") ||
@@ -1073,7 +1168,7 @@ function requiredPermission(
   ) {
     return "ads:operate";
   }
-  if (path.startsWith("/api/launch-plans")) return "launch:manage";
+  if (path.startsWith("/api/launch-plans") || path.startsWith("/api/launch-presets")) return "launch:manage";
   if (path.startsWith("/api/accounts")) return "accounts:manage";
   return method === "DELETE" ? "system:control" : null;
 }
@@ -1097,16 +1192,20 @@ function readCookie(
   return null;
 }
 
-function setSessionCookie(reply: FastifyReply, token: string): void {
+function setSessionCookie(
+  reply: FastifyReply,
+  token: string,
+  secure: boolean,
+): void {
   reply.header(
     "set-cookie",
-    `${authCookie.name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${authCookie.maxAgeSeconds}`,
+    `${authCookie.name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=${authCookie.maxAgeSeconds}`,
   );
 }
 
-function clearSessionCookie(reply: FastifyReply): void {
+function clearSessionCookie(reply: FastifyReply, secure: boolean): void {
   reply.header(
     "set-cookie",
-    `${authCookie.name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
+    `${authCookie.name}=; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=0`,
   );
 }

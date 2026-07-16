@@ -33,6 +33,7 @@ describe("parseTikTokCurl", () => {
         expect.objectContaining({
           target: "ad",
           derived: true,
+          url: expect.stringContaining("/ad/list/"),
         }),
       ]),
     );

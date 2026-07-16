@@ -127,6 +127,33 @@ describe("local authentication and authorization", () => {
     });
     expect(oldSession.statusCode).toBe(401);
   });
+
+  it("uses secure session cookies when HTTPS mode is enabled", async () => {
+    const secureStore = new AutomationStore(":memory:");
+    secureStore.seed();
+    const secureApp = await createApp({
+      store: secureStore,
+      vault: new InMemoryCredentialVault(),
+      secureCookies: true,
+    });
+
+    try {
+      const setup = await secureApp.inject({
+        method: "POST",
+        url: "/api/auth/setup",
+        payload: {
+          username: "secure-developer",
+          displayName: "HTTPS 测试开发者",
+          password: developerPassword,
+        },
+      });
+      expect(setup.statusCode).toBe(201);
+      expect(setup.headers["set-cookie"]).toContain("Secure");
+    } finally {
+      await secureApp.close();
+      secureStore.close();
+    }
+  });
 });
 
 async function setupDeveloper(app: FastifyInstance): Promise<{

@@ -38,6 +38,8 @@ import type {
   OvernightScheduleInput,
   MultiAccountLaunchPlanInput,
   MultiAccountLaunchPlanRecord,
+  LaunchPresetInput,
+  LaunchPresetRecord,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -62,6 +64,17 @@ export interface ManualStatusResult extends ManualStatusInput {
   message: string;
 }
 
+export interface LaunchExecutionResult {
+  plan: MultiAccountLaunchPlanRecord;
+  results: Array<{
+    accountId: string;
+    ok: boolean;
+    message?: string;
+    created?: Array<{ ok: boolean; message: string }>;
+    sync?: ReadOnlySyncResult;
+  }>;
+}
+
 let csrfToken: string | null = null;
 
 export function setAuthSession(status: AuthStatus | null): void {
@@ -74,7 +87,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     credentials: "same-origin",
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...(csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)
         ? { "x-csrf-token": csrfToken }
         : {}),
@@ -181,6 +194,19 @@ export const api = {
     ),
   getLaunchPlans: () =>
     request<MultiAccountLaunchPlanRecord[]>("/api/launch-plans"),
+  getLaunchPresets: () => request<LaunchPresetRecord[]>("/api/launch-presets"),
+  createLaunchPreset: (input: LaunchPresetInput) =>
+    request<LaunchPresetRecord>("/api/launch-presets", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateLaunchPreset: (presetId: string, input: LaunchPresetInput) =>
+    request<LaunchPresetRecord>(`/api/launch-presets/${presetId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  deleteLaunchPreset: (presetId: string) =>
+    request<void>(`/api/launch-presets/${presetId}`, { method: "DELETE" }),
   createLaunchPlan: (input: MultiAccountLaunchPlanInput) =>
     request<MultiAccountLaunchPlanRecord>("/api/launch-plans", {
       method: "POST",
@@ -188,6 +214,10 @@ export const api = {
     }),
   cancelLaunchPlan: (planId: string) =>
     request<void>(`/api/launch-plans/${planId}`, { method: "DELETE" }),
+  executeLaunchPlan: (planId: string) =>
+    request<LaunchExecutionResult>(`/api/launch-plans/${planId}/execute`, {
+      method: "POST",
+    }),
   bootstrap: () => request<BootstrapPayload>("/api/bootstrap"),
   createAccount: (input: AccountCreateInput) =>
     request<AccountConfig>("/api/accounts", {
@@ -297,6 +327,10 @@ export const api = {
   getAutomationRuns: (accountId: string) =>
     request<AutomationRunRecord[]>(
       `/api/accounts/${accountId}/automation/runs`,
+    ),
+  getLatestAutomationSync: (accountId: string) =>
+    request<ReadOnlySyncResult | null>(
+      `/api/accounts/${accountId}/automation/latest-sync`,
     ),
   getAutomationDecisions: (accountId: string) =>
     request<AutomationDecisionRecord[]>(

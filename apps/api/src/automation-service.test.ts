@@ -21,7 +21,7 @@ class FakeProvider implements AdsProvider {
   shouldFail = false;
   afterSync: (() => void | Promise<void>) | null = null;
   campaignCreatedAt = new Date().toISOString();
-  scenario: "default" | "parent-child" | "priority" = "default";
+  scenario: "default" | "parent-child" | "priority" | "recovery" = "default";
 
   async checkHealth() {
     return { ok: true, status: "ready" as const, message: "ready" };
@@ -56,6 +56,18 @@ class FakeProvider implements AdsProvider {
       },
     };
     const entities: ProviderEntity[] = [campaign, defaultGroup];
+    if (this.scenario === "recovery") {
+      defaultGroup.payload.ad_primary_status = "disable";
+      defaultGroup.payload.row_data = {
+        campaign_id: "campaign-1",
+        stat_cost: "20",
+        cpc: "0.1",
+        click_cnt: "10",
+        time_attr_convert_cnt: "1",
+        time_attr_conversion_cost: "1",
+        time_attr_on_web_cart: "1",
+      };
+    }
     if (this.scenario === "parent-child") {
       entities.push({
         entityType: "ad",
@@ -346,6 +358,25 @@ describe("AutomationService", () => {
       status: "changed",
       enabledCount: 0,
       disabledCount: 1,
+    });
+  });
+
+  it("automatically re-enables a qualified closed ad group in a due scheduler cycle", async () => {
+    provider.scenario = "recovery";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "enable" },
+    ]);
+    expect(store.listPollCycles()[0]?.accounts[0]).toMatchObject({
+      status: "changed",
+      enabledCount: 1,
+      disabledCount: 0,
     });
   });
 
