@@ -406,6 +406,9 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
 .master-switch.checked i { transform: translateX(15px); }
 .retention-note { margin: 0; padding: 0 20px 16px; color: #7b8796; font-size: 10px; }
 .automation-sync-panel { display: grid; gap: 12px; }
+.automation-run-feedback { margin: -4px 0 2px; padding: 12px 14px; border-radius: 9px; font-size: 13px; line-height: 1.45; }
+.automation-run-feedback.success { color: #137a5d; background: #eefbf5; border: 1px solid #bcebd9; }
+.automation-run-feedback.error { color: #b42318; background: #fff3f2; border: 1px solid #fecdc9; }
 .automation-sync-panel .panel-heading { margin-bottom: 0; }
 .sync-count-grid { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 0 18px; }
 .sync-count-grid span { min-width: 96px; padding: 10px 12px; border-radius: 9px; background: #f2f7f8; color: #61707b; font-size: 11px; }

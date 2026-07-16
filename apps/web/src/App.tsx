@@ -337,6 +337,7 @@ function UsersPage({
       {
         connection: ProviderConnection | null;
         readiness: CookieConnectionReadiness | null;
+        latestSync: ReadOnlySyncResult | null;
       }
     >
   >({});
@@ -344,11 +345,12 @@ function UsersPage({
   const loadConnectionStates = useCallback(async () => {
     const entries = await Promise.all(
       accounts.map(async (account) => {
-        const [list, readiness] = await Promise.all([
+        const [list, readiness, latestSync] = await Promise.all([
           api.getConnections(account.id).catch(() => []),
           account.providerKind === "cookie"
             ? api.getCookieReadiness(account.id).catch(() => null)
             : Promise.resolve(null),
+          api.getLatestAutomationSync(account.id).catch(() => null),
         ]);
         return [
           account.id,
@@ -356,6 +358,7 @@ function UsersPage({
             connection:
               list.find((item) => item.kind === account.providerKind) ?? null,
             readiness,
+            latestSync,
           },
         ] as const;
       }),
@@ -521,6 +524,7 @@ function AdsManagementPage({
   const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>("all");
   const [busy, setBusy] = useState<string | null>(null);
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [scheduling, setScheduling] = useState<ManagedEntityRecord | null>(null);
   const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
   const [scheduledAction, setScheduledAction] = useState<"enable" | "disable">("disable");
@@ -548,6 +552,26 @@ function AdsManagementPage({
     setEntities(null);
     void load();
   }, [load]);
+
+  const refreshFromProvider = async () => {
+    try {
+      setBusy("refresh");
+      setSyncFeedback(null);
+      const result = await api.previewAutomation(account.id);
+      if (result.status === "failed") {
+        setSyncFeedback(result.errorMessage ?? "读取广告数据失败，未返回具体原因。");
+      } else {
+        setSyncFeedback(`已完成只读同步：检测到 ${result.candidateCount} 项候选规则，不会修改广告。`);
+      }
+      await load();
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      setSyncFeedback(message);
+      onError(message);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -690,8 +714,9 @@ function AdsManagementPage({
       <div className="panel table-panel">
         <div className="panel-heading">
           <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象</h2><p>共 {filtered.length} 项；忽略对象不会参与自动化决策。</p></div></div>
-          <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
+          <button className="secondary-button" disabled={busy !== null} onClick={() => void refreshFromProvider()} type="button"><RefreshCcw size={16} /> {busy === "refresh" ? "同步中…" : "刷新"}</button>
         </div>
+        {syncFeedback && <div className={`automation-run-feedback ${syncFeedback.includes("失败") || syncFeedback.includes("错误") ? "error" : "success"}`}>{syncFeedback}</div>}
         <div className="table-wrap">
           <table>
             <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPC</th><th>转化</th><th>自动化</th><th>操作</th></tr></thead>
@@ -919,6 +944,7 @@ function AutomationPage({
   >(null);
   const [latestSync, setLatestSync] = useState<ReadOnlySyncResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [runFeedback, setRunFeedback] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -946,11 +972,24 @@ function AutomationPage({
   const execute = async (preview: boolean) => {
     try {
       setBusy(preview ? "preview" : "run");
-      if (preview) await api.previewAutomation(account.id);
-      else await api.runAutomation(account.id);
+      setRunFeedback(null);
+      const result = preview
+        ? await api.previewAutomation(account.id)
+        : await api.runAutomation(account.id);
+      if (result.status === "failed") {
+        setRunFeedback(result.errorMessage ?? "检测失败，未返回具体原因。");
+      } else {
+        setRunFeedback(
+          preview
+            ? `检测完成：发现 ${result.candidateCount} 项候选操作，未修改广告。`
+            : `执行完成：成功 ${result.successCount} 项，失败 ${result.failureCount} 项。`,
+        );
+      }
       await load();
     } catch (cause) {
-      onError(getErrorMessage(cause));
+      const message = getErrorMessage(cause);
+      setRunFeedback(message);
+      onError(message);
     } finally {
       setBusy(null);
     }
@@ -1014,6 +1053,7 @@ function AutomationPage({
           </button>
         </div>
       </div>
+      {runFeedback && <div className={`automation-run-feedback ${latest?.status === "failed" ? "error" : "success"}`}>{runFeedback}</div>}
 
       <div className="panel automation-sync-panel">
         <div className="panel-heading"><div><span className="panel-icon"><Layers3 size={18} /></span><div><h2>最近一次三层同步</h2><p>只有同步到的层级才会进入规则判断；检测预览与轮询都会更新此状态。</p></div></div></div>
@@ -1176,12 +1216,14 @@ function connectionStateLabel(
     | {
         connection: ProviderConnection | null;
         readiness: CookieConnectionReadiness | null;
+        latestSync: ReadOnlySyncResult | null;
       }
     | undefined,
   kind: ProviderKind,
 ): ReactNode {
   const connection = state?.connection;
   const cookieReadiness = state?.readiness;
+  const latestSync = state?.latestSync;
   if (kind === "cookie" && !cookieReadiness?.fieldsComplete) {
     return (
       <span className="status warning">
@@ -1196,7 +1238,14 @@ function connectionStateLabel(
     return <span className="status">未接入</span>;
   }
   if (connection.status === "ready") {
-    return <span className="status active">连接正常</span>;
+    if (!latestSync) return <span className="status warning">已连接·待检测</span>;
+    if (latestSync.counts["ad-group"] === 0) {
+      return <span className="status danger">已连接·未读取广告组</span>;
+    }
+    if (latestSync.warnings.length > 0) {
+      return <span className="status warning">已连接·部分数据</span>;
+    }
+    return <span className="status active">数据已接入</span>;
   }
   if (connection.status === "failed" && kind === "cookie") {
     return <span className="status danger">Cookie 已失效</span>;
