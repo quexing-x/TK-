@@ -54,6 +54,7 @@ export interface CreationMutation {
   row: LaunchConfigurationRow;
   preset: CreationPresetConfig;
   initialStatus: "enabled" | "disabled";
+  sourceCampaignName?: string;
 }
 
 export interface CreationMutationResult extends CreationMutation {

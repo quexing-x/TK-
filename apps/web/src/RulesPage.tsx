@@ -125,6 +125,7 @@ export function RulesPage({
 
   return (
     <section className="page-stack">
+      <div className="alert warning-alert"><Gauge size={18} /><span>币种提醒：九条规则当前为全账户共用阈值。不同币种账户会以各自账户币种直接比较，金额阈值可能不具可比性；请先只对同币种账户开启自动化。</span></div>
       <form className="panel form-panel" onSubmit={(event) => void saveSettings(event)}>
         <div className="panel-heading">
           <div>

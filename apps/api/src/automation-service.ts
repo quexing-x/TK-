@@ -65,7 +65,11 @@ export class AutomationService {
         account.providerKind,
       );
       if (!connection || connection.status !== "ready") {
-        throw new Error("当前 Provider 尚未通过连接检测。");
+        throw new Error(connectionUnavailableMessage(
+          account.displayName,
+          account.providerKind,
+          connection?.status,
+        ));
       }
       const context = await this.loadContext(
         accountId,
@@ -349,7 +353,11 @@ export class AutomationService {
       account.providerKind,
     );
     if (!connection || connection.status !== "ready") {
-      throw new Error("当前 Provider 尚未通过连接检测。");
+      throw new Error(connectionUnavailableMessage(
+        account.displayName,
+        account.providerKind,
+        connection?.status,
+      ));
     }
     const context = await this.loadContext(
       accountId,
@@ -701,4 +709,23 @@ export class AutomationScheduler {
 
 function safeMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "自动化任务失败。";
+}
+
+function connectionUnavailableMessage(
+  accountName: string,
+  providerKind: "cookie" | "official-api",
+  status: string | undefined,
+): string {
+  const providerLabel = providerKind === "cookie" ? "Cookie 接入" : "API 接入";
+  const stateLabel =
+    status === "not-configured"
+      ? "尚未接入"
+      : status === "untested"
+        ? "等待后台检测"
+        : status === "failed"
+          ? providerKind === "cookie"
+            ? "Cookie 已失效或连接异常"
+            : "API 连接异常"
+          : "未通过连接检测";
+  return `账户「${accountName}」当前${providerLabel}状态：${stateLabel}。请到「用户管理」查看接入状态后再运行。`;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TikTokCreationSteps, buildDraftPayloads, buildPublishInput, CreationPresetIncompleteError, deriveTikTokCreationRequest, getCreationTemplateReadiness } from "./creation-protocol.js";
+import { TikTokCreationSteps, buildDraftPayloads, buildProfileDraftPayloads, buildPublishInput, CreationPresetIncompleteError, deriveTikTokCreationRequest, getCreationTemplateReadiness } from "./creation-protocol.js";
 
 describe("creation protocol", () => {
   it("reports template readiness without exposing internal field names", () => {
@@ -45,7 +45,8 @@ describe("creation protocol", () => {
 
     expect(payloads.campaign.campaign_sketch_form_data.campaign_name).toBe("夏季系列");
     expect(payloads.adGroup.ad_sketch_form_data.budget).toBe("100");
-    expect(payloads.adGroup.ad_sketch_form_data.start_time).toBe("1784217600");
+    expect(payloads.adGroup.ad_sketch_form_data.start_time).toBe("2026-07-16 16:00:00");
+    expect(payloads.adGroup.ad_sketch_form_data.end_time).toBe("2036-07-16 16:00:00");
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       creative_name: "260716:001", external_url: "https://example.com/product",
       image_list: [{ aweme_item_id: "video-001" }],
@@ -57,6 +58,18 @@ describe("creation protocol", () => {
       rowNumber: 2, campaignName: "系列", adGroupName: "组", adName: "260716:001", videoCode: "v", productUrl: "https://example.com", region: "US", dailyBudget: 1, bid: null, startAt: null, endAt: null, initialStatus: "disabled",
     }, { objectiveType: null, buyingType: null, campaignBudgetMode: null, adBudgetMode: null, pricing: null, optimizeGoal: null, externalAction: null, pixelId: null, identityType: null, identityId: null, callToActionId: null, countryCodes: [], placementIds: [], smartTargeting: true, commentDisabled: false, shareDisabled: false }))
       .toThrow(CreationPresetIncompleteError);
+  });
+
+  it("uses an encrypted account snapshot while replacing only creation inputs", () => {
+    const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: { campaign_name: "old", objective_type: 9, campaign_id: "old-id" }, risk_info: { browser_name: "saved" } },
+      adGroupPayload: { ad_sketch_form_data: { ad_name: "old", budget: "1", cpa_bid: "1", identity_only: "kept" }, risk_info: { browser_name: "saved" } },
+      creativePayload: { asset_group_sketch_form_data_list: [{ creative_name: "old", external_url: "https://old.example", image_list: [{ aweme_item_id: "old-video", identity_id: "kept" }] }] },
+      publishPayload: {},
+    }, { rowNumber: 2, campaignName: "new campaign", adGroupName: "new group", adName: "260716:001", videoCode: "new-video", productUrl: "https://example.com/product", region: "US", dailyBudget: 25, bid: 2.5, startAt: null, endAt: null, initialStatus: "disabled" });
+    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ campaign_name: "new campaign", campaign_id: "", objective_type: 9 });
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ ad_name: "new group", budget: "25", cpa_bid: "2.5", identity_only: "kept" });
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: "https://example.com/product", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
   });
 
 });

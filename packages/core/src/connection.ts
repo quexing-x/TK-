@@ -74,6 +74,18 @@ export type CapturedCookieRequest = z.infer<
   typeof CapturedCookieRequestSchema
 >;
 
+/** Account-local, verified creation snapshots. They stay encrypted alongside
+ * the Cookie and never appear in plans, presets or source control. */
+export const CookieCreationProfileSchema = z.object({
+  version: z.literal(1),
+  campaignPayload: z.record(z.unknown()),
+  adGroupPayload: z.record(z.unknown()),
+  creativePayload: z.record(z.unknown()),
+  publishPayload: z.record(z.unknown()),
+  verifiedAt: z.string().datetime().nullable().default(null),
+});
+export type CookieCreationProfile = z.infer<typeof CookieCreationProfileSchema>;
+
 export const CookieCredentialInputSchema = z.object({
   kind: z.literal("cookie"),
   cookie: z.string().trim().min(10),
@@ -85,6 +97,7 @@ export const CookieCredentialInputSchema = z.object({
     .default("x-csrftoken"),
   userAgent: z.string().trim().max(1024).optional(),
   requestTemplates: z.array(CapturedCookieRequestSchema).max(12).optional(),
+  creationProfile: CookieCreationProfileSchema.optional(),
 });
 
 export const OfficialApiCredentialInputSchema = z.object({

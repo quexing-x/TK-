@@ -53,9 +53,11 @@ const requiredFieldLabels = [
 
 export function ConnectionPage({
   account,
+  onConnectionReady,
   onError,
 }: {
   account: AccountConfig;
+  onConnectionReady?: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
   const [providerKind, setProviderKind] = useState<ProviderKind>("cookie");
@@ -141,6 +143,7 @@ export function ConnectionPage({
         result?.status === "ready" &&
         nextReadiness.fieldsComplete &&
         nextReadiness.statusRequestImported;
+      if (importReady) await onConnectionReady?.();
       setImportFeedback({
         ok: importReady,
         message:
@@ -169,6 +172,7 @@ export function ConnectionPage({
       );
       if (connection?.hasCredential) {
         await api.testConnection(account.id, "official-api");
+        await onConnectionReady?.();
       }
       await load();
     } catch (cause) {
@@ -187,6 +191,7 @@ export function ConnectionPage({
       });
       setAccessToken("");
       await api.testConnection(account.id, "official-api");
+      await onConnectionReady?.();
       await load();
     } catch (cause) {
       onError(getErrorMessage(cause));

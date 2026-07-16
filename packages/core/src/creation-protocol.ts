@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { CapturedCookieRequest } from "./connection.js";
+import type { CapturedCookieRequest, CookieCreationProfile } from "./connection.js";
 import type { CreationPresetConfig, LaunchConfigurationRow } from "./launch.js";
 
 /** Confirmed TikTok draft-to-publish sequence.  Values are deliberately
@@ -97,11 +97,12 @@ export function getCreationTemplateReadiness(
 export function buildDraftPayloads(
   row: LaunchConfigurationRow,
   config: CreationPresetConfig,
+  timezone = "UTC",
+  now = new Date(),
 ) {
   const required = requiredCreationFields(config);
   if (required.length > 0) throw new CreationPresetIncompleteError(required);
-  const startTime = row.startAt ? unixSeconds(row.startAt) : "";
-  const endTime = row.endAt ? unixSeconds(row.endAt) : "";
+  const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
   return {
     campaign: {
       campaign_sketch_form_data: {
@@ -126,7 +127,7 @@ export function buildDraftPayloads(
         ad_name: row.adGroupName,
         ad_snap_id: "",
         ad_sketch_id: "",
-        schedule_type: startTime ? 1 : 0,
+        schedule_type: 1,
         start_time: startTime,
         end_time: endTime,
         budget_mode: config.adBudgetMode,
@@ -161,6 +162,33 @@ export function buildDraftPayloads(
   };
 }
 
+/** Applies only user-controlled fields to a locally encrypted, account-verified
+ * creation snapshot. Identity, pixel, targeting and provider risk fields are
+ * retained verbatim instead of being guessed from a list/status cURL. */
+export function buildProfileDraftPayloads(profile: CookieCreationProfile, row: LaunchConfigurationRow, timezone = "UTC", now = new Date()) {
+  const campaign = clone(profile.campaignPayload);
+  const adGroup = clone(profile.adGroupPayload);
+  const creative = clone(profile.creativePayload);
+  const campaignForm = objectAt(campaign, "campaign_sketch_form_data");
+  const adForm = objectAt(adGroup, "ad_sketch_form_data");
+  const list = creative.asset_group_sketch_form_data_list;
+  if (!Array.isArray(list) || !isRecord(list[0])) throw new Error("本地创建模板缺少广告素材结构，请重新验证该账户的创建模板。");
+  campaignForm.campaign_name = row.campaignName;
+  campaignForm.campaign_id = ""; campaignForm.campaign_snap_id = ""; campaignForm.campaign_sketch_id = "";
+  adForm.ad_name = row.adGroupName; adForm.budget = String(row.dailyBudget);
+  if (row.bid !== null) adForm.cpa_bid = String(row.bid);
+  const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
+  adForm.schedule_type = 1; adForm.start_time = startTime; adForm.end_time = endTime;
+  const asset = list[0]; asset.creative_name = row.adName; asset.external_url = row.productUrl;
+  if (typeof asset.open_url === "string") asset.open_url = row.productUrl;
+  if (!Array.isArray(asset.image_list) || !isRecord(asset.image_list[0])) throw new Error("本地创建模板缺少视频素材结构，请重新验证该账户的创建模板。");
+  asset.image_list[0].aweme_item_id = row.videoCode;
+  return { campaign, adGroup, creative };
+}
+function clone(value: Record<string, unknown>): Record<string, unknown> { return JSON.parse(JSON.stringify(value)) as Record<string, unknown>; }
+function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> { if (!isRecord(value[key])) throw new Error(`本地创建模板缺少 ${key}，请重新验证该账户的创建模板。`); return value[key]; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
 function requiredCreationFields(config: CreationPresetConfig): string[] {
   const fields: Array<[string, unknown]> = [
     ["营销目标", config.objectiveType],
@@ -177,8 +205,25 @@ function requiredCreationFields(config: CreationPresetConfig): string[] {
   return fields.filter(([, value]) => value == null || value === "").map(([name]) => name);
 }
 
-function unixSeconds(value: string): string {
-  const milliseconds = new Date(value).getTime();
-  if (!Number.isFinite(milliseconds)) throw new Error("创建时间无效。");
-  return String(Math.floor(milliseconds / 1000));
+function materializeSchedule(startAt: string | null, endAt: string | null, timezone: string, now: Date) {
+  const start = startAt ? new Date(startAt) : new Date(now.getTime() + 300_000);
+  if (!Number.isFinite(start.getTime())) throw new Error("创建时间无效。");
+  const end = endAt ? new Date(endAt) : new Date(start);
+  if (endAt) {
+    if (!Number.isFinite(end.getTime())) throw new Error("结束时间无效。");
+  } else {
+    end.setUTCFullYear(end.getUTCFullYear() + 10);
+  }
+  return { startTime: formatTikTokDateTime(start, timezone), endTime: formatTikTokDateTime(end, timezone) };
+}
+
+function formatTikTokDateTime(value: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(value);
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}:${fields.second}`;
 }

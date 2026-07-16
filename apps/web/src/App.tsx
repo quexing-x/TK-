@@ -9,7 +9,6 @@ import {
   ChevronDown,
   CircleGauge,
   Gauge,
-  Layers3,
   ListFilter,
   Plus,
   Pencil,
@@ -75,6 +74,41 @@ type PageKey =
   | "notifications"
   | "launch"
   | "system-users";
+
+const selectedAccountStorageKey = "tk-auto:selected-account-id";
+
+const pageHash: Record<PageKey, string> = {
+  manual: "#manual",
+  users: "#users",
+  automation: "#automation",
+  ads: "#ads",
+  analytics: "#analytics",
+  rules: "#rules",
+  notifications: "#notifications",
+  launch: "#launch",
+  "system-users": "#system-users",
+};
+
+function pageFromHash(hash = window.location.hash): PageKey {
+  const found = (Object.entries(pageHash) as Array<[PageKey, string]>).find(
+    ([, value]) => value === hash,
+  );
+  return found?.[0] ?? "manual";
+}
+
+function preferredAccountId(
+  accounts: AccountConfig[],
+  states: BootstrapPayload["accountConnectionStates"],
+  current: string,
+): string {
+  const available = new Set(accounts.map((account) => account.id));
+  const remembered = window.localStorage.getItem(selectedAccountStorageKey) ?? "";
+  if (available.has(current)) return current;
+  if (available.has(remembered)) return remembered;
+  return states.find((state) => state.connection?.status === "ready")?.accountId
+    ?? accounts[0]?.id
+    ?? "";
+}
 
 const navItems: Array<{
   key: PageKey;
@@ -144,14 +178,18 @@ function ConsoleApp() {
   const auth = useAuth();
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
-  const [page, setPage] = useState<PageKey>("manual");
+  const [page, setPage] = useState<PageKey>(() => pageFromHash());
   const [error, setError] = useState<string | null>(null);
 
   const loadBootstrap = useCallback(async () => {
     try {
       const payload = await api.bootstrap();
       setBootstrap(payload);
-      setSelectedAccountId((current) => current || payload.accounts[0]?.id || "");
+      setSelectedAccountId((current) => preferredAccountId(
+        payload.accounts,
+        payload.accountConnectionStates,
+        current,
+      ));
       setError(null);
     } catch (cause) {
       setError(getErrorMessage(cause));
@@ -162,9 +200,39 @@ function ConsoleApp() {
     void loadBootstrap();
   }, [loadBootstrap]);
 
+  useEffect(() => {
+    const syncPageFromUrl = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", syncPageFromUrl);
+    return () => window.removeEventListener("hashchange", syncPageFromUrl);
+  }, []);
+
+  const navigateTo = useCallback((nextPage: PageKey) => {
+    const nextHash = pageHash[nextPage];
+    if (window.location.hash === nextHash) setPage(nextPage);
+    else window.location.hash = nextHash;
+  }, []);
+
+  const selectAccount = useCallback((accountId: string) => {
+    window.localStorage.setItem(selectedAccountStorageKey, accountId);
+    setSelectedAccountId(accountId);
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void loadBootstrap();
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, [loadBootstrap]);
+
   const account = bootstrap?.accounts.find(
     (item) => item.id === selectedAccountId,
   );
+  const selectedConnection = bootstrap?.accountConnectionStates.find(
+    (item) => item.accountId === selectedAccountId,
+  )?.connection ?? null;
+  const selectedLatestSync = bootstrap?.accountConnectionStates.find(
+    (item) => item.accountId === selectedAccountId,
+  )?.latestSync ?? null;
 
   if (!bootstrap) {
     return (
@@ -175,6 +243,11 @@ function ConsoleApp() {
       </div>
     );
   }
+
+  const automationOverview = summarizeAccountConnections(
+    bootstrap.accounts,
+    bootstrap.accountConnectionStates,
+  );
 
   return (
     <div className="app-shell">
@@ -225,7 +298,7 @@ function ConsoleApp() {
               <button
                 className={page === item.key ? "nav-item active" : "nav-item"}
                 key={item.key}
-                onClick={() => setPage(item.key)}
+                onClick={() => navigateTo(item.key)}
                 type="button"
               >
                 <Icon size={19} />
@@ -238,7 +311,7 @@ function ConsoleApp() {
           })}
         </nav>
 
-        <button className={page === "manual" ? "nav-item manual-launch active" : "nav-item manual-launch"} onClick={() => setPage("manual")} type="button"><BookOpen size={19} /><span><strong>操作手册</strong><small>API 与 Cookie 详细教程</small></span></button>
+        <button className={page === "manual" ? "nav-item manual-launch active" : "nav-item manual-launch"} onClick={() => navigateTo("manual")} type="button"><BookOpen size={19} /><span><strong>操作手册</strong><small>API 与 Cookie 详细教程</small></span></button>
 
         <div className="sidebar-footer">
           <ShieldCheck size={18} />
@@ -275,6 +348,16 @@ function ConsoleApp() {
         ) : page === "users" ? (
           <UsersPage
             accounts={bootstrap.accounts}
+            initialConnectionStates={Object.fromEntries(
+              bootstrap.accountConnectionStates.map((state) => [
+                state.accountId,
+                {
+                  connection: state.connection,
+                  readiness: null,
+                  latestSync: state.latestSync,
+                },
+              ]),
+            )}
             onChanged={loadBootstrap}
             onError={setError}
           />
@@ -287,20 +370,21 @@ function ConsoleApp() {
         ) : page === "notifications" ? (
           <NotificationsPage onError={setError} />
         ) : page === "launch" ? (
-          <LaunchPage accounts={bootstrap.accounts} onError={setError} />
+          <LaunchPage accounts={bootstrap.accounts} preferredAccountId={selectedAccountId} onError={setError} />
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
-          <section className="page-stack"><AutomationFeaturesPage onError={setError} /><AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
-            <AutomationPage account={account} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} onError={setError} />
+          <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
+            <AutomationPage account={account} connection={selectedConnection} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} onError={setError} />
+            <AutomationFeaturesPage onError={setError} />
           </AccountScopedPage></section>
         ) : page === "ads" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
             <AdsManagementPage account={account} onError={setError} />
           </AccountScopedPage>
         ) : page === "analytics" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={setSelectedAccountId}>
-            <AnalyticsPage account={account} onError={setError} />
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
+            <AnalyticsPage account={account} connection={selectedConnection} latestSync={selectedLatestSync} onError={setError} />
           </AccountScopedPage>
         ) : (
           <EmptyState text="页面不存在。" />
@@ -313,16 +397,97 @@ function ConsoleApp() {
 const defaultAccountInput: AccountCreateInput = {
   displayName: "",
   accountType: "standard",
-  enabled: true,
+  enabled: false,
   providerKind: "cookie",
 };
 
+interface AccountAutomationOverview {
+  connectedCount: number;
+  automationEnabledCount: number;
+  unreadyAccounts: Array<{
+    accountId: string;
+    displayName: string;
+    message: string;
+  }>;
+}
+
+function summarizeAccountConnections(
+  accounts: AccountConfig[],
+  states: BootstrapPayload["accountConnectionStates"],
+): AccountAutomationOverview {
+  const stateByAccountId = new Map(
+    states.map((state) => [state.accountId, state]),
+  );
+  const automaticAccounts = accounts.filter((account) => account.enabled);
+  return {
+    connectedCount: states.filter(
+      (state) => state.connection?.status === "ready",
+    ).length,
+    automationEnabledCount: automaticAccounts.length,
+    unreadyAccounts: automaticAccounts.flatMap((account) => {
+      const connection = stateByAccountId.get(account.id)?.connection;
+      return connection?.status !== "ready"
+        ? [{
+            accountId: account.id,
+            displayName: account.displayName,
+            message: connectionStatusSummary(account, connection),
+          }]
+        : [];
+    }),
+  };
+}
+
+function automationConnectionMessage(
+  account: AccountConfig,
+  connection: ProviderConnection | null,
+): string {
+  const providerLabel = account.providerKind === "cookie" ? "Cookie 接入" : "API 接入";
+  const stateLabel =
+    !connection || connection.status === "not-configured"
+      ? "尚未接入"
+      : connection.status === "untested"
+        ? "等待后台检测"
+        : connection.status === "failed"
+          ? account.providerKind === "cookie"
+            ? "Cookie 已失效或连接异常"
+            : "API 连接异常"
+          : "尚未通过连接检测";
+  return `当前账户「${account.displayName}」的${providerLabel}状态：${stateLabel}。请前往“用户管理”完成或检查接入。`;
+}
+
+function connectionStatusSummary(
+  account: AccountConfig,
+  connection: ProviderConnection | null | undefined,
+): string {
+  if (!connection || connection.status === "not-configured") {
+    return "尚未导入接入信息";
+  }
+  if (connection.status === "untested") {
+    return "已导入，等待后台连接检测";
+  }
+  if (connection.status === "failed") {
+    return connection.lastMessage ?? (account.providerKind === "cookie"
+      ? "Cookie 已失效或连接异常"
+      : "API 连接异常");
+  }
+  return "尚未通过连接检测";
+}
+
 function UsersPage({
   accounts,
+  initialConnectionStates,
   onChanged,
   onError,
 }: {
   accounts: AccountConfig[];
+  initialConnectionStates: Record<
+    string,
+    {
+      connection: ProviderConnection | null;
+      readiness: CookieConnectionReadiness | null;
+      latestSync: ReadOnlySyncResult | null;
+    }
+  >;
   onChanged: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
@@ -340,37 +505,16 @@ function UsersPage({
         latestSync: ReadOnlySyncResult | null;
       }
     >
-  >({});
-
-  const loadConnectionStates = useCallback(async () => {
-    const entries = await Promise.all(
-      accounts.map(async (account) => {
-        const [list, readiness, latestSync] = await Promise.all([
-          api.getConnections(account.id).catch(() => []),
-          account.providerKind === "cookie"
-            ? api.getCookieReadiness(account.id).catch(() => null)
-            : Promise.resolve(null),
-          api.getLatestAutomationSync(account.id).catch(() => null),
-        ]);
-        return [
-          account.id,
-          {
-            connection:
-              list.find((item) => item.kind === account.providerKind) ?? null,
-            readiness,
-            latestSync,
-          },
-        ] as const;
-      }),
-    );
-    setConnectionStates(Object.fromEntries(entries));
-  }, [accounts]);
+  >(initialConnectionStates);
 
   useEffect(() => {
-    void loadConnectionStates();
-    const timer = window.setInterval(() => void loadConnectionStates(), 30_000);
+    setConnectionStates(initialConnectionStates);
+  }, [initialConnectionStates]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void onChanged(), 30_000);
     return () => window.clearInterval(timer);
-  }, [loadConnectionStates]);
+  }, [onChanged]);
 
   const openNew = () => {
     setEditing(null);
@@ -412,6 +556,16 @@ function UsersPage({
     }
   };
 
+  const enableAfterConnection = async (account: AccountConfig) => {
+    if (!account.enabled) {
+      await api.updateSettings(account.id, {
+        ...settingsFromAccount(account),
+        enabled: true,
+      });
+    }
+    await onChanged();
+  };
+
   return (
     <section className="page-stack">
       <div className="panel table-panel">
@@ -441,20 +595,31 @@ function UsersPage({
             </thead>
             <tbody>
               {accounts.map((account) => (
-                <tr key={account.id}>
-                  <td><strong>{account.displayName}</strong><br /><small>{account.id}</small></td>
+                <tr key={account.id}>{(() => {
+                  const automationReady = connectionStates[account.id]?.connection?.status === "ready";
+                  return <>
+                  <td><strong>{account.displayName}</strong><br /><small className="account-id">{account.id}</small></td>
                   <td>{accountTypeLabel(account.accountType)}</td>
                   <td>{providerLabel(account.providerKind)}</td>
                   <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
-                  <td><span className={account.enabled ? "status active" : "status"}>{account.enabled ? "已开启" : "已关闭"}</span></td>
+                  <td>
+                    <div className="account-automation-toggle">
+                      <Toggle
+                        checked={automationReady && account.enabled}
+                        disabled={!automationReady}
+                        label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
+                        onChange={() => void toggleAccount(account)}
+                      />
+                      <span className={automationReady && account.enabled ? "status active" : "status"}>{automationReady ? account.enabled ? "已开启" : "已关闭" : "接入后开启"}</span>
+                    </div>
+                  </td>
                   <td>
                     <div className="row-actions">
                       <button type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
                       <button type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
-                      <button type="button" onClick={() => void toggleAccount(account)}>{account.enabled ? "关闭自动化" : "开启自动化"}</button>
                     </div>
-                  </td>
-                </tr>
+                  </td></>;
+                })()}</tr>
               ))}
             </tbody>
           </table>
@@ -500,9 +665,9 @@ function UsersPage({
           <div className="modal connection-modal" onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-heading">
               <div><span className="eyebrow">广告账户接入</span><h2>{connecting.displayName}</h2></div>
-              <button type="button" onClick={() => { setConnecting(null); void loadConnectionStates(); }}><X size={20} /></button>
+              <button type="button" onClick={() => { setConnecting(null); void onChanged(); }}><X size={20} /></button>
             </div>
-            <ConnectionPage account={connecting} onError={onError} />
+            <ConnectionPage account={connecting} onConnectionReady={() => enableAfterConnection(connecting)} onError={onError} />
           </div>
         </div>
       )}
@@ -733,7 +898,8 @@ function AdsManagementPage({
                     <td>{formatMetric(entity.metrics.conversions)}</td>
                     <td>{entity.ignored ? <span className="risk-badge destructive">已忽略</span> : "参与"}</td>
                     <td><div className="row-actions">
-                      <button disabled={busy !== null || entity.status === "unknown"} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>
+                      <button disabled={busy !== null || entity.status === "unknown"} title={entity.status === "unknown" ? "状态未知：请先执行检测预览或等待下一次同步后再操作。" : undefined} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>
+                      {entity.status === "unknown" && <small className="inline-protection-note">请先同步状态</small>}
                       <button disabled={busy !== null} onClick={() => void toggleIgnore(entity)} type="button"><Ban size={14} /> {entity.ignored ? "取消忽略" : "忽略"}</button>
                       {entity.entityType === "ad-group" && <button disabled={busy !== null} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
                       {entity.entityType === "ad" && <button disabled={busy !== null} onClick={() => void queueAppeal(entity)} type="button">加入申诉</button>}
@@ -752,7 +918,7 @@ function AdsManagementPage({
       </div>
 
       <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>广告操作记录</h2><p>手动和自动启停、忽略名单变更均记录在本机。</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>广告操作记录</h2><p>当前仅显示账户「{account.displayName}」的手动和自动启停、忽略名单变更。</p></div></div></div>
         <div className="table-wrap"><table>
           <thead><tr><th>对象</th><th>动作</th><th>来源</th><th>结果</th><th>信息</th><th>时间</th></tr></thead>
           <tbody>{operations.length === 0 ? <tr><td colSpan={6}>暂无操作记录。</td></tr> : operations.slice(0, 50).map((operation) => <tr key={operation.id}>
@@ -783,9 +949,13 @@ function AdsManagementPage({
 
 function AnalyticsPage({
   account,
+  connection,
+  latestSync,
   onError,
 }: {
   account: AccountConfig;
+  connection: ProviderConnection | null;
+  latestSync: ReadOnlySyncResult | null;
   onError: (message: string | null) => void;
 }) {
   const today = formatDateInput(new Date());
@@ -830,6 +1000,7 @@ function AnalyticsPage({
 
   return (
     <section className="page-stack">
+      <div className={connection?.status === "ready" ? "alert info-alert" : "alert warning-alert"}><Activity size={18} /><span><strong>账户「{account.displayName}」</strong> · 当前连接{connection?.status === "ready" ? "正常" : "异常或待检测"} · 最后成功同步：{latestSync ? new Date(latestSync.finishedAt).toLocaleString() : "暂无"} · 指标图表为本机历史快照 · 币种：当前接入未提供，金额请以 TikTok 广告账户币种为准。</span></div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
           <Field label="时间范围"><select value={preset} onChange={(event) => setPreset(event.target.value as AnalysisPreset)}><option value="today">今天</option><option value="yesterday">昨天</option><option value="3d">三天</option><option value="7d">七天</option><option value="30d">三十天</option><option value="custom">自定义</option></select></Field>
@@ -931,31 +1102,35 @@ function formatChartTime(value: string): string {
 
 function AutomationPage({
   account,
+  connection,
   maxActionsPerRun,
+  overview,
   onError,
 }: {
   account: AccountConfig;
+  connection: ProviderConnection | null;
   maxActionsPerRun: number;
+  overview: AccountAutomationOverview;
   onError: (message: string | null) => void;
 }) {
   const [runs, setRuns] = useState<AutomationRunRecord[] | null>(null);
   const [decisions, setDecisions] = useState<
     AutomationDecisionRecord[] | null
   >(null);
-  const [latestSync, setLatestSync] = useState<ReadOnlySyncResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<string | null>(null);
+  const connectionMessage = automationConnectionMessage(account, connection);
+  const canRunAutomation = connection?.status === "ready";
+  const unreadyAccounts = overview.unreadyAccounts ?? [];
 
   const load = useCallback(async () => {
     try {
-      const [nextRuns, nextDecisions, nextSync] = await Promise.all([
+      const [nextRuns, nextDecisions] = await Promise.all([
         api.getAutomationRuns(account.id),
         api.getAutomationDecisions(account.id),
-        api.getLatestAutomationSync(account.id),
       ]);
       setRuns(nextRuns);
       setDecisions(nextDecisions);
-      setLatestSync(nextSync);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -965,7 +1140,6 @@ function AutomationPage({
   useEffect(() => {
     setRuns(null);
     setDecisions(null);
-    setLatestSync(null);
     void load();
   }, [load]);
 
@@ -1030,23 +1204,25 @@ function AutomationPage({
           <p>
             检测预览永远不会修改广告；账户开关开启后，定时轮询和“立即执行”都会按已启用规则自动启停。
           </p>
+          {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
         <div className="automation-actions">
           <button
             className="secondary-button"
-            disabled={busy !== null}
+            disabled={busy !== null || !canRunAutomation}
             onClick={() => void execute(true)}
             type="button"
+            title={canRunAutomation ? "只读检测，不会修改广告" : connectionMessage}
           >
             <RefreshCcw size={17} />
             {busy === "preview" ? "检测中…" : "检测预览"}
           </button>
           <button
             className="primary-button"
-            disabled={busy !== null || !account.enabled}
+            disabled={busy !== null || !account.enabled || !canRunAutomation}
             onClick={() => void execute(false)}
             type="button"
-            title={account.enabled ? "按规则执行真实启停" : "请先在用户管理中开启账户自动化"}
+            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则执行真实启停" : "请先在用户管理中开启账户自动化"}
           >
             <Play size={17} />
             {busy === "run" ? "运行中…" : "立即执行"}
@@ -1056,8 +1232,9 @@ function AutomationPage({
       {runFeedback && <div className={`automation-run-feedback ${latest?.status === "failed" ? "error" : "success"}`}>{runFeedback}</div>}
 
       <div className="panel automation-sync-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><Layers3 size={18} /></span><div><h2>最近一次三层同步</h2><p>只有同步到的层级才会进入规则判断；检测预览与轮询都会更新此状态。</p></div></div></div>
-        {latestSync ? <><div className="sync-count-grid"><span>系列 <strong>{latestSync.counts.campaign}</strong></span><span>广告组 <strong>{latestSync.counts["ad-group"]}</strong></span><span>广告 <strong>{latestSync.counts.ad}</strong></span><small>{new Date(latestSync.finishedAt).toLocaleString()}</small></div>{latestSync.warnings.length > 0 ? <div className="sheet-issues warning"><strong>同步告警</strong><ul>{latestSync.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : <p className="retention-note">三层同步正常，本轮可以按规则参与判断。</p>}</> : <p className="inline-empty">尚未有同步记录。点击“检测预览”后将在此显示系列、广告组和广告的实际数量。</p>}
+        <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>账户接入状态</h2><p>由后台轮询维护；页面只展示已保存的最新结果，不会因切换页面重新检测。</p></div></div></div>
+        <div className="sync-count-grid"><span>已接入 <strong>{overview.connectedCount}</strong></span><span>已开启自动化 <strong>{overview.automationEnabledCount}</strong></span><span>待处理接入 <strong>{unreadyAccounts.length}</strong></span></div>
+        {unreadyAccounts.length > 0 ? <div className="sheet-issues warning"><strong>以下已开启自动化的账户尚不能运行</strong><ul>{unreadyAccounts.map((item) => <li key={item.accountId}><strong>{item.displayName}</strong>：{item.message}</li>)}</ul></div> : <p className="retention-note">所有已开启自动化的账户均已通过连接检测。</p>}
       </div>
 
       <div className="panel table-panel">
@@ -1134,16 +1311,20 @@ function Toggle({
   checked,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       aria-label={label}
       aria-pressed={checked}
       className={checked ? "toggle checked" : "toggle"}
+      disabled={disabled}
+      title={disabled ? "账户尚未完成接入，完成后会自动开启自动化。" : undefined}
       onClick={() => onChange(!checked)}
       type="button"
     >
@@ -1182,7 +1363,7 @@ function AccountScopedPage({
           <strong>查看账户</strong>
           <span>这里只切换当前页面的数据视图，不改变全局自动化规则。</span>
         </div>
-        <select value={selectedId} onChange={(event) => onSelect(event.target.value)}>
+        <select aria-label="当前数据账户" value={selectedId} onChange={(event) => onSelect(event.target.value)}>
           {accounts.map((account) => (
             <option key={account.id} value={account.id}>{account.displayName}</option>
           ))}
@@ -1217,35 +1398,35 @@ function connectionStateLabel(
         connection: ProviderConnection | null;
         readiness: CookieConnectionReadiness | null;
         latestSync: ReadOnlySyncResult | null;
-      }
+  }
     | undefined,
   kind: ProviderKind,
 ): ReactNode {
   const connection = state?.connection;
   const cookieReadiness = state?.readiness;
   const latestSync = state?.latestSync;
-  if (kind === "cookie" && !cookieReadiness?.fieldsComplete) {
-    return (
-      <span className="status warning">
-        待导入 {cookieReadiness?.completedFields ?? 0}/5
-      </span>
-    );
-  }
-  if (kind === "cookie" && !cookieReadiness?.statusRequestImported) {
-    return <span className="status danger">启停能力未建立</span>;
-  }
   if (!connection || connection.status === "not-configured") {
     return <span className="status">未接入</span>;
   }
+  if (kind === "cookie" && cookieReadiness && !cookieReadiness.fieldsComplete) {
+    return (
+      <span className="status warning">
+        待导入 {cookieReadiness.completedFields}/5
+      </span>
+    );
+  }
+  if (kind === "cookie" && cookieReadiness && !cookieReadiness.statusRequestImported) {
+    return <span className="status danger">启停能力未建立</span>;
+  }
   if (connection.status === "ready") {
-    if (!latestSync) return <span className="status warning">已连接·待检测</span>;
-    if (latestSync.counts["ad-group"] === 0) {
-      return <span className="status danger">已连接·未读取广告组</span>;
-    }
-    if (latestSync.warnings.length > 0) {
-      return <span className="status warning">已连接·部分数据</span>;
-    }
-    return <span className="status active">数据已接入</span>;
+    const readStatus = !latestSync
+      ? <span className="status warning">数据读取：待同步</span>
+      : latestSync.counts["ad-group"] === 0
+        ? <span className="status warning">数据读取：无广告组</span>
+        : latestSync.warnings.length > 0
+          ? <span className="status warning">数据读取：部分数据</span>
+          : <span className="status active">数据读取：已接入</span>;
+    return <div className="capability-statuses">{readStatus}<span className="status active">启停：已接入</span><span className="status">创建功能：暂未就绪</span></div>;
   }
   if (connection.status === "failed" && kind === "cookie") {
     return <span className="status danger">Cookie 已失效</span>;

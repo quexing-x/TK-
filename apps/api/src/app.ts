@@ -311,13 +311,29 @@ export async function createApp(
     );
   });
 
-  app.get("/api/bootstrap", async () => ({
-    accounts: dependencies.store.listAccounts(),
-    globalAutomationSettings:
-      dependencies.store.getGlobalAutomationSettings(),
-    systemRuntime: dependencies.store.getSystemRuntimeState(),
-    providers: providers.list(),
-  }));
+  app.get("/api/bootstrap", async () => {
+    const accounts = dependencies.store.listAccounts();
+    return {
+      accounts,
+      // This is persisted local state only. It lets the account list render
+      // immediately; the scheduler remains the sole background health checker.
+      accountConnectionStates: accounts.map((account) => ({
+        accountId: account.id,
+        connection: dependencies.store.getProviderConnection(
+          account.id,
+          account.providerKind,
+        ),
+        latestSync: dependencies.store.getLatestReadOnlySync(
+          account.id,
+          account.providerKind,
+        ),
+      })),
+      globalAutomationSettings:
+        dependencies.store.getGlobalAutomationSettings(),
+      systemRuntime: dependencies.store.getSystemRuntimeState(),
+      providers: providers.list(),
+    };
+  });
 
   app.get("/api/system/runtime", async () =>
     dependencies.store.getSystemRuntimeState(),
@@ -647,6 +663,10 @@ export async function createApp(
               );
               credential = CookieCredentialInputSchema.parse({
                 ...credential,
+                // A refreshed list/status cURL updates session material only.
+                // Keep the account-scoped encrypted creation profile so
+                // reconnecting never silently removes creation capability.
+                creationProfile: parsedPrevious.creationProfile,
                 csrfToken:
                   credential.csrfToken ?? parsedPrevious.csrfToken,
                 csrfHeaderName: credential.csrfToken

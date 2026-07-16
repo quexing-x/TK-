@@ -46,7 +46,7 @@ export async function downloadLaunchTemplate(): Promise<void> {
 
   const example = workbook.addWorksheet("填写示例");
   example.addRow(launchSheetColumns.map((column) => column.label));
-  example.addRow(["夏季促销系列", "夏季广告组", "视频代码_001", "https://example.com/product"]);
+  example.addRow(["夏季促销系列", "夏季广告组", "视频代码_001；视频代码_002", "https://example.com/product"]);
   example.columns = [{ width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }];
   styleHeader(example.getRow(1));
 
@@ -54,10 +54,13 @@ export async function downloadLaunchTemplate(): Promise<void> {
   guide.columns = [{ width: 20 }, { width: 90 }];
   guide.addRows([
     ["规则", "说明"],
-    ["只填写四列", "导入表仅保留推广系列名称、广告组名称、视频代码与产品 URL。源广告、目标账户和广告预设在软件中选择一次。"],
+    ["推广系列名称", "必填。同一行拆分出的多个视频代码共用此系列名称。"],
+    ["广告组名称", "必填。同一行拆分出的多个视频代码共用此广告组名称。"],
+    ["视频代码", "必填。可填写一个代码，或用中文分号（；）、英文分号（;）或换行分隔多个代码；每个代码会生成一条广告。视频必须已存在于每个目标账户自己的素材库。"],
+    ["产品 URL", "必填。必须以 http:// 或 https:// 开头；同一行拆分出的多个广告共用此 URL。"],
     ["广告预设", "预算、出价、创建/结束时间和初始状态统一从所选广告预设读取，无需写入表格。"],
     ["自动命名", "广告名称由软件自动生成：YYMMDD:XXX，例如 260716:001。"],
-    ["安全限制", "单次最多 500 行。当前只保存创建计划，未接入真实创建接口时不会写入 TikTok。"],
+    ["安全限制", "单次最多 500 条创建任务；一行含多个视频代码时会按拆分后的广告数量计数。发布后页面只显示本次计划的账户级成功数、失败数和错误摘要，不列出全部广告。"],
   ]);
   styleHeader(guide.getRow(1));
   guide.eachRow((row) => { row.alignment = { vertical: "top", wrapText: true }; });

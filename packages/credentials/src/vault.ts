@@ -19,7 +19,8 @@ export class WindowsDpapiCredentialVault implements CredentialVault {
 
     await mkdir(this.directory, { recursive: true });
     const reference = randomUUID();
-    const encrypted = await runPowerShell(PROTECT_SCRIPT, secret);
+    const plaintextBase64 = Buffer.from(secret, "utf8").toString("base64");
+    const encrypted = await runPowerShell(PROTECT_SCRIPT, plaintextBase64);
     await writeFile(this.pathFor(reference), encrypted, {
       encoding: "utf8",
       mode: 0o600,
@@ -36,7 +37,11 @@ export class WindowsDpapiCredentialVault implements CredentialVault {
       if (isMissingFile(error)) return null;
       throw error;
     }
-    return runPowerShell(UNPROTECT_SCRIPT, encrypted.trim());
+    const plaintextBase64 = await runPowerShell(
+      UNPROTECT_SCRIPT,
+      encrypted.trim(),
+    );
+    return Buffer.from(plaintextBase64.trim(), "base64").toString("utf8");
   }
 
   async delete(reference: string): Promise<void> {
@@ -71,7 +76,7 @@ const PROTECT_SCRIPT = `
 $ProgressPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Security
 $inputText = [Console]::In.ReadToEnd()
-$bytes = [Text.Encoding]::UTF8.GetBytes($inputText)
+$bytes = [Convert]::FromBase64String($inputText)
 $encrypted = [Security.Cryptography.ProtectedData]::Protect(
   $bytes,
   $null,
@@ -90,7 +95,7 @@ $bytes = [Security.Cryptography.ProtectedData]::Unprotect(
   $null,
   [Security.Cryptography.DataProtectionScope]::CurrentUser
 )
-[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))
+[Console]::Out.Write([Convert]::ToBase64String($bytes))
 `;
 
 function runPowerShell(script: string, input: string): Promise<string> {

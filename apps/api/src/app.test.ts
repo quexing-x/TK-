@@ -27,6 +27,9 @@ describe("local API", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json().accounts).toHaveLength(1);
+    expect(response.json().accountConnectionStates).toEqual([
+      expect.objectContaining({ accountId: "demo-account" }),
+    ]);
     expect(response.json().providers).toHaveLength(2);
     expect(response.json()).not.toHaveProperty("switchDefinitions");
     expect(response.json().globalAutomationSettings).toMatchObject({

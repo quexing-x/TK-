@@ -54,6 +54,11 @@ export interface ProviderDescriptor {
 
 export interface BootstrapPayload {
   accounts: AccountConfig[];
+  accountConnectionStates: Array<{
+    accountId: string;
+    connection: ProviderConnection | null;
+    latestSync: ReadOnlySyncResult | null;
+  }>;
   globalAutomationSettings: GlobalAutomationSettings;
   systemRuntime: SystemRuntimeState;
   providers: ProviderDescriptor[];

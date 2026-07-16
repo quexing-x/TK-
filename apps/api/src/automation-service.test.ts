@@ -193,6 +193,16 @@ describe("AutomationService", () => {
     );
   });
 
+  it("explains which account needs connection verification before a preview", async () => {
+    store.updateProviderStatus("demo-account", "cookie", "failed", "expired");
+
+    await expect(service.runAccount("demo-account", "preview")).resolves.toMatchObject({
+      status: "failed",
+      errorMessage:
+        "账户「演示广告账户」当前Cookie 接入状态：Cookie 已失效或连接异常。请到「用户管理」查看接入状态后再运行。",
+    });
+  });
+
   it("executes matching decisions automatically by default", async () => {
     const run = await service.runAccount("demo-account", "manual");
 

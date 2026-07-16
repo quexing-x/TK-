@@ -39,6 +39,22 @@ describe("parseLaunchSheetTable", () => {
     expect(result.errors.map((issue) => issue.field)).toContain("视频代码");
   });
 
+  it("splits several video codes in one cell into separately named ads", () => {
+    const result = parseLaunchSheetTable(
+      [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["夏季系列", "夏季广告组", "video-001； video-002;video-003", "https://example.com/product"]],
+      preset,
+      new Date("2026-07-16T09:00:00.000Z"),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([expect.objectContaining({ field: "视频代码" })]);
+    expect(result.rows.map((row) => [row.videoCode, row.adName])).toEqual([
+      ["video-001", "260716:001"],
+      ["video-002", "260716:002"],
+      ["video-003", "260716:003"],
+    ]);
+  });
+
   it("formats automatic names as YYMMDD:XXX", () => {
     expect(automaticName(new Date("2026-07-16T09:00:00.000Z"), 7)).toBe("260716:007");
   });

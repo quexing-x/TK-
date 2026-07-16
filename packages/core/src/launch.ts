@@ -120,22 +120,28 @@ export function parseLaunchSheetTable(
     if (!videoCode) addError(errors, rowNumber, "视频代码", "请填写视频代码。");
     if (!isUrl(productUrl)) addError(errors, rowNumber, "产品 URL", "请填写有效的 http 或 https 产品 URL。");
     if (errors.some((issue) => issue.rowNumber === rowNumber)) continue;
-    const name = automaticName(now, serial);
-    serial += 1;
-    rows.push(LaunchConfigurationRowSchema.parse({
-      rowNumber,
-      campaignName,
-      videoCode,
-      productUrl,
-      adGroupName,
-      adName: name,
-      region: preset.region,
-      dailyBudget: preset.dailyBudget,
-      bid: preset.bid,
-      startAt: preset.startAt,
-      endAt: preset.endAt,
-      initialStatus: preset.initialStatus,
-    }));
+    const videoCodes = splitVideoCodes(videoCode);
+    for (const code of videoCodes) {
+      const name = automaticName(now, serial);
+      serial += 1;
+      rows.push(LaunchConfigurationRowSchema.parse({
+        rowNumber,
+        campaignName,
+        videoCode: code,
+        productUrl,
+        adGroupName,
+        adName: name,
+        region: preset.region,
+        dailyBudget: preset.dailyBudget,
+        bid: preset.bid,
+        startAt: preset.startAt,
+        endAt: preset.endAt,
+        initialStatus: preset.initialStatus,
+      }));
+    }
+    if (videoCodes.length > 1) {
+      warnings.push({ rowNumber, field: "视频代码", message: `已拆分为 ${videoCodes.length} 条广告创建任务。` });
+    }
   }
   if (rows.length === 0 && errors.length === 0) {
     errors.push({ rowNumber: 2, field: "数据", message: "没有可导入的任务行。" });
@@ -144,6 +150,11 @@ export function parseLaunchSheetTable(
     errors.push({ rowNumber: 1, field: "文件", message: "单次最多导入 500 条任务。" });
   }
   return LaunchSheetImportResultSchema.parse({ rows: rows.slice(0, 500), errors, warnings });
+}
+
+/** A cell can contain several account-local video codes separated by ;、； or a new line. */
+function splitVideoCodes(value: string): string[] {
+  return [...new Set(value.split(/[;；\r\n]+/).map((item) => item.trim()).filter(Boolean))];
 }
 
 export function automaticName(now: Date, serial: number): string {
