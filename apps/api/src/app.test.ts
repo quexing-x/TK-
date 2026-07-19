@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AutomationStore } from "@tk-auto/storage";
 import { createApp } from "./app.js";
+import { LaunchService } from "./launch-service.js";
 import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -469,6 +470,33 @@ describe("local API", () => {
 
     releaseProvider();
     await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
+  });
+
+  it("keeps a queued interrupted worker item visible until lease recovery marks it unknown", async () => {
+    vi.useFakeTimers();
+    try {
+      const planId = await installLaunchTestProvider(
+        async (_context, mutations) => mutations.map((mutation) => ({ ...mutation, ok: true, campaignId: "c", adGroupId: "g", adId: "a", message: "created" })),
+        [apiLaunchRow(2)],
+      );
+      await app.close();
+      const item = store.listLaunchPlanItems(planId)[0]!;
+      store.claimLaunchPlanItem(item.itemId, "interrupted-worker", "pending", { id: "worker", name: "Worker", kind: "system" });
+      store.enqueueLaunchPlan(planId, { id: "worker", name: "Worker", kind: "system" });
+
+      expect(store.listQueuedLaunchPlans()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ planId }),
+      ]));
+      vi.setSystemTime(Date.now() + 31 * 60 * 1000);
+      new LaunchService(store, vault, new ProviderRegistry());
+
+      expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "unknown", attemptCount: 1 });
+      expect(store.listQueuedLaunchPlans()).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ planId }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists detected entities and manages the ignore list", async () => {

@@ -126,13 +126,15 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   ].filter((item): item is string => Boolean(item));
 
   const load = async () => {
-    const [nextPresets, nextPlans, connectionLists] = await Promise.all([
+    const [nextPresets, nextPlans, queuedPlanIds, connectionLists] = await Promise.all([
       api.getLaunchPresets(),
       api.getLaunchPlans(),
+      api.getQueuedLaunchPlanIds(),
       Promise.all(accounts.map(async (account) => [account.id, (await api.getConnections(account.id)).find((item) => item.kind === account.providerKind) ?? null] as const)),
     ]);
     setPresets(nextPresets);
     setPlans(nextPlans);
+    setActivePlanIds(queuedPlanIds);
     const itemLists = await Promise.all(nextPlans.map(async (plan) => [plan.id, await api.getLaunchPlanItems(plan.id)] as const));
     setPlanItems(Object.fromEntries(itemLists));
     setConnections(Object.fromEntries(connectionLists));
@@ -143,15 +145,10 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   useEffect(() => {
     if (activePlanIds.length === 0) return;
     const timer = window.setInterval(() => {
-      void load().then(() => {
-        setActivePlanIds((current) => current.filter((planId) => {
-          const items = planItems[planId] ?? [];
-          return items.some((item) => item.status === "pending" || item.status === "running");
-        }));
-      }).catch((cause) => onError(messageOf(cause)));
+      void load().catch((cause) => onError(messageOf(cause)));
     }, 750);
     return () => window.clearInterval(timer);
-  }, [activePlanIds.length, onError, planItems]);
+  }, [activePlanIds.length, onError]);
   useEffect(() => {
     if (sourceAccounts.length === 0) {
       setSourceAccountId("");

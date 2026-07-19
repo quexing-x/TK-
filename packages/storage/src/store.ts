@@ -2430,7 +2430,7 @@ export class AutomationStore {
        WHERE plan.status IN ('draft', 'blocked')
          AND EXISTS (
            SELECT 1 FROM launch_plan_items item
-           WHERE item.plan_id = dispatch.plan_id AND item.status = 'pending'
+           WHERE item.plan_id = dispatch.plan_id AND item.status IN ('pending', 'running')
          )
        ORDER BY dispatch.requested_at
        LIMIT ?`,

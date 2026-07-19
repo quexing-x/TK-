@@ -260,6 +260,8 @@ export const api = {
     ),
   getLaunchPlans: () =>
     request<MultiAccountLaunchPlanRecord[]>("/api/launch-plans"),
+  getQueuedLaunchPlanIds: () =>
+    request<string[]>("/api/launch-plans/queued"),
   getLaunchPresets: () => request<LaunchPresetRecord[]>("/api/launch-presets"),
   createLaunchPreset: (input: LaunchPresetInput) =>
     request<LaunchPresetRecord>("/api/launch-presets", {

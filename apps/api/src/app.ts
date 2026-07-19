@@ -413,6 +413,10 @@ export async function createApp(
     dependencies.store.listMultiAccountLaunchPlans(),
   );
 
+  app.get("/api/launch-plans/queued", async () =>
+    dependencies.store.listQueuedLaunchPlans().map((queued) => queued.planId),
+  );
+
   app.get("/api/write-tasks", async (request) => {
     const query = z.object({
       kind: z.enum(["launch", "status"]).optional(),
