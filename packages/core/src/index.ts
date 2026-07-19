@@ -13,3 +13,5 @@ export * from "./feature-config.js";
 export * from "./launch.js";
 export * from "./creation-protocol.js";
 export * from "./auth.js";
+export * from "./write-task.js";
+export * from "./maintenance.js";

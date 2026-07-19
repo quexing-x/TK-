@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import { AutomationStore } from "@tk-auto/storage";
-import { createApp } from "./app.js";
+import { createApp, requiredPermission } from "./app.js";
 
 const developerPassword = "Local-Developer-2026!";
 const viewerPassword = "Local-Viewer-2026!";
@@ -153,6 +153,95 @@ describe("local authentication and authorization", () => {
       await secureApp.close();
       secureStore.close();
     }
+  });
+
+  it("requires ads operation permission for item-level creation retry", () => {
+    expect(requiredPermission(
+      "POST",
+      "/api/launch-plans/plan-1/items/item-1/retry",
+    )).toBe("ads:operate");
+  });
+
+  it("requires ads operation permission for status write retry", () => {
+    expect(requiredPermission(
+      "POST",
+      "/api/accounts/account-1/status-operations/operation-1/retry",
+    )).toBe("ads:operate");
+  });
+
+  it("requires ads operation permission for status write verification", () => {
+    expect(requiredPermission(
+      "POST",
+      "/api/accounts/account-1/status-operations/operation-1/verify",
+    )).toBe("ads:operate");
+  });
+
+  it("requires ads operation permission for approving a suggestion", () => {
+    expect(requiredPermission(
+      "POST",
+      "/api/accounts/account-1/automation/decisions/decision-1/approve",
+    )).toBe("ads:operate");
+  });
+
+  it("requires automation execution permission for changing the low-risk policy", () => {
+    expect(requiredPermission(
+      "PUT",
+      "/api/accounts/account-1/low-risk-automation",
+    )).toBe("automation:execute");
+  });
+
+  it("restricts maintenance and audit endpoints to system administrators", async () => {
+    const developer = await setupDeveloper(app);
+    const mutation = await app.inject({
+      method: "PUT",
+      url: "/api/system/runtime",
+      headers: { ...developer.headers, "x-correlation-id": "audit-request-1" },
+      payload: { enabled: false },
+    });
+    expect(mutation.statusCode).toBe(200);
+
+    const audit = await app.inject({
+      method: "GET",
+      url: "/api/maintenance/audit?action=global.runtime.updated",
+      headers: { cookie: developer.cookie },
+    });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.json()[0]).toMatchObject({
+      actor: { name: "本机开发者", kind: "user" },
+      correlationId: "audit-request-1",
+      requestId: expect.any(String),
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/api/local-users",
+      headers: developer.headers,
+      payload: {
+        username: "maintenance-viewer",
+        displayName: "运维只读测试",
+        role: "viewer",
+        password: viewerPassword,
+      },
+    });
+    const viewerLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "maintenance-viewer", password: viewerPassword },
+    });
+    const blocked = await app.inject({
+      method: "GET",
+      url: "/api/maintenance/status",
+      headers: { cookie: cookieFrom(viewerLogin) },
+    });
+    expect(blocked.statusCode).toBe(403);
+    expect(blocked.json().error).toBe("PERMISSION_DENIED");
+  });
+
+  it("maps every maintenance read or mutation to system control", () => {
+    expect(requiredPermission("GET", "/api/maintenance/status")).toBe("system:control");
+    expect(requiredPermission("GET", "/api/maintenance/audit")).toBe("system:control");
+    expect(requiredPermission("POST", "/api/maintenance/backups")).toBe("system:control");
+    expect(requiredPermission("POST", "/api/maintenance/updates/install")).toBe("system:control");
   });
 });
 

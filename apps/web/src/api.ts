@@ -4,7 +4,11 @@ import type {
   AccountCreateInput,
   GlobalAutomationSettings,
   GlobalAutomationSettingsInput,
+  LowRiskAutomationPolicy,
+  LowRiskAutomationPolicyInput,
+  ProviderWriteCircuit,
   AutomationDecisionRecord,
+  AutomationApprovalRecord,
   AutomationRunRecord,
   ProviderConnection,
   ProviderConnectionSettings,
@@ -40,6 +44,25 @@ import type {
   MultiAccountLaunchPlanRecord,
   LaunchPresetInput,
   LaunchPresetRecord,
+  LaunchPlanItemRecord,
+  LaunchPlanItemAttemptRecord,
+  LaunchManualVerificationInput,
+  LaunchManualVerificationRecord,
+  LaunchCopyPreviewInput,
+  LaunchCopyPreviewRecord,
+  WriteTaskKind,
+  WriteTaskStatus,
+  WriteTaskSummaryRecord,
+  AdOperationAttemptRecord,
+  StatusManualVerificationInput,
+  StatusManualVerificationRecord,
+  AuditLogFilter,
+  AuditLogRecord,
+  DatabaseBackupRecord,
+  MaintenanceStatus,
+  UpdateRuntimeStatus,
+  AccountProviderCapabilities,
+  ProviderCapability,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -49,7 +72,8 @@ export interface ProviderDescriptor {
   kind: ProviderKind;
   displayName: string;
   implementationStatus: "scaffolded" | "available";
-  capabilities: string[];
+  capabilityVersion: string;
+  capabilities: ProviderCapability[];
 }
 
 export interface BootstrapPayload {
@@ -58,6 +82,7 @@ export interface BootstrapPayload {
     accountId: string;
     connection: ProviderConnection | null;
     latestSync: ReadOnlySyncResult | null;
+    capabilities: AccountProviderCapabilities;
   }>;
   globalAutomationSettings: GlobalAutomationSettings;
   systemRuntime: SystemRuntimeState;
@@ -72,12 +97,27 @@ export interface ManualStatusResult extends ManualStatusInput {
 export interface LaunchExecutionResult {
   plan: MultiAccountLaunchPlanRecord;
   results: Array<{
+    itemId: string;
     accountId: string;
-    ok: boolean;
-    message?: string;
-    created?: Array<{ ok: boolean; message: string }>;
-    sync?: ReadOnlySyncResult;
+    status: "pending" | "running" | "succeeded" | "failed" | "unknown" | "cancelled";
+    message: string;
+    syncWarning: string | null;
   }>;
+}
+
+export interface LowRiskAutomationState {
+  policy: LowRiskAutomationPolicy;
+  todayUsage: number;
+  circuit: ProviderWriteCircuit | null;
+}
+
+export type WriteTaskAttemptRecord = LaunchPlanItemAttemptRecord | AdOperationAttemptRecord;
+
+export interface WriteTaskFilters {
+  kind?: WriteTaskKind;
+  status?: WriteTaskStatus;
+  accountId?: string;
+  limit?: number;
 }
 
 let csrfToken: string | null = null;
@@ -164,6 +204,22 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  getLowRiskAutomation: (accountId: string) =>
+    request<LowRiskAutomationState>(
+      `/api/accounts/${accountId}/low-risk-automation`,
+    ),
+  updateLowRiskAutomation: (
+    accountId: string,
+    input: LowRiskAutomationPolicyInput,
+  ) => request<LowRiskAutomationState>(
+    `/api/accounts/${accountId}/low-risk-automation`,
+    { method: "PUT", body: JSON.stringify(input) },
+  ),
+  resetLowRiskAutomationCircuit: (accountId: string) =>
+    request<LowRiskAutomationState>(
+      `/api/accounts/${accountId}/low-risk-automation/reset-circuit`,
+      { method: "POST" },
+    ),
   getAutomationFeatures: () =>
     request<AutomationFeatureSettings>("/api/automation/features"),
   updateAutomationFeatures: (input: AutomationFeatureSettingsInput) =>
@@ -223,6 +279,58 @@ export const api = {
     request<LaunchExecutionResult>(`/api/launch-plans/${planId}/execute`, {
       method: "POST",
     }),
+  createLaunchCopyPreview: (input: LaunchCopyPreviewInput) =>
+    request<LaunchCopyPreviewRecord>("/api/launch-plans/copy-preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getLaunchPlanItems: (planId: string) =>
+    request<LaunchPlanItemRecord[]>(`/api/launch-plans/${planId}/items`),
+  retryLaunchPlanItem: (planId: string, itemId: string) =>
+    request<LaunchExecutionResult>(`/api/launch-plans/${planId}/items/${itemId}/retry`, {
+      method: "POST",
+    }),
+  getLaunchPlanItemAttempts: (planId: string, itemId: string) =>
+    request<LaunchPlanItemAttemptRecord[]>(`/api/launch-plans/${planId}/items/${itemId}/attempts`),
+  getLaunchPlanItemVerifications: (planId: string, itemId: string) =>
+    request<LaunchManualVerificationRecord[]>(`/api/launch-plans/${planId}/items/${itemId}/verifications`),
+  verifyLaunchPlanItem: (planId: string, itemId: string, input: LaunchManualVerificationInput) =>
+    request<{
+      verification: LaunchManualVerificationRecord;
+      item: LaunchPlanItemRecord;
+      plan: MultiAccountLaunchPlanRecord;
+    }>(`/api/launch-plans/${planId}/items/${itemId}/verify`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getWriteTasks: (filters: WriteTaskFilters = {}) => {
+    const query = new URLSearchParams();
+    if (filters.kind) query.set("kind", filters.kind);
+    if (filters.status) query.set("status", filters.status);
+    if (filters.accountId) query.set("accountId", filters.accountId);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<WriteTaskSummaryRecord[]>(`/api/write-tasks${suffix}`);
+  },
+  getWriteTaskAttempts: (kind: WriteTaskKind, taskId: string) =>
+    request<WriteTaskAttemptRecord[]>(`/api/write-tasks/${kind}/${taskId}/attempts`),
+  getStatusWriteTaskVerifications: (taskId: string) =>
+    request<StatusManualVerificationRecord[]>(`/api/write-tasks/status/${taskId}/verifications`),
+  retryStatusOperation: (accountId: string, operationId: string) =>
+    request<ManualStatusResult>(`/api/accounts/${accountId}/status-operations/${operationId}/retry`, {
+      method: "POST",
+    }),
+  verifyStatusOperation: (
+    accountId: string,
+    operationId: string,
+    input: StatusManualVerificationInput,
+  ) => request<{
+    verification: StatusManualVerificationRecord;
+    task: AdOperationRecord;
+  }>(`/api/accounts/${accountId}/status-operations/${operationId}/verify`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
   bootstrap: () => request<BootstrapPayload>("/api/bootstrap"),
   createAccount: (input: AccountCreateInput) =>
     request<AccountConfig>("/api/accounts", {
@@ -277,6 +385,8 @@ export const api = {
     ),
   getConnections: (accountId: string) =>
     request<ProviderConnection[]>(`/api/accounts/${accountId}/connections`),
+  getAccountCapabilities: (accountId: string) =>
+    request<AccountProviderCapabilities>(`/api/accounts/${accountId}/capabilities`),
   getCookieReadiness: (accountId: string) =>
     request<CookieConnectionReadiness>(
       `/api/accounts/${accountId}/connections/cookie/readiness`,
@@ -341,6 +451,15 @@ export const api = {
     request<AutomationDecisionRecord[]>(
       `/api/accounts/${accountId}/automation/decisions`,
     ),
+  getAutomationApprovals: (accountId: string) =>
+    request<AutomationApprovalRecord[]>(
+      `/api/accounts/${accountId}/automation/approvals`,
+    ),
+  approveAutomationDecision: (accountId: string, decisionId: string) =>
+    request<AutomationApprovalRecord>(
+      `/api/accounts/${accountId}/automation/decisions/${decisionId}/approve`,
+      { method: "POST" },
+    ),
   previewAutomation: (accountId: string) =>
     request<AutomationRunRecord>(
       `/api/accounts/${accountId}/automation/preview`,
@@ -395,4 +514,34 @@ export const api = {
       `/api/accounts/${accountId}/analytics?${query.toString()}`,
     );
   },
+  getMaintenanceStatus: () =>
+    request<MaintenanceStatus>("/api/maintenance/status"),
+  getAuditLogs: (filters: Partial<AuditLogFilter> = {}) => {
+    const query = new URLSearchParams();
+    if (filters.accountId) query.set("accountId", filters.accountId);
+    if (filters.actorId) query.set("actorId", filters.actorId);
+    if (filters.action) query.set("action", filters.action);
+    if (filters.correlationId) query.set("correlationId", filters.correlationId);
+    if (filters.from) query.set("from", filters.from);
+    if (filters.to) query.set("to", filters.to);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    return request<AuditLogRecord[]>(`/api/maintenance/audit?${query.toString()}`);
+  },
+  getDatabaseBackups: () =>
+    request<DatabaseBackupRecord[]>("/api/maintenance/backups"),
+  createDatabaseBackup: () =>
+    request<DatabaseBackupRecord>("/api/maintenance/backups", { method: "POST" }),
+  verifyDatabaseBackup: (backupId: string) =>
+    request<DatabaseBackupRecord>(`/api/maintenance/backups/${backupId}/verify`, { method: "POST" }),
+  requestDatabaseRestore: (backupId: string) =>
+    request<{ backup: DatabaseBackupRecord; restartRequired: boolean; message: string }>(
+      `/api/maintenance/backups/${backupId}/restore`,
+      { method: "POST" },
+    ),
+  checkForUpdates: () =>
+    request<UpdateRuntimeStatus>("/api/maintenance/updates/check", { method: "POST" }),
+  downloadUpdate: () =>
+    request<UpdateRuntimeStatus>("/api/maintenance/updates/download", { method: "POST" }),
+  installUpdate: () =>
+    request<UpdateRuntimeStatus>("/api/maintenance/updates/install", { method: "POST" }),
 };

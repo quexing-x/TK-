@@ -59,4 +59,3 @@ export const ScheduledEntityActionRecordSchema = z.object({
 export type ScheduledEntityActionRecord = z.infer<
   typeof ScheduledEntityActionRecordSchema
 >;
-

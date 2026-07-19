@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AutomationSwitchKey, AutomationSwitches } from "./automation.js";
 import type { ProviderEntity, SyncEntityType } from "./connection.js";
 import type { ThresholdConfig } from "./threshold.js";
+import type { WriteTaskActor } from "./write-task.js";
 
 export const EntityOperationalStatusSchema = z.enum([
   "enabled",
@@ -23,6 +24,7 @@ export const AutomationDecisionStatusSchema = z.enum([
   "pending",
   "succeeded",
   "failed",
+  "unknown",
   "skipped",
 ]);
 export type AutomationDecisionStatus = z.infer<
@@ -63,10 +65,49 @@ export interface AutomationDecisionRecord {
   operator: ThresholdConfig["operator"];
   thresholdValue: number;
   reason: string;
+  suggestionKey: string;
+  ruleVersion: string;
+  rulePredicate: Record<string, unknown>;
+  metricSnapshot: NormalizedMetrics;
+  dataQualityStatus: "healthy" | "partial" | "stale" | "invalid";
+  dataQualityWarnings: string[];
   status: AutomationDecisionStatus;
   errorMessage: string | null;
   createdAt: string;
   executedAt: string | null;
+}
+
+export type AutomationApprovalStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "unknown";
+
+/** Immutable approval snapshot plus the one-time execution outcome. */
+export interface AutomationApprovalRecord {
+  id: string;
+  decisionId: string;
+  runId: string;
+  accountId: string;
+  providerKind: "cookie" | "official-api";
+  suggestionKey: string;
+  entityType: SyncEntityType;
+  externalId: string;
+  entityName: string;
+  action: AutomationAction;
+  expectedStatus: EntityOperationalStatus;
+  beforeStatus: EntityOperationalStatus | null;
+  afterStatus: EntityOperationalStatus | null;
+  status: AutomationApprovalStatus;
+  actor: WriteTaskActor;
+  statusOperationId: string | null;
+  providerMessage: string | null;
+  errorMessage: string | null;
+  claimedBy: string | null;
+  claimedAt: string | null;
+  createdAt: string;
+  completedAt: string | null;
 }
 
 export interface NormalizedMetrics {

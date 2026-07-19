@@ -10,6 +10,7 @@ import {
   CircleGauge,
   Gauge,
   ListFilter,
+  ListChecks,
   Plus,
   Pencil,
   PlugZap,
@@ -36,6 +37,7 @@ import type {
   AccountCreateInput,
   GlobalAutomationSettings,
   AutomationDecisionRecord,
+  AutomationApprovalRecord,
   AutomationRunRecord,
   AdOperationRecord,
   MetricBatchRecord,
@@ -45,11 +47,13 @@ import type {
   ReadOnlySyncResult,
   ThresholdConfig,
   ScheduledEntityActionRecord,
+  AccountProviderCapabilities,
 } from "@tk-auto/core";
 import {
   api,
   type BootstrapPayload,
   type CookieConnectionReadiness,
+  type LowRiskAutomationState,
 } from "./api";
 import { ConnectionPage } from "./ConnectionPage";
 import { ManualPage } from "./ManualPage";
@@ -59,10 +63,18 @@ import { AuthGate, useAuth } from "./AuthGate";
 import { SystemUsersPage } from "./SystemUsersPage";
 import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
 import { LaunchPage } from "./LaunchPage";
+import { TaskCenterPage } from "./TaskCenterPage";
+import { MaintenancePage } from "./MaintenancePage";
+import {
+  canEnableAccountAutomation,
+  hasProviderCapability,
+  providerCapabilitySummary,
+} from "./provider-capability-view";
 import {
   resolveAnalysisRange,
   type AnalysisPreset,
 } from "./analytics";
+import { syncQualityPresentation } from "./sync-quality-view";
 
 type PageKey =
   | "manual"
@@ -73,6 +85,8 @@ type PageKey =
   | "rules"
   | "notifications"
   | "launch"
+  | "tasks"
+  | "maintenance"
   | "system-users";
 
 const selectedAccountStorageKey = "tk-auto:selected-account-id";
@@ -86,6 +100,8 @@ const pageHash: Record<PageKey, string> = {
   rules: "#rules",
   notifications: "#notifications",
   launch: "#launch",
+  tasks: "#tasks",
+  maintenance: "#maintenance",
   "system-users": "#system-users",
 };
 
@@ -159,10 +175,22 @@ const navItems: Array<{
     icon: Plus,
   },
   {
+    key: "tasks",
+    label: "任务中心",
+    description: "写入任务、恢复与人工核验",
+    icon: ListChecks,
+  },
+  {
     key: "system-users",
     label: "系统权限",
     description: "登录账户与角色权限",
     icon: ShieldCheck,
+  },
+  {
+    key: "maintenance",
+    label: "运维中心",
+    description: "审计、备份、恢复与升级",
+    icon: Settings2,
   },
 ];
 
@@ -233,6 +261,9 @@ function ConsoleApp() {
   const selectedLatestSync = bootstrap?.accountConnectionStates.find(
     (item) => item.accountId === selectedAccountId,
   )?.latestSync ?? null;
+  const selectedCapabilities = bootstrap?.accountConnectionStates.find(
+    (item) => item.accountId === selectedAccountId,
+  )?.capabilities;
 
   if (!bootstrap) {
     return (
@@ -292,7 +323,11 @@ function ConsoleApp() {
         </div>
 
         <nav className="nav-list">
-          {navItems.filter((item) => item.key !== "system-users" || auth.status.permissions.includes("users:manage")).map((item) => {
+          {navItems.filter((item) => {
+            if (item.key === "system-users") return auth.status.permissions.includes("users:manage");
+            if (item.key === "maintenance") return auth.status.permissions.includes("system:control");
+            return true;
+          }).map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -345,6 +380,8 @@ function ConsoleApp() {
           <ManualPage />
         ) : page === "system-users" ? (
           <SystemUsersPage onError={setError} />
+        ) : page === "maintenance" ? (
+          <MaintenancePage onError={setError} />
         ) : page === "users" ? (
           <UsersPage
             accounts={bootstrap.accounts}
@@ -355,6 +392,7 @@ function ConsoleApp() {
                   connection: state.connection,
                   readiness: null,
                   latestSync: state.latestSync,
+                  capabilities: state.capabilities,
                 },
               ]),
             )}
@@ -370,17 +408,26 @@ function ConsoleApp() {
         ) : page === "notifications" ? (
           <NotificationsPage onError={setError} />
         ) : page === "launch" ? (
-          <LaunchPage accounts={bootstrap.accounts} preferredAccountId={selectedAccountId} onError={setError} />
+          <LaunchPage
+            accounts={bootstrap.accounts}
+            accountCapabilities={Object.fromEntries(
+              bootstrap.accountConnectionStates.map((state) => [state.accountId, state.capabilities]),
+            )}
+            preferredAccountId={selectedAccountId}
+            onError={setError}
+          />
+        ) : page === "tasks" ? (
+          <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={selectedAccountId} onError={setError} />
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
           <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
-            <AutomationPage account={account} connection={selectedConnection} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} onError={setError} />
+            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} onError={setError} />
             <AutomationFeaturesPage onError={setError} />
           </AccountScopedPage></section>
         ) : page === "ads" ? (
           <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
-            <AdsManagementPage account={account} onError={setError} />
+            <AdsManagementPage account={account} capabilities={selectedCapabilities} onError={setError} />
           </AccountScopedPage>
         ) : page === "analytics" ? (
           <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
@@ -399,6 +446,15 @@ const defaultAccountInput: AccountCreateInput = {
   accountType: "standard",
   enabled: false,
   providerKind: "cookie",
+};
+
+type AccountEditorInput = AccountCreateInput & {
+  executionMode: AccountConfig["executionMode"];
+};
+
+const defaultAccountEditorInput: AccountEditorInput = {
+  ...defaultAccountInput,
+  executionMode: "manual-approval",
 };
 
 interface AccountAutomationOverview {
@@ -486,13 +542,14 @@ function UsersPage({
       connection: ProviderConnection | null;
       readiness: CookieConnectionReadiness | null;
       latestSync: ReadOnlySyncResult | null;
+      capabilities: AccountProviderCapabilities;
     }
   >;
   onChanged: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
   const [editing, setEditing] = useState<AccountConfig | null>(null);
-  const [form, setForm] = useState<AccountCreateInput>(defaultAccountInput);
+  const [form, setForm] = useState<AccountEditorInput>(defaultAccountEditorInput);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [connecting, setConnecting] = useState<AccountConfig | null>(null);
@@ -503,6 +560,7 @@ function UsersPage({
         connection: ProviderConnection | null;
         readiness: CookieConnectionReadiness | null;
         latestSync: ReadOnlySyncResult | null;
+        capabilities: AccountProviderCapabilities;
       }
     >
   >(initialConnectionStates);
@@ -518,7 +576,7 @@ function UsersPage({
 
   const openNew = () => {
     setEditing(null);
-    setForm(defaultAccountInput);
+    setForm(defaultAccountEditorInput);
     setShowForm(true);
   };
 
@@ -532,8 +590,18 @@ function UsersPage({
     event.preventDefault();
     try {
       setSaving(true);
+      const enablesAutomation = form.enabled && (!editing || !editing.enabled);
+      if (
+        enablesAutomation
+        && (!editing || !canEnableAccountAutomation(connectionStates[editing.id]?.capabilities))
+      ) {
+        throw new Error("账户缺少数据读取或广告启停能力，不能开启自动化。");
+      }
       if (editing) await api.updateSettings(editing.id, form);
-      else await api.createAccount(form);
+      else {
+        const { executionMode: _executionMode, ...createInput } = form;
+        await api.createAccount(createInput);
+      }
       await onChanged();
       setShowForm(false);
       onError(null);
@@ -546,6 +614,12 @@ function UsersPage({
 
   const toggleAccount = async (account: AccountConfig) => {
     try {
+      if (
+        !account.enabled
+        && !canEnableAccountAutomation(connectionStates[account.id]?.capabilities)
+      ) {
+        throw new Error("账户缺少数据读取或广告启停能力，不能开启自动化。");
+      }
       await api.updateSettings(account.id, {
         ...settingsFromAccount(account),
         enabled: !account.enabled,
@@ -557,6 +631,12 @@ function UsersPage({
   };
 
   const enableAfterConnection = async (account: AccountConfig) => {
+    const capabilities = await api.getAccountCapabilities(account.id);
+    if (!canEnableAccountAutomation(capabilities)) {
+      await onChanged();
+      onError("接入已保存，但当前缺少数据读取或广告启停能力，自动化未开启。");
+      return;
+    }
     if (!account.enabled) {
       await api.updateSettings(account.id, {
         ...settingsFromAccount(account),
@@ -589,6 +669,7 @@ function UsersPage({
                 <th>账户类型</th>
                 <th>接入方式</th>
                 <th>接入状态</th>
+                <th>可用能力</th>
                 <th>自动化开关</th>
                 <th>操作</th>
               </tr>
@@ -596,21 +677,24 @@ function UsersPage({
             <tbody>
               {accounts.map((account) => (
                 <tr key={account.id}>{(() => {
-                  const automationReady = connectionStates[account.id]?.connection?.status === "ready";
+                  const capabilityProfile = connectionStates[account.id]?.capabilities;
+                  const automationReady = connectionStates[account.id]?.connection?.status === "ready"
+                    && canEnableAccountAutomation(capabilityProfile);
                   return <>
                   <td><strong>{account.displayName}</strong><br /><small className="account-id">{account.id}</small></td>
                   <td>{accountTypeLabel(account.accountType)}</td>
                   <td>{providerLabel(account.providerKind)}</td>
                   <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
+                  <td>{providerCapabilitySummary(connectionStates[account.id]?.capabilities)}</td>
                   <td>
                     <div className="account-automation-toggle">
                       <Toggle
-                        checked={automationReady && account.enabled}
-                        disabled={!automationReady}
+                        checked={account.enabled}
+                        disabled={!account.enabled && !automationReady}
                         label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
                         onChange={() => void toggleAccount(account)}
                       />
-                      <span className={automationReady && account.enabled ? "status active" : "status"}>{automationReady ? account.enabled ? "已开启" : "已关闭" : "接入后开启"}</span>
+                      <span className={automationReady && account.enabled ? "status active" : "status"}>{account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
                     </div>
                   </td>
                   <td>
@@ -650,7 +734,14 @@ function UsersPage({
                   <option value="official-api">Marketing API</option>
                 </select>
               </Field>
-              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
+              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} disabled={!form.enabled && (!editing || !canEnableAccountAutomation(connectionStates[editing.id]?.capabilities))} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
+              <Field label="执行模式">
+                <select value={form.executionMode} onChange={(event) => setForm({ ...form, executionMode: event.target.value as AccountConfig["executionMode"] })}>
+                  <option value="observe">仅观察</option>
+                  <option value="manual-approval">人工批准（默认）</option>
+                  <option value="automatic">自动执行（高风险）</option>
+                </select>
+              </Field>
             </div>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
@@ -677,9 +768,11 @@ function UsersPage({
 
 function AdsManagementPage({
   account,
+  capabilities,
   onError,
 }: {
   account: AccountConfig;
+  capabilities: AccountProviderCapabilities | undefined;
   onError: (message: string | null) => void;
 }) {
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
@@ -696,6 +789,9 @@ function AdsManagementPage({
   const [runAt, setRunAt] = useState("");
   const [disableAt, setDisableAt] = useState("");
   const [enableAt, setEnableAt] = useState("");
+  const canRead = hasProviderCapability(capabilities, "read-campaigns");
+  const canChangeStatus = hasProviderCapability(capabilities, "change-status");
+  const canAppeal = hasProviderCapability(capabilities, "appeal-ads");
 
   const load = useCallback(async () => {
     try {
@@ -879,7 +975,7 @@ function AdsManagementPage({
       <div className="panel table-panel">
         <div className="panel-heading">
           <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象</h2><p>共 {filtered.length} 项；忽略对象不会参与自动化决策。</p></div></div>
-          <button className="secondary-button" disabled={busy !== null} onClick={() => void refreshFromProvider()} type="button"><RefreshCcw size={16} /> {busy === "refresh" ? "同步中…" : "刷新"}</button>
+          <button className="secondary-button" disabled={busy !== null || !canRead} onClick={() => void refreshFromProvider()} type="button" title={canRead ? undefined : "当前账户未开放数据读取能力"}><RefreshCcw size={16} /> {busy === "refresh" ? "同步中…" : "刷新"}</button>
         </div>
         {syncFeedback && <div className={`automation-run-feedback ${syncFeedback.includes("失败") || syncFeedback.includes("错误") ? "error" : "success"}`}>{syncFeedback}</div>}
         <div className="table-wrap">
@@ -898,11 +994,11 @@ function AdsManagementPage({
                     <td>{formatMetric(entity.metrics.conversions)}</td>
                     <td>{entity.ignored ? <span className="risk-badge destructive">已忽略</span> : "参与"}</td>
                     <td><div className="row-actions">
-                      <button disabled={busy !== null || entity.status === "unknown"} title={entity.status === "unknown" ? "状态未知：请先执行检测预览或等待下一次同步后再操作。" : undefined} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>
+                      {canChangeStatus && <button disabled={busy !== null || entity.status === "unknown"} title={entity.status === "unknown" ? "状态未知：请先执行检测预览或等待下一次同步后再操作。" : undefined} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>}
                       {entity.status === "unknown" && <small className="inline-protection-note">请先同步状态</small>}
                       <button disabled={busy !== null} onClick={() => void toggleIgnore(entity)} type="button"><Ban size={14} /> {entity.ignored ? "取消忽略" : "忽略"}</button>
-                      {entity.entityType === "ad-group" && <button disabled={busy !== null} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
-                      {entity.entityType === "ad" && <button disabled={busy !== null} onClick={() => void queueAppeal(entity)} type="button">加入申诉</button>}
+                      {canChangeStatus && entity.entityType === "ad-group" && <button disabled={busy !== null} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
+                      {canAppeal && entity.entityType === "ad" && <button disabled={busy !== null} onClick={() => void queueAppeal(entity)} type="button">加入申诉</button>}
                     </div></td>
                   </tr>
                 );
@@ -1000,7 +1096,7 @@ function AnalyticsPage({
 
   return (
     <section className="page-stack">
-      <div className={connection?.status === "ready" ? "alert info-alert" : "alert warning-alert"}><Activity size={18} /><span><strong>账户「{account.displayName}」</strong> · 当前连接{connection?.status === "ready" ? "正常" : "异常或待检测"} · 最后成功同步：{latestSync ? new Date(latestSync.finishedAt).toLocaleString() : "暂无"} · 指标图表为本机历史快照 · 币种：当前接入未提供，金额请以 TikTok 广告账户币种为准。</span></div>
+      <div className={connection?.status === "ready" ? "alert info-alert" : "alert warning-alert"}><Activity size={18} /><span><strong>账户「{account.displayName}」</strong> · 当前连接{connection?.status === "ready" ? "正常" : "异常或待检测"} · 最后健康同步：{latestSync?.quality.lastHealthyAt ? new Date(latestSync.quality.lastHealthyAt).toLocaleString() : "暂无"} · 数据质量：{latestSync ? syncQualityPresentation(latestSync.quality.status).label : "暂无"} · 指标图表为本机历史快照 · 币种：当前接入未提供，金额请以 TikTok 广告账户币种为准。</span></div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
           <Field label="时间范围"><select value={preset} onChange={(event) => setPreset(event.target.value as AnalysisPreset)}><option value="today">今天</option><option value="yesterday">昨天</option><option value="3d">三天</option><option value="7d">七天</option><option value="30d">三十天</option><option value="custom">自定义</option></select></Field>
@@ -1103,12 +1199,14 @@ function formatChartTime(value: string): string {
 function AutomationPage({
   account,
   connection,
+  capabilities,
   maxActionsPerRun,
   overview,
   onError,
 }: {
   account: AccountConfig;
   connection: ProviderConnection | null;
+  capabilities: AccountProviderCapabilities | undefined;
   maxActionsPerRun: number;
   overview: AccountAutomationOverview;
   onError: (message: string | null) => void;
@@ -1117,20 +1215,28 @@ function AutomationPage({
   const [decisions, setDecisions] = useState<
     AutomationDecisionRecord[] | null
   >(null);
+  const [approvals, setApprovals] = useState<AutomationApprovalRecord[] | null>(null);
+  const [lowRiskState, setLowRiskState] = useState<LowRiskAutomationState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<string | null>(null);
   const connectionMessage = automationConnectionMessage(account, connection);
-  const canRunAutomation = connection?.status === "ready";
+  const canRunAutomation = connection?.status === "ready"
+    && hasProviderCapability(capabilities, "read-campaigns");
+  const canChangeStatus = hasProviderCapability(capabilities, "change-status");
   const unreadyAccounts = overview.unreadyAccounts ?? [];
 
   const load = useCallback(async () => {
     try {
-      const [nextRuns, nextDecisions] = await Promise.all([
+      const [nextRuns, nextDecisions, nextApprovals, nextLowRiskState] = await Promise.all([
         api.getAutomationRuns(account.id),
         api.getAutomationDecisions(account.id),
+        api.getAutomationApprovals(account.id),
+        api.getLowRiskAutomation(account.id),
       ]);
       setRuns(nextRuns);
       setDecisions(nextDecisions);
+      setApprovals(nextApprovals);
+      setLowRiskState(nextLowRiskState);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -1140,6 +1246,8 @@ function AutomationPage({
   useEffect(() => {
     setRuns(null);
     setDecisions(null);
+    setApprovals(null);
+    setLowRiskState(null);
     void load();
   }, [load]);
 
@@ -1155,8 +1263,8 @@ function AutomationPage({
       } else {
         setRunFeedback(
           preview
-            ? `检测完成：发现 ${result.candidateCount} 项候选操作，未修改广告。`
-            : `执行完成：成功 ${result.successCount} 项，失败 ${result.failureCount} 项。`,
+            ? `检测完成：生成 ${result.candidateCount} 项规则建议，未修改广告。`
+            : `建议生成完成：共 ${result.candidateCount} 项，未调用 TikTok 写接口。`,
         );
       }
       await load();
@@ -1169,7 +1277,58 @@ function AutomationPage({
     }
   };
 
-  if (!runs || !decisions) {
+  const approve = async (decision: AutomationDecisionRecord) => {
+    const action = decision.action === "enable" ? "开启" : "关闭";
+    if (!window.confirm(`确认执行一次性操作？\n账户：${account.displayName}\n对象：${decision.entityName}\n动作：${action}`)) return;
+    try {
+      setBusy(`approve:${decision.id}`);
+      const approval = await api.approveAutomationDecision(account.id, decision.id);
+      setRunFeedback(
+        approval.status === "succeeded"
+          ? `${decision.entityName}：${action}成功`
+          : approval.status === "unknown"
+            ? `${decision.entityName}：执行结果待确认，禁止重复批准`
+            : `${decision.entityName}：${approval.errorMessage ?? approval.providerMessage ?? "执行失败"}`,
+      );
+      await load();
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      setRunFeedback(message);
+      onError(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveLowRiskPolicy = async (enabled: boolean, dailyActionLimit: number) => {
+    try {
+      setBusy("low-risk-policy");
+      const next = await api.updateLowRiskAutomation(account.id, {
+        enabled,
+        dailyActionLimit,
+      });
+      setLowRiskState(next);
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const resetCircuit = async () => {
+    try {
+      setBusy("reset-circuit");
+      setLowRiskState(await api.resetLowRiskAutomationCircuit(account.id));
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!runs || !decisions || !approvals || !lowRiskState) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
@@ -1199,10 +1358,10 @@ function AutomationPage({
 
       <div className="panel automation-control-panel">
         <div>
-          <span className="eyebrow">检测 → 判断 → 执行</span>
-          <h2>自动化运行控制</h2>
+          <span className="eyebrow">检测 → 判断 → 建议</span>
+          <h2>规则建议中心</h2>
           <p>
-            检测预览永远不会修改广告；账户开关开启后，定时轮询和“立即执行”都会按已启用规则自动启停。
+            检测预览和“生成建议”始终只读。只有账户明确启用下方低风险策略后，后台轮询才可执行已验证的关闭规则。
           </p>
           {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
@@ -1222,14 +1381,30 @@ function AutomationPage({
             disabled={busy !== null || !account.enabled || !canRunAutomation}
             onClick={() => void execute(false)}
             type="button"
-            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则执行真实启停" : "请先在用户管理中开启账户自动化"}
+            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则生成只读建议" : "请先在用户管理中开启账户自动化"}
           >
             <Play size={17} />
-            {busy === "run" ? "运行中…" : "立即执行"}
+            {busy === "run" ? "生成中…" : "生成建议"}
           </button>
         </div>
       </div>
       {runFeedback && <div className={`automation-run-feedback ${latest?.status === "failed" ? "error" : "success"}`}>{runFeedback}</div>}
+
+      <div className="panel automation-sync-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动关闭</h2><p>默认关闭；只允许关闭，不允许自动开启。每日限额由数据库原子控制，多实例不会重复领取同一建议。</p></div></div></div>
+        <div className="sync-count-grid">
+          <span>策略 <strong>{lowRiskState.policy.enabled ? "已启用" : "已关闭"}</strong></span>
+          <span>今日用量 <strong>{lowRiskState.todayUsage} / {lowRiskState.policy.dailyActionLimit}</strong></span>
+          <span>熔断 <strong>{lowRiskState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
+        </div>
+        <div className="automation-actions">
+          <label className="field"><span>每日自动关闭上限</span><input min="1" max="100" type="number" value={lowRiskState.policy.dailyActionLimit} disabled={busy !== null || lowRiskState.policy.enabled} onChange={(event) => setLowRiskState({ ...lowRiskState, policy: { ...lowRiskState.policy, dailyActionLimit: Number(event.target.value) } })} /></label>
+          <button className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"} disabled={busy !== null || !canChangeStatus || (account.executionMode !== "automatic" && !lowRiskState.policy.enabled) || Boolean(lowRiskState.circuit?.openedAt)} onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled, lowRiskState.policy.dailyActionLimit)} type="button">{busy === "low-risk-policy" ? "保存中…" : lowRiskState.policy.enabled ? "关闭低风险自动化" : "启用低风险自动化"}</button>
+          {lowRiskState.circuit?.openedAt && <button className="secondary-button" disabled={busy !== null || lowRiskState.policy.enabled} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>}
+        </div>
+        {account.executionMode !== "automatic" && <p className="retention-note">请先在用户管理中将账户执行模式明确设为“自动执行”；启用后仍只开放关闭规则。</p>}
+        {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
+      </div>
 
       <div className="panel automation-sync-panel">
         <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>账户接入状态</h2><p>由后台轮询维护；页面只展示已保存的最新结果，不会因切换页面重新检测。</p></div></div></div>
@@ -1242,8 +1417,8 @@ function AutomationPage({
           <div>
             <span className="panel-icon"><Activity size={18} /></span>
             <div>
-              <h2>最近决策</h2>
-              <p>每次命中、跳过和执行结果都会保存在本地审计记录中。</p>
+              <h2>最近规则建议</h2>
+              <p>每条建议保存触发规则、指标快照、规则版本、数据质量和冲突处理结果。</p>
             </div>
           </div>
           <button className="secondary-button" onClick={() => void load()} type="button">
@@ -1265,21 +1440,40 @@ function AutomationPage({
             <tbody>
               {decisions.length === 0 ? (
                 <tr><td colSpan={6}>暂无决策记录，请先执行“检测预览”。</td></tr>
-              ) : decisions.map((decision) => (
+              ) : decisions.map((decision) => {
+                const approval = approvals.find((item) => item.decisionId === decision.id);
+                return (
                 <tr key={decision.id}>
                   <td><strong>{decision.entityName}</strong><br /><small>{decision.externalId}</small></td>
                   <td>{entityTypeLabel(decision.entityType)}</td>
-                  <td>{metricLabel(decision.metric)} {operatorLabel(decision.operator)} {decision.thresholdValue}<br /><small>当前 {decision.metricValue}</small></td>
+                  <td>{metricLabel(decision.metric)} {operatorLabel(decision.operator)} {decision.thresholdValue}<br /><small>当前 {decision.metricValue} · {decision.thresholdCode}</small><br /><small>{decision.reason}</small><br /><small>规则版本 {formatRuleVersion(decision.ruleVersion)}</small><br /><small>指标快照：{formatMetricSnapshot(decision.metricSnapshot)}</small></td>
                   <td>{decision.action === "enable" ? "开启" : "关闭"}</td>
                   <td>
                     <span className={`status ${decision.status === "succeeded" ? "active" : ""}`}>
                       {decisionStatusLabel(decision.status)}
                     </span>
                     {decision.errorMessage && <small className="decision-error">{decision.errorMessage}</small>}
+                    {approval ? (
+                      <small className={approval.status === "succeeded" ? undefined : "decision-error"}>
+                        批准执行：{approvalStatusLabel(approval.status)}
+                        {(approval.errorMessage || approval.providerMessage) ? ` · ${approval.errorMessage ?? approval.providerMessage}` : ""}
+                      </small>
+                    ) : decision.status === "preview" ? (
+                      <button
+                        className="secondary-button"
+                        disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled}
+                        onClick={() => void approve(decision)}
+                        type="button"
+                        title="批准后会重新检查连接、数据质量和对象状态；每条建议只能消费一次"
+                      >
+                        {busy === `approve:${decision.id}` ? "执行中…" : "批准并执行"}
+                      </button>
+                    ) : null}
+                    <small className={decision.dataQualityStatus === "healthy" ? undefined : "decision-error"}>数据质量：{decision.dataQualityStatus}。{decision.dataQualityWarnings.length > 0 ? decision.dataQualityWarnings.join("；") : "无警告"}</small>
                   </td>
                   <td>{new Date(decision.createdAt).toLocaleString()}</td>
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
         </div>
@@ -1389,6 +1583,7 @@ function settingsFromAccount(account: AccountConfig): AccountSettingsUpdate {
     accountType: account.accountType,
     enabled: account.enabled,
     providerKind: account.providerKind,
+    executionMode: account.executionMode,
   };
 }
 
@@ -1421,7 +1616,11 @@ function connectionStateLabel(
   if (connection.status === "ready") {
     const readStatus = !latestSync
       ? <span className="status warning">数据读取：待同步</span>
-      : latestSync.counts["ad-group"] === 0
+      : latestSync.quality.status !== "healthy"
+        ? <span className={`status ${syncQualityPresentation(latestSync.quality.status).tone}`}>
+            数据读取：{syncQualityPresentation(latestSync.quality.status).label}
+          </span>
+        : latestSync.counts["ad-group"] === 0
         ? <span className="status warning">数据读取：无广告组</span>
         : latestSync.warnings.length > 0
           ? <span className="status warning">数据读取：部分数据</span>
@@ -1467,6 +1666,27 @@ function metricLabel(metric: ThresholdConfig["metric"]): string {
   }[metric];
 }
 
+function formatRuleVersion(value: string): string {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : value;
+}
+
+function formatMetricSnapshot(
+  snapshot: AutomationDecisionRecord["metricSnapshot"],
+): string {
+  return [
+    ["消耗", snapshot.spend],
+    ["预算", snapshot.budget],
+    ["点击", snapshot.clicks],
+    ["转化", snapshot.conversions],
+    ["加购", snapshot.carts],
+    ["展示", snapshot.impressions],
+    ["CPC", snapshot.cost_per_click],
+    ["CPA", snapshot.cost_per_conversion],
+    ["加购成本", snapshot.cost_per_cart],
+  ].map(([label, value]) => `${label} ${formatMetric(value as number | null)}`).join(" · ");
+}
+
 function decisionStatusLabel(
   status: AutomationDecisionRecord["status"],
 ): string {
@@ -1475,7 +1695,18 @@ function decisionStatusLabel(
     pending: "等待确认",
     succeeded: "执行成功",
     failed: "执行失败",
+    unknown: "执行结果待确认",
     skipped: "安全跳过",
+  }[status];
+}
+
+function approvalStatusLabel(status: AutomationApprovalRecord["status"]): string {
+  return {
+    pending: "待执行",
+    running: "执行中",
+    succeeded: "成功",
+    failed: "明确失败",
+    unknown: "结果待确认",
   }[status];
 }
 

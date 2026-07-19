@@ -8,6 +8,7 @@ import {
   AccountSettingsUpdateSchema,
   AccountCreateInputSchema,
   GlobalAutomationSettingsInputSchema,
+  LowRiskAutomationPolicyInputSchema,
   CookieCredentialInputSchema,
   ProviderConnectionSettingsSchema,
   ProviderCredentialInputSchema,
@@ -30,7 +31,12 @@ import {
   OvernightScheduleInputSchema,
   AutomationFeatureSettingsInputSchema,
   MultiAccountLaunchPlanInputSchema,
+  LaunchCopyPreviewInputSchema,
   LaunchPresetInputSchema,
+  LaunchManualVerificationInputSchema,
+  StatusManualVerificationInputSchema,
+  WriteTaskStatusSchema,
+  AuditLogFilterSchema,
   type AppPermission,
   type ProviderKind,
 } from "@tk-auto/core";
@@ -51,6 +57,7 @@ import {
   AutomationService,
 } from "./automation-service.js";
 import { NotificationService } from "./notification-service.js";
+import { LaunchService } from "./launch-service.js";
 import {
   AuthenticationError,
   AuthorizationError,
@@ -59,8 +66,13 @@ import {
   authCookie,
   type AuthenticatedSession,
 } from "./auth-service.js";
+import {
+  unavailableMaintenanceUpdateRuntime,
+  type MaintenanceUpdateRuntime,
+} from "./maintenance-runtime.js";
 
 export { AuthService };
+export type { MaintenanceUpdateRuntime } from "./maintenance-runtime.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -79,6 +91,9 @@ const CurlImportBodySchema = z.object({
 const EntityParamsSchema = AccountParamsSchema.extend({
   entityType: SyncEntityTypeSchema,
   externalId: z.string().min(1).max(128),
+});
+const OperationParamsSchema = AccountParamsSchema.extend({
+  operationId: z.string().min(1),
 });
 const AnalyticsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).default(7),
@@ -109,6 +124,9 @@ export interface AppDependencies {
   disableAuth?: boolean;
   /** Enable only when the application is reached through HTTPS. */
   secureCookies?: boolean;
+  appVersion?: string;
+  packaged?: boolean;
+  maintenanceUpdates?: MaintenanceUpdateRuntime;
 }
 
 export async function createApp(
@@ -116,6 +134,11 @@ export async function createApp(
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const providers = dependencies.providers ?? new ProviderRegistry();
+  const launchService = new LaunchService(
+    dependencies.store,
+    dependencies.vault,
+    providers,
+  );
   const automation =
     dependencies.automation ??
     new AutomationService(dependencies.store, dependencies.vault, providers);
@@ -123,6 +146,8 @@ export async function createApp(
     dependencies.notifications ??
     new NotificationService(dependencies.store, dependencies.vault);
   const auth = new AuthService(dependencies.store);
+  const maintenanceUpdates = dependencies.maintenanceUpdates
+    ?? unavailableMaintenanceUpdateRuntime(dependencies.appVersion);
   const scheduler = new AutomationScheduler(
     dependencies.store,
     automation,
@@ -152,6 +177,23 @@ export async function createApp(
     if (!request.url.startsWith("/api/")) return;
     const token = readCookie(request.headers.cookie, authCookie.name);
     request.authSession = auth.authenticate(token);
+    const requestedCorrelationId = request.headers["x-correlation-id"];
+    const correlationId = typeof requestedCorrelationId === "string"
+      && /^[A-Za-z0-9_.:-]{1,128}$/.test(requestedCorrelationId)
+      ? requestedCorrelationId
+      : request.id;
+    dependencies.store.enterAuditContext({
+      actor: request.authSession
+        ? {
+          id: request.authSession.user.id,
+          name: request.authSession.user.displayName,
+          kind: "user",
+        }
+        : { id: "system", name: "系统", kind: "system" },
+      requestId: request.id,
+      correlationId,
+    });
+    reply.header("x-correlation-id", correlationId);
     if (dependencies.disableAuth || isPublicApi(request.method, request.url)) {
       return;
     }
@@ -327,6 +369,11 @@ export async function createApp(
           account.id,
           account.providerKind,
         ),
+        capabilities: providers.describeAccount(
+          account.id,
+          account.providerKind,
+          dependencies.store.getProviderConnection(account.id, account.providerKind),
+        ),
       })),
       globalAutomationSettings:
         dependencies.store.getGlobalAutomationSettings(),
@@ -359,6 +406,126 @@ export async function createApp(
     dependencies.store.listMultiAccountLaunchPlans(),
   );
 
+  app.get("/api/write-tasks", async (request) => {
+    const query = z.object({
+      kind: z.enum(["launch", "status"]).optional(),
+      status: WriteTaskStatusSchema.optional(),
+      accountId: z.string().min(1).optional(),
+      limit: z.coerce.number().int().min(1).max(1_000).optional(),
+    }).parse(request.query);
+    return dependencies.store.listWriteTaskSummaries({
+      ...(query.kind ? { kind: query.kind } : {}),
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.accountId ? { accountId: query.accountId } : {}),
+      ...(query.limit ? { limit: query.limit } : {}),
+    });
+  });
+
+  app.get("/api/maintenance/status", async () => ({
+    appVersion: dependencies.appVersion ?? "development",
+    schemaVersion: dependencies.store.getSchemaVersion(),
+    packaged: dependencies.packaged ?? false,
+    pendingRestore: dependencies.store.hasPendingDatabaseRestore(),
+    update: await maintenanceUpdates.getStatus(),
+  }));
+
+  app.get("/api/maintenance/audit", async (request) =>
+    dependencies.store.listAuditLogs(AuditLogFilterSchema.parse(request.query)),
+  );
+
+  app.get("/api/maintenance/backups", async () =>
+    dependencies.store.listDatabaseBackups(),
+  );
+
+  app.post("/api/maintenance/backups", async (_request, reply) =>
+    reply.status(201).send(dependencies.store.createDatabaseBackup("manual")),
+  );
+
+  app.post("/api/maintenance/backups/:backupId/verify", async (request) => {
+    const { backupId } = z.object({ backupId: z.string().min(1) }).parse(request.params);
+    return dependencies.store.verifyDatabaseBackup(backupId);
+  });
+
+  app.post("/api/maintenance/backups/:backupId/restore", async (request) => {
+    const { backupId } = z.object({ backupId: z.string().min(1) }).parse(request.params);
+    return {
+      backup: dependencies.store.requestDatabaseRestore(backupId),
+      restartRequired: true,
+      message: "恢复请求已安全保存；重启软件后应用，并在失败时自动回滚当前数据库。",
+    };
+  });
+
+  app.post("/api/maintenance/updates/check", async () =>
+    maintenanceUpdates.checkForUpdates(),
+  );
+
+  app.post("/api/maintenance/updates/download", async () =>
+    maintenanceUpdates.downloadUpdate(),
+  );
+
+  app.post("/api/maintenance/updates/install", async () => {
+    const backup = dependencies.store.createDatabaseBackup("pre-upgrade");
+    if (backup.status !== "verified") {
+      throw new Error("升级前备份未通过校验，已阻止安装更新。");
+    }
+    return maintenanceUpdates.installUpdate();
+  });
+
+  app.get("/api/write-tasks/:kind/:taskId/attempts", async (request, reply) => {
+    const { kind, taskId } = z.object({
+      kind: z.enum(["launch", "status"]),
+      taskId: z.string().min(1),
+    }).parse(request.params);
+    try {
+      if (kind === "launch") {
+        dependencies.store.getLaunchPlanItem(taskId);
+        return dependencies.store.listLaunchPlanItemAttempts(taskId);
+      }
+      const task = dependencies.store.getAdOperation(taskId);
+      return dependencies.store.listAdOperationAttempts(task.operationId);
+    } catch (cause) {
+      return reply.status(404).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.get("/api/write-tasks/status/:taskId/verifications", async (request, reply) => {
+    const { taskId } = z.object({ taskId: z.string().min(1) }).parse(request.params);
+    try {
+      dependencies.store.getAdOperation(taskId);
+      return dependencies.store.listStatusWriteTaskVerifications(taskId);
+    } catch (cause) {
+      return reply.status(404).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.get("/api/launch-plans/:planId/items", async (request, reply) => {
+    const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
+    if (!dependencies.store.getMultiAccountLaunchPlan(planId)) {
+      return reply.status(404).send({ message: "投放计划不存在。" });
+    }
+    return dependencies.store.listLaunchPlanItems(planId);
+  });
+
+  app.get("/api/launch-plans/:planId/items/:itemId/attempts", async (request, reply) => {
+    const { planId, itemId } = z.object({
+      planId: z.string().min(1),
+      itemId: z.string().min(1),
+    }).parse(request.params);
+    const item = dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId);
+    if (!item) return reply.status(404).send({ message: "创建任务不存在。" });
+    return dependencies.store.listLaunchPlanItemAttempts(itemId);
+  });
+
+  app.get("/api/launch-plans/:planId/items/:itemId/verifications", async (request, reply) => {
+    const { planId, itemId } = z.object({
+      planId: z.string().min(1),
+      itemId: z.string().min(1),
+    }).parse(request.params);
+    const item = dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId);
+    if (!item) return reply.status(404).send({ message: "创建任务不存在。" });
+    return dependencies.store.listLaunchPlanItemVerifications(itemId);
+  });
+
   app.get("/api/launch-presets", async () =>
     dependencies.store.listLaunchPresets(),
   );
@@ -385,86 +552,101 @@ export async function createApp(
     return reply.status(204).send();
   });
 
-  app.post("/api/launch-plans", async (request, reply) =>
-    reply.status(201).send(
-      dependencies.store.createMultiAccountLaunchPlan(
-        MultiAccountLaunchPlanInputSchema.parse(request.body),
-      ),
-    ),
-  );
+  app.post("/api/launch-plans", async (request, reply) => {
+    try {
+      const user = request.authSession?.user;
+      return reply.status(201).send(
+        dependencies.store.createMultiAccountLaunchPlan(
+          MultiAccountLaunchPlanInputSchema.parse(request.body),
+          user
+            ? { id: user.id, name: user.username, kind: "user" }
+            : { id: "local-user", name: "本地用户", kind: "user" },
+        ),
+      );
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.post("/api/launch-plans/copy-preview", async (request, reply) => {
+    try {
+      return reply.status(201).send(
+        dependencies.store.createLaunchCopyPreview(
+          LaunchCopyPreviewInputSchema.parse(request.body),
+        ),
+      );
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
 
   app.post("/api/launch-plans/:planId/execute", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
-    const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
-    if (!plan) return reply.status(404).send({ message: "投放计划不存在。" });
-    if (plan.status === "cancelled" || plan.status === "completed") {
-      return reply.status(409).send({ message: "该投放计划不能再次执行。" });
+    if (!dependencies.store.getMultiAccountLaunchPlan(planId)) {
+      return reply.status(404).send({ message: "投放计划不存在。" });
     }
-    if (!plan.presetSnapshot) {
-      return reply.status(409).send({ message: "这是旧版本计划，缺少冻结的创建预设；请重新导入表格后创建。" });
+    try {
+      const user = request.authSession?.user;
+      return await launchService.execute(planId, user
+        ? { id: user.id, name: user.username, kind: "user" }
+        : { id: "local-user", name: "本地用户", kind: "user" });
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
-    if (plan.mode === "copy") {
-      return reply.status(409).send({ message: "旧版复制计划不可执行；请改用多账户新建。同一视频代码会由每个目标账户自己的素材库分别解析，不能迁移源账户素材 ID。" });
-    }
+  });
 
-    // Each target account supplies its own Cookie session, so the same video
-    // code is resolved against that account's material library.
-    const results: Array<Record<string, unknown>> = [];
-    for (const accountId of plan.targetAccountIds) {
-      const account = dependencies.store.getAccount(accountId);
-      if (!account) {
-        results.push({ accountId, ok: false, message: "目标广告账户不存在。" });
-        continue;
-      }
-      const connection = dependencies.store.getProviderConnection(accountId, account.providerKind);
-      if (!connection || connection.status !== "ready") {
-        results.push({ accountId, ok: false, message: "账户未完成连接验证。" });
-        continue;
-      }
-      try {
-        const context = await loadProviderContext(dependencies.store, dependencies.vault, accountId, account.providerKind);
-        const created = await providers.createFromPreset(
-          account.providerKind,
-          context,
-          plan.launchRows.map((row) => ({ row, preset: plan.presetSnapshot!.creationConfig, initialStatus: row.initialStatus })),
-        );
-        const sync = await providers.syncReadOnly(account.providerKind, context);
-        dependencies.store.saveReadOnlySync(accountId, account.providerKind, sync.entities, sync.result);
-        results.push({
-          accountId,
-          ok: created.every((item) => item.ok),
-          created,
-          sync: sync.result,
-        });
-      } catch (cause) {
-        results.push({ accountId, ok: false, message: getSafeProviderError(cause) });
-      }
+  app.post("/api/launch-plans/:planId/items/:itemId/retry", async (request, reply) => {
+    const { planId, itemId } = z.object({
+      planId: z.string().min(1),
+      itemId: z.string().min(1),
+    }).parse(request.params);
+    try {
+      const user = request.authSession?.user;
+      return await launchService.retryItem(planId, itemId, user
+        ? { id: user.id, name: user.username, kind: "user" }
+        : { id: "local-user", name: "本地用户", kind: "user" });
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
-    const ok = results.length > 0 && results.every((item) => item.ok === true);
-    const updated = dependencies.store.updateMultiAccountLaunchPlanResult(
-      plan.id,
-      ok ? "completed" : "blocked",
-      ok ? "已提交 TikTok 创建请求并完成结果回读。" : "部分或全部创建失败；请查看执行结果并修正后重试。",
-      results.map((result) => {
-        const created = Array.isArray(result.created) ? result.created : [];
-        return {
-          accountId: String(result.accountId),
-          ok: result.ok === true,
-          message: typeof result.message === "string" ? result.message : null,
-          createdCount: created.filter((item) => typeof item === "object" && item !== null && (item as { ok?: unknown }).ok === true).length,
-          failedCount: created.filter((item) => typeof item !== "object" || item === null || (item as { ok?: unknown }).ok !== true).length,
-        };
-      }),
-    );
-    return { plan: updated, results };
+  });
+
+  app.post("/api/launch-plans/:planId/items/:itemId/verify", async (request, reply) => {
+    const { planId, itemId } = z.object({
+      planId: z.string().min(1),
+      itemId: z.string().min(1),
+    }).parse(request.params);
+    const item = dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId);
+    if (!item) return reply.status(404).send({ message: "创建任务不存在。" });
+    const actor = request.authSession?.user ?? {
+      id: "isolated-test",
+      username: "isolated-test",
+    };
+    try {
+      const verification = dependencies.store.verifyUnknownLaunchPlanItem(
+        itemId,
+        LaunchManualVerificationInputSchema.parse(request.body),
+        { id: actor.id, name: actor.username },
+      );
+      return {
+        verification,
+        item: dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId),
+        plan: dependencies.store.refreshLaunchPlanResult(planId),
+      };
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
   });
 
   app.delete("/api/launch-plans/:planId", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
-    if (!dependencies.store.cancelMultiAccountLaunchPlan(planId)) {
-      return reply.status(404).send({ message: "投放计划不存在或已结束。" });
+    try {
+      if (!dependencies.store.cancelMultiAccountLaunchPlan(planId)) {
+        return reply.status(404).send({ message: "投放计划不存在或已结束。" });
+      }
+      return reply.status(204).send();
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
-    return reply.status(204).send();
   });
 
   app.put("/api/automation/settings", async (request) => {
@@ -577,6 +759,28 @@ export async function createApp(
     return account;
   });
 
+  app.get("/api/accounts/:accountId/low-risk-automation", async (request) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    return automation.getLowRiskAutomationState(accountId);
+  });
+
+  app.put("/api/accounts/:accountId/low-risk-automation", async (request) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    dependencies.store.updateLowRiskAutomationPolicy(
+      accountId,
+      LowRiskAutomationPolicyInputSchema.parse(request.body),
+    );
+    return automation.getLowRiskAutomationState(accountId);
+  });
+
+  app.post(
+    "/api/accounts/:accountId/low-risk-automation/reset-circuit",
+    async (request) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      return automation.resetProviderWriteCircuit(accountId);
+    },
+  );
+
   app.get("/api/accounts/:accountId/provider-health", async (request, reply) => {
     const { accountId } = AccountParamsSchema.parse(request.params);
     const account = dependencies.store.getAccount(accountId);
@@ -593,6 +797,17 @@ export async function createApp(
       return reply.status(404).send({ message: "账号不存在。" });
     }
     return dependencies.store.listProviderConnections(accountId);
+  });
+
+  app.get("/api/accounts/:accountId/capabilities", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    return providers.describeAccount(
+      accountId,
+      account.providerKind,
+      dependencies.store.getProviderConnection(accountId, account.providerKind),
+    );
   });
 
   app.get(
@@ -711,6 +926,8 @@ export async function createApp(
         ? "第 2 段启停 cURL 已解码，更新查询参数和三级启停模板已加密保存。"
         : "第 1 段列表 cURL 已解码，列表查询参数、复制查询参数、Cookie 和 CSRF 已加密保存。";
 
+      const checkedConnection = dependencies.store.getProviderConnection(accountId, "cookie");
+      if (!checkedConnection) throw new Error("Provider connection not found");
       try {
         const context = await loadProviderContext(
           dependencies.store,
@@ -719,19 +936,53 @@ export async function createApp(
           "cookie",
         );
         const health = await providers.checkHealth("cookie", context);
-        return dependencies.store.updateProviderStatus(
+        const authorized = dependencies.store.completeProviderHealthCheckIfCurrent(
           accountId,
           "cookie",
-          health.status,
-          `${importMessage} ${imported.summary.method} ${imported.summary.path} ${health.message}`,
+          checkedConnection,
+          {
+            connectionStatus: health.status,
+            message: `${importMessage} ${imported.summary.method} ${imported.summary.path} ${health.message}`,
+            authorizationStatus: health.status === "ready" ? "active" : "failed",
+            capabilityVersion: providers.capabilityVersion("cookie"),
+            capabilities: health.status === "ready"
+              ? providers.resolveAuthorizedCapabilities("cookie", context)
+              : [],
+          },
         );
+        if (!authorized) {
+          return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
+        }
+        if (health.status !== "ready") {
+          dependencies.store.setAccountExecutionMode(
+            accountId,
+            "manual-approval",
+            "cURL 导入后的连接检测未通过，已自动熔断写入。",
+          );
+        }
+        return authorized;
       } catch (cause) {
-        return dependencies.store.updateProviderStatus(
+        const authorized = dependencies.store.completeProviderHealthCheckIfCurrent(
           accountId,
           "cookie",
-          "failed",
-          `${importMessage} 请求已加密保存，但连接检测失败：${getSafeProviderError(cause)}`,
+          checkedConnection,
+          {
+            connectionStatus: "failed",
+            message: `${importMessage} 请求已加密保存，但连接检测失败：${getSafeProviderError(cause)}`,
+            authorizationStatus: "failed",
+            capabilityVersion: providers.capabilityVersion("cookie"),
+            capabilities: [],
+          },
         );
+        if (!authorized) {
+          return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
+        }
+        dependencies.store.setAccountExecutionMode(
+          accountId,
+          "manual-approval",
+          "cURL 导入后的连接检测异常，已自动熔断写入。",
+        );
+        return authorized;
       }
     },
   );
@@ -875,7 +1126,89 @@ export async function createApp(
         return reply.status(404).send({ message: "账号不存在。" });
       }
       const body = ManualStatusInputSchema.parse(request.body);
-      return automation.changeStatusManually(accountId, body);
+      const user = request.authSession?.user;
+      return automation.changeStatusManually(accountId, body, user
+        ? { id: user.id, name: user.username, kind: "user" }
+        : { id: "local-user", name: "本地用户", kind: "user" });
+    },
+  );
+
+  app.get(
+    "/api/accounts/:accountId/automation/approvals",
+    async (request, reply) => {
+      const { accountId } = AccountParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账户不存在。" });
+      }
+      return dependencies.store.listAutomationApprovals(accountId);
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/automation/decisions/:decisionId/approve",
+    async (request, reply) => {
+      const { accountId, decisionId } = z.object({
+        accountId: z.string().min(1),
+        decisionId: z.string().min(1),
+      }).parse(request.params);
+      const user = request.authSession?.user;
+      try {
+        return await automation.approveAutomationDecision(accountId, decisionId, user
+          ? { id: user.id, name: user.username, kind: "user" }
+          : { id: "local-user", name: "本地用户", kind: "user" });
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/status-operations/:operationId/retry",
+    async (request, reply) => {
+      const { accountId, operationId } = OperationParamsSchema.parse(request.params);
+      if (!dependencies.store.getAccount(accountId)) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      const user = request.authSession?.user;
+      try {
+        return await automation.retryStatusOperation(accountId, operationId, user
+          ? { id: user.id, name: user.username, kind: "user" }
+          : { id: "local-user", name: "本地用户", kind: "user" });
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/status-operations/:operationId/verify",
+    async (request, reply) => {
+      const { accountId, operationId } = OperationParamsSchema.parse(request.params);
+      let task;
+      try {
+        task = dependencies.store.getAdOperationByOperationId(operationId);
+      } catch (cause) {
+        return reply.status(404).send({ message: getSafeProviderError(cause) });
+      }
+      if (task.accountId !== accountId) {
+        return reply.status(404).send({ message: "状态写入任务不存在。" });
+      }
+      const user = request.authSession?.user;
+      try {
+        const verification = dependencies.store.verifyUnknownStatusWriteTask(
+          task.id,
+          StatusManualVerificationInputSchema.parse(request.body),
+          user
+            ? { id: user.id, name: user.username, kind: "user" }
+            : { id: "local-user", name: "本地用户", kind: "user" },
+        );
+        return {
+          verification,
+          task: dependencies.store.getAdOperation(task.id),
+        };
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
     },
   );
 
@@ -1049,10 +1382,17 @@ export async function createApp(
 
   app.post(
     "/api/accounts/:accountId/connections/:providerKind/test",
-    async (request) => {
+    async (request, reply) => {
       const { accountId, providerKind } = ProviderParamsSchema.parse(
         request.params,
       );
+      const checkedConnection = dependencies.store.getProviderConnection(
+        accountId,
+        providerKind,
+      );
+      if (!checkedConnection) {
+        return reply.status(404).send({ message: "Provider 接入不存在。" });
+      }
       try {
         const context = await loadProviderContext(
           dependencies.store,
@@ -1061,19 +1401,53 @@ export async function createApp(
           providerKind,
         );
         const health = await providers.checkHealth(providerKind, context);
-        return dependencies.store.updateProviderStatus(
+        const authorized = dependencies.store.completeProviderHealthCheckIfCurrent(
           accountId,
           providerKind,
-          health.status,
-          health.message,
+          checkedConnection,
+          {
+            connectionStatus: health.status,
+            message: health.message,
+            authorizationStatus: health.status === "ready" ? "active" : "failed",
+            capabilityVersion: providers.capabilityVersion(providerKind),
+            capabilities: health.status === "ready"
+              ? providers.resolveAuthorizedCapabilities(providerKind, context)
+              : [],
+          },
         );
+        if (!authorized) {
+          return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
+        }
+        if (health.status !== "ready") {
+          dependencies.store.setAccountExecutionMode(
+            accountId,
+            "manual-approval",
+            "Provider 连接检测未通过，已自动熔断写入。",
+          );
+        }
+        return authorized;
       } catch (cause) {
-        return dependencies.store.updateProviderStatus(
+        const authorized = dependencies.store.completeProviderHealthCheckIfCurrent(
           accountId,
           providerKind,
-          "failed",
-          getSafeProviderError(cause),
+          checkedConnection,
+          {
+            connectionStatus: "failed",
+            message: getSafeProviderError(cause),
+            authorizationStatus: "failed",
+            capabilityVersion: providers.capabilityVersion(providerKind),
+            capabilities: [],
+          },
         );
+        if (!authorized) {
+          return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
+        }
+        dependencies.store.setAccountExecutionMode(
+          accountId,
+          "manual-approval",
+          "Provider 连接检测异常，已自动熔断写入。",
+        );
+        return authorized;
       }
     },
   );
@@ -1091,19 +1465,48 @@ export async function createApp(
       if (!connection || connection.status !== "ready") {
         return reply.status(409).send({ message: "请先通过连接检测。" });
       }
-      const context = await loadProviderContext(
-        dependencies.store,
-        dependencies.vault,
+      providers.requireAccountCapability(
         accountId,
         providerKind,
+        connection,
+        "read-campaigns",
       );
-      const output = await providers.syncReadOnly(providerKind, context);
+      let output: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>;
+      try {
+        const context = await loadProviderContext(
+          dependencies.store,
+          dependencies.vault,
+          accountId,
+          providerKind,
+        );
+        output = await providers.syncReadOnly(providerKind, context);
+      } catch (cause) {
+        dependencies.store.updateProviderStatus(
+          accountId,
+          providerKind,
+          "failed",
+          `数据同步异常：${getSafeProviderError(cause)}`,
+        );
+        dependencies.store.setAccountExecutionMode(
+          accountId,
+          "manual-approval",
+          "Provider 数据同步失败，已自动熔断写入。",
+        );
+        throw cause;
+      }
       dependencies.store.saveReadOnlySync(
         accountId,
         providerKind,
         output.entities,
         output.result,
       );
+      if (output.result.quality.status !== "healthy") {
+        dependencies.store.setAccountExecutionMode(
+          accountId,
+          "manual-approval",
+          `同步数据不完整：${output.result.warnings.join("；").slice(0, 500)}`,
+        );
+      }
       return output.result;
     },
   );
@@ -1152,7 +1555,6 @@ function isRuntimeOperation(method: string, rawUrl: string): boolean {
   if (!isMutation(method)) return false;
   const path = rawUrl.split("?", 1)[0] ?? rawUrl;
   return (
-    path.endsWith("/automation/preview") ||
     path.endsWith("/automation/run") ||
     path.endsWith("/entities/status") ||
     path.endsWith("/sync") ||
@@ -1160,11 +1562,12 @@ function isRuntimeOperation(method: string, rawUrl: string): boolean {
   );
 }
 
-function requiredPermission(
+export function requiredPermission(
   method: string,
   rawUrl: string,
 ): AppPermission | null {
   const path = rawUrl.split("?", 1)[0] ?? rawUrl;
+  if (path.startsWith("/api/maintenance/")) return "system:control";
   if (!isMutation(method)) {
     return path.startsWith("/api/local-users") ? "users:manage" : null;
   }
@@ -1178,10 +1581,18 @@ function requiredPermission(
     return "rules:manage";
   }
   if (path.startsWith("/api/notifications/")) return "rules:manage";
-  if (path.startsWith("/api/launch-plans/") && path.endsWith("/execute")) return "ads:operate";
+  if (
+    path.startsWith("/api/launch-plans/")
+    && (path.endsWith("/execute") || path.endsWith("/retry") || path.endsWith("/verify"))
+  ) return "ads:operate";
+  if (path.includes("/automation/decisions/") && path.endsWith("/approve")) {
+    return "ads:operate";
+  }
+  if (path.includes("/low-risk-automation")) return "automation:execute";
   if (path.includes("/automation/")) return "automation:execute";
   if (
     path.includes("/entities/status") ||
+    path.includes("/status-operations/") ||
     path.includes("/ignore") ||
     path.includes("/appeals") ||
     path.includes("/schedules")
