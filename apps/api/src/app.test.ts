@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AutomationStore } from "@tk-auto/storage";
 import { createApp } from "./app.js";
+import { LaunchService } from "./launch-service.js";
 import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -442,6 +443,74 @@ describe("local API", () => {
     ]));
     expect(cookies).toContain("sessionid=first-test-session");
     expect(cookies).toContain("sessionid=second-test-session");
+  });
+
+  it("queues batch creation for the background worker without waiting for provider completion", async () => {
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
+      await providerStarted;
+      return mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "queued-campaign",
+        adGroupId: "queued-group",
+        adId: "queued-ad",
+        message: "created in worker",
+      }));
+    });
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    const queued = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/queue` });
+
+    expect(queued.statusCode).toBe(202);
+    expect(queued.json()).toMatchObject({ queued: true, plan: { id: planId } });
+    await vi.waitFor(() => expect(createFromPreset).toHaveBeenCalledTimes(1));
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "running", attemptCount: 1 });
+
+    releaseProvider();
+    await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
+  });
+
+  it("does not persist a launch queue request while the master switch is off", async () => {
+    const planId = await installLaunchTestProvider(
+      async (_context, mutations) => mutations.map((mutation) => ({ ...mutation, ok: true, campaignId: "c", adGroupId: "g", adId: "a", message: "created" })),
+      [apiLaunchRow(2)],
+    );
+    store.updateSystemRuntimeState({ enabled: false });
+
+    const queued = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/queue` });
+
+    expect(queued.statusCode).toBe(409);
+    expect(queued.json().message).toContain("再次确认");
+    expect(store.listQueuedLaunchPlans()).toEqual([]);
+  });
+
+  it("keeps a queued interrupted worker item visible until lease recovery marks it unknown", async () => {
+    vi.useFakeTimers();
+    try {
+      const planId = await installLaunchTestProvider(
+        async (_context, mutations) => mutations.map((mutation) => ({ ...mutation, ok: true, campaignId: "c", adGroupId: "g", adId: "a", message: "created" })),
+        [apiLaunchRow(2)],
+      );
+      await app.close();
+      const item = store.listLaunchPlanItems(planId)[0]!;
+      store.claimLaunchPlanItem(item.itemId, "interrupted-worker", "pending", { id: "worker", name: "Worker", kind: "system" });
+      store.enqueueLaunchPlan(planId, { id: "worker", name: "Worker", kind: "system" });
+
+      expect(store.listQueuedLaunchPlans()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ planId }),
+      ]));
+      vi.setSystemTime(Date.now() + 31 * 60 * 1000);
+      new LaunchService(store, vault, new ProviderRegistry());
+
+      expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "unknown", attemptCount: 1 });
+      expect(store.listQueuedLaunchPlans()).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ planId }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists detected entities and manages the ignore list", async () => {

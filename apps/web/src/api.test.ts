@@ -239,6 +239,19 @@ describe("web API client", () => {
     );
   });
 
+  it("loads persisted queued plan ids so a reloaded page can resume progress polling", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(["plan-1", "plan-2"]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.getQueuedLaunchPlanIds()).resolves.toEqual(["plan-1", "plan-2"]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/launch-plans/queued", expect.any(Object));
+  });
+
   it("uses the maintenance endpoints for audit, backup, restore, and signed updates", async () => {
     const fetchMock = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({}), {

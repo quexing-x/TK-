@@ -39,6 +39,7 @@ import {
   AuditLogFilterSchema,
   type AppPermission,
   type ProviderKind,
+  type WriteTaskActor,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -58,6 +59,7 @@ import {
 } from "./automation-service.js";
 import { NotificationService } from "./notification-service.js";
 import { LaunchService } from "./launch-service.js";
+import { LaunchWorker } from "./launch-worker.js";
 import {
   AuthenticationError,
   AuthorizationError,
@@ -139,6 +141,8 @@ export async function createApp(
     dependencies.vault,
     providers,
   );
+  const launchWorker = new LaunchWorker(dependencies.store, launchService);
+  launchWorker.start();
   const automation =
     dependencies.automation ??
     new AutomationService(dependencies.store, dependencies.vault, providers);
@@ -154,7 +158,10 @@ export async function createApp(
     notifications,
   );
   if (dependencies.startScheduler) scheduler.start();
-  app.addHook("onClose", async () => scheduler.stop());
+  app.addHook("onClose", async () => {
+    await launchWorker.stop();
+    scheduler.stop();
+  });
   app.decorateRequest("authSession", null);
 
   await app.register(cors, {
@@ -406,6 +413,10 @@ export async function createApp(
     dependencies.store.listMultiAccountLaunchPlans(),
   );
 
+  app.get("/api/launch-plans/queued", async () =>
+    dependencies.store.listQueuedLaunchPlans().map((queued) => queued.planId),
+  );
+
   app.get("/api/write-tasks", async (request) => {
     const query = z.object({
       kind: z.enum(["launch", "status"]).optional(),
@@ -590,6 +601,29 @@ export async function createApp(
       return await launchService.execute(planId, user
         ? { id: user.id, name: user.username, kind: "user" }
         : { id: "local-user", name: "本地用户", kind: "user" });
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.post("/api/launch-plans/:planId/queue", async (request, reply) => {
+    const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
+    if (!dependencies.store.getMultiAccountLaunchPlan(planId)) {
+      return reply.status(404).send({ message: "投放计划不存在。" });
+    }
+    if (!dependencies.store.getSystemRuntimeState().enabled) {
+      return reply.status(409).send({ message: "软件总开关已关闭，批量创建写入已暂停。请重新开启后再次确认并加入队列。" });
+    }
+    try {
+      const user = request.authSession?.user;
+      const actor: WriteTaskActor = user
+        ? { id: user.id, name: user.username, kind: "user" }
+        : { id: "local-user", name: "本地用户", kind: "user" };
+      launchWorker.enqueue(planId, actor);
+      return reply.status(202).send({
+        plan: dependencies.store.getMultiAccountLaunchPlan(planId),
+        queued: true,
+      });
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
@@ -1583,7 +1617,7 @@ export function requiredPermission(
   if (path.startsWith("/api/notifications/")) return "rules:manage";
   if (
     path.startsWith("/api/launch-plans/")
-    && (path.endsWith("/execute") || path.endsWith("/retry") || path.endsWith("/verify"))
+    && (path.endsWith("/execute") || path.endsWith("/queue") || path.endsWith("/retry") || path.endsWith("/verify"))
   ) return "ads:operate";
   if (path.includes("/automation/decisions/") && path.endsWith("/approve")) {
     return "ads:operate";

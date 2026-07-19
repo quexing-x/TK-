@@ -2402,6 +2402,49 @@ export class AutomationStore {
     return row ? mapMultiAccountLaunchPlan(row) : null;
   }
 
+  enqueueLaunchPlan(planId: string, actor: WriteTaskActor): MultiAccountLaunchPlanRecord {
+    const plan = this.getMultiAccountLaunchPlan(planId);
+    if (!plan) throw new Error("投放计划不存在。");
+    if (plan.status === "cancelled" || plan.status === "completed") {
+      throw new Error("投放计划已结束，无法加入后台队列。");
+    }
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO launch_plan_dispatches (
+         plan_id, actor_id, actor_name, actor_kind, requested_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(plan_id) DO UPDATE SET
+         actor_id = excluded.actor_id,
+         actor_name = excluded.actor_name,
+         actor_kind = excluded.actor_kind,
+         updated_at = excluded.updated_at`,
+    ).run(planId, actor.id, actor.name, actor.kind, now, now);
+    return plan;
+  }
+
+  listQueuedLaunchPlans(limit = 100): Array<{ planId: string; actor: WriteTaskActor }> {
+    const rows = this.db.prepare(
+      `SELECT dispatch.plan_id, dispatch.actor_id, dispatch.actor_name, dispatch.actor_kind
+       FROM launch_plan_dispatches dispatch
+       JOIN multi_account_launch_plans plan ON plan.id = dispatch.plan_id
+       WHERE plan.status IN ('draft', 'blocked')
+         AND EXISTS (
+           SELECT 1 FROM launch_plan_items item
+           WHERE item.plan_id = dispatch.plan_id AND item.status IN ('pending', 'running')
+         )
+       ORDER BY dispatch.requested_at
+       LIMIT ?`,
+    ).all(limit) as SqlRow[];
+    return rows.map((row) => ({
+      planId: String(row.plan_id),
+      actor: {
+        id: String(row.actor_id),
+        name: String(row.actor_name),
+        kind: row.actor_kind === "system" ? "system" : "user",
+      },
+    }));
+  }
+
   listWriteTaskSummaries(input: {
     kind?: WriteTaskKind;
     status?: WriteTaskStatus;
@@ -5010,6 +5053,18 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
+      -- A plan is not executable until an operator explicitly queues it. The
+      -- durable dispatch record lets a restarted API process resume pending
+      -- items without treating every historical draft as safe to run.
+      CREATE TABLE IF NOT EXISTS launch_plan_dispatches (
+        plan_id TEXT PRIMARY KEY REFERENCES multi_account_launch_plans(id) ON DELETE CASCADE,
+        actor_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL,
+        actor_kind TEXT NOT NULL,
+        requested_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS provider_write_circuits (
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         provider_kind TEXT NOT NULL,
@@ -5488,6 +5543,9 @@ export class AutomationStore {
     );
     this.db.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS launch_plan_items_idempotency ON launch_plan_items (idempotency_key) WHERE idempotency_key IS NOT NULL",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS launch_plan_dispatches_requested ON launch_plan_dispatches (requested_at)",
     );
     this.applyMigration("launch-plan-items-v1", () => {
       // Historical plans have no trustworthy row-level execution state. Do
