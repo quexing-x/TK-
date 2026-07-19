@@ -1,15 +1,22 @@
 import { mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import fastifyStatic from "@fastify/static";
 import { createApp } from "@tk-auto/api";
 import { WindowsDpapiCredentialVault } from "@tk-auto/credentials";
-import { AutomationStore } from "@tk-auto/storage";
+import {
+  AutomationStore,
+  applyPendingDatabaseRestore,
+  finalizePendingDatabaseRestore,
+  rollbackPendingDatabaseRestore,
+} from "@tk-auto/storage";
 import {
   BrowserWindow,
   app,
   dialog,
 } from "electron";
 import { installOutboundProxy, resolveOutboundProxy } from "../../api/src/proxy.ts";
+import { SignedUpdateRuntime } from "./update-runtime.js";
 
 const PRODUCT_NAME = "TK Ads Automation";
 const HOST = "127.0.0.1";
@@ -67,12 +74,66 @@ async function startRuntime() {
   const credentialDirectory = join(dataDirectory, "credentials");
   mkdirSync(dataDirectory, { recursive: true });
 
-  const store = new AutomationStore(join(dataDirectory, "tk-automation.db"));
+  const databasePath = join(dataDirectory, "tk-automation.db");
+  let pendingRestore: ReturnType<typeof applyPendingDatabaseRestore> = null;
+  try {
+    pendingRestore = applyPendingDatabaseRestore(databasePath);
+  } catch (cause) {
+    console.error("Database restore was rejected; continuing with the original database.", cause);
+  }
+  let store: AutomationStore;
+  try {
+    store = new AutomationStore(databasePath, { appVersion: app.getVersion() });
+    if (pendingRestore) {
+      if (pendingRestore.rollbackPath) {
+        store.registerRestoreRollbackBackup(pendingRestore.rollbackPath);
+      }
+      finalizePendingDatabaseRestore(pendingRestore);
+    }
+  } catch (cause) {
+    if (!pendingRestore) throw cause;
+    rollbackPendingDatabaseRestore(pendingRestore);
+    store = new AutomationStore(databasePath, { appVersion: app.getVersion() });
+    if (pendingRestore.rollbackPath) {
+      store.registerRestoreRollbackBackup(pendingRestore.rollbackPath);
+    }
+  }
   store.seed();
   const vault = new WindowsDpapiCredentialVault(credentialDirectory);
   const proxyConfig = resolveOutboundProxy();
   const proxyAgent = installOutboundProxy(proxyConfig);
-  const server = await createApp({ store, vault, startScheduler: true });
+  const updateRuntime = new SignedUpdateRuntime({
+    currentVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    currentExecutable: process.execPath,
+    downloadDirectory: join(dataDirectory, "updates"),
+    ...(process.env.TK_AUTO_UPDATE_MANIFEST_URL
+      ? { manifestUrl: process.env.TK_AUTO_UPDATE_MANIFEST_URL }
+      : {}),
+    ...(process.env.TK_AUTO_UPDATE_PUBLIC_KEY
+      ? { publicKey: process.env.TK_AUTO_UPDATE_PUBLIC_KEY }
+      : {}),
+    ...(process.env.TK_SIGNING_PUBLISHER
+      ? { expectedPublisher: process.env.TK_SIGNING_PUBLISHER }
+      : {}),
+    install: (installerPath) => {
+      const child = spawn(installerPath, [], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+      });
+      child.unref();
+      app.quit();
+    },
+  });
+  const server = await createApp({
+    store,
+    vault,
+    startScheduler: true,
+    appVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    maintenanceUpdates: updateRuntime,
+  });
 
   const webRoot = app.isPackaged
     ? join(process.resourcesPath, "web")
@@ -90,6 +151,11 @@ async function startRuntime() {
   }
 
   const origin = await server.listen({ host: HOST, port: 0 });
+  if (updateRuntime.isConfigured()) {
+    void updateRuntime.checkForUpdates().catch((cause) => {
+      server.log.warn({ cause }, "Signed update check failed");
+    });
+  }
   return { server, store, proxyAgent, origin };
 }
 

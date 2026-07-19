@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { AutomationActionSchema, type ManagedEntitySnapshot } from "./decision.js";
 import { SyncEntityTypeSchema, type SyncEntityType } from "./connection.js";
+import type {
+  WriteTaskActor,
+  WriteTaskIdentity,
+  WriteTaskPhase,
+  WriteTaskStatus,
+} from "./write-task.js";
 
 export const ManualStatusInputSchema = z.object({
   entityType: SyncEntityTypeSchema,
@@ -36,7 +42,7 @@ export interface IgnoredEntityRecord {
   createdAt: string;
 }
 
-export interface AdOperationRecord {
+export interface AdOperationRecord extends WriteTaskIdentity {
   id: string;
   accountId: string;
   providerKind: "cookie" | "official-api";
@@ -44,9 +50,48 @@ export interface AdOperationRecord {
   externalId: string;
   entityName: string;
   action: "enable" | "disable" | "ignore" | "unignore" | "appeal";
-  source: "manual" | "automation";
-  status: "succeeded" | "failed" | "pending";
+  source: "manual" | "automation" | "scheduled";
+  status: WriteTaskStatus;
+  phase: WriteTaskPhase;
+  actor: WriteTaskActor;
+  claimedBy: string | null;
+  claimedAt: string | null;
   message: string | null;
+  syncWarning: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface AdOperationAttemptRecord {
+  attemptId: string;
+  operationId: string;
+  correlationId: string;
+  attemptNumber: number;
+  actor: WriteTaskActor;
+  phase: WriteTaskPhase;
+  status: Exclude<WriteTaskStatus, "pending" | "cancelled">;
+  message: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export const StatusManualVerificationInputSchema = z.object({
+  decision: z.enum(["confirmed-succeeded", "confirmed-failed"]),
+  observedStatus: z.enum(["enabled", "disabled"]),
+  evidence: z.string().trim().min(10).max(4_000),
+  note: z.string().trim().max(2_000).default(""),
+});
+export type StatusManualVerificationInput = z.infer<typeof StatusManualVerificationInputSchema>;
+
+export interface StatusManualVerificationRecord extends StatusManualVerificationInput {
+  id: string;
+  taskId: string;
+  operationId: string;
+  actor: WriteTaskActor;
+  previousStatus: "unknown";
+  nextStatus: "succeeded" | "failed";
   createdAt: string;
 }
 
@@ -60,4 +105,12 @@ export interface EntityMetricSnapshotRecord {
   status: "enabled" | "disabled" | "unknown";
   metrics: ManagedEntitySnapshot["metrics"];
   capturedAt: string;
+}
+
+export interface MetricBatchRecord {
+  capturedAt: string;
+  count: number;
+  spend: number;
+  clicks: number;
+  conversions: number;
 }

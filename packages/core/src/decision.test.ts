@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDefaultAutomationSwitches,
   evaluateAutomation,
+  normalizeProviderEntity,
   type ProviderEntity,
   type ThresholdConfig,
 } from "./index.js";
@@ -41,6 +42,20 @@ const threshold: ThresholdConfig = {
 };
 
 describe("evaluateAutomation", () => {
+  it("recognizes TikTok delivery_ok campaign status as enabled", () => {
+    const snapshot = normalizeProviderEntity({
+      entityType: "campaign",
+      externalId: "campaign-delivery-ok",
+      payload: {
+        campaign_name: "status test",
+        campaign_primary_status: "delivery_ok",
+        campaign_status: "campaign_delivery_ok",
+      },
+    });
+
+    expect(snapshot.status).toBe("enabled");
+  });
+
   it("creates a disable candidate when a guarded threshold matches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.manageAdGroupStatus = true;

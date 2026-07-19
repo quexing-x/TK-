@@ -33,11 +33,17 @@ export const AccountSettingsUpdateSchema = AccountConfigSchema.pick({
   accountType: true,
   enabled: true,
   providerKind: true,
+  executionMode: true,
 });
 
 export type AccountSettingsUpdate = z.infer<typeof AccountSettingsUpdateSchema>;
 
-export const AccountCreateInputSchema = AccountSettingsUpdateSchema;
+export const AccountCreateInputSchema = AccountConfigSchema.pick({
+  displayName: true,
+  accountType: true,
+  enabled: true,
+  providerKind: true,
+});
 export type AccountCreateInput = z.infer<typeof AccountCreateInputSchema>;
 
 export const GlobalAutomationSettingsSchema = z.object({
@@ -54,3 +60,35 @@ export const GlobalAutomationSettingsInputSchema =
 export type GlobalAutomationSettingsInput = z.infer<
   typeof GlobalAutomationSettingsInputSchema
 >;
+
+export const LOW_RISK_AUTOMATION_POLICY_VERSION = "disable-only-v1" as const;
+
+export const LowRiskAutomationPolicySchema = z.object({
+  accountId: z.string().min(1),
+  enabled: z.boolean(),
+  policyVersion: z.literal(LOW_RISK_AUTOMATION_POLICY_VERSION),
+  dailyActionLimit: z.number().int().min(1).max(100),
+  updatedAt: z.string().datetime(),
+});
+export type LowRiskAutomationPolicy = z.infer<
+  typeof LowRiskAutomationPolicySchema
+>;
+
+export const LowRiskAutomationPolicyInputSchema =
+  LowRiskAutomationPolicySchema.pick({
+    enabled: true,
+    dailyActionLimit: true,
+  });
+export type LowRiskAutomationPolicyInput = z.infer<
+  typeof LowRiskAutomationPolicyInputSchema
+>;
+
+export const ProviderWriteCircuitSchema = z.object({
+  accountId: z.string().min(1),
+  providerKind: ProviderKindSchema,
+  consecutiveFailures: z.number().int().min(0),
+  lastError: z.string().nullable(),
+  openedAt: z.string().datetime().nullable(),
+  updatedAt: z.string().datetime(),
+});
+export type ProviderWriteCircuit = z.infer<typeof ProviderWriteCircuitSchema>;

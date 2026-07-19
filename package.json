@@ -1,6 +1,6 @@
 {
   "name": "tk-ads-automation",
-  "version": "1.2.0",
+  "version": "1.3.2",
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "scripts": {
@@ -13,6 +13,10 @@
     "desktop:build": "pnpm --filter @tk-auto/web build && pnpm --filter @tk-auto/desktop build",
     "desktop:run": "pnpm desktop:build && pnpm --filter @tk-auto/desktop start",
     "desktop:dist": "pnpm desktop:build && pnpm --filter @tk-auto/desktop dist",
+    "login-test:secrets": "pnpm --filter @tk-auto/login-server-test secrets",
+    "login-test:credentials:export": "pnpm --filter @tk-auto/login-server-test credentials:export",
+    "login-test:build": "pnpm --filter @tk-auto/web build && pnpm --filter @tk-auto/login-server-test build",
+    "login-test:start": "pnpm login-test:build && pnpm --filter @tk-auto/login-server-test start",
     "docs:generate": "node scripts/generate-manual.mjs"
   },
   "devDependencies": {

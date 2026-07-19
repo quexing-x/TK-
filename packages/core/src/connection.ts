@@ -1,6 +1,53 @@
 import { z } from "zod";
 import { ProviderKindSchema } from "./account.js";
 
+export const ProviderCapabilitySchema = z.enum([
+  "read-campaigns",
+  "read-ad-groups",
+  "read-ads",
+  "read-reports",
+  "create-campaigns",
+  "copy-ads",
+  "change-status",
+  "delete-ad-groups",
+  "appeal-ads",
+]);
+export type ProviderCapability = z.infer<typeof ProviderCapabilitySchema>;
+
+export const ProviderAuthorizationStatusSchema = z.enum([
+  "not-authorized",
+  "active",
+  "expired",
+  "revoked",
+  "failed",
+]);
+export type ProviderAuthorizationStatus = z.infer<
+  typeof ProviderAuthorizationStatusSchema
+>;
+
+export const ProviderCapabilityStateSchema = z.object({
+  capability: ProviderCapabilitySchema,
+  available: z.boolean(),
+  reason: z.string().min(1),
+});
+export type ProviderCapabilityState = z.infer<
+  typeof ProviderCapabilityStateSchema
+>;
+
+export const AccountProviderCapabilitiesSchema = z.object({
+  accountId: z.string().min(1),
+  providerKind: ProviderKindSchema,
+  providerDisplayName: z.string().min(1),
+  capabilityVersion: z.string().min(1),
+  authorizationStatus: ProviderAuthorizationStatusSchema,
+  authorizedAt: z.string().datetime().nullable(),
+  authorizationExpiresAt: z.string().datetime().nullable(),
+  capabilities: z.array(ProviderCapabilityStateSchema),
+});
+export type AccountProviderCapabilities = z.infer<
+  typeof AccountProviderCapabilitiesSchema
+>;
+
 const TikTokHttpsUrlSchema = z
   .string()
   .url()
@@ -74,6 +121,18 @@ export type CapturedCookieRequest = z.infer<
   typeof CapturedCookieRequestSchema
 >;
 
+/** Account-local, verified creation snapshots. They stay encrypted alongside
+ * the Cookie and never appear in plans, presets or source control. */
+export const CookieCreationProfileSchema = z.object({
+  version: z.literal(1),
+  campaignPayload: z.record(z.unknown()),
+  adGroupPayload: z.record(z.unknown()),
+  creativePayload: z.record(z.unknown()),
+  publishPayload: z.record(z.unknown()),
+  verifiedAt: z.string().datetime().nullable().default(null),
+});
+export type CookieCreationProfile = z.infer<typeof CookieCreationProfileSchema>;
+
 export const CookieCredentialInputSchema = z.object({
   kind: z.literal("cookie"),
   cookie: z.string().trim().min(10),
@@ -85,6 +144,7 @@ export const CookieCredentialInputSchema = z.object({
     .default("x-csrftoken"),
   userAgent: z.string().trim().max(1024).optional(),
   requestTemplates: z.array(CapturedCookieRequestSchema).max(12).optional(),
+  creationProfile: CookieCreationProfileSchema.optional(),
 });
 
 export const OfficialApiCredentialInputSchema = z.object({
@@ -114,6 +174,11 @@ export const ProviderConnectionSchema = z.object({
   settings: ProviderConnectionSettingsSchema,
   hasCredential: z.boolean(),
   status: ConnectionStatusSchema,
+  authorizationStatus: ProviderAuthorizationStatusSchema.default("not-authorized"),
+  capabilityVersion: z.string().min(1).default("legacy-unversioned"),
+  authorizedCapabilities: z.array(ProviderCapabilitySchema).default([]),
+  authorizedAt: z.string().datetime().nullable().default(null),
+  authorizationExpiresAt: z.string().datetime().nullable().default(null),
   lastMessage: z.string().nullable(),
   lastTestedAt: z.string().datetime().nullable(),
   updatedAt: z.string().datetime(),
@@ -134,9 +199,31 @@ export interface ProviderEntity {
   payload: Record<string, unknown>;
 }
 
+export type SyncDataQualityStatus = "healthy" | "partial" | "stale" | "invalid";
+
+export interface SyncDataCoverage {
+  startDate: string;
+  endDate: string;
+  timezone: string;
+}
+
+export interface SyncDataQuality {
+  status: SyncDataQualityStatus;
+  paginationComplete: boolean;
+  requiredMetricsComplete: boolean;
+  contractValid: boolean;
+  providerContractVersion: string;
+  coverage: SyncDataCoverage;
+  missingMetrics: string[];
+  partialFailures: string[];
+  /** Most recent fully healthy sync, enriched by storage when available. */
+  lastHealthyAt: string | null;
+}
+
 export interface ReadOnlySyncResult {
   startedAt: string;
   finishedAt: string;
   counts: Record<SyncEntityType, number>;
   warnings: string[];
+  quality: SyncDataQuality;
 }

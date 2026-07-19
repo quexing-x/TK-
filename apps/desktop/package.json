@@ -1,6 +1,6 @@
 {
   "name": "@tk-auto/desktop",
-  "version": "1.2.0",
+  "version": "1.3.2",
   "private": true,
   "description": "本地优先的 TikTok Ads 自动化管理工具",
   "author": "TK Ads Automation",
@@ -12,11 +12,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "build": "node build.mjs",
-    "dist": "electron-builder --win nsis --x64"
+    "dist": "electron-builder --win nsis --x64",
+    "dist:signed": "node scripts/require-signing-env.mjs && electron-builder --win nsis --x64 && node scripts/verify-release-signature.mjs",
+    "release:manifest": "node scripts/generate-signed-update-manifest.mjs"
   },
   "devDependencies": {
     "@fastify/static": "latest",
     "@tk-auto/api": "workspace:*",
+    "@tk-auto/core": "workspace:*",
     "@tk-auto/credentials": "workspace:*",
     "@tk-auto/storage": "workspace:*",
     "@types/node": "^24.10.1",

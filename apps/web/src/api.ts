@@ -4,7 +4,11 @@ import type {
   AccountCreateInput,
   GlobalAutomationSettings,
   GlobalAutomationSettingsInput,
+  LowRiskAutomationPolicy,
+  LowRiskAutomationPolicyInput,
+  ProviderWriteCircuit,
   AutomationDecisionRecord,
+  AutomationApprovalRecord,
   AutomationRunRecord,
   ProviderConnection,
   ProviderConnectionSettings,
@@ -14,7 +18,7 @@ import type {
   RuleConfiguration,
   RuleConfigurationInput,
   AdOperationRecord,
-  EntityMetricSnapshotRecord,
+  MetricBatchRecord,
   ManagedEntityRecord,
   ManualStatusInput,
   NotificationChannelKind,
@@ -23,6 +27,42 @@ import type {
   NotificationCredentialInput,
   NotificationDeliveryRecord,
   PollCycleRecord,
+  AuthStatus,
+  InitialDeveloperInput,
+  LoginInput,
+  LocalUserCreateInput,
+  LocalUserRecord,
+  LocalUserUpdateInput,
+  PasswordChangeInput,
+  SystemRuntimeState,
+  AutomationFeatureSettings,
+  AutomationFeatureSettingsInput,
+  ScheduledEntityActionRecord,
+  OneTimeScheduleInput,
+  OvernightScheduleInput,
+  MultiAccountLaunchPlanInput,
+  MultiAccountLaunchPlanRecord,
+  LaunchPresetInput,
+  LaunchPresetRecord,
+  LaunchPlanItemRecord,
+  LaunchPlanItemAttemptRecord,
+  LaunchManualVerificationInput,
+  LaunchManualVerificationRecord,
+  LaunchCopyPreviewInput,
+  LaunchCopyPreviewRecord,
+  WriteTaskKind,
+  WriteTaskStatus,
+  WriteTaskSummaryRecord,
+  AdOperationAttemptRecord,
+  StatusManualVerificationInput,
+  StatusManualVerificationRecord,
+  AuditLogFilter,
+  AuditLogRecord,
+  DatabaseBackupRecord,
+  MaintenanceStatus,
+  UpdateRuntimeStatus,
+  AccountProviderCapabilities,
+  ProviderCapability,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -32,12 +72,20 @@ export interface ProviderDescriptor {
   kind: ProviderKind;
   displayName: string;
   implementationStatus: "scaffolded" | "available";
-  capabilities: string[];
+  capabilityVersion: string;
+  capabilities: ProviderCapability[];
 }
 
 export interface BootstrapPayload {
   accounts: AccountConfig[];
+  accountConnectionStates: Array<{
+    accountId: string;
+    connection: ProviderConnection | null;
+    latestSync: ReadOnlySyncResult | null;
+    capabilities: AccountProviderCapabilities;
+  }>;
   globalAutomationSettings: GlobalAutomationSettings;
+  systemRuntime: SystemRuntimeState;
   providers: ProviderDescriptor[];
 }
 
@@ -46,11 +94,48 @@ export interface ManualStatusResult extends ManualStatusInput {
   message: string;
 }
 
+export interface LaunchExecutionResult {
+  plan: MultiAccountLaunchPlanRecord;
+  results: Array<{
+    itemId: string;
+    accountId: string;
+    status: "pending" | "running" | "succeeded" | "failed" | "unknown" | "cancelled";
+    message: string;
+    syncWarning: string | null;
+  }>;
+}
+
+export interface LowRiskAutomationState {
+  policy: LowRiskAutomationPolicy;
+  todayUsage: number;
+  circuit: ProviderWriteCircuit | null;
+}
+
+export type WriteTaskAttemptRecord = LaunchPlanItemAttemptRecord | AdOperationAttemptRecord;
+
+export interface WriteTaskFilters {
+  kind?: WriteTaskKind;
+  status?: WriteTaskStatus;
+  accountId?: string;
+  limit?: number;
+}
+
+let csrfToken: string | null = null;
+
+export function setAuthSession(status: AuthStatus | null): void {
+  csrfToken = status?.csrfToken ?? null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)
+        ? { "x-csrf-token": csrfToken }
+        : {}),
       ...init?.headers,
     },
   });
@@ -70,6 +155,182 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authStatus: async () => {
+    const status = await request<AuthStatus>("/api/auth/status");
+    setAuthSession(status);
+    return status;
+  },
+  setupDeveloper: async (input: InitialDeveloperInput) => {
+    const status = await request<AuthStatus>("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    setAuthSession(status);
+    return status;
+  },
+  login: async (input: LoginInput) => {
+    const status = await request<AuthStatus>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    setAuthSession(status);
+    return status;
+  },
+  logout: async () => {
+    const result = await request<{ ok: boolean }>("/api/auth/logout", {
+      method: "POST",
+    });
+    setAuthSession(null);
+    return result;
+  },
+  changePassword: (input: PasswordChangeInput) =>
+    request<{ ok: boolean; reauthenticationRequired: boolean }>(
+      "/api/auth/password",
+      { method: "PUT", body: JSON.stringify(input) },
+    ),
+  getLocalUsers: () => request<LocalUserRecord[]>("/api/local-users"),
+  createLocalUser: (input: LocalUserCreateInput) =>
+    request<LocalUserRecord>("/api/local-users", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateLocalUser: (userId: string, input: LocalUserUpdateInput) =>
+    request<LocalUserRecord>(`/api/local-users/${userId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  updateSystemRuntime: (enabled: boolean) =>
+    request<SystemRuntimeState>("/api/system/runtime", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  getLowRiskAutomation: (accountId: string) =>
+    request<LowRiskAutomationState>(
+      `/api/accounts/${accountId}/low-risk-automation`,
+    ),
+  updateLowRiskAutomation: (
+    accountId: string,
+    input: LowRiskAutomationPolicyInput,
+  ) => request<LowRiskAutomationState>(
+    `/api/accounts/${accountId}/low-risk-automation`,
+    { method: "PUT", body: JSON.stringify(input) },
+  ),
+  resetLowRiskAutomationCircuit: (accountId: string) =>
+    request<LowRiskAutomationState>(
+      `/api/accounts/${accountId}/low-risk-automation/reset-circuit`,
+      { method: "POST" },
+    ),
+  getAutomationFeatures: () =>
+    request<AutomationFeatureSettings>("/api/automation/features"),
+  updateAutomationFeatures: (input: AutomationFeatureSettingsInput) =>
+    request<AutomationFeatureSettings>("/api/automation/features", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  getSchedules: (accountId: string) =>
+    request<ScheduledEntityActionRecord[]>(
+      `/api/accounts/${accountId}/schedules`,
+    ),
+  createOneTimeSchedule: (accountId: string, input: OneTimeScheduleInput) =>
+    request<ScheduledEntityActionRecord>(
+      `/api/accounts/${accountId}/schedules/once`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  createOvernightSchedule: (
+    accountId: string,
+    input: OvernightScheduleInput,
+  ) =>
+    request<ScheduledEntityActionRecord[]>(
+      `/api/accounts/${accountId}/schedules/overnight`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  cancelSchedule: (accountId: string, scheduleId: string) =>
+    request<void>(`/api/accounts/${accountId}/schedules/${scheduleId}`, {
+      method: "DELETE",
+    }),
+  cancelOvernightSchedule: (accountId: string, groupId: string) =>
+    request<void>(
+      `/api/accounts/${accountId}/overnight-schedules/${groupId}`,
+      { method: "DELETE" },
+    ),
+  getLaunchPlans: () =>
+    request<MultiAccountLaunchPlanRecord[]>("/api/launch-plans"),
+  getLaunchPresets: () => request<LaunchPresetRecord[]>("/api/launch-presets"),
+  createLaunchPreset: (input: LaunchPresetInput) =>
+    request<LaunchPresetRecord>("/api/launch-presets", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateLaunchPreset: (presetId: string, input: LaunchPresetInput) =>
+    request<LaunchPresetRecord>(`/api/launch-presets/${presetId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  deleteLaunchPreset: (presetId: string) =>
+    request<void>(`/api/launch-presets/${presetId}`, { method: "DELETE" }),
+  createLaunchPlan: (input: MultiAccountLaunchPlanInput) =>
+    request<MultiAccountLaunchPlanRecord>("/api/launch-plans", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  cancelLaunchPlan: (planId: string) =>
+    request<void>(`/api/launch-plans/${planId}`, { method: "DELETE" }),
+  executeLaunchPlan: (planId: string) =>
+    request<LaunchExecutionResult>(`/api/launch-plans/${planId}/execute`, {
+      method: "POST",
+    }),
+  createLaunchCopyPreview: (input: LaunchCopyPreviewInput) =>
+    request<LaunchCopyPreviewRecord>("/api/launch-plans/copy-preview", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getLaunchPlanItems: (planId: string) =>
+    request<LaunchPlanItemRecord[]>(`/api/launch-plans/${planId}/items`),
+  retryLaunchPlanItem: (planId: string, itemId: string) =>
+    request<LaunchExecutionResult>(`/api/launch-plans/${planId}/items/${itemId}/retry`, {
+      method: "POST",
+    }),
+  getLaunchPlanItemAttempts: (planId: string, itemId: string) =>
+    request<LaunchPlanItemAttemptRecord[]>(`/api/launch-plans/${planId}/items/${itemId}/attempts`),
+  getLaunchPlanItemVerifications: (planId: string, itemId: string) =>
+    request<LaunchManualVerificationRecord[]>(`/api/launch-plans/${planId}/items/${itemId}/verifications`),
+  verifyLaunchPlanItem: (planId: string, itemId: string, input: LaunchManualVerificationInput) =>
+    request<{
+      verification: LaunchManualVerificationRecord;
+      item: LaunchPlanItemRecord;
+      plan: MultiAccountLaunchPlanRecord;
+    }>(`/api/launch-plans/${planId}/items/${itemId}/verify`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getWriteTasks: (filters: WriteTaskFilters = {}) => {
+    const query = new URLSearchParams();
+    if (filters.kind) query.set("kind", filters.kind);
+    if (filters.status) query.set("status", filters.status);
+    if (filters.accountId) query.set("accountId", filters.accountId);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<WriteTaskSummaryRecord[]>(`/api/write-tasks${suffix}`);
+  },
+  getWriteTaskAttempts: (kind: WriteTaskKind, taskId: string) =>
+    request<WriteTaskAttemptRecord[]>(`/api/write-tasks/${kind}/${taskId}/attempts`),
+  getStatusWriteTaskVerifications: (taskId: string) =>
+    request<StatusManualVerificationRecord[]>(`/api/write-tasks/status/${taskId}/verifications`),
+  retryStatusOperation: (accountId: string, operationId: string) =>
+    request<ManualStatusResult>(`/api/accounts/${accountId}/status-operations/${operationId}/retry`, {
+      method: "POST",
+    }),
+  verifyStatusOperation: (
+    accountId: string,
+    operationId: string,
+    input: StatusManualVerificationInput,
+  ) => request<{
+    verification: StatusManualVerificationRecord;
+    task: AdOperationRecord;
+  }>(`/api/accounts/${accountId}/status-operations/${operationId}/verify`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
   bootstrap: () => request<BootstrapPayload>("/api/bootstrap"),
   createAccount: (input: AccountCreateInput) =>
     request<AccountConfig>("/api/accounts", {
@@ -124,6 +385,8 @@ export const api = {
     ),
   getConnections: (accountId: string) =>
     request<ProviderConnection[]>(`/api/accounts/${accountId}/connections`),
+  getAccountCapabilities: (accountId: string) =>
+    request<AccountProviderCapabilities>(`/api/accounts/${accountId}/capabilities`),
   getCookieReadiness: (accountId: string) =>
     request<CookieConnectionReadiness>(
       `/api/accounts/${accountId}/connections/cookie/readiness`,
@@ -180,9 +443,22 @@ export const api = {
     request<AutomationRunRecord[]>(
       `/api/accounts/${accountId}/automation/runs`,
     ),
+  getLatestAutomationSync: (accountId: string) =>
+    request<ReadOnlySyncResult | null>(
+      `/api/accounts/${accountId}/automation/latest-sync`,
+    ),
   getAutomationDecisions: (accountId: string) =>
     request<AutomationDecisionRecord[]>(
       `/api/accounts/${accountId}/automation/decisions`,
+    ),
+  getAutomationApprovals: (accountId: string) =>
+    request<AutomationApprovalRecord[]>(
+      `/api/accounts/${accountId}/automation/approvals`,
+    ),
+  approveAutomationDecision: (accountId: string, decisionId: string) =>
+    request<AutomationApprovalRecord>(
+      `/api/accounts/${accountId}/automation/decisions/${decisionId}/approve`,
+      { method: "POST" },
     ),
   previewAutomation: (accountId: string) =>
     request<AutomationRunRecord>(
@@ -229,13 +505,43 @@ export const api = {
     }),
   getAnalytics: (
     accountId: string,
-    days: number,
+    range: { from: string; to: string },
     entityType?: ManualStatusInput["entityType"],
   ) => {
-    const query = new URLSearchParams({ days: String(days) });
+    const query = new URLSearchParams({ from: range.from, to: range.to });
     if (entityType) query.set("entityType", entityType);
-    return request<EntityMetricSnapshotRecord[]>(
+    return request<MetricBatchRecord[]>(
       `/api/accounts/${accountId}/analytics?${query.toString()}`,
     );
   },
+  getMaintenanceStatus: () =>
+    request<MaintenanceStatus>("/api/maintenance/status"),
+  getAuditLogs: (filters: Partial<AuditLogFilter> = {}) => {
+    const query = new URLSearchParams();
+    if (filters.accountId) query.set("accountId", filters.accountId);
+    if (filters.actorId) query.set("actorId", filters.actorId);
+    if (filters.action) query.set("action", filters.action);
+    if (filters.correlationId) query.set("correlationId", filters.correlationId);
+    if (filters.from) query.set("from", filters.from);
+    if (filters.to) query.set("to", filters.to);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    return request<AuditLogRecord[]>(`/api/maintenance/audit?${query.toString()}`);
+  },
+  getDatabaseBackups: () =>
+    request<DatabaseBackupRecord[]>("/api/maintenance/backups"),
+  createDatabaseBackup: () =>
+    request<DatabaseBackupRecord>("/api/maintenance/backups", { method: "POST" }),
+  verifyDatabaseBackup: (backupId: string) =>
+    request<DatabaseBackupRecord>(`/api/maintenance/backups/${backupId}/verify`, { method: "POST" }),
+  requestDatabaseRestore: (backupId: string) =>
+    request<{ backup: DatabaseBackupRecord; restartRequired: boolean; message: string }>(
+      `/api/maintenance/backups/${backupId}/restore`,
+      { method: "POST" },
+    ),
+  checkForUpdates: () =>
+    request<UpdateRuntimeStatus>("/api/maintenance/updates/check", { method: "POST" }),
+  downloadUpdate: () =>
+    request<UpdateRuntimeStatus>("/api/maintenance/updates/download", { method: "POST" }),
+  installUpdate: () =>
+    request<UpdateRuntimeStatus>("/api/maintenance/updates/install", { method: "POST" }),
 };

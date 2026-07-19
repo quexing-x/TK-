@@ -34,6 +34,20 @@ describe("CredentialVault", () => {
       } finally {
         await rm(directory, { force: true, recursive: true });
       }
+      });
+
+    it("round-trips a large Unicode creation profile without JSON corruption", async () => {
+      const directory = await mkdtemp(join(tmpdir(), "tk-auto-dpapi-large-"));
+      try {
+        const vault = new WindowsDpapiCredentialVault(directory);
+        const secret = JSON.stringify({ name: "测试创建模板", body: "素材参数；".repeat(10_000) });
+        const reference = await vault.create(secret);
+        const restored = await vault.read(reference);
+        expect(restored).toBe(secret);
+        expect(() => JSON.parse(restored!)).not.toThrow();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     });
   }
 });

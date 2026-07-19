@@ -13,3 +13,6 @@ data/*.db-*
 data/logs/
 data/credentials/
 *.log
+/private/
+/apps/api/data/
+/apps/desktop/data/

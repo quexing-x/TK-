@@ -30,8 +30,51 @@ describe("web API client", () => {
     expect(fetch).toHaveBeenCalledWith(
       "/api/bootstrap",
       expect.objectContaining({
-        headers: expect.objectContaining({ "Content-Type": "application/json" }),
+        headers: expect.not.objectContaining({ "Content-Type": "application/json" }),
       }),
+    );
+  });
+
+  it("does not send an empty JSON body header for automation preview", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.previewAutomation("account-1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1/automation/preview",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.not.objectContaining({ "Content-Type": "application/json" }),
+      }),
+    );
+  });
+
+  it("loads account-scoped provider capabilities", async () => {
+    const payload = {
+      accountId: "account-1",
+      providerKind: "cookie",
+      providerDisplayName: "Cookie",
+      capabilityVersion: "cookie-v2",
+      authorizationStatus: "active",
+      authorizedAt: "2026-07-18T00:00:00.000Z",
+      authorizationExpiresAt: null,
+      capabilities: [{ capability: "create-campaigns", available: true, reason: "available" }],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.getAccountCapabilities("account-1")).resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1/capabilities",
+      expect.any(Object),
     );
   });
 
@@ -127,5 +170,106 @@ describe("web API client", () => {
       "/api/notifications/channels/wecom/credential",
       expect.objectContaining({ method: "PUT" }),
     );
+  });
+
+  it("updates the account-scoped low-risk policy without enabling other automation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        policy: {
+          accountId: "account-1",
+          enabled: true,
+          policyVersion: "disable-only-v1",
+          dailyActionLimit: 3,
+          updatedAt: "2026-07-18T00:00:00.000Z",
+        },
+        todayUsage: 0,
+        circuit: null,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.updateLowRiskAutomation("account-1", {
+      enabled: true,
+      dailyActionLimit: 3,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1/low-risk-automation",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ enabled: true, dailyActionLimit: 3 }),
+      }),
+    );
+  });
+
+  it("requests a server-verified copy preview before creating a migration plan", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "preview-1", safeToCreate: true }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      sourceAccountId: "source-account",
+      sourceAdId: "source-ad",
+      targetAccountIds: ["target-account"],
+      launchPresetId: "preset-1",
+      launchRows: [{
+        rowNumber: 2,
+        campaignName: "campaign",
+        adGroupName: "group",
+        adName: "260718:001",
+        videoCode: "video-1",
+        productUrl: "https://example.com/product",
+        region: "US",
+        dailyBudget: 100,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        initialStatus: "disabled" as const,
+      }],
+    };
+
+    await api.createLaunchCopyPreview(input);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/launch-plans/copy-preview",
+      expect.objectContaining({ method: "POST", body: JSON.stringify(input) }),
+    );
+  });
+
+  it("uses the maintenance endpoints for audit, backup, restore, and signed updates", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.getMaintenanceStatus();
+    await api.getAuditLogs({ action: "write-task", correlationId: "corr-1", limit: 25 });
+    await api.getDatabaseBackups();
+    await api.createDatabaseBackup();
+    await api.verifyDatabaseBackup("backup-1");
+    await api.requestDatabaseRestore("backup-1");
+    await api.checkForUpdates();
+    await api.downloadUpdate();
+    await api.installUpdate();
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/maintenance/status",
+      "/api/maintenance/audit?action=write-task&correlationId=corr-1&limit=25",
+      "/api/maintenance/backups",
+      "/api/maintenance/backups",
+      "/api/maintenance/backups/backup-1/verify",
+      "/api/maintenance/backups/backup-1/restore",
+      "/api/maintenance/updates/check",
+      "/api/maintenance/updates/download",
+      "/api/maintenance/updates/install",
+    ]);
+    expect(fetchMock).toHaveBeenNthCalledWith(4, "/api/maintenance/backups", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(6, "/api/maintenance/backups/backup-1/restore", expect.objectContaining({ method: "POST" }));
   });
 });

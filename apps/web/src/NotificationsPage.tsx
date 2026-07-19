@@ -412,7 +412,7 @@ function HistoryTables({ deliveries, cycles }: { deliveries: NotificationDeliver
     <div className="notification-history-grid">
       <div className="panel table-panel">
         <div className="panel-heading"><div><span className="panel-icon"><BellRing size={18} /></span><div><h2>最近轮询汇总</h2><p>仅记录存在到期账户的实际轮询批次。</p></div></div></div>
-        <div className="table-wrap"><table><thead><tr><th>完成时间</th><th>账户</th><th>开启</th><th>关闭</th><th>无操作</th><th>失败 / 跳过</th></tr></thead><tbody>
+        <div className="table-wrap"><table><thead><tr><th>完成时间</th><th>账户数</th><th>开启</th><th>关闭</th><th>无操作</th><th>失败 / 跳过</th></tr></thead><tbody>
           {cycles.length === 0 ? <tr><td colSpan={6}>尚无轮询汇总。</td></tr> : cycles.slice(0, 10).map((cycle) => {
             const summary = summarizeCycle(cycle);
             return <tr key={cycle.id}><td>{formatTime(cycle.finishedAt ?? cycle.startedAt)}</td><td>{cycle.accounts.length}</td><td>{summary.enabled}</td><td>{summary.disabled}</td><td>{summary.noAction}</td><td>{summary.failed} / {summary.skipped}</td></tr>;
