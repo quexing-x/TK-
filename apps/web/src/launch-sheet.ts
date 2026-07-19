@@ -7,6 +7,7 @@ import {
 } from "@tk-auto/core";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+let excelJsModule: Promise<typeof import("exceljs")> | undefined;
 
 export async function readLaunchSpreadsheet(
   file: File,
@@ -17,7 +18,7 @@ export async function readLaunchSpreadsheet(
   if (extension === "csv") {
     table = parseCsvTable(await file.text());
   } else if (extension === "xlsx") {
-    const { Workbook } = await import("exceljs");
+    const { Workbook } = await loadExcelJs();
     const workbook = new Workbook();
     await workbook.xlsx.load(await file.arrayBuffer());
     const worksheet = workbook.worksheets[0];
@@ -36,7 +37,7 @@ export async function readLaunchSpreadsheet(
 }
 
 export async function downloadLaunchTemplate(): Promise<void> {
-  const { Workbook } = await import("exceljs");
+  const { Workbook } = await loadExcelJs();
   const workbook = new Workbook();
   const input = workbook.addWorksheet("批量创建", { views: [{ state: "frozen", ySplit: 1 }] });
   input.addRow(launchSheetColumns.map((column) => column.label));
@@ -96,6 +97,11 @@ export function parseCsvTable(text: string): string[][] {
   }
   if (cell || row.length > 0) { row.push(cell.replace(/\r$/, "")); rows.push(row); }
   return rows;
+}
+
+function loadExcelJs(): Promise<typeof import("exceljs")> {
+  // Keep the spreadsheet library outside the initial application module graph.
+  return (excelJsModule ??= import("exceljs"));
 }
 
 function styleHeader(row: { font: object; fill: object; alignment: object }): void {
