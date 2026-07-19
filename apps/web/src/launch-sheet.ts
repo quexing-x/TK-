@@ -101,7 +101,13 @@ export function parseCsvTable(text: string): string[][] {
 
 function loadExcelJs(): Promise<typeof import("exceljs")> {
   // Keep the spreadsheet library outside the initial application module graph.
-  return (excelJsModule ??= import("exceljs"));
+  if (!excelJsModule) {
+    excelJsModule = import("exceljs").catch((error: unknown) => {
+      excelJsModule = undefined;
+      throw error;
+    });
+  }
+  return excelJsModule;
 }
 
 function styleHeader(row: { font: object; fill: object; alignment: object }): void {
