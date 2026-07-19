@@ -4,6 +4,7 @@ import { defaultCreationPresetConfig, getCreationTemplateReadiness, type Account
 import { api, type LaunchExecutionResult } from "./api";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
 import { canUseCopySource, canUseLaunchTarget } from "./provider-capability-view";
+import { createLaunchProgressPoller } from "./launch-progress-polling";
 
 type LaunchMode = "single" | "multi" | "copy";
 type LaunchFeedback = {
@@ -53,6 +54,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     adId: null,
   });
   const fileInput = useRef<HTMLInputElement>(null);
+  const loadRef = useRef<() => Promise<void>>(async () => {});
 
   const selectedPreset = presets.find((item) => item.id === presetId) ?? null;
   const createTargets = useMemo(
@@ -141,13 +143,14 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     setPresetId((current) => current && nextPresets.some((item) => item.id === current) ? current : (nextPresets[0]?.id ?? ""));
     onError(null);
   };
+  loadRef.current = load;
   useEffect(() => { void load().catch((cause) => onError(messageOf(cause))); }, [onError]);
   useEffect(() => {
-    if (activePlanIds.length === 0) return;
-    const timer = window.setInterval(() => {
-      void load().catch((cause) => onError(messageOf(cause)));
-    }, 750);
-    return () => window.clearInterval(timer);
+    const poller = createLaunchProgressPoller(() => {
+      void loadRef.current().catch((cause) => onError(messageOf(cause)));
+    });
+    poller.reconcile(activePlanIds);
+    return () => poller.stop();
   }, [activePlanIds.length, onError]);
   useEffect(() => {
     if (sourceAccounts.length === 0) {
