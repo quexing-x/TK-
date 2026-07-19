@@ -1,4 +1,5 @@
 import type { CellValue } from "exceljs";
+import { loadExcelJs } from "./exceljs-loader.js";
 import {
   launchSheetColumns,
   parseLaunchSheetTable,
@@ -17,7 +18,7 @@ export async function readLaunchSpreadsheet(
   if (extension === "csv") {
     table = parseCsvTable(await file.text());
   } else if (extension === "xlsx") {
-    const { Workbook } = await import("exceljs");
+    const { Workbook } = await loadExcelJs();
     const workbook = new Workbook();
     await workbook.xlsx.load(await file.arrayBuffer());
     const worksheet = workbook.worksheets[0];
@@ -36,7 +37,7 @@ export async function readLaunchSpreadsheet(
 }
 
 export async function downloadLaunchTemplate(): Promise<void> {
-  const { Workbook } = await import("exceljs");
+  const { Workbook } = await loadExcelJs();
   const workbook = new Workbook();
   const input = workbook.addWorksheet("批量创建", { views: [{ state: "frozen", ySplit: 1 }] });
   input.addRow(launchSheetColumns.map((column) => column.label));
