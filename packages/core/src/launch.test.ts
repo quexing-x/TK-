@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, parseLaunchSheetTable } from "./launch.js";
+import { automaticName, LaunchCopyPreviewInputSchema, parseLaunchSheetTable } from "./launch.js";
 
 const preset = {
   name: "测试预设",
@@ -57,5 +57,26 @@ describe("parseLaunchSheetTable", () => {
 
   it("formats automatic names as YYMMDD:XXX", () => {
     expect(automaticName(new Date("2026-07-16T09:00:00.000Z"), 7)).toBe("260716:007");
+  });
+
+  it("caps one copy preview at three controlled target accounts and rows", () => {
+    const row = parseLaunchSheetTable(
+      [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["系列", "组", "video-1", "https://example.com/product"]],
+      preset,
+    ).rows[0]!;
+    expect(() => LaunchCopyPreviewInputSchema.parse({
+      sourceAccountId: "source",
+      sourceAdId: "source-ad",
+      targetAccountIds: ["a", "b", "c", "d"],
+      launchPresetId: "preset",
+      launchRows: [row],
+    })).toThrow();
+    expect(() => LaunchCopyPreviewInputSchema.parse({
+      sourceAccountId: "source",
+      sourceAdId: "source-ad",
+      targetAccountIds: ["a"],
+      launchPresetId: "preset",
+      launchRows: [row, row, row, row],
+    })).toThrow();
   });
 });

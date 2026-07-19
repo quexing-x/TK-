@@ -21,12 +21,33 @@ try {
   const raw = await vault.read(connection.credentialRef);
   if (!raw) throw new Error("测试账户凭据已失效。");
   const provider = new CookieAdsProvider();
-  const sync = await provider.syncReadOnly({
-    accountId: account.id,
-    settings: connection.settings,
-    credential: CookieCredentialInputSchema.parse(JSON.parse(raw)),
-    timezone: account.timezone,
-  });
+  let sync: Awaited<ReturnType<CookieAdsProvider["syncReadOnly"]>>;
+  try {
+    sync = await provider.syncReadOnly({
+      accountId: account.id,
+      settings: connection.settings,
+      credential: CookieCredentialInputSchema.parse(JSON.parse(raw)),
+      timezone: account.timezone,
+    });
+  } catch (cause) {
+    store.updateProviderStatus(account.id, "cookie", "failed", `创建结果核验同步异常：${safeMessage(cause)}`);
+    store.setAccountExecutionMode(account.id, "manual-approval", "创建结果核验同步失败，已自动熔断写入。");
+    throw cause;
+  }
+  store.saveReadOnlySync(account.id, "cookie", sync.entities, sync.result);
+  if (sync.result.quality.status !== "healthy") {
+    store.setAccountExecutionMode(
+      account.id,
+      "manual-approval",
+      `创建结果核验同步质量为 ${sync.result.quality.status}，已自动熔断写入。`,
+    );
+    throw new Error(
+      `创建结果核验数据质量为 ${sync.result.quality.status}，禁止宣布验收成功。`,
+    );
+  }
+  if (sync.result.warnings.length > 0) {
+    store.setAccountExecutionMode(account.id, "manual-approval", `创建结果核验数据不完整：${sync.result.warnings.join("；").slice(0, 500)}`);
+  }
   const verification = (["campaign", "ad-group", "ad"] as const).map((entityType) => {
     const matches = sync.entities.filter((entity) => entity.entityType === entityType && entityName(entity) === expected[entityType]);
     const statuses = matches.map((entity) => normalizeProviderEntity(entity).status);
@@ -38,9 +59,15 @@ try {
   }));
   console.log(JSON.stringify({ counts: sync.result.counts, verification, available }));
   const missing = verification.filter((item) => item.matchCount === 0);
-  if (missing.length > 0) throw new Error(`尚未回读到：${missing.map((item) => item.entityType).join("、")}。`);
+  if (missing.length > 0) {
+    store.setAccountExecutionMode(account.id, "manual-approval", "创建结果未回读到完整层级，已自动熔断写入。");
+    throw new Error(`尚未回读到：${missing.map((item) => item.entityType).join("、")}。`);
+  }
   const unsafe = verification.filter((item) => item.statuses.some((status) => status !== "disabled"));
-  if (unsafe.length > 0) throw new Error(`以下层级未确认全部关闭：${unsafe.map((item) => item.entityType).join("、")}。`);
+  if (unsafe.length > 0) {
+    store.setAccountExecutionMode(account.id, "manual-approval", "核验对象未确认全部关闭，已自动熔断写入。");
+    throw new Error(`以下层级未确认全部关闭：${unsafe.map((item) => item.entityType).join("、")}。`);
+  }
   console.log("已回读系列、广告组和广告，三层均为关闭状态。");
 } finally {
   await proxyAgent?.close();
@@ -63,4 +90,8 @@ function entityName(entity: ProviderEntity): string {
     if (typeof entity.payload[key] === "string") return entity.payload[key];
   }
   return "";
+}
+
+function safeMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : "未知 Provider 错误";
 }
