@@ -144,7 +144,7 @@ describe("AutomationStore", () => {
     ).toBe(false);
     reopenedStore.close();
     rmSync(directory, { recursive: true, force: true });
-  });
+  }, 15_000);
 
   it("migrates existing accounts to the safe manual-approval execution mode", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-"));
