@@ -444,6 +444,33 @@ describe("local API", () => {
     expect(cookies).toContain("sessionid=second-test-session");
   });
 
+  it("queues batch creation for the background worker without waiting for provider completion", async () => {
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
+      await providerStarted;
+      return mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "queued-campaign",
+        adGroupId: "queued-group",
+        adId: "queued-ad",
+        message: "created in worker",
+      }));
+    });
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    const queued = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/queue` });
+
+    expect(queued.statusCode).toBe(202);
+    expect(queued.json()).toMatchObject({ queued: true, plan: { id: planId } });
+    await vi.waitFor(() => expect(createFromPreset).toHaveBeenCalledTimes(1));
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "running", attemptCount: 1 });
+
+    releaseProvider();
+    await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
+  });
+
   it("lists detected entities and manages the ignore list", async () => {
     const now = new Date().toISOString();
     store.saveReadOnlySync(

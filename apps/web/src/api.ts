@@ -105,6 +105,11 @@ export interface LaunchExecutionResult {
   }>;
 }
 
+export interface LaunchQueueResult {
+  plan: MultiAccountLaunchPlanRecord;
+  queued: true;
+}
+
 export interface LowRiskAutomationState {
   policy: LowRiskAutomationPolicy;
   todayUsage: number;
@@ -277,6 +282,10 @@ export const api = {
     request<void>(`/api/launch-plans/${planId}`, { method: "DELETE" }),
   executeLaunchPlan: (planId: string) =>
     request<LaunchExecutionResult>(`/api/launch-plans/${planId}/execute`, {
+      method: "POST",
+    }),
+  queueLaunchPlan: (planId: string) =>
+    request<LaunchQueueResult>(`/api/launch-plans/${planId}/queue`, {
       method: "POST",
     }),
   createLaunchCopyPreview: (input: LaunchCopyPreviewInput) =>

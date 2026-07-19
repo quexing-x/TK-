@@ -37,6 +37,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [plans, setPlans] = useState<MultiAccountLaunchPlanRecord[]>([]);
   const [planItems, setPlanItems] = useState<Record<string, LaunchPlanItemRecord[]>>({});
+  const [activePlanIds, setActivePlanIds] = useState<string[]>([]);
   const [connections, setConnections] = useState<Record<string, ProviderConnection | null>>({});
   const [sheet, setSheet] = useState<LaunchSheetImportResult | null>(null);
   const [fileName, setFileName] = useState("");
@@ -140,6 +141,18 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   };
   useEffect(() => { void load().catch((cause) => onError(messageOf(cause))); }, [onError]);
   useEffect(() => {
+    if (activePlanIds.length === 0) return;
+    const timer = window.setInterval(() => {
+      void load().then(() => {
+        setActivePlanIds((current) => current.filter((planId) => {
+          const items = planItems[planId] ?? [];
+          return items.some((item) => item.status === "pending" || item.status === "running");
+        }));
+      }).catch((cause) => onError(messageOf(cause)));
+    }, 750);
+    return () => window.clearInterval(timer);
+  }, [activePlanIds.length, onError, planItems]);
+  useEffect(() => {
     if (sourceAccounts.length === 0) {
       setSourceAccountId("");
       setTargetIds([]);
@@ -235,8 +248,9 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
         launchPresetId: presetId,
         launchRows: sheet.rows,
       });
-      const execution = await api.executeLaunchPlan(plan.id);
-      setExecutionFeedback(summarizeExecution(execution, accounts));
+      await api.queueLaunchPlan(plan.id);
+      setActivePlanIds((current) => [...new Set([...current, plan.id])]);
+      setExecutionFeedback({ tone: "warning", title: "已加入后台创建队列", lines: ["页面将持续刷新逐项状态；关闭本页不会中断已领取的任务。"] });
       setSheet(null); setFileName(""); setTargetIds([]); setCopyPreview(null);
       if (fileInput.current) fileInput.current.value = "";
       await load(); onError(null);
@@ -323,7 +337,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       {executionFeedback && <div className={executionFeedback.tone === "success" ? "creation-template-note" : `sheet-issues ${executionFeedback.tone}`}><strong>{executionFeedback.title}</strong><ul>{executionFeedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul></div>}
     </div>
 
-    <div className="panel table-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>仅保留每次发布计划的账户级结果、成功数量和错误摘要，不展示全部广告。</p></div></div></div><div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>账户结果</th><th>发布结果</th><th>操作</th></tr></thead><tbody>{plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => { const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0); const failed = plan.executionResults.reduce((total, item) => total + item.failedCount, 0); const unknown = plan.executionResults.reduce((total, item) => total + item.unknownCount, 0); const items = planItems[plan.id] ?? []; const failedItems = items.filter((item) => item.status === "failed"); const unknownItems = items.filter((item) => item.status === "unknown"); return <tr key={plan.id}><td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.launchRows.length} 条 × {plan.targetAccountIds.length} 个账户</td><td>{plan.executionResults.length > 0 ? <small className="plan-execution-summary">成功创建 {created} · 明确失败 {failed}（可重试） · 结果未知 {unknown}（禁止重试，需人工核验）</small> : "尚未执行"}</td><td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{item.accountId}：{detail.text}</small> : null; })}</td><td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重试 {item.launchRow.adName}</button>)}{unknownItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => setVerificationTarget({ planId: plan.id, item })} type="button">人工核验 {item.launchRow.adName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td></tr>; })}</tbody></table></div></div>
+    <div className="panel table-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>后台执行时会自动刷新逐项状态和当前阶段。</p></div></div></div><div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>{plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => { const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0); const failed = plan.executionResults.reduce((total, item) => total + item.failedCount, 0); const unknown = plan.executionResults.reduce((total, item) => total + item.unknownCount, 0); const items = planItems[plan.id] ?? []; const failedItems = items.filter((item) => item.status === "failed"); const unknownItems = items.filter((item) => item.status === "unknown"); return <tr key={plan.id}><td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.launchRows.length} 条 × {plan.targetAccountIds.length} 个账户</td><td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : ["failed", "unknown"].includes(item.status) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adName} · {launchItemStatusLabel(item.status)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td><td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">成功 {created} · 失败 {failed} · 待核验 {unknown}</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{item.accountId}：{detail.text}</small> : null; })}</td><td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重试 {item.launchRow.adName}</button>)}{unknownItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => setVerificationTarget({ planId: plan.id, item })} type="button">人工核验 {item.launchRow.adName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td></tr>; })}</tbody></table></div></div>
 
     {verificationTarget && <LaunchVerificationDialog
       accountName={accounts.find((account) => account.id === verificationTarget.item.accountId)?.displayName ?? verificationTarget.item.accountId}
@@ -439,4 +453,12 @@ export function summarizePlanAccountResult(
     tone: result.failedCount > 0 ? "danger" : "warning",
     text: parts.join("；"),
   };
+}
+
+function launchItemStatusLabel(status: LaunchPlanItemRecord["status"]): string {
+  return ({ pending: "排队中", running: "执行中", succeeded: "已成功", failed: "明确失败", unknown: "待核验", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
+}
+
+function launchPhaseLabel(phase: LaunchPlanItemRecord["phase"]): string {
+  return ({ validation: "校验", campaign_draft: "系列草稿", adgroup_draft: "广告组草稿", creative_draft: "广告草稿", publishing: "发布", readback: "回读", sync: "同步" } as Record<string, string>)[phase] ?? phase;
 }
