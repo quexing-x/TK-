@@ -472,6 +472,20 @@ describe("local API", () => {
     await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
   });
 
+  it("does not persist a launch queue request while the master switch is off", async () => {
+    const planId = await installLaunchTestProvider(
+      async (_context, mutations) => mutations.map((mutation) => ({ ...mutation, ok: true, campaignId: "c", adGroupId: "g", adId: "a", message: "created" })),
+      [apiLaunchRow(2)],
+    );
+    store.updateSystemRuntimeState({ enabled: false });
+
+    const queued = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/queue` });
+
+    expect(queued.statusCode).toBe(409);
+    expect(queued.json().message).toContain("再次确认");
+    expect(store.listQueuedLaunchPlans()).toEqual([]);
+  });
+
   it("keeps a queued interrupted worker item visible until lease recovery marks it unknown", async () => {
     vi.useFakeTimers();
     try {

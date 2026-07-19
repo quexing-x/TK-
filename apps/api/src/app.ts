@@ -611,6 +611,9 @@ export async function createApp(
     if (!dependencies.store.getMultiAccountLaunchPlan(planId)) {
       return reply.status(404).send({ message: "投放计划不存在。" });
     }
+    if (!dependencies.store.getSystemRuntimeState().enabled) {
+      return reply.status(409).send({ message: "软件总开关已关闭，批量创建写入已暂停。请重新开启后再次确认并加入队列。" });
+    }
     try {
       const user = request.authSession?.user;
       const actor: WriteTaskActor = user
