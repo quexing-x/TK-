@@ -1,4 +1,5 @@
 import type { CellValue } from "exceljs";
+import { loadExcelJs } from "./exceljs-loader.js";
 import {
   launchSheetColumns,
   parseLaunchSheetTable,
@@ -7,7 +8,6 @@ import {
 } from "@tk-auto/core";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-let excelJsModule: Promise<typeof import("exceljs")> | undefined;
 
 export async function readLaunchSpreadsheet(
   file: File,
@@ -97,17 +97,6 @@ export function parseCsvTable(text: string): string[][] {
   }
   if (cell || row.length > 0) { row.push(cell.replace(/\r$/, "")); rows.push(row); }
   return rows;
-}
-
-function loadExcelJs(): Promise<typeof import("exceljs")> {
-  // Keep the spreadsheet library outside the initial application module graph.
-  if (!excelJsModule) {
-    excelJsModule = import("exceljs").catch((error: unknown) => {
-      excelJsModule = undefined;
-      throw error;
-    });
-  }
-  return excelJsModule;
 }
 
 function styleHeader(row: { font: object; fill: object; alignment: object }): void {

@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { parseCsvTable, readLaunchSpreadsheet } from "./launch-sheet.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { downloadLaunchTemplate, parseCsvTable, readLaunchSpreadsheet } from "./launch-sheet.js";
 
 const preset = { name: "测试预设", region: "US", dailyBudget: 120, bid: null, startAt: null, endAt: null, initialStatus: "disabled" as const };
 
 describe("launch spreadsheet", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("handles commas, escaped quotes and line breaks inside quoted cells", () => {
     expect(parseCsvTable('\uFEFF推广系列名称,广告组名称,视频代码\r\n"系列,一",广告组,video-001\r\n')).toEqual([
       ["推广系列名称", "广告组名称", "视频代码"],
@@ -24,5 +28,22 @@ describe("launch spreadsheet", () => {
 
     expect(result.errors).toEqual([]);
     expect(result.rows[0]).toMatchObject({ campaignName: "测试系列", adGroupName: "测试广告组", videoCode: "video-001", productUrl: "https://example.com/product", region: "US", dailyBudget: 120, bid: null });
+  });
+  it("downloads a populated workbook template", async () => {
+    const anchor = { href: "", download: "", click: vi.fn(), remove: vi.fn() };
+    const appendChild = vi.fn();
+    const createObjectURL = vi.fn(() => "blob:launch-template");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("document", { createElement: vi.fn(() => anchor), body: { appendChild } });
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+
+    await downloadLaunchTemplate();
+
+    expect(anchor.download).toBe("TK广告批量创建模板.xlsx");
+    expect(anchor.href).toBe("blob:launch-template");
+    expect(appendChild).toHaveBeenCalledWith(anchor);
+    expect(anchor.click).toHaveBeenCalledOnce();
+    expect(anchor.remove).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:launch-template");
   });
 });
