@@ -313,10 +313,45 @@ export class CookieAdsProvider implements AdsProvider {
       (item) => item.target === "campaign",
     ) ?? siblingListRequest(sessionRequest, "campaign");
     const results: CreationMutationResult[] = [];
+    const batchCampaignIds = new Map<string, string>();
+    const batchAdGroupNames = new Map<string, Set<string>>();
+    const uncertainCampaigns = new Set<string>();
     for (const mutation of mutations) {
+      const campaignKey = mutation.row.campaignName.trim();
+      if (mutation.templateMode === "none" && uncertainCampaigns.has(campaignKey)) {
+        results.push({
+          ...mutation,
+          ok: false,
+          failureKind: "retryable",
+          message: "同批次前一条同系列任务结果未知，已停止后续创建以避免重复系列或广告组。",
+        });
+        continue;
+      }
       try {
-        results.push(await createCookieDraftChain(sessionRequest, campaignListRequest, credential, mutation, context.timezone ?? "UTC"));
+        const result = await createCookieDraftChain(
+          sessionRequest,
+          campaignListRequest,
+          credential,
+          mutation,
+          context.timezone ?? "UTC",
+          mutation.templateMode === "none" ? {
+            ...(batchCampaignIds.get(campaignKey)
+              ? { campaignId: batchCampaignIds.get(campaignKey)! }
+              : {}),
+            adGroupNames: batchAdGroupNames.get(campaignKey) ?? new Set<string>(),
+          } : undefined,
+        );
+        results.push(result);
+        if (mutation.templateMode === "none" && result.ok && result.campaignId) {
+          batchCampaignIds.set(campaignKey, result.campaignId);
+          const names = batchAdGroupNames.get(campaignKey) ?? new Set<string>();
+          names.add(result.row.adGroupName.trim());
+          batchAdGroupNames.set(campaignKey, names);
+        }
       } catch (cause) {
+        if (mutation.templateMode === "none" && cause instanceof UnknownCreationStateError) {
+          uncertainCampaigns.add(campaignKey);
+        }
         results.push({
           ...mutation,
           ok: false,
@@ -467,10 +502,19 @@ async function createCookieDraftChain(
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
+  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
 ): Promise<CreationMutationResult> {
   const dispatchState = { mutationDispatched: false };
   try {
-    return await runCookieDraftChain(sessionRequest, campaignListRequest, credential, mutation, timezone, dispatchState);
+    return await runCookieDraftChain(
+      sessionRequest,
+      campaignListRequest,
+      credential,
+      mutation,
+      timezone,
+      dispatchState,
+      batchReservation,
+    );
   } catch (cause) {
     if (cause instanceof ConfirmedCreationFailureError || cause instanceof UnknownCreationStateError) {
       throw cause;
@@ -519,6 +563,7 @@ async function runCookieDraftChain(
   mutation: CreationMutation,
   timezone: string,
   dispatchState: CreationDispatchState,
+  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
 ): Promise<CreationMutationResult> {
   mutation.onProgress?.({ phase: "validation", evidence: {} });
   const copyOnly = mutation.templateMode === "copy";
@@ -562,16 +607,25 @@ async function runCookieDraftChain(
   if (exactCampaigns.length > 1) {
     throw new RetryableCreationError("当前账户存在多个同名推广系列，无法确定应复用哪一个系列。");
   }
-  const existingCampaignId = exactCampaigns[0]?.externalId;
+  const remoteCampaignId = exactCampaigns[0]?.externalId;
+  if (batchReservation?.campaignId && remoteCampaignId && batchReservation.campaignId !== remoteCampaignId) {
+    throw new RetryableCreationError("同批次系列预留与远端同名系列不一致，已停止创建。");
+  }
+  const existingCampaignId = batchReservation?.campaignId ?? remoteCampaignId;
   const creationRow = existingCampaignId
-    ? { ...resolvedRow, adGroupName: uniqueAdGroupName(preflightEntities, resolvedRow.adGroupName, existingCampaignId) }
+    ? { ...resolvedRow, adGroupName: uniqueAdGroupName(
+        preflightEntities,
+        resolvedRow.adGroupName,
+        existingCampaignId,
+        batchReservation?.adGroupNames,
+      ) }
     : resolvedRow;
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
     : buildDraftPayloads(creationRow, mutation.preset, timezone);
   const initializationTemplateCampaignId = copyOnly
     ? mutation.templateCampaignId
-    : existingCampaignId ?? bootstrapTemplateCampaignId;
+    : remoteCampaignId ?? bootstrapTemplateCampaignId;
   const initializedIds = initializationTemplateCampaignId
     ? await initializeProfileDraftIds(
         sessionRequest,
@@ -750,6 +804,7 @@ async function runCookieDraftChain(
   mutation.onProgress?.({ phase: "readback", evidence: {} });
   return {
     ...mutation,
+    row: creationRow,
     ok: true,
     ...(ids.campaignId ? { campaignId: ids.campaignId } : {}),
     ...(ids.adGroupId ? { adGroupId: ids.adGroupId } : {}),
@@ -915,6 +970,7 @@ function uniqueAdGroupName(
   preflightEntities: ProviderEntity[],
   requestedName: string,
   campaignId: string,
+  reservedNames: ReadonlySet<string> = new Set(),
 ): string {
   const existingNames = new Set(
     preflightEntities
@@ -922,6 +978,7 @@ function uniqueAdGroupName(
       .map((entity) => normalizeProviderEntity(entity).name.trim())
       .filter(Boolean),
   );
+  for (const name of reservedNames) existingNames.add(name);
   if (!existingNames.has(requestedName)) return requestedName;
   for (let suffix = 1; suffix <= 999; suffix += 1) {
     const candidate = `${requestedName}-${String(suffix).padStart(3, "0")}`;
@@ -1852,7 +1909,11 @@ async function requestCompleteListPages(
       throw new RetryableCreationError(`${step} 未返回请求的第 ${page} 页，无法安全判断同名对象。`);
     }
     pages.push(payload);
-    if (!hasExplicitAdditionalPages(payload)) return pages;
+    if (hasExplicitAdditionalPages(payload)) continue;
+    if (!hasExplicitPaginationEnd(payload)) {
+      throw new RetryableCreationError(`${step} 缺少可验证的分页结束信息，无法安全判断同名对象。`);
+    }
+    return pages;
   }
   throw new RetryableCreationError(`${step} 超过 100 页，无法在创建前完成安全查重。`);
 }
@@ -1971,6 +2032,18 @@ function hasExplicitAdditionalPages(payload: Record<string, unknown>): boolean {
   if (Number.isInteger(current) && Number.isInteger(total) && total > current) return true;
   const hasMore = data.has_more ?? data.hasMore ?? pageInfo.has_more ?? pageInfo.hasMore;
   return hasMore === true || hasMore === 1 || hasMore === "1";
+}
+
+function hasExplicitPaginationEnd(payload: Record<string, unknown>): boolean {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const pageInfo = isRecord(data.page_info)
+    ? data.page_info
+    : isRecord(data.pageInfo) ? data.pageInfo : isRecord(data.pagination) ? data.pagination : {};
+  const current = Number(pageInfo.page ?? pageInfo.current_page ?? pageInfo.currentPage);
+  const total = Number(pageInfo.total_page ?? pageInfo.totalPage ?? pageInfo.page_count ?? pageInfo.pageCount);
+  if (Number.isInteger(current) && Number.isInteger(total) && current >= 1 && total >= 1 && current >= total) return true;
+  const hasMore = data.has_more ?? data.hasMore ?? pageInfo.has_more ?? pageInfo.hasMore;
+  return hasMore === false || hasMore === 0 || hasMore === "0";
 }
 
 function readRequestedPage(request: CapturedCookieRequest): number | null {

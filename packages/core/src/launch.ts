@@ -118,7 +118,20 @@ export const CreationPresetConfigSchema = z.object({
 });
 export type CreationPresetConfig = z.infer<typeof CreationPresetConfigSchema>;
 export const defaultCreationPresetConfig: CreationPresetConfig =
-  CreationPresetConfigSchema.parse({});
+  CreationPresetConfigSchema.parse({
+    objectiveType: 3,
+    buyingType: 1,
+    campaignBudgetMode: -1,
+    adBudgetMode: 3,
+    pricing: 1,
+    optimizeGoal: 100,
+    externalAction: 96,
+    identityType: 0,
+    identityId: null,
+    callToActionId: "0",
+    countryCodes: [1668284],
+    placementIds: [3000],
+  });
 
 export const LaunchPresetInputSchema = z.object({
   name: z.string().trim().min(1).max(80),

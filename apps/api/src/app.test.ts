@@ -262,7 +262,16 @@ describe("local API", () => {
     });
     const reference = store.getProviderConnection("demo-account", "cookie")?.credentialRef;
     expect(reference).toBeTruthy();
-    vi.spyOn(vault, "delete").mockRejectedValueOnce(new Error("vault unavailable"));
+    store.saveProviderConnectionSettings("demo-account", { kind: "official-api", advertiserId: "123" });
+    const secondReference = await vault.create(JSON.stringify({ kind: "official-api", accessToken: "test-access-token" }));
+    store.setProviderCredentialReference("demo-account", "official-api", secondReference);
+    const originalDelete = vault.delete.bind(vault);
+    let deleteCount = 0;
+    vi.spyOn(vault, "delete").mockImplementation(async (credentialReference) => {
+      deleteCount += 1;
+      if (deleteCount === 2) throw new Error("vault unavailable");
+      await originalDelete(credentialReference);
+    });
 
     const response = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
 
@@ -270,6 +279,7 @@ describe("local API", () => {
     expect(store.getAccount("demo-account")).not.toBeNull();
     expect(store.getProviderConnection("demo-account", "cookie")?.credentialRef).toBe(reference);
     await expect(vault.read(reference!)).resolves.not.toBeNull();
+    await expect(vault.read(secondReference)).resolves.not.toBeNull();
   });
 
   it("blocks account deletion while launch history still references it", async () => {
@@ -289,6 +299,25 @@ describe("local API", () => {
     expect(store.getAccount("demo-account")).not.toBeNull();
     expect(store.getMultiAccountLaunchPlan(plan.id)).not.toBeNull();
     expect(store.listLaunchPlanItems(plan.id)).toHaveLength(1);
+  });
+
+  it("blocks account deletion while a status write task is active", async () => {
+    const task = store.createStatusWriteTask({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "group-1",
+      entityName: "测试广告组",
+      action: "disable",
+      source: "manual",
+    }, { id: "reviewer", name: "测试用户", kind: "user" });
+
+    const response = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().message).toContain("启停任务");
+    expect(store.getAccount("demo-account")).not.toBeNull();
+    expect(store.getAdOperation(task.id)).toMatchObject({ status: "pending" });
   });
 
   it("stores provider settings and an encrypted credential reference", async () => {
@@ -543,7 +572,7 @@ describe("local API", () => {
             ? { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }
             : url.includes("create_by_snap")
               ? { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "ad" }
-              : { list: [] };
+              : { list: [], pagination: { page: 1, page_count: 1 } };
       return new Response(JSON.stringify({ code: 0, data }), { status: 200, headers: { "content-type": "application/json" } });
     });
 

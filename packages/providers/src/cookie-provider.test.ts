@@ -655,7 +655,7 @@ describe("CookieAdsProvider", () => {
       const url = String(input);
       requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       const body = url.includes("adgroup/list") || url.includes("campaign/list")
-        ? { data: { table: [] }, code: 0 }
+        ? { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 }
         : url.includes("campaign_snap/save")
         ? { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 }
         : url.includes("ad_snap/save")
@@ -758,7 +758,7 @@ describe("CookieAdsProvider", () => {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ url, body });
       const response = url.includes("adgroup/list") || url.includes("campaign/list")
-        ? { data: { table: [{ campaign_id: "source-campaign", campaign_name: "old", campaign_status: "disabled" }] }, code: 0 }
+        ? { data: { table: [{ campaign_id: "source-campaign", campaign_name: "old", campaign_status: "disabled" }], pagination: { page: 1, page_count: 1 } }, code: 0 }
         : url.includes("campaign_snap/copy")
           ? { data: {
               new_campaign_snap_info_item: { campaign_snap_id: "campaign-snap", campaign_snap_form_data: { campaign_name: "copied", campaign_snap_id: "campaign-snap" } },
@@ -859,7 +859,7 @@ describe("CookieAdsProvider", () => {
         return jsonResponse({ code: 0, data: { table: [
           { campaign_id: "source-campaign", campaign_name: "source", campaign_status: "enabled", adgroup_id: "existing-group", adgroup_name: "group" },
           { campaign_id: "source-campaign", campaign_name: "source", campaign_status: "enabled", adgroup_id: "existing-group-001", adgroup_name: "group-001" },
-        ] } });
+        ], pagination: { page: 1, page_count: 1 } } });
       }
       return jsonResponse(successfulCreationPayload(url));
     }));
@@ -933,6 +933,47 @@ describe("CookieAdsProvider", () => {
     expect(adSave?.body.ad_sketch_form_data).toMatchObject({ ad_name: "group-002" });
     expect(requested.filter((item) => item.url.includes("/campaign/list/")).length).toBe(2);
     expect(requested.filter((item) => item.url.includes("/adgroup/list/")).length).toBe(2);
+  });
+
+  it("blocks creation when list pagination completeness cannot be proven", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ code: 0, data: { table: [] } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [creationTestMutation("none")],
+    );
+
+    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
+    expect(result?.message).toContain("分页结束信息");
+  });
+
+  it("reserves campaign and ad-group names across rows in one batch", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      if (url.includes("campaign/list") || url.includes("adgroup/list")) {
+        return jsonResponse({ code: 0, data: { table: [], pagination: { page: 1, page_count: 1 } } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const first = creationTestMutation("none");
+    const second = creationTestMutation("none");
+    second.row.adName = "260717:002";
+
+    const results = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [first, second],
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(requested.filter((item) => item.url.includes("campaign_snap/save"))).toHaveLength(1);
+    const adNames = requested
+      .filter((item) => item.url.includes("ad_snap/save"))
+      .map((item) => (item.body.ad_sketch_form_data as Record<string, unknown>).ad_name);
+    expect(adNames).toEqual(["group", "group-001"]);
   });
 
   it("bootstraps a zero-create draft from a stable campaign template when no verified profile exists", async () => {
@@ -1034,7 +1075,7 @@ describe("CookieAdsProvider", () => {
         ? { data: { table: [
             { campaign_id: "wrong-same-name", campaign_name: "source", campaign_status: "disabled" },
             { campaign_id: "source-campaign", campaign_name: "source", campaign_status: "disabled" },
-          ] }, code: 0 }
+          ], pagination: { page: 1, page_count: 1 } }, code: 0 }
         : url.includes("campaign_snap/copy")
           ? { data: {
               new_campaign_snap_info_item: { campaign_snap_id: "campaign-snap", campaign_snap_form_data: { campaign_name: "copied" } },
@@ -1115,7 +1156,7 @@ describe("CookieAdsProvider", () => {
 
   it("refuses copy creation when the explicitly requested source campaign is missing", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      data: { table: [{ campaign_id: "other", campaign_name: "other", campaign_status: "disabled" }] },
+      data: { table: [{ campaign_id: "other", campaign_name: "other", campaign_status: "disabled" }], pagination: { page: 1, page_count: 1 } },
       code: 0,
     }), { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
@@ -1212,7 +1253,7 @@ describe("CookieAdsProvider", () => {
         });
       }
       const data = url.includes("adgroup/list") || url.includes("campaign/list")
-        ? { table: [] }
+        ? { table: [], pagination: { page: 1, page_count: 1 } }
         : url.includes("campaign_snap/save")
         ? { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }
         : url.includes("ad_snap/save")
@@ -1247,7 +1288,7 @@ describe("CookieAdsProvider", () => {
       if (url.includes("adgroup/list") || url.includes("campaign/list")) {
         return jsonResponse({ code: 0, data: { table: [
           { campaign_id: "existing-campaign", campaign_name: "campaign", campaign_status: "enabled" },
-        ] } });
+        ], pagination: { page: 1, page_count: 1 } } });
       }
       if (url.includes("async_creation/detail")) {
         return jsonResponse({ code: 0, data: { status: 1, result: {
@@ -1578,8 +1619,8 @@ function creationTestMutation(mode: "none" | "copy"): CreationMutation {
 }
 
 function successfulCreationPayload(url: string): Record<string, unknown> {
-  if (url.includes("campaign/list")) return { code: 0, data: { table: [{ campaign_id: "source-campaign", campaign_name: "source", campaign_status: "disabled" }] } };
-  if (url.includes("adgroup/list")) return { code: 0, data: { table: [{ campaign_id: "source-campaign", campaign_name: "source", campaign_status: "disabled" }] } };
+  if (url.includes("campaign/list")) return { code: 0, data: { table: [{ campaign_id: "source-campaign", campaign_name: "source", campaign_status: "disabled" }], pagination: { page: 1, page_count: 1 } } };
+  if (url.includes("adgroup/list")) return { code: 0, data: { table: [{ campaign_id: "source-campaign", campaign_name: "source", campaign_status: "disabled" }], pagination: { page: 1, page_count: 1 } } };
   if (url.includes("campaign_snap/copy")) return { code: 0, data: {
     new_campaign_snap_info_item: { campaign_snap_id: "campaign-snap", campaign_snap_form_data: { campaign_name: "source", campaign_snap_id: "campaign-snap", objective_type: 9 } },
     new_campaign_sketch_id: "campaign-sketch",

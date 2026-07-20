@@ -7,6 +7,7 @@ export interface CredentialVault {
   create(secret: string): Promise<string>;
   read(reference: string): Promise<string | null>;
   delete(reference: string): Promise<void>;
+  restore(reference: string, secret: string): Promise<void>;
 }
 
 export class WindowsDpapiCredentialVault implements CredentialVault {
@@ -26,6 +27,14 @@ export class WindowsDpapiCredentialVault implements CredentialVault {
       mode: 0o600,
     });
     return reference;
+  }
+
+  async restore(reference: string, secret: string): Promise<void> {
+    assertReference(reference);
+    await mkdir(this.directory, { recursive: true });
+    const plaintextBase64 = Buffer.from(secret, "utf8").toString("base64");
+    const encrypted = await runPowerShell(PROTECT_SCRIPT, plaintextBase64);
+    await writeFile(this.pathFor(reference), encrypted, { encoding: "utf8", mode: 0o600 });
   }
 
   async read(reference: string): Promise<string | null> {
@@ -69,6 +78,10 @@ export class InMemoryCredentialVault implements CredentialVault {
 
   async delete(reference: string): Promise<void> {
     this.values.delete(reference);
+  }
+
+  async restore(reference: string, secret: string): Promise<void> {
+    this.values.set(reference, secret);
   }
 }
 

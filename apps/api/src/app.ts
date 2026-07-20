@@ -791,14 +791,24 @@ export async function createApp(
 
   app.delete("/api/accounts/:accountId", async (request, reply) => {
     const { accountId } = AccountParamsSchema.parse(request.params);
+    let credentialBackups: Array<{ reference: string; secret: string }> = [];
     try {
       const credentialReferences = dependencies.store.listAccountCredentialReferences(accountId);
       if (!credentialReferences) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
-      await Promise.all(credentialReferences.map((reference) => dependencies.vault.delete(reference)));
-      dependencies.store.deleteAccount(accountId);
+      credentialBackups = (await Promise.all(credentialReferences.map(async (reference) => ({
+        reference,
+        secret: await dependencies.vault.read(reference),
+      })))).flatMap((item) => item.secret === null ? [] : [{ reference: item.reference, secret: item.secret }]);
+      for (const reference of credentialReferences) {
+        await dependencies.vault.delete(reference);
+      }
+      dependencies.store.deleteAccount(accountId, credentialReferences);
     } catch (cause) {
+      await Promise.allSettled(credentialBackups.map(({ reference, secret }) =>
+        dependencies.vault.restore(reference, secret),
+      ));
       return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
     return reply.status(204).send();

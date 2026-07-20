@@ -87,6 +87,7 @@ import {
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
   automaticName,
+  defaultCreationPresetConfig,
   MultiAccountLaunchPlanInputSchema,
   MultiAccountLaunchPlanRecordSchema,
   type MultiAccountLaunchPlanInput,
@@ -503,18 +504,18 @@ export class AutomationStore {
     if (launchReference) {
       throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
     }
-    const connectionReferences = this.db
-      .prepare(
-        "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND credential_ref IS NOT NULL",
-      )
-      .all(accountId) as SqlRow[];
-    return [...new Set([
-      account.credential_ref,
-      ...connectionReferences.map((row) => row.credential_ref),
-    ].filter((reference): reference is string => typeof reference === "string" && reference.length > 0))];
+    const activeStatusTask = this.db.prepare(
+      `SELECT 1 FROM ad_operations
+       WHERE account_id = ? AND status IN ('pending', 'running', 'unknown')
+       LIMIT 1`,
+    ).get(accountId);
+    if (activeStatusTask) {
+      throw new Error("该账户仍有待处理、执行中或结果未知的启停任务，不能删除。");
+    }
+    return this.listCredentialReferencesUnchecked(accountId);
   }
 
-  deleteAccount(accountId: string): boolean {
+  deleteAccount(accountId: string, expectedCredentialReferences: string[]): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const account = this.db
@@ -536,6 +537,20 @@ export class AutomationStore {
         throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
       }
 
+      const activeStatusTask = this.db.prepare(
+        `SELECT 1 FROM ad_operations
+         WHERE account_id = ? AND status IN ('pending', 'running', 'unknown')
+         LIMIT 1`,
+      ).get(accountId);
+      if (activeStatusTask) {
+        throw new Error("该账户仍有待处理、执行中或结果未知的启停任务，不能删除。");
+      }
+
+      const currentCredentialReferences = this.listCredentialReferencesUnchecked(accountId);
+      if (!sameStringSet(currentCredentialReferences, expectedCredentialReferences)) {
+        throw new Error("账户凭据在删除期间已发生变化，请刷新后重试。");
+      }
+
       const credentialReferenceCount = Number((this.db.prepare(
         `SELECT COUNT(DISTINCT credential_ref) AS count
          FROM provider_connections
@@ -552,6 +567,16 @@ export class AutomationStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private listCredentialReferencesUnchecked(accountId: string): string[] {
+    const account = this.db.prepare("SELECT credential_ref FROM accounts WHERE id = ?").get(accountId) as SqlRow | undefined;
+    if (!account) return [];
+    const rows = this.db.prepare(
+      "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND credential_ref IS NOT NULL",
+    ).all(accountId) as SqlRow[];
+    return [...new Set([account.credential_ref, ...rows.map((row) => row.credential_ref)]
+      .filter((reference): reference is string => typeof reference === "string" && reference.length > 0))];
   }
 
   getAccount(accountId: string): AccountConfig | null {
@@ -5694,10 +5719,14 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO launch_presets (
-          id, name, region, daily_budget, bid, start_at, end_at, initial_status, created_at, updated_at
-        ) VALUES ('default-launch-preset', '基础预设', '未设置', 100, NULL, NULL, NULL, 'enabled', ?, ?)`,
+          id, name, region, daily_budget, bid, start_at, end_at, initial_status, creation_config_json, created_at, updated_at
+        ) VALUES ('default-launch-preset', '基础预设', '未设置', 100, NULL, NULL, NULL, 'enabled', ?, ?, ?)`,
       )
-      .run(now, now);
+      .run(JSON.stringify(defaultCreationPresetConfig), now, now);
+    this.db.prepare(
+      `UPDATE launch_presets SET creation_config_json = ?, updated_at = ?
+       WHERE id = 'default-launch-preset' AND (creation_config_json = '{}' OR creation_config_json = '')`,
+    ).run(JSON.stringify(defaultCreationPresetConfig), now);
     this.db
       .prepare(
         `INSERT OR IGNORE INTO global_automation_settings (
@@ -6441,6 +6470,12 @@ function toSqlBoolean(value: boolean): number {
 
 function fromSqlBoolean(value: unknown): boolean {
   return Number(value) === 1;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
 }
 
 function advanceDailyRun(current: string, completedAt: string): string {
