@@ -2491,6 +2491,45 @@ export class AutomationStore {
     return rows.map(mapMultiAccountLaunchPlan);
   }
 
+  claimLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): boolean {
+    const claimedAt = new Date().toISOString();
+    const expiredAt = new Date(Date.now() - 30 * 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(
+        `DELETE FROM launch_creation_locks
+         WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND claimed_at <= ?`,
+      ).run(planId, accountId, campaignName, expiredAt);
+      const result = this.db.prepare(
+        `INSERT OR IGNORE INTO launch_creation_locks (
+          plan_id, account_id, campaign_name, owner_id, claimed_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+      ).run(planId, accountId, campaignName, ownerId, claimedAt);
+      this.db.exec("COMMIT");
+      return result.changes === 1;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  releaseLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): void {
+    this.db.prepare(
+      `DELETE FROM launch_creation_locks
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(planId, accountId, campaignName, ownerId);
+  }
+
   getMultiAccountLaunchPlan(planId: string): MultiAccountLaunchPlanRecord | null {
     const row = this.db
       .prepare("SELECT * FROM multi_account_launch_plans WHERE id = ?")
@@ -5207,6 +5246,15 @@ export class AutomationStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (plan_id, account_id, item_index)
+      );
+
+      CREATE TABLE IF NOT EXISTS launch_creation_locks (
+        plan_id TEXT NOT NULL REFERENCES multi_account_launch_plans(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        campaign_name TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        PRIMARY KEY (plan_id, account_id, campaign_name)
       );
 
       CREATE TABLE IF NOT EXISTS launch_plan_item_attempts (

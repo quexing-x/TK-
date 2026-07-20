@@ -158,7 +158,19 @@ export class LaunchService {
   ): Promise<LaunchExecutionItemResult> {
     let providerInvoked = false;
     let providerConfirmed = false;
+    let creationScopeLocked = false;
+    const campaignName = claimed.launchRow.campaignName.trim();
+    const creationScopeOwner = `${executorId}:${claimed.itemId}`;
     try {
+      creationScopeLocked = this.store.claimLaunchCreationScope(
+        claimed.planId,
+        claimed.accountId,
+        campaignName,
+        creationScopeOwner,
+      );
+      if (!creationScopeLocked) {
+        throw new RetryableCreationError("同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。");
+      }
       const uncertainSibling = this.launchStore.listItems(claimed.planId).some((item) =>
         item.itemId !== claimed.itemId
         && item.accountId === claimed.accountId
@@ -402,6 +414,15 @@ export class LaunchService {
         created: [{ ok: false, message }],
         sync: null,
       };
+    } finally {
+      if (creationScopeLocked) {
+        this.store.releaseLaunchCreationScope(
+          claimed.planId,
+          claimed.accountId,
+          campaignName,
+          creationScopeOwner,
+        );
+      }
     }
   }
 

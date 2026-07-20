@@ -342,6 +342,35 @@ describe("AutomationStore", () => {
     ).toHaveLength(2);
   });
 
+  it("serializes same-plan same-account campaign creation scopes", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-creation-lock-"));
+    const databasePath = join(directory, "shared.db");
+    const first = new AutomationStore(databasePath);
+    const second = new AutomationStore(databasePath);
+    try {
+      first.seed();
+      const plan = first.createMultiAccountLaunchPlan({
+        mode: "single",
+        sourceAccountId: "demo-account",
+        sourceAdId: null,
+        targetAccountIds: ["demo-account"],
+        launchPresetId: "default-launch-preset",
+        launchRows: [launchItemRow(2)],
+      });
+
+      expect(first.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1")).toBe(true);
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
+      second.releaseLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2");
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
+      first.releaseLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1");
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(true);
+    } finally {
+      second.close();
+      first.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("stores a non-executing multi-account launch plan", () => {
     const target = store.createAccount({
       displayName: "目标账户",
