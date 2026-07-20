@@ -1335,7 +1335,20 @@ describe("AutomationStore", () => {
     });
     const [confirmed, notCreated] = store.listLaunchPlanItems(plan.id);
     store.claimLaunchPlanItem(confirmed!.itemId, "executor-a", "pending");
+    store.updateLaunchPlanItemProgress(confirmed!.itemId, "executor-a", {
+      phase: "validation",
+      evidence: { resolvedAdGroupName: `${confirmed!.launchRow.adGroupName}-001` },
+    });
     store.completeLaunchPlanItemUnknown(confirmed!.itemId, "executor-a", "response lost");
+    store.claimLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-seed");
+    store.completeLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      confirmed!.launchRow.campaignName,
+      "scope-seed",
+      "campaign-existing",
+      confirmed!.launchRow.adGroupName,
+    );
     store.claimLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-a");
     store.markLaunchCreationScopeUncertain(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-a");
     store.claimLaunchPlanItem(notCreated!.itemId, "executor-a", "pending");
@@ -1378,7 +1391,10 @@ describe("AutomationStore", () => {
     expect(store.listLaunchPlanItemVerifications(confirmed!.itemId)).toHaveLength(1);
     expect(store.claimLaunchCreationScope(
       plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-c",
-    )).toEqual({ campaignId: "campaign-1", adGroupNames: [confirmed!.launchRow.adGroupName] });
+    )).toEqual({
+      campaignId: "campaign-1",
+      adGroupNames: [confirmed!.launchRow.adGroupName, `${confirmed!.launchRow.adGroupName}-001`],
+    });
     store.releaseLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-c");
     expect(store.claimLaunchCreationScope(
       plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-d",

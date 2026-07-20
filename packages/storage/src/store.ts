@@ -3046,6 +3046,9 @@ export class AutomationStore {
         campaignName: string;
         adGroupName: string;
       };
+      const creationEvidence = JSON.parse(String(current.evidence_json ?? "{}")) as {
+        resolvedAdGroupName?: unknown;
+      };
       this.db.prepare(
         `INSERT INTO launch_plan_item_verifications (
           id, item_id, actor_id, actor_name, decision, evidence, note,
@@ -3092,7 +3095,13 @@ export class AutomationStore {
            WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
         ).get(String(current.plan_id), String(current.account_id), launchRow.campaignName.trim()) as SqlRow | undefined;
         const names = new Set(JSON.parse(String(existingScope?.ad_group_names_json ?? "[]")) as string[]);
-        names.add(launchRow.adGroupName);
+        const resolvedAdGroupName = typeof creationEvidence.resolvedAdGroupName === "string"
+          ? creationEvidence.resolvedAdGroupName.trim()
+          : "";
+        if (!resolvedAdGroupName && names.has(launchRow.adGroupName)) {
+          throw new Error("未知创建记录缺少实际广告组名称，请升级后重新核验，禁止猜测后续名。");
+        }
+        names.add(resolvedAdGroupName || launchRow.adGroupName);
         this.db.prepare(
           `INSERT INTO launch_creation_locks (
              plan_id, account_id, campaign_name, owner_id, claimed_at,

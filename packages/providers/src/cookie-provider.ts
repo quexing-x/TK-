@@ -664,6 +664,13 @@ async function runCookieDraftChain(
         batchReservation?.adGroupNames,
       ) }
     : resolvedRow;
+  // Persist the exact auto-suffixed name before the first creation mutation.
+  // Manual verification can then restore the same reservation after an
+  // unknown provider result without guessing from the original spreadsheet.
+  mutation.onProgress?.({
+    phase: "validation",
+    evidence: { resolvedAdGroupName: creationRow.adGroupName },
+  });
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
     : buildDraftPayloads(creationRow, mutation.preset, timezone);

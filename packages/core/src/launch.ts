@@ -32,6 +32,7 @@ export const LaunchCreationPhaseSchema = z.enum([
 export type LaunchCreationPhase = z.infer<typeof LaunchCreationPhaseSchema>;
 
 export const LaunchCreationEvidenceSchema = z.object({
+  resolvedAdGroupName: z.string().min(1).nullable().default(null),
   providerRequestId: z.string().min(1).nullable().default(null),
   campaignSnapId: z.string().min(1).nullable().default(null),
   campaignSketchId: z.string().min(1).nullable().default(null),

@@ -852,6 +852,7 @@ describe("CookieAdsProvider", () => {
 
   it("reuses the unique exact-name campaign instead of creating another campaign", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const progress: Array<Parameters<NonNullable<CreationMutation["onProgress"]>>[0]> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -865,6 +866,7 @@ describe("CookieAdsProvider", () => {
     }));
     const mutation = creationTestMutation("none");
     mutation.row.campaignName = "source";
+    mutation.onProgress = (event) => progress.push(event);
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
       creationTestContext(false),
@@ -889,6 +891,10 @@ describe("CookieAdsProvider", () => {
       creative_sketch_id: "creative-sketch",
     });
     expect(bodyFor("create_by_snap")).toMatchObject({ campaign_id: "source-campaign" });
+    expect(progress).toContainEqual({
+      phase: "validation",
+      evidence: { resolvedAdGroupName: "group-002" },
+    });
   });
 
   it("checks every campaign and ad-group page before reusing and auto-naming", async () => {
