@@ -20,9 +20,13 @@ export function ManualPage() {
         </div>
         <nav>
           {userGuide.sections.map((section) => (
-            <a href={`#${section.id}`} key={section.id}>
+            <button
+              key={section.id}
+              onClick={() => document.getElementById(section.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              type="button"
+            >
               {section.title}
-            </a>
+            </button>
           ))}
         </nav>
       </aside>

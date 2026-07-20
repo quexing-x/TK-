@@ -32,6 +32,7 @@ export const LaunchCreationPhaseSchema = z.enum([
 export type LaunchCreationPhase = z.infer<typeof LaunchCreationPhaseSchema>;
 
 export const LaunchCreationEvidenceSchema = z.object({
+  resolvedAdGroupName: z.string().min(1).nullable().default(null),
   providerRequestId: z.string().min(1).nullable().default(null),
   campaignSnapId: z.string().min(1).nullable().default(null),
   campaignSketchId: z.string().min(1).nullable().default(null),
@@ -92,6 +93,7 @@ export type LaunchCopyPreviewItem = z.infer<typeof LaunchCopyPreviewItemSchema>;
 /** Values TikTok needs in addition to each spreadsheet row.  They are saved
  * once in a preset rather than repeatedly typed into the import sheet. */
 export const CreationPresetConfigSchema = z.object({
+  templateCampaignId: z.string().trim().min(1).max(128).nullable().optional(),
   objectiveType: z.number().int().nullable().default(null),
   buyingType: z.number().int().nullable().default(null),
   campaignBudgetMode: z.number().int().nullable().default(null),
@@ -108,10 +110,29 @@ export const CreationPresetConfigSchema = z.object({
   smartTargeting: z.boolean().default(true),
   commentDisabled: z.boolean().default(false),
   shareDisabled: z.boolean().default(false),
+  /** Shared authorization-code to TikTok Post mappings. advertiserId is legacy-only. */
+  videoPostMappings: z.array(z.object({
+    advertiserId: z.string().trim().max(128).optional(),
+    videoCode: z.string().trim().min(1).max(512),
+    postId: z.string().trim().regex(/^\d+$/).max(128),
+  })).max(500).optional(),
 });
 export type CreationPresetConfig = z.infer<typeof CreationPresetConfigSchema>;
 export const defaultCreationPresetConfig: CreationPresetConfig =
-  CreationPresetConfigSchema.parse({});
+  CreationPresetConfigSchema.parse({
+    objectiveType: 3,
+    buyingType: 1,
+    campaignBudgetMode: -1,
+    adBudgetMode: 3,
+    pricing: 1,
+    optimizeGoal: 100,
+    externalAction: 96,
+    identityType: 0,
+    identityId: null,
+    callToActionId: "0",
+    countryCodes: [1668284],
+    placementIds: [3000],
+  });
 
 export const LaunchPresetInputSchema = z.object({
   name: z.string().trim().min(1).max(80),

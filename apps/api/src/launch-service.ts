@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
+  getCreationTemplateReadiness,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
@@ -91,6 +92,10 @@ export class LaunchService {
     if (!plan.presetSnapshot) {
       throw new Error("旧版计划缺少冻结的创建预设，请重新导入并创建计划。");
     }
+    const readiness = getCreationTemplateReadiness(plan.presetSnapshot.creationConfig);
+    if (!readiness.ready) {
+      throw new Error(`广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，批量创建已阻止。`);
+    }
 
     // Plan execution claims only pending items. Failed items are retried only
     // through retryItem with an explicit itemId.
@@ -126,6 +131,10 @@ export class LaunchService {
     if (!plan) throw new Error("投放计划不存在。");
     if (plan.status === "cancelled") throw new Error("投放计划已取消。");
     if (!plan.presetSnapshot) throw new Error("投放计划缺少冻结的创建预设。");
+    const readiness = getCreationTemplateReadiness(plan.presetSnapshot.creationConfig);
+    if (!readiness.ready) {
+      throw new Error(`广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，重试已阻止。`);
+    }
     const item = this.launchStore.listItems(planId).find((candidate) => candidate.itemId === itemId);
     if (!item) throw new Error("创建任务不存在或不属于当前计划。");
     if (item.status === "unknown") {
@@ -149,12 +158,35 @@ export class LaunchService {
   ): Promise<LaunchExecutionItemResult> {
     let providerInvoked = false;
     let providerConfirmed = false;
+    let creationScopeLocked = false;
+    let creationScopeReservation: { campaignId: string | null; adGroupNames: string[] } | null = null;
+    const campaignName = claimed.launchRow.campaignName.trim();
+    const creationScopeOwner = `${executorId}:${claimed.itemId}`;
     try {
+      creationScopeReservation = this.store.claimLaunchCreationScope(
+        claimed.planId,
+        claimed.accountId,
+        campaignName,
+        creationScopeOwner,
+      );
+      creationScopeLocked = creationScopeReservation !== null;
+      if (!creationScopeLocked) {
+        throw new RetryableCreationError("同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。");
+      }
+      const uncertainSibling = this.launchStore.listItems(claimed.planId).some((item) =>
+        item.itemId !== claimed.itemId
+        && item.accountId === claimed.accountId
+        && item.launchRow.campaignName.trim() === claimed.launchRow.campaignName.trim()
+        && item.status === "unknown",
+      );
+      if (uncertainSibling) {
+        throw new RetryableCreationError("同计划内已有同系列任务结果未知，已停止后续创建以避免重复系列或广告组。");
+      }
       const account = this.store.getAccount(claimed.accountId);
       if (!account) throw new Error("目标广告账户不存在。");
-      if (!account.enabled || account.executionMode !== "automatic") {
-        throw new Error("目标账户没有明确启用 automatic 模式，批量创建已阻止。");
-      }
+      // A launch plan is an explicit user-triggered write with its own audit,
+      // confirmation and manual-verification path. It must not require the
+      // account's background automation mode to be enabled.
       const connection = this.store.getProviderConnection(claimed.accountId, account.providerKind);
       if (!connection || connection.status !== "ready") {
         throw new Error("目标账户未通过连接验证。");
@@ -165,11 +197,8 @@ export class LaunchService {
         connection,
         claimed.templateMode === "copy" ? "copy-ads" : "create-campaigns",
       );
-      const latestSync = this.store.getLatestReadOnlySync(
-        claimed.accountId,
-        account.providerKind,
-      );
-      if (!latestSync || latestSync.quality.status !== "healthy") {
+      const latestSync = this.store.getLatestReadOnlySync(claimed.accountId, account.providerKind);
+      if (claimed.templateMode === "copy" && (!latestSync || latestSync.quality.status !== "healthy")) {
         throw new Error(
           `目标账户同步数据不是 healthy，批量创建已阻止（当前：${latestSync?.quality.status ?? "none"}）。`,
         );
@@ -197,17 +226,14 @@ export class LaunchService {
         throw new Error("软件总开关已关闭，批量创建写入已暂停。");
       }
       const currentAccount = this.store.getAccount(claimed.accountId);
-      if (!currentAccount?.enabled || currentAccount.executionMode !== "automatic") {
-        throw new Error("目标账户没有明确启用 automatic 模式，批量创建已阻止。");
+      if (!currentAccount) {
+        throw new Error("目标广告账户不存在，批量创建已阻止。");
       }
       if (currentAccount.providerKind !== account.providerKind) {
         throw new Error("目标账户 Provider 已变更，批量创建已阻止。");
       }
-      const currentSync = this.store.getLatestReadOnlySync(
-        claimed.accountId,
-        account.providerKind,
-      );
-      if (!currentSync || currentSync.quality.status !== "healthy") {
+      const currentSync = this.store.getLatestReadOnlySync(claimed.accountId, account.providerKind);
+      if (claimed.templateMode === "copy" && (!currentSync || currentSync.quality.status !== "healthy")) {
         throw new Error(
           `目标账户同步数据已变化，批量创建已阻止（当前：${currentSync?.quality.status ?? "none"}）。`,
         );
@@ -236,6 +262,15 @@ export class LaunchService {
         claimed.templateMode === "copy" ? "copy-ads" : "create-campaigns",
       );
 
+      if (!this.store.renewLaunchCreationScope(
+        claimed.planId,
+        claimed.accountId,
+        campaignName,
+        creationScopeOwner,
+      )) {
+        throw new RetryableCreationError("同系列创建锁已失效，当前任务未发送 Provider 请求，请重新执行。");
+      }
+
       providerInvoked = true;
       const creationMutation = {
         row: claimed.launchRow,
@@ -244,6 +279,13 @@ export class LaunchService {
         operationId: claimed.operationId,
         attemptId,
         correlationId: claimed.correlationId,
+        batchId: claimed.planId,
+        ...(creationScopeReservation?.campaignId
+          ? { batchCampaignId: creationScopeReservation.campaignId }
+          : {}),
+        ...(creationScopeReservation?.adGroupNames.length
+          ? { batchAdGroupNames: creationScopeReservation.adGroupNames }
+          : {}),
         onProgress: (progress: LaunchCreationProgress) => {
           this.launchStore.progress(claimed.itemId, executorId, progress);
         },
@@ -255,7 +297,16 @@ export class LaunchService {
               templateCampaignId: templateCampaignId!,
             }])
           : this.providers.create(account.providerKind, context, [creationMutation]),
-        () => this.launchStore.renew(claimed.itemId, executorId),
+        () => {
+          const itemRenewed = this.launchStore.renew(claimed.itemId, executorId);
+          const scopeRenewed = this.store.renewLaunchCreationScope(
+            claimed.planId,
+            claimed.accountId,
+            campaignName,
+            creationScopeOwner,
+          );
+          return itemRenewed && scopeRenewed;
+        },
         launchLeaseHeartbeatMs,
       );
       if (!created?.ok) {
@@ -271,6 +322,17 @@ export class LaunchService {
           "Provider 报告成功，但没有返回完整的系列、广告组和广告 ID；为避免重复投放，系统不会自动重试。",
         );
       }
+      if (!this.store.completeLaunchCreationScope(
+        claimed.planId,
+        claimed.accountId,
+        campaignName,
+        creationScopeOwner,
+        created.campaignId,
+        created.row.adGroupName,
+      )) {
+        throw new UnknownCreationStateError("Provider 已确认创建，但批次系列预留未能持久化；后续同系列任务已阻止。");
+      }
+      creationScopeLocked = false;
 
       this.tasks.succeed(claimed.itemId, executorId, {
         campaignId: created.campaignId,
@@ -366,6 +428,23 @@ export class LaunchService {
       const unknown = cause instanceof UnknownCreationStateError
         || providerConfirmed
         || (providerInvoked && !(cause instanceof RetryableCreationError));
+      if (unknown && creationScopeLocked) {
+        // Never release an unknown provider result, even if persisting the
+        // explicit uncertain marker fails. The retained owner lease expires
+        // into an uncertain scope on the next claim, which remains fail-closed.
+        creationScopeLocked = false;
+        try {
+          this.store.markLaunchCreationScopeUncertain(
+            claimed.planId,
+            claimed.accountId,
+            campaignName,
+            creationScopeOwner,
+          );
+        } catch {
+          // The item still transitions to unknown below; the scope must not be
+          // reopened by the finally block.
+        }
+      }
       if (unknown) {
         this.tasks.unknown(
           claimed.itemId,
@@ -389,6 +468,15 @@ export class LaunchService {
         created: [{ ok: false, message }],
         sync: null,
       };
+    } finally {
+      if (creationScopeLocked) {
+        this.store.releaseLaunchCreationScope(
+          claimed.planId,
+          claimed.accountId,
+          campaignName,
+          creationScopeOwner,
+        );
+      }
     }
   }
 

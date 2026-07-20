@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { ProviderConnection } from "@tk-auto/core";
 import type { CookieConnectionReadiness } from "./api";
 import {
   canSubmitCookieImport,
   describeCookieState,
+  displayedCookieReadiness,
   getCookieImportSteps,
+  replaceProviderConnection,
 } from "./cookie-onboarding.js";
 
 const emptyReadiness: CookieConnectionReadiness = {
@@ -59,4 +62,31 @@ describe("Cookie onboarding interaction", () => {
     };
     expect(describeCookieState(readiness).label).toBe("启停能力未建立");
   });
+
+  it("does not show retained fields as acquired after connection failure", () => {
+    const readiness: CookieConnectionReadiness = {
+      ...emptyReadiness, dataRequestImported: true, statusRequestImported: true,
+      completedFields: 5, fieldsComplete: true,
+      requiredFields: { listQuery: true, updateQuery: true, copyQuery: true, csrfToken: true, cookie: true },
+    };
+    const failed = cookieConnection({ status: "failed", lastMessage: "session expired" });
+    expect(displayedCookieReadiness(readiness, failed)).toMatchObject({ completedFields: 0, fieldsComplete: false, requiredFields: { cookie: false } });
+    expect(describeCookieState(readiness, failed).status).toBe("failed");
+  });
+
+  it("updates the rendered provider connection with the import result", () => {
+    const existing = cookieConnection({ status: "untested" });
+    const imported = { ...existing, status: "ready" as const, lastMessage: "ready" };
+    expect(replaceProviderConnection([existing], imported)).toEqual([imported]);
+  });
 });
+
+function cookieConnection(overrides: Partial<ProviderConnection> = {}): ProviderConnection {
+  return {
+    accountId: "account-1", kind: "cookie",
+    settings: { kind: "cookie", advertiserId: "123", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+    hasCredential: true, status: "untested", authorizationStatus: "not-authorized", capabilityVersion: "cookie-v1",
+    authorizedCapabilities: [], authorizedAt: null, authorizationExpiresAt: null, lastMessage: null, lastTestedAt: null,
+    updatedAt: "2026-07-20T00:00:00.000Z", ...overrides,
+  };
+}

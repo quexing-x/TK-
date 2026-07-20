@@ -11,6 +11,7 @@ import {
   Gauge,
   ListFilter,
   ListChecks,
+  LayoutDashboard,
   Plus,
   Pencil,
   PlugZap,
@@ -19,6 +20,7 @@ import {
   Save,
   Settings2,
   ShieldCheck,
+  Search,
   Trash2,
   UserRound,
   X,
@@ -65,6 +67,7 @@ import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
 import { LaunchPage } from "./LaunchPage";
 import { TaskCenterPage } from "./TaskCenterPage";
 import { MaintenancePage } from "./MaintenancePage";
+import { OverviewPage } from "./OverviewPage";
 import {
   canEnableAccountAutomation,
   hasProviderCapability,
@@ -77,6 +80,7 @@ import {
 import { syncQualityPresentation } from "./sync-quality-view";
 
 type PageKey =
+  | "overview"
   | "manual"
   | "users"
   | "automation"
@@ -92,6 +96,7 @@ type PageKey =
 const selectedAccountStorageKey = "tk-auto:selected-account-id";
 
 const pageHash: Record<PageKey, string> = {
+  overview: "#overview",
   manual: "#manual",
   users: "#users",
   automation: "#automation",
@@ -109,7 +114,7 @@ function pageFromHash(hash = window.location.hash): PageKey {
   const found = (Object.entries(pageHash) as Array<[PageKey, string]>).find(
     ([, value]) => value === hash,
   );
-  return found?.[0] ?? "manual";
+  return found?.[0] ?? "overview";
 }
 
 function preferredAccountId(
@@ -132,6 +137,12 @@ const navItems: Array<{
   description: string;
   icon: typeof Settings2;
 }> = [
+  {
+    key: "overview",
+    label: "总览",
+    description: "运行状态、待处理决策与快捷操作",
+    icon: LayoutDashboard,
+  },
   {
     key: "users",
     label: "用户管理",
@@ -208,6 +219,7 @@ function ConsoleApp() {
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [page, setPage] = useState<PageKey>(() => pageFromHash());
   const [error, setError] = useState<string | null>(null);
+  const [commandOpen, setCommandOpen] = useState(false);
 
   const loadBootstrap = useCallback(async () => {
     try {
@@ -232,6 +244,17 @@ function ConsoleApp() {
     const syncPageFromUrl = () => setPage(pageFromHash());
     window.addEventListener("hashchange", syncPageFromUrl);
     return () => window.removeEventListener("hashchange", syncPageFromUrl);
+  }, []);
+
+  useEffect(() => {
+    const openCommand = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen(true);
+      }
+    };
+    window.addEventListener("keydown", openCommand);
+    return () => window.removeEventListener("keydown", openCommand);
   }, []);
 
   const navigateTo = useCallback((nextPage: PageKey) => {
@@ -294,6 +317,7 @@ function ConsoleApp() {
         </div>
 
         <button
+          aria-label={bootstrap.systemRuntime.enabled ? "系统运行中，点击暂停" : "系统已暂停，点击恢复"}
           className={bootstrap.systemRuntime.enabled ? "system-master active" : "system-master paused"}
           disabled={!auth.status.permissions.includes("system:control")}
           onClick={async () => {
@@ -304,6 +328,7 @@ function ConsoleApp() {
               setError(getErrorMessage(cause));
             }
           }}
+          title={bootstrap.systemRuntime.enabled ? "系统运行中，点击暂停" : "系统已暂停，点击恢复"}
           type="button"
         >
           <span className="system-master-light" />
@@ -333,7 +358,9 @@ function ConsoleApp() {
               <button
                 className={page === item.key ? "nav-item active" : "nav-item"}
                 key={item.key}
+                aria-label={item.label}
                 onClick={() => navigateTo(item.key)}
+                title={item.label}
                 type="button"
               >
                 <Icon size={19} />
@@ -346,7 +373,7 @@ function ConsoleApp() {
           })}
         </nav>
 
-        <button className={page === "manual" ? "nav-item manual-launch active" : "nav-item manual-launch"} onClick={() => navigateTo("manual")} type="button"><BookOpen size={19} /><span><strong>操作手册</strong><small>API 与 Cookie 详细教程</small></span></button>
+        <button aria-label="操作手册" className={page === "manual" ? "nav-item manual-launch active" : "nav-item manual-launch"} onClick={() => navigateTo("manual")} title="操作手册" type="button"><BookOpen size={19} /><span><strong>操作手册</strong><small>API 与 Cookie 详细教程</small></span></button>
 
         <div className="sidebar-footer">
           <ShieldCheck size={18} />
@@ -360,6 +387,20 @@ function ConsoleApp() {
             <span className="eyebrow">核心控制台</span>
             <h1>{page === "manual" ? "操作手册" : navItems.find((item) => item.key === page)?.label}</h1>
           </div>
+          <div className="command-area">
+            <button className="command-trigger" type="button" onClick={() => setCommandOpen((open) => !open)} aria-expanded={commandOpen}>
+              <Search size={15} /><span>跳转账户、规则、任务…</span><kbd>Ctrl K</kbd>
+            </button>
+            {commandOpen && <div className="command-menu" role="menu">
+              {navItems.filter((item) => item.key !== "overview").map((item) => {
+                const Icon = item.icon;
+                return <button key={item.key} type="button" role="menuitem" onClick={() => { navigateTo(item.key); setCommandOpen(false); }}><Icon size={15} /><span>{item.label}</span><small>{item.description}</small></button>;
+              })}
+            </div>}
+          </div>
+          <span className={bootstrap.systemRuntime.enabled ? "runtime-chip active" : "runtime-chip paused"}>
+            <i />{bootstrap.systemRuntime.enabled ? "稳定运行" : "已暂停"}
+          </span>
           <div className="topbar-user">
             <span><strong>{auth.status.user?.displayName}</strong><small>{auth.status.user?.role}</small></span>
             <button type="button" onClick={() => void auth.logout()}>退出</button>
@@ -376,7 +417,14 @@ function ConsoleApp() {
           </div>
         )}
 
-        {page === "manual" ? (
+        {page === "overview" ? (
+          <OverviewPage
+            accounts={bootstrap.accounts}
+            connectionStates={bootstrap.accountConnectionStates}
+            runtime={bootstrap.systemRuntime}
+            onNavigate={navigateTo}
+          />
+        ) : page === "manual" ? (
           <ManualPage />
         ) : page === "system-users" ? (
           <SystemUsersPage onError={setError} />
@@ -646,6 +694,21 @@ function UsersPage({
     await onChanged();
   };
 
+  const deleteAccount = async (account: AccountConfig) => {
+    const confirmation = `确认删除广告账户“${account.displayName}”吗？\n\n此操作不可撤销，将删除该账户的本地接入凭据及账户级数据；其他账户、全局规则和通知配置不会受影响。`;
+    if (!window.confirm(confirmation)) return;
+    try {
+      setSaving(true);
+      await api.deleteAccount(account.id);
+      await onChanged();
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <section className="page-stack">
       <div className="panel table-panel">
@@ -701,6 +764,7 @@ function UsersPage({
                     <div className="row-actions">
                       <button type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
                       <button type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
+                      <button className="danger-button" disabled={saving} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
                     </div>
                   </td></>;
                 })()}</tr>

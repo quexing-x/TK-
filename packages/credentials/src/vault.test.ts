@@ -17,6 +17,8 @@ describe("CredentialVault", () => {
 
     await vault.delete(reference);
     await expect(vault.read(reference)).resolves.toBeNull();
+    await vault.restore(reference, "top-secret");
+    await expect(vault.read(reference)).resolves.toBe("top-secret");
   });
 
   if (process.platform === "win32") {

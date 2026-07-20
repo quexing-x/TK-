@@ -87,6 +87,7 @@ import {
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
   automaticName,
+  defaultCreationPresetConfig,
   MultiAccountLaunchPlanInputSchema,
   MultiAccountLaunchPlanRecordSchema,
   type MultiAccountLaunchPlanInput,
@@ -481,6 +482,101 @@ export class AutomationStore {
       accountType: input.accountType,
     });
     return this.getAccount(id) as AccountConfig;
+  }
+
+  /**
+   * Removes one advertising account and its account-scoped database records.
+   * The returned references belong to this account only and must be removed
+   * from the credential vault by the caller.
+   */
+  listAccountCredentialReferences(accountId: string): string[] | null {
+    const account = this.db
+      .prepare("SELECT credential_ref FROM accounts WHERE id = ?")
+      .get(accountId) as SqlRow | undefined;
+    if (!account) return null;
+    const launchReference = this.db.prepare(
+      `SELECT 1
+       FROM multi_account_launch_plans plan
+       LEFT JOIN launch_plan_items item ON item.plan_id = plan.id
+       WHERE plan.source_account_id = ? OR item.account_id = ?
+       LIMIT 1`,
+    ).get(accountId, accountId);
+    if (launchReference) {
+      throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
+    }
+    const activeStatusTask = this.db.prepare(
+      `SELECT 1 FROM ad_operations
+       WHERE account_id = ? AND status IN ('pending', 'running', 'unknown')
+       LIMIT 1`,
+    ).get(accountId);
+    if (activeStatusTask) {
+      throw new Error("该账户仍有待处理、执行中或结果未知的启停任务，不能删除。");
+    }
+    return this.listCredentialReferencesUnchecked(accountId);
+  }
+
+  deleteAccount(accountId: string, expectedCredentialReferences: string[]): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const account = this.db
+        .prepare("SELECT id, credential_ref FROM accounts WHERE id = ?")
+        .get(accountId) as SqlRow | undefined;
+      if (!account) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+
+      const launchReference = this.db.prepare(
+        `SELECT 1
+         FROM multi_account_launch_plans plan
+         LEFT JOIN launch_plan_items item ON item.plan_id = plan.id
+         WHERE plan.source_account_id = ? OR item.account_id = ?
+         LIMIT 1`,
+      ).get(accountId, accountId);
+      if (launchReference) {
+        throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
+      }
+
+      const activeStatusTask = this.db.prepare(
+        `SELECT 1 FROM ad_operations
+         WHERE account_id = ? AND status IN ('pending', 'running', 'unknown')
+         LIMIT 1`,
+      ).get(accountId);
+      if (activeStatusTask) {
+        throw new Error("该账户仍有待处理、执行中或结果未知的启停任务，不能删除。");
+      }
+
+      const currentCredentialReferences = this.listCredentialReferencesUnchecked(accountId);
+      if (!sameStringSet(currentCredentialReferences, expectedCredentialReferences)) {
+        throw new Error("账户凭据在删除期间已发生变化，请刷新后重试。");
+      }
+
+      const credentialReferenceCount = Number((this.db.prepare(
+        `SELECT COUNT(DISTINCT credential_ref) AS count
+         FROM provider_connections
+         WHERE account_id = ? AND credential_ref IS NOT NULL`,
+      ).get(accountId) as SqlRow).count ?? 0) + (account.credential_ref ? 1 : 0);
+
+      this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+      this.writeAudit("local-user", accountId, "account.deleted", {
+        credentialReferenceCount,
+      });
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private listCredentialReferencesUnchecked(accountId: string): string[] {
+    const account = this.db.prepare("SELECT credential_ref FROM accounts WHERE id = ?").get(accountId) as SqlRow | undefined;
+    if (!account) return [];
+    const rows = this.db.prepare(
+      "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND credential_ref IS NOT NULL",
+    ).all(accountId) as SqlRow[];
+    return [...new Set([account.credential_ref, ...rows.map((row) => row.credential_ref)]
+      .filter((reference): reference is string => typeof reference === "string" && reference.length > 0))];
   }
 
   getAccount(accountId: string): AccountConfig | null {
@@ -2395,6 +2491,116 @@ export class AutomationStore {
     return rows.map(mapMultiAccountLaunchPlan);
   }
 
+  claimLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): { campaignId: string | null; adGroupNames: string[] } | null {
+    const claimedAt = new Date().toISOString();
+    const expiredAt = new Date(Date.now() - 30 * 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(
+        `UPDATE launch_creation_locks
+         SET owner_id = NULL, uncertain = 1, claimed_at = ?
+         WHERE plan_id = ? AND account_id = ? AND campaign_name = ?
+           AND owner_id IS NOT NULL AND claimed_at <= ?`,
+      ).run(claimedAt, planId, accountId, campaignName, expiredAt);
+      const existing = this.db.prepare(
+        `SELECT owner_id, campaign_id, ad_group_names_json, uncertain
+         FROM launch_creation_locks
+         WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+      ).get(planId, accountId, campaignName) as SqlRow | undefined;
+      if (existing && (existing.owner_id !== null || Number(existing.uncertain) === 1)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if (existing) {
+        this.db.prepare(
+          `UPDATE launch_creation_locks SET owner_id = ?, claimed_at = ?
+           WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id IS NULL AND uncertain = 0`,
+        ).run(ownerId, claimedAt, planId, accountId, campaignName);
+      } else {
+        this.db.prepare(
+          `INSERT INTO launch_creation_locks (
+            plan_id, account_id, campaign_name, owner_id, claimed_at,
+            campaign_id, ad_group_names_json, uncertain
+          ) VALUES (?, ?, ?, ?, ?, NULL, '[]', 0)`,
+        ).run(planId, accountId, campaignName, ownerId, claimedAt);
+      }
+      this.db.exec("COMMIT");
+      return {
+        campaignId: typeof existing?.campaign_id === "string" ? existing.campaign_id : null,
+        adGroupNames: existing?.ad_group_names_json
+          ? JSON.parse(String(existing.ad_group_names_json)) as string[]
+          : [],
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  releaseLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): void {
+    this.db.prepare(
+      `UPDATE launch_creation_locks SET owner_id = NULL, claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
+  }
+
+  renewLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): boolean {
+    const result = this.db.prepare(
+      `UPDATE launch_creation_locks SET claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
+    return result.changes === 1;
+  }
+
+  completeLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+    campaignId: string,
+    adGroupName: string,
+  ): boolean {
+    const row = this.db.prepare(
+      `SELECT ad_group_names_json FROM launch_creation_locks
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).get(planId, accountId, campaignName, ownerId) as SqlRow | undefined;
+    if (!row) return false;
+    const names = new Set(JSON.parse(String(row.ad_group_names_json ?? "[]")) as string[]);
+    names.add(adGroupName);
+    const result = this.db.prepare(
+      `UPDATE launch_creation_locks SET campaign_id = ?, ad_group_names_json = ?, owner_id = NULL, claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(campaignId, JSON.stringify([...names]), new Date().toISOString(), planId, accountId, campaignName, ownerId);
+    return result.changes === 1;
+  }
+
+  markLaunchCreationScopeUncertain(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): void {
+    this.db.prepare(
+      `UPDATE launch_creation_locks SET uncertain = 1, owner_id = NULL, claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
+  }
+
   getMultiAccountLaunchPlan(planId: string): MultiAccountLaunchPlanRecord | null {
     const row = this.db
       .prepare("SELECT * FROM multi_account_launch_plans WHERE id = ?")
@@ -2836,6 +3042,13 @@ export class AutomationStore {
         "SELECT * FROM launch_plan_items WHERE item_id = ? AND status = 'unknown'",
       ).get(itemId) as SqlRow | undefined;
       if (!current) throw new Error("只有创建结果未知的任务可以人工核验。");
+      const launchRow = JSON.parse(String(current.launch_row_json)) as {
+        campaignName: string;
+        adGroupName: string;
+      };
+      const creationEvidence = JSON.parse(String(current.evidence_json ?? "{}")) as {
+        resolvedAdGroupName?: unknown;
+      };
       this.db.prepare(
         `INSERT INTO launch_plan_item_verifications (
           id, item_id, actor_id, actor_name, decision, evidence, note,
@@ -2875,6 +3088,43 @@ export class AutomationStore {
            error_message = '人工核验确认未创建；可由用户显式单项重试。', updated_at = ?
            WHERE item_id = ? AND status = 'unknown'`,
         ).run(now, itemId);
+      }
+      if (verification.decision === "confirmed-succeeded") {
+        const existingScope = this.db.prepare(
+          `SELECT ad_group_names_json FROM launch_creation_locks
+           WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+        ).get(String(current.plan_id), String(current.account_id), launchRow.campaignName.trim()) as SqlRow | undefined;
+        const names = new Set(JSON.parse(String(existingScope?.ad_group_names_json ?? "[]")) as string[]);
+        const resolvedAdGroupName = typeof creationEvidence.resolvedAdGroupName === "string"
+          ? creationEvidence.resolvedAdGroupName.trim()
+          : "";
+        if (!resolvedAdGroupName) {
+          throw new Error("未知创建记录缺少实际广告组名称，禁止猜测原名或后续名并确认成功。");
+        }
+        names.add(resolvedAdGroupName);
+        this.db.prepare(
+          `INSERT INTO launch_creation_locks (
+             plan_id, account_id, campaign_name, owner_id, claimed_at,
+             campaign_id, ad_group_names_json, uncertain
+           ) VALUES (?, ?, ?, NULL, ?, ?, ?, 0)
+           ON CONFLICT(plan_id, account_id, campaign_name) DO UPDATE SET
+             owner_id = NULL, claimed_at = excluded.claimed_at,
+             campaign_id = excluded.campaign_id,
+             ad_group_names_json = excluded.ad_group_names_json, uncertain = 0`,
+        ).run(
+          String(current.plan_id),
+          String(current.account_id),
+          launchRow.campaignName.trim(),
+          now,
+          verification.campaignId,
+          JSON.stringify([...names]),
+        );
+      } else {
+        this.db.prepare(
+          `UPDATE launch_creation_locks
+           SET owner_id = NULL, uncertain = 0, claimed_at = ?
+           WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+        ).run(now, String(current.plan_id), String(current.account_id), launchRow.campaignName.trim());
       }
       this.writeAudit(actor.name, String(current.account_id), "launch-item.manually-verified", {
         itemId,
@@ -3116,7 +3366,11 @@ export class AutomationStore {
     const unknownCount = items.filter((item) => item.status === "unknown").length;
     const message = completed
       ? `已完成 ${items.length} 条广告创建任务。`
-      : `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条；明确失败 ${failedCount} 条，可单独重试；结果未知 ${unknownCount} 条，禁止重试，需人工核验。`;
+      : [
+          `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条`,
+          ...(failedCount > 0 ? [`明确失败 ${failedCount} 条，可单独重试`] : []),
+          ...(unknownCount > 0 ? [`结果未知 ${unknownCount} 条，禁止重试，需人工核验`] : []),
+        ].join("；") + "。";
     this.db
       .prepare(
         `UPDATE multi_account_launch_plans
@@ -5109,6 +5363,18 @@ export class AutomationStore {
         UNIQUE (plan_id, account_id, item_index)
       );
 
+      CREATE TABLE IF NOT EXISTS launch_creation_locks (
+        plan_id TEXT NOT NULL REFERENCES multi_account_launch_plans(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        campaign_name TEXT NOT NULL,
+        owner_id TEXT,
+        claimed_at TEXT NOT NULL,
+        campaign_id TEXT,
+        ad_group_names_json TEXT NOT NULL DEFAULT '[]',
+        uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
+        PRIMARY KEY (plan_id, account_id, campaign_name)
+      );
+
       CREATE TABLE IF NOT EXISTS launch_plan_item_attempts (
         attempt_id TEXT PRIMARY KEY,
         item_id TEXT NOT NULL REFERENCES launch_plan_items(item_id) ON DELETE CASCADE,
@@ -5538,6 +5804,36 @@ export class AutomationStore {
     this.ensureColumn("launch_plan_items", "source_snapshot_json", "TEXT");
     this.ensureColumn("launch_plan_items", "target_asset_mapping_json", "TEXT");
     this.ensureColumn("launch_plan_items", "idempotency_key", "TEXT");
+    this.applyMigration("launch-creation-locks-v2", () => {
+      const columns = this.db.prepare("PRAGMA table_info(launch_creation_locks)").all() as SqlRow[];
+      const owner = columns.find((column) => column.name === "owner_id");
+      const needsRebuild = Number(owner?.notnull ?? 0) === 1
+        || !columns.some((column) => column.name === "campaign_id")
+        || !columns.some((column) => column.name === "ad_group_names_json")
+        || !columns.some((column) => column.name === "uncertain");
+      if (!needsRebuild) return;
+      this.db.exec(`
+        ALTER TABLE launch_creation_locks RENAME TO launch_creation_locks_legacy;
+        CREATE TABLE launch_creation_locks (
+          plan_id TEXT NOT NULL REFERENCES multi_account_launch_plans(id) ON DELETE CASCADE,
+          account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          campaign_name TEXT NOT NULL,
+          owner_id TEXT,
+          claimed_at TEXT NOT NULL,
+          campaign_id TEXT,
+          ad_group_names_json TEXT NOT NULL DEFAULT '[]',
+          uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
+          PRIMARY KEY (plan_id, account_id, campaign_name)
+        );
+        INSERT INTO launch_creation_locks (
+          plan_id, account_id, campaign_name, owner_id, claimed_at,
+          campaign_id, ad_group_names_json, uncertain
+        )
+        SELECT plan_id, account_id, campaign_name, NULL, claimed_at, NULL, '[]', 1
+        FROM launch_creation_locks_legacy;
+        DROP TABLE launch_creation_locks_legacy;
+      `);
+    });
     this.db.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS launch_plans_copy_preview ON multi_account_launch_plans (copy_preview_id) WHERE copy_preview_id IS NOT NULL",
     );
@@ -5619,10 +5915,14 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO launch_presets (
-          id, name, region, daily_budget, bid, start_at, end_at, initial_status, created_at, updated_at
-        ) VALUES ('default-launch-preset', '基础预设', '未设置', 100, NULL, NULL, NULL, 'enabled', ?, ?)`,
+          id, name, region, daily_budget, bid, start_at, end_at, initial_status, creation_config_json, created_at, updated_at
+        ) VALUES ('default-launch-preset', '基础预设', '未设置', 100, NULL, NULL, NULL, 'enabled', ?, ?, ?)`,
       )
-      .run(now, now);
+      .run(JSON.stringify(defaultCreationPresetConfig), now, now);
+    this.db.prepare(
+      `UPDATE launch_presets SET creation_config_json = ?, updated_at = ?
+       WHERE id = 'default-launch-preset' AND (creation_config_json = '{}' OR creation_config_json = '')`,
+    ).run(JSON.stringify(defaultCreationPresetConfig), now);
     this.db
       .prepare(
         `INSERT OR IGNORE INTO global_automation_settings (
@@ -6366,6 +6666,12 @@ function toSqlBoolean(value: boolean): number {
 
 function fromSqlBoolean(value: unknown): boolean {
   return Number(value) === 1;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
 }
 
 function advanceDailyRun(current: string, completedAt: string): string {

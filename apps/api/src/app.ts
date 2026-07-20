@@ -34,6 +34,7 @@ import {
   LaunchCopyPreviewInputSchema,
   LaunchPresetInputSchema,
   LaunchManualVerificationInputSchema,
+  getCreationTemplateReadiness,
   StatusManualVerificationInputSchema,
   WriteTaskStatusSchema,
   AuditLogFilterSchema,
@@ -593,8 +594,13 @@ export async function createApp(
 
   app.post("/api/launch-plans/:planId/execute", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
-    if (!dependencies.store.getMultiAccountLaunchPlan(planId)) {
+    const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
+    if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
+    }
+    const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
+    if (!readiness.ready) {
+      return reply.status(409).send({ message: `广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，不能执行。` });
     }
     try {
       const user = request.authSession?.user;
@@ -608,11 +614,16 @@ export async function createApp(
 
   app.post("/api/launch-plans/:planId/queue", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
-    if (!dependencies.store.getMultiAccountLaunchPlan(planId)) {
+    const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
+    if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
     }
     if (!dependencies.store.getSystemRuntimeState().enabled) {
       return reply.status(409).send({ message: "软件总开关已关闭，批量创建写入已暂停。请重新开启后再次确认并加入队列。" });
+    }
+    const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
+    if (!readiness.ready) {
+      return reply.status(409).send({ message: `广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，不能加入创建队列。` });
     }
     try {
       const user = request.authSession?.user;
@@ -776,6 +787,31 @@ export async function createApp(
   app.post("/api/accounts", async (request, reply) => {
     const body = AccountCreateInputSchema.parse(request.body);
     return reply.status(201).send(dependencies.store.createAccount(body));
+  });
+
+  app.delete("/api/accounts/:accountId", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    let credentialBackups: Array<{ reference: string; secret: string }> = [];
+    try {
+      const credentialReferences = dependencies.store.listAccountCredentialReferences(accountId);
+      if (!credentialReferences) {
+        return reply.status(404).send({ message: "账号不存在。" });
+      }
+      credentialBackups = (await Promise.all(credentialReferences.map(async (reference) => ({
+        reference,
+        secret: await dependencies.vault.read(reference),
+      })))).flatMap((item) => item.secret === null ? [] : [{ reference: item.reference, secret: item.secret }]);
+      for (const reference of credentialReferences) {
+        await dependencies.vault.delete(reference);
+      }
+      dependencies.store.deleteAccount(accountId, credentialReferences);
+    } catch (cause) {
+      await Promise.allSettled(credentialBackups.map(({ reference, secret }) =>
+        dependencies.vault.restore(reference, secret),
+      ));
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+    return reply.status(204).send();
   });
 
   app.get("/api/accounts/:accountId", async (request, reply) => {

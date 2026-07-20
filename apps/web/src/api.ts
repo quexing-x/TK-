@@ -348,6 +348,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
+  deleteAccount: (accountId: string) =>
+    request<void>(`/api/accounts/${accountId}`, { method: "DELETE" }),
   updateSettings: (accountId: string, settings: AccountSettingsUpdate) =>
     request<AccountConfig>(`/api/accounts/${accountId}/settings`, {
       method: "PUT",

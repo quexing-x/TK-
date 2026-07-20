@@ -52,6 +52,18 @@ describe("web API client", () => {
     );
   });
 
+  it("deletes an advertising account through the account endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.deleteAccount("account-1")).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
   it("loads account-scoped provider capabilities", async () => {
     const payload = {
       accountId: "account-1",

@@ -61,6 +61,9 @@ export interface CreationMutation {
   operationId?: string;
   attemptId?: string;
   correlationId?: string;
+  batchId?: string;
+  batchCampaignId?: string;
+  batchAdGroupNames?: string[];
   onProgress?: (progress: LaunchCreationProgress) => void;
 }
 

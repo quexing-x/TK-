@@ -53,11 +53,19 @@ type ParsedCookieCredential = ReturnType<
   typeof CookieCredentialInputSchema.parse
 >;
 
+interface CreationBatchReservations {
+  campaignIds: Map<string, string>;
+  adGroupNames: Map<string, Set<string>>;
+  uncertainCampaigns: Set<string>;
+}
+
 export class CookieAdsProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Cookie 会话";
   readonly capabilityVersion = "cookie-capabilities-v2-2026-07";
   readonly capabilities = capabilities;
+  private readonly creationBatchReservations = new Map<string, CreationBatchReservations>();
+  private readonly creationBatchLocks = new Map<string, Promise<void>>();
 
   resolveCapabilities(context: ProviderContext): ReadonlySet<ProviderCapability> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -309,22 +317,96 @@ export class CookieAdsProvider implements AdsProvider {
         message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。",
       }));
     }
+    const campaignListRequest = credential.requestTemplates?.find(
+      (item) => item.target === "campaign",
+    ) ?? siblingListRequest(sessionRequest, "campaign");
     const results: CreationMutationResult[] = [];
-    for (const mutation of mutations) {
-      try {
-        results.push(await createCookieDraftChain(sessionRequest, credential, mutation, context.timezone ?? "UTC"));
-      } catch (cause) {
-        results.push({
-          ...mutation,
-          ok: false,
-          failureKind: cause instanceof UnknownCreationStateError
-            ? "unknown"
-            : "retryable",
-          message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
-        });
+    const batchId = mutations[0]?.batchId;
+    const reservationKey = batchId ? `${context.accountId}:${batchId}` : null;
+    const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
+    try {
+      const reservations = reservationKey
+        ? this.creationBatchReservations.get(reservationKey) ?? this.createBatchReservations(reservationKey)
+        : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>(), uncertainCampaigns: new Set<string>() };
+      for (const mutation of mutations) {
+        const campaignKey = mutation.row.campaignName.trim();
+        if (mutation.batchCampaignId) reservations.campaignIds.set(campaignKey, mutation.batchCampaignId);
+        if (mutation.batchAdGroupNames?.length) {
+          const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+          for (const name of mutation.batchAdGroupNames) names.add(name.trim());
+          reservations.adGroupNames.set(campaignKey, names);
+        }
+        if (mutation.templateMode === "none" && reservations.uncertainCampaigns.has(campaignKey)) {
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            message: "同批次前一条同系列任务结果未知，已停止后续创建以避免重复系列或广告组。",
+          });
+          continue;
+        }
+        try {
+          const result = await createCookieDraftChain(
+            sessionRequest,
+            campaignListRequest,
+            credential,
+            mutation,
+            context.timezone ?? "UTC",
+            mutation.templateMode === "none" ? {
+              ...(reservations.campaignIds.get(campaignKey)
+                ? { campaignId: reservations.campaignIds.get(campaignKey)! }
+                : {}),
+              adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
+            } : undefined,
+          );
+          results.push(result);
+          if (mutation.templateMode === "none" && result.ok && result.campaignId) {
+            reservations.campaignIds.set(campaignKey, result.campaignId);
+            const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+            names.add(result.row.adGroupName.trim());
+            reservations.adGroupNames.set(campaignKey, names);
+          }
+        } catch (cause) {
+          if (mutation.templateMode === "none" && cause instanceof UnknownCreationStateError) {
+            reservations.uncertainCampaigns.add(campaignKey);
+          }
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: cause instanceof UnknownCreationStateError
+              ? "unknown"
+              : "retryable",
+            message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
+          });
+        }
       }
+      return results;
+    } finally {
+      releaseBatchLock?.();
     }
-    return results;
+  }
+
+  private createBatchReservations(key: string): CreationBatchReservations {
+    const reservations: CreationBatchReservations = {
+      campaignIds: new Map(),
+      adGroupNames: new Map(),
+      uncertainCampaigns: new Set(),
+    };
+    this.creationBatchReservations.set(key, reservations);
+    return reservations;
+  }
+
+  private async acquireBatchLock(key: string): Promise<() => void> {
+    const previous = this.creationBatchLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => current);
+    this.creationBatchLocks.set(key, tail);
+    await previous;
+    return () => {
+      release();
+      if (this.creationBatchLocks.get(key) === tail) this.creationBatchLocks.delete(key);
+    };
   }
 
   async create(
@@ -460,13 +542,23 @@ function formatDateInTimezone(date: Date, timezone: string): string {
 
 async function createCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
+  campaignListRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
+  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
 ): Promise<CreationMutationResult> {
   const dispatchState = { mutationDispatched: false };
   try {
-    return await runCookieDraftChain(sessionRequest, credential, mutation, timezone, dispatchState);
+    return await runCookieDraftChain(
+      sessionRequest,
+      campaignListRequest,
+      credential,
+      mutation,
+      timezone,
+      dispatchState,
+      batchReservation,
+    );
   } catch (cause) {
     if (cause instanceof ConfirmedCreationFailureError || cause instanceof UnknownCreationStateError) {
       throw cause;
@@ -510,10 +602,12 @@ function ensureStatisticsMetric(value: unknown, metric: string): boolean {
 
 async function runCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
+  campaignListRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
   dispatchState: CreationDispatchState,
+  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
 ): Promise<CreationMutationResult> {
   mutation.onProgress?.({ phase: "validation", evidence: {} });
   const copyOnly = mutation.templateMode === "copy";
@@ -529,44 +623,93 @@ async function runCookieDraftChain(
       "当前创建样本来自 copy 流程，不能用于从零创建。请重新导入一次真正从空白页面创建广告时的创建请求。",
     );
   }
-  const drafts = credential.creationProfile
-    ? buildProfileDraftPayloads(credential.creationProfile, mutation.row, timezone)
-    : buildDraftPayloads(mutation.row, mutation.preset, timezone);
-  const preflightPayload = await requestCreationStep("adgroup/list",
-    () => sessionRequest,
+  const bootstrapTemplateCampaignId = !copyOnly && !credential.creationProfile
+    ? nonEmptyId(mutation.preset.templateCampaignId)
+    : undefined;
+  const resolvedRow = resolveTikTokPostRow(mutation);
+  const preflightPayloads = await requestCompleteListPages(
+    "adgroup/list",
+    sessionRequest,
     credential,
-    { semantics: "preflight-read", dispatchState },
+    dispatchState,
   );
-  assertAdGroupListPreflight(preflightPayload);
-  const initializedIds = copyOnly
+  const campaignPayloads = copyOnly
+    ? preflightPayloads
+    : await requestCompleteListPages(
+        "campaign/list",
+        campaignListRequest,
+        credential,
+        dispatchState,
+      );
+  const preflightEntities = preflightPayloads.flatMap((payload) => extractEntities(payload, "ad-group"));
+  const campaignEntities = campaignPayloads.flatMap((payload) => extractEntities(payload, "campaign"));
+  const exactCampaigns = copyOnly ? [] : [...new Map(
+    campaignEntities
+      .filter((entity) => normalizeProviderEntity(entity).name.trim() === mutation.row.campaignName.trim())
+      .map((entity) => [entity.externalId, entity]),
+  ).values()];
+  if (exactCampaigns.length > 1) {
+    throw new RetryableCreationError("当前账户存在多个同名推广系列，无法确定应复用哪一个系列。");
+  }
+  const remoteCampaignId = exactCampaigns[0]?.externalId;
+  if (batchReservation?.campaignId && remoteCampaignId && batchReservation.campaignId !== remoteCampaignId) {
+    throw new RetryableCreationError("同批次系列预留与远端同名系列不一致，已停止创建。");
+  }
+  const existingCampaignId = batchReservation?.campaignId ?? remoteCampaignId;
+  const creationRow = existingCampaignId
+    ? { ...resolvedRow, adGroupName: uniqueAdGroupName(
+        preflightEntities,
+        resolvedRow.adGroupName,
+        existingCampaignId,
+        batchReservation?.adGroupNames,
+      ) }
+    : resolvedRow;
+  // Persist the exact auto-suffixed name before the first creation mutation.
+  // Manual verification can then restore the same reservation after an
+  // unknown provider result without guessing from the original spreadsheet.
+  mutation.onProgress?.({
+    phase: "validation",
+    evidence: { resolvedAdGroupName: creationRow.adGroupName },
+  });
+  const drafts = credential.creationProfile
+    ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
+    : buildDraftPayloads(creationRow, mutation.preset, timezone);
+  const initializationTemplateCampaignId = copyOnly
+    ? mutation.templateCampaignId
+    : remoteCampaignId ?? bootstrapTemplateCampaignId;
+  const initializedIds = initializationTemplateCampaignId
     ? await initializeProfileDraftIds(
         sessionRequest,
         credential,
         mutation,
         dispatchState,
-        preflightPayload,
+        campaignEntities,
+        initializationTemplateCampaignId,
+        copyOnly,
       )
     : null;
   if (initializedIds) {
-    applyCopiedDraftForms(drafts, initializedIds);
+    applyCopiedDraftForms(drafts, initializedIds, !copyOnly, existingCampaignId);
   }
-  const campaign = await requestCreationStep("campaign_snap/save",
+  const campaign = existingCampaignId ? {} : await requestCreationStep("campaign_snap/save",
     () => creationRequest(sessionRequest, "campaign_snap/save", drafts.campaign),
     credential,
     { semantics: "mutation", dispatchState },
   );
-  const campaignSnapId = responseId(campaign, "campaign_snap_id") ?? initializedIds?.campaignSnapId ?? requiredResponseId(campaign, "campaign_snap_id");
-  mutation.onProgress?.({
-    phase: "campaign_draft",
-    evidence: { campaignSnapId },
-  });
-  const campaignSketchId = responseId(campaign, "campaign_sketch_id") ?? initializedIds?.campaignSketchId ?? requiredResponseId(campaign, "campaign_sketch_id");
-  mutation.onProgress?.({
-    phase: "campaign_draft",
-    evidence: { campaignSnapId, campaignSketchId },
-  });
+  const campaignSnapId = existingCampaignId ? "" : responseId(campaign, "campaign_snap_id")
+    ?? initializedIds?.campaignSnapId
+    ?? requiredResponseId(campaign, "campaign_snap_id");
+  if (!existingCampaignId) {
+    mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId } });
+  }
+  const campaignSketchId = existingCampaignId ? "" : responseId(campaign, "campaign_sketch_id")
+    ?? initializedIds?.campaignSketchId
+    ?? requiredResponseId(campaign, "campaign_sketch_id");
+  if (!existingCampaignId) {
+    mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId, campaignSketchId } });
+  }
 
-  if (initializedIds) {
+  if (initializedIds && !existingCampaignId) {
     const form = requireObjectField(drafts.adGroup, "ad_sketch_form_data");
     form.ad_snap_id = initializedIds.adSnapId;
     form.ad_sketch_id = initializedIds.adSketchId;
@@ -580,14 +723,19 @@ async function runCookieDraftChain(
       campaign_sketch_id: campaignSketchId,
       campaign_id:
         responseId(campaign, "campaign_id") ??
+        existingCampaignId ??
         nonEmptyId(drafts.adGroup.campaign_id) ??
         "",
     }),
     credential,
     { semantics: "mutation", dispatchState },
   );
-  const adSnapId = copyOnly && initializedIds ? initializedIds.adSnapId : responseId(adGroup, "ad_snap_id") ?? initializedIds?.adSnapId ?? requiredResponseId(adGroup, "ad_snap_id");
-  const adSketchId = copyOnly && initializedIds ? initializedIds.adSketchId : responseId(adGroup, "ad_sketch_id") ?? initializedIds?.adSketchId ?? requiredResponseId(adGroup, "ad_sketch_id");
+  const adSnapId = copyOnly && initializedIds ? initializedIds.adSnapId : responseId(adGroup, "ad_snap_id")
+    ?? initializedIds?.adSnapId
+    ?? requiredResponseId(adGroup, "ad_snap_id");
+  const adSketchId = copyOnly && initializedIds ? initializedIds.adSketchId : responseId(adGroup, "ad_sketch_id")
+    ?? initializedIds?.adSketchId
+    ?? requiredResponseId(adGroup, "ad_sketch_id");
   mutation.onProgress?.({
     phase: "adgroup_draft",
     evidence: { adGroupSnapId: adSnapId, adGroupSketchId: adSketchId },
@@ -639,16 +787,21 @@ async function runCookieDraftChain(
       }];
   const publishPayload = credential.creationProfile
     ? materializePublishProfile(credential.creationProfile.publishPayload, {
-        campaignSnapId, campaignSketchId, publishItems,
+        ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
         initialStatus: mutation.initialStatus,
       })
     : buildPublishInput({
-        campaignSnapId,
-        campaignSketchId,
-        adAndCreativeSnapInfoList: publishItems,
-      }, mutation.initialStatus);
+      campaignSnapId: campaignSnapId || existingCampaignId!,
+      campaignSketchId: campaignSketchId || existingCampaignId!,
+      adAndCreativeSnapInfoList: publishItems,
+    }, mutation.initialStatus);
+  if (existingCampaignId) {
+    publishPayload.campaign_id = existingCampaignId;
+    publishPayload.campaign_snap_id = "";
+    publishPayload.campaign_sketch_id = "";
+  }
   await validateDraftChain(sessionRequest, credential, {
-    campaignSnapId, campaignSketchId, publishItems,
+    ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
     riskInfo: credential.creationProfile && isRecord(credential.creationProfile.publishPayload.risk_info)
       ? credential.creationProfile.publishPayload.risk_info
       : {},
@@ -687,7 +840,7 @@ async function runCookieDraftChain(
   }
   let completed: Record<string, unknown>;
   try {
-    completed = await awaitCreationResult(sessionRequest, credential, published);
+    completed = await awaitCreationResult(sessionRequest, credential, published, existingCampaignId);
   } catch (cause) {
     if (cause instanceof ConfirmedCreationFailureError) throw cause;
     throw new UnknownCreationStateError(
@@ -695,12 +848,14 @@ async function runCookieDraftChain(
     );
   }
   const ids = creationResultIds(completed);
+  if (!ids.campaignId && existingCampaignId) ids.campaignId = existingCampaignId;
   if (!ids.campaignId || !ids.adGroupId || !ids.adId) {
     throw new UnknownCreationStateError(`TikTok 创建任务未生成完整对象：${JSON.stringify(creationResultSummary(completed))}`);
   }
   mutation.onProgress?.({ phase: "readback", evidence: {} });
   return {
     ...mutation,
+    row: creationRow,
     ok: true,
     ...(ids.campaignId ? { campaignId: ids.campaignId } : {}),
     ...(ids.adGroupId ? { adGroupId: ids.adGroupId } : {}),
@@ -758,6 +913,7 @@ async function validateDraftChain(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   ids: {
+    campaignId?: string;
     campaignSnapId: string;
     campaignSketchId: string;
     publishItems: DraftPublishItem[];
@@ -765,49 +921,53 @@ async function validateDraftChain(
   },
 ): Promise<void> {
   const adSnapIds = ids.publishItems.map((item) => item.ad_snap_id);
-  const consistency = await requestCreationStep("snap/cbo_consistency_check",
-    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/cbo_consistency_check/", {
-      campaign_snap_id: ids.campaignSnapId,
-      adgroup_snap_ids: adSnapIds,
-      ad_snap_ids: adSnapIds,
-      is_budget_split_test: false,
-    }), credential);
-  if (isRecord(consistency.data) && consistency.data.is_all_success === false) {
-    throw new ConfirmedCreationFailureError("TikTok 系列与广告组草稿一致性检查失败。");
+  let fakeCampaignId = "";
+  if (!ids.campaignId) {
+    const consistency = await requestCreationStep("snap/cbo_consistency_check",
+      () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/cbo_consistency_check/", {
+        campaign_snap_id: ids.campaignSnapId,
+        adgroup_snap_ids: adSnapIds,
+        ad_snap_ids: adSnapIds,
+        is_budget_split_test: false,
+      }), credential);
+    if (isRecord(consistency.data) && consistency.data.is_all_success === false) {
+      throw new ConfirmedCreationFailureError("TikTok 系列与广告组草稿一致性检查失败。");
+    }
+    const campaignCheck = await requestCreationStep("campaign_snap/check",
+      () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
+        campaign_snap_id: ids.campaignSnapId,
+      }), credential);
+    const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
+    if (campaignData?.success === false) throw new ConfirmedCreationFailureError("TikTok 系列草稿检查失败。");
+    fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
   }
-  const campaignCheck = await requestCreationStep("campaign_snap/check",
-    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
-      campaign_snap_id: ids.campaignSnapId,
-    }), credential);
-  const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
-  if (campaignData?.success === false) throw new ConfirmedCreationFailureError("TikTok 系列草稿检查失败。");
-  const fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
   const checkInfo = ids.publishItems.map((item) => ({
     ad_id: "",
     ad_snap_id: item.ad_snap_id,
     creative_snap_ids: item.creative_snap_info_list.map((creative) => creative.creative_snap_id),
   }));
+  await requestCreationStep("snap/batch_create_cta_id",
+    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
+      campaign_id: ids.campaignId ?? "",
+      campaign_snap_id: ids.campaignSnapId,
+      ad_and_creative_snap_info_list: checkInfo,
+    }), credential);
   const adCheck = await requestCreationStep("ad_creative_snap/check",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_creative_snap/check/", {
-      campaign_id: "",
+      campaign_id: ids.campaignId ?? "",
       fake_campaign_id: fakeCampaignId,
       ad_creative_snap_check_info: checkInfo,
       risk_info: ids.riskInfo,
     }), credential);
   const adData = isRecord(adCheck.data) ? adCheck.data : undefined;
   if (adData?.creative_success === false) throw new ConfirmedCreationFailureError("TikTok 广告素材草稿检查失败。");
-  await requestCreationStep("snap/batch_create_cta_id",
-    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
-      campaign_id: "",
-      campaign_snap_id: ids.campaignSnapId,
-      ad_and_creative_snap_info_list: checkInfo,
-    }), credential);
 }
 
 async function awaitCreationResult(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   published: Record<string, unknown>,
+  existingCampaignId?: string,
 ): Promise<Record<string, unknown>> {
   const asyncRequestId = responseId(published, "async_request_id");
   if (!asyncRequestId) return published;
@@ -819,12 +979,90 @@ async function awaitCreationResult(
       { semantics: "result-query" },
     );
     const data = isRecord(detail.data) ? detail.data : undefined;
-    if (data?.status === 1 && isRecord(data.result)) return detail;
+    if (data?.status === 1 && isRecord(data.result)) {
+      if (hasExplicitCreationFailure(data.result)) {
+        if (hasAnyPublishedCreationId(data.result, existingCampaignId)) {
+          throw new UnknownCreationStateError(
+            "TikTok 返回部分创建成功、部分失败；为避免重复创建，必须人工核验后再处理。",
+          );
+        }
+        throw new ConfirmedCreationFailureError("TikTok 已明确报告广告组或创意创建失败，未生成正式广告。");
+      }
+      return detail;
+    }
     if (typeof data?.status === "number" && data.status < 0) {
       throw new ConfirmedCreationFailureError("TikTok 已明确报告创建失败，未生成正式广告。");
     }
   }
   throw new Error("TikTok 创建任务在 9 秒内未返回最终结果，请稍后在投放结果中重新检查。");
+}
+
+function resolveTikTokPostRow(
+  mutation: CreationMutation,
+): CreationMutation["row"] {
+  const matches = mutation.preset.videoPostMappings?.filter(
+    (item) => item.videoCode === mutation.row.videoCode,
+  ) ?? [];
+  const postIds = [...new Set(matches.map((item) => item.postId))];
+  if (postIds.length > 1) {
+    throw new RetryableCreationError("同一视频代码配置了多个 Post ID，请先统一映射。");
+  }
+  const mapping = matches[0];
+  if (mapping) return { ...mutation.row, videoCode: mapping.postId };
+  if (mutation.row.videoCode.startsWith("#")) {
+    throw new RetryableCreationError(
+      "该视频代码尚未映射到 TikTok Post；请先在高级自定义中保存共享 Post ID。",
+    );
+  }
+  return mutation.row;
+}
+
+function uniqueAdGroupName(
+  preflightEntities: ProviderEntity[],
+  requestedName: string,
+  campaignId: string,
+  reservedNames: ReadonlySet<string> = new Set(),
+): string {
+  const existingNames = new Set(
+    preflightEntities
+      .filter((entity) => nonEmptyId(entity.payload.campaign_id) === campaignId)
+      .map((entity) => normalizeProviderEntity(entity).name.trim())
+      .filter(Boolean),
+  );
+  for (const name of reservedNames) existingNames.add(name);
+  if (!existingNames.has(requestedName)) return requestedName;
+  for (let suffix = 1; suffix <= 999; suffix += 1) {
+    const candidate = `${requestedName}-${String(suffix).padStart(3, "0")}`;
+    if (!existingNames.has(candidate)) return candidate;
+  }
+  throw new RetryableCreationError("同一推广系列下的广告组名称已用尽 001-999 后缀，请修改表格中的广告组名称。");
+}
+
+function hasExplicitCreationFailure(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasExplicitCreationFailure);
+  if (!isRecord(value)) return false;
+  if (value.is_success === false) return true;
+  return Object.values(value).some(hasExplicitCreationFailure);
+}
+
+function hasAnyPublishedCreationId(
+  result: Record<string, unknown>,
+  existingCampaignId?: string,
+): boolean {
+  const campaignId = nonEmptyId(result.campaign_id);
+  if (campaignId && campaignId !== existingCampaignId) return true;
+  const ads = isRecord(result.ad_and_creative)
+    ? Object.values(result.ad_and_creative)
+    : Array.isArray(result.ad_and_creative) ? result.ad_and_creative : [];
+  return ads.some((ad) => {
+    if (!isRecord(ad)) return false;
+    if (nonEmptyId(ad.ad_id)) return true;
+    const groups = isRecord(ad.asset_group_result)
+      ? Object.values(ad.asset_group_result)
+      : Array.isArray(ad.asset_group_result) ? ad.asset_group_result : [];
+    return groups.some((group) => isRecord(group) && Array.isArray(group.creative_items)
+      && group.creative_items.some((creative) => isRecord(creative) && nonEmptyId(creative.id)));
+  });
 }
 
 function creationResultIds(payload: Record<string, unknown>): { campaignId?: string; adGroupId?: string; adId?: string } {
@@ -882,21 +1120,18 @@ async function initializeProfileDraftIds(
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   dispatchState: CreationDispatchState,
-  listPayload: Record<string, unknown>,
+  campaigns: ProviderEntity[],
+  templateCampaignId: string,
+  requireDisabledSource: boolean,
 ): Promise<InitializedDraftIds> {
-  const templateCampaignId = mutation.templateCampaignId;
-  if (!templateCampaignId) {
-    throw new Error("复制模板无效：缺少 templateCampaignId，不能按系列名称回退定位。");
-  }
   const profile = credential.creationProfile;
-  const campaigns = extractEntities(listPayload, "campaign");
   const sourceCampaign = campaigns.find(
     (entity) => entity.externalId === templateCampaignId,
   );
   if (!sourceCampaign) {
     throw new Error(`当前账户未找到模板系列 ID：${templateCampaignId}。不会按系列名称回退定位。`);
   }
-  if (normalizeProviderEntity(sourceCampaign).status !== "disabled") {
+  if (requireDisabledSource && normalizeProviderEntity(sourceCampaign).status !== "disabled") {
     throw new Error("为了避免意外花费，只允许复制关闭状态的源系列。");
   }
   const riskInfo = profile && isRecord(profile.publishPayload.risk_info)
@@ -1013,6 +1248,8 @@ function copiedPublishItems(
 function applyCopiedDraftForms(
   drafts: { campaign: Record<string, unknown>; adGroup: Record<string, unknown>; creative: Record<string, unknown> },
   initialized: InitializedDraftIds,
+  applyPresetOverrides: boolean,
+  existingCampaignId?: string,
 ): void {
   const requestedCampaign = requireObjectField(drafts.campaign, "campaign_sketch_form_data");
   const requestedAd = requireObjectField(drafts.adGroup, "ad_sketch_form_data");
@@ -1020,24 +1257,43 @@ function applyCopiedDraftForms(
   const requestedCreative = Array.isArray(requestedCreatives) && isRecord(requestedCreatives[0]) ? requestedCreatives[0] : undefined;
   if (!requestedCreative) throw new Error("创建模板缺少广告素材表单。");
   const campaignForm = { ...requestedCampaign, ...cloneRecord(initialized.campaignForm) };
-  campaignForm.campaign_name = requestedCampaign.campaign_name;
-  campaignForm.campaign_id = "";
-  campaignForm.campaign_snap_id = initialized.campaignSnapId;
-  campaignForm.campaign_sketch_id = initialized.campaignSketchId;
+  if (!existingCampaignId) campaignForm.campaign_name = requestedCampaign.campaign_name;
+  if (applyPresetOverrides && !existingCampaignId) {
+    copyDefinedFields(requestedCampaign, campaignForm, ["objective_type", "buying_type", "budget_mode", "budget"]);
+  }
+  campaignForm.campaign_id = existingCampaignId ?? "";
+  campaignForm.campaign_snap_id = existingCampaignId ? "" : initialized.campaignSnapId;
+  campaignForm.campaign_sketch_id = existingCampaignId ? "" : initialized.campaignSketchId;
   drafts.campaign.campaign_sketch_form_data = campaignForm;
 
   const adForm = cloneRecord(initialized.adForm);
-  for (const key of ["ad_name", "budget", "cpa_bid", "schedule_type", "start_time", "end_time"] as const) {
+  const adOverrideKeys = ["ad_name", "budget", "cpa_bid", "schedule_type", "start_time", "end_time"];
+  if (applyPresetOverrides) {
+    adOverrideKeys.push(
+      "budget_mode", "pricing", "optimize_goal", "external_action", "ad_ref_pixel_id",
+      "automated_targeting", "country", "platform",
+    );
+  }
+  for (const key of adOverrideKeys) {
     if (requestedAd[key] !== undefined) adForm[key] = requestedAd[key];
   }
-  adForm.origin_ad_id = initialized.adForm.origin_ad_id;
+  if (applyPresetOverrides) {
+    applyManualAdSetup(adForm);
+  }
+  adForm.origin_ad_id = existingCampaignId ? 0 : initialized.adForm.origin_ad_id;
   adForm.ad_snap_id = initialized.adSnapId;
   adForm.ad_sketch_id = initialized.adSketchId;
   adForm.by_ad_sketch_id = initialized.adSketchId;
   drafts.adGroup.ad_sketch_form_data = adForm;
 
   const creativeForm = cloneRecord(initialized.creativeForm);
-  for (const key of ["creative_name", "external_url", "open_url"] as const) {
+  const creativeOverrideKeys = ["creative_name", "external_url", "open_url"];
+  if (applyPresetOverrides) {
+    creativeOverrideKeys.push(
+      "identity_type", "identity_id", "call_to_action_id", "is_comment_disable", "is_share_disable",
+    );
+  }
+  for (const key of creativeOverrideKeys) {
     if (requestedCreative[key] !== undefined) creativeForm[key] = requestedCreative[key];
   }
   const requestedImages = requestedCreative.image_list;
@@ -1048,10 +1304,34 @@ function applyCopiedDraftForms(
   if (requestedImages[0].aweme_item_id !== "__COPY_SOURCE__") {
     images[0].aweme_item_id = requestedImages[0].aweme_item_id;
   }
-  creativeForm.origin_creative_id = initialized.creativeForm.origin_creative_id;
+  creativeForm.origin_creative_id = existingCampaignId ? 0 : initialized.creativeForm.origin_creative_id;
   creativeForm.creative_snap_id = initialized.creativeSnapId;
   creativeForm.creative_sketch_id = initialized.creativeSketchId;
   drafts.creative.asset_group_sketch_form_data_list = [creativeForm];
+}
+
+function applyManualAdSetup(adForm: Record<string, unknown>): void {
+  // TikTok's Sales/Website flow keeps web_all_in_one_catalog=OPTIONAL at the
+  // campaign level. Manual creation is selected by clearing catalog bindings
+  // on the ad form, not by changing that campaign field or the page URL.
+  adForm.creative_material_mode = 6;
+  adForm.product_platform_id = "0";
+  adForm.product_set_id = "";
+  adForm.catalog_authorized_bc = "0";
+  adForm.supply_catalog_id = "0";
+  adForm.promotion_catalog_type = 0;
+  adForm.product_specific_type = 0;
+  adForm.budget_auto_adjust = { is_enabled: 0, initial_budget: "0" };
+}
+
+function copyDefinedFields(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  keys: string[],
+): void {
+  for (const key of keys) {
+    if (source[key] !== undefined) target[key] = source[key];
+  }
 }
 
 function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
@@ -1074,6 +1354,7 @@ function decodeJsonStrings(value: unknown): unknown {
 function materializePublishProfile(
   template: Record<string, unknown>,
   ids: {
+    campaignId?: string;
     campaignSnapId: string;
     campaignSketchId: string;
     publishItems: DraftPublishItem[];
@@ -1081,7 +1362,7 @@ function materializePublishProfile(
   },
 ): Record<string, unknown> {
   const body = JSON.parse(JSON.stringify(template)) as Record<string, unknown>;
-  body.campaign_id = "";
+  body.campaign_id = ids.campaignId ?? "";
   body.campaign_snap_id = ids.campaignSnapId;
   body.campaign_sketch_id = ids.campaignSketchId;
   body.is_status_disabled = ids.initialStatus === "disabled";
@@ -1659,6 +1940,112 @@ function isStableExternalId(value: unknown): value is string | number {
   );
 }
 
+async function requestCompleteListPages(
+  step: "campaign/list" | "adgroup/list",
+  template: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  dispatchState: CreationDispatchState,
+): Promise<Record<string, unknown>[]> {
+  const pages: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const payload = await requestCreationStep(
+      `${step} 第 ${page} 页`,
+      () => page === 1 ? template : withRequestedPage(template, page),
+      credential,
+      { semantics: "preflight-read", dispatchState },
+    );
+    assertListPreflight(payload, step);
+    const responsePage = responsePageNumber(payload);
+    if (responsePage !== null && responsePage !== page) {
+      throw new RetryableCreationError(`${step} 未返回请求的第 ${page} 页，无法安全判断同名对象。`);
+    }
+    pages.push(payload);
+    if (hasExplicitAdditionalPages(payload)) continue;
+    if (!hasExplicitPaginationEnd(payload)) {
+      throw new RetryableCreationError(`${step} 缺少可验证的分页结束信息，无法安全判断同名对象。`);
+    }
+    return pages;
+  }
+  throw new RetryableCreationError(`${step} 超过 100 页，无法在创建前完成安全查重。`);
+}
+
+function withRequestedPage(template: CapturedCookieRequest, page: number): CapturedCookieRequest {
+  const url = new URL(template.url);
+  let replaced = false;
+  for (const key of ["page", "page_num", "pageNum", "page_index", "pageIndex"]) {
+    if (!url.searchParams.has(key)) continue;
+    url.searchParams.set(key, String(page));
+    replaced = true;
+  }
+  let body = template.body;
+  const contentType = template.contentType?.toLowerCase() ?? "";
+  if (body && (contentType.includes("json") || body.trim().startsWith("{"))) {
+    const parsed = JSON.parse(body) as unknown;
+    const rewritten = rewritePageValue(parsed, page);
+    body = JSON.stringify(rewritten.value);
+    replaced ||= rewritten.changed;
+  } else if (body && contentType.includes("application/x-www-form-urlencoded")) {
+    const fields = new URLSearchParams(body);
+    for (const key of ["page", "page_num", "pageNum", "page_index", "pageIndex"]) {
+      if (!fields.has(key)) continue;
+      fields.set(key, String(page));
+      replaced = true;
+    }
+    body = fields.toString();
+  }
+  if (!replaced) url.searchParams.set("page", String(page));
+  return { ...template, url: url.toString(), body };
+}
+
+function siblingListRequest(
+  template: CapturedCookieRequest,
+  target: "campaign" | "ad-group",
+): CapturedCookieRequest {
+  const url = new URL(template.url);
+  const segment = target === "campaign" ? "campaign" : "adgroup";
+  url.pathname = url.pathname.replace(
+    /\/(campaign|adgroup)\/list(?=\/|$)/i,
+    `/${segment}/list`,
+  );
+  return { ...template, target, derived: true, url: url.toString() };
+}
+
+function rewritePageValue(value: unknown, page: number): { value: unknown; changed: boolean } {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const output = value.map((item) => {
+      const rewritten = rewritePageValue(item, page);
+      changed ||= rewritten.changed;
+      return rewritten.value;
+    });
+    return { value: output, changed };
+  }
+  if (!isRecord(value)) return { value, changed: false };
+  let changed = false;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (["page", "page_num", "pageNum", "page_index", "pageIndex"].includes(key)) {
+      output[key] = page;
+      changed = true;
+    } else {
+      const rewritten = rewritePageValue(item, page);
+      output[key] = rewritten.value;
+      changed ||= rewritten.changed;
+    }
+  }
+  return { value: output, changed };
+}
+
+function responsePageNumber(payload: Record<string, unknown>): number | null {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const pageInfo = isRecord(data.page_info)
+    ? data.page_info
+    : isRecord(data.pageInfo) ? data.pageInfo : isRecord(data.pagination) ? data.pagination : {};
+  const value = pageInfo.page ?? pageInfo.current_page ?? pageInfo.currentPage;
+  const page = Number(value);
+  return value !== undefined && Number.isInteger(page) ? page : null;
+}
+
 function isCookiePaginationComplete(
   payload: Record<string, unknown>,
   request: CapturedCookieRequest,
@@ -1684,6 +2071,30 @@ function isCookiePaginationComplete(
   if (hasMore === true || hasMore === 1 || hasMore === "1") return false;
   if (hasMore === false || hasMore === 0 || hasMore === "0") return true;
   return false;
+}
+
+function hasExplicitAdditionalPages(payload: Record<string, unknown>): boolean {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const pageInfo = isRecord(data.page_info)
+    ? data.page_info
+    : isRecord(data.pageInfo) ? data.pageInfo : isRecord(data.pagination) ? data.pagination : {};
+  const current = Number(pageInfo.page ?? pageInfo.current_page ?? pageInfo.currentPage);
+  const total = Number(pageInfo.total_page ?? pageInfo.totalPage ?? pageInfo.page_count ?? pageInfo.pageCount);
+  if (Number.isInteger(current) && Number.isInteger(total) && total > current) return true;
+  const hasMore = data.has_more ?? data.hasMore ?? pageInfo.has_more ?? pageInfo.hasMore;
+  return hasMore === true || hasMore === 1 || hasMore === "1";
+}
+
+function hasExplicitPaginationEnd(payload: Record<string, unknown>): boolean {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const pageInfo = isRecord(data.page_info)
+    ? data.page_info
+    : isRecord(data.pageInfo) ? data.pageInfo : isRecord(data.pagination) ? data.pagination : {};
+  const current = Number(pageInfo.page ?? pageInfo.current_page ?? pageInfo.currentPage);
+  const total = Number(pageInfo.total_page ?? pageInfo.totalPage ?? pageInfo.page_count ?? pageInfo.pageCount);
+  if (Number.isInteger(current) && Number.isInteger(total) && current >= 1 && total >= 1 && current >= total) return true;
+  const hasMore = data.has_more ?? data.hasMore ?? pageInfo.has_more ?? pageInfo.hasMore;
+  return hasMore === false || hasMore === 0 || hasMore === "0";
 }
 
 function readRequestedPage(request: CapturedCookieRequest): number | null {
@@ -1745,12 +2156,15 @@ function findJsonPage(value: unknown): number | null {
   return null;
 }
 
-function assertAdGroupListPreflight(payload: Record<string, unknown>): void {
+function assertListPreflight(
+  payload: Record<string, unknown>,
+  step: "campaign/list" | "adgroup/list",
+): void {
   const data = isRecord(payload.data) ? payload.data : undefined;
   const listKeys = ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"];
   if (!data || !listKeys.some((key) => Array.isArray(data[key]))) {
     throw new RetryableCreationError(
-      "adgroup/list 预检响应缺少可识别的列表结构，尚未发送任何创建请求。",
+      `${step} 预检响应缺少可识别的列表结构，尚未发送任何创建请求。`,
     );
   }
 }
