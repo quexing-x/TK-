@@ -12,6 +12,7 @@ import {
   ListFilter,
   ListChecks,
   LayoutDashboard,
+  Moon,
   Plus,
   Pencil,
   PlugZap,
@@ -21,6 +22,7 @@ import {
   Settings2,
   ShieldCheck,
   Search,
+  Sun,
   Trash2,
   UserRound,
   X,
@@ -44,6 +46,7 @@ import type {
   AdOperationRecord,
   MetricBatchRecord,
   ManagedEntityRecord,
+  IgnoredEntityRecord,
   ProviderConnection,
   ProviderKind,
   ReadOnlySyncResult,
@@ -78,6 +81,7 @@ import {
   type AnalysisPreset,
 } from "./analytics";
 import { syncQualityPresentation } from "./sync-quality-view";
+import { nextUiTheme, resolveUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from "./ui-theme";
 
 type PageKey =
   | "overview"
@@ -205,21 +209,48 @@ const navItems: Array<{
   },
 ];
 
+function canAccessNavigationItem(
+  key: PageKey,
+  permissions: readonly string[],
+): boolean {
+  if (key === "system-users") return permissions.includes("users:manage");
+  if (key === "maintenance") return permissions.includes("system:control");
+  return true;
+}
+
 export function App() {
+  const [theme, setTheme] = useState<UiTheme>(() => {
+    try {
+      return resolveUiTheme(window.localStorage.getItem(UI_THEME_STORAGE_KEY));
+    } catch {
+      return "light";
+    }
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(UI_THEME_STORAGE_KEY, theme);
+    } catch {
+      // Keep the selected theme for this session when storage is unavailable.
+    }
+  }, [theme]);
+
   return (
     <AuthGate>
-      <ConsoleApp />
+      <ConsoleApp theme={theme} onThemeToggle={() => setTheme((current) => nextUiTheme(current))} />
     </AuthGate>
   );
 }
 
-function ConsoleApp() {
+function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: () => void }) {
   const auth = useAuth();
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [page, setPage] = useState<PageKey>(() => pageFromHash());
   const [error, setError] = useState<string | null>(null);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
 
   const loadBootstrap = useCallback(async () => {
     try {
@@ -303,6 +334,19 @@ function ConsoleApp() {
     bootstrap.accountConnectionStates,
   );
 
+  const toggleSystemRuntime = async () => {
+    if (runtimeBusy) return;
+    try {
+      setRuntimeBusy(true);
+      await api.updateSystemRuntime(!bootstrap.systemRuntime.enabled);
+      await loadBootstrap();
+    } catch (cause) {
+      setError(getErrorMessage(cause));
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -319,15 +363,8 @@ function ConsoleApp() {
         <button
           aria-label={bootstrap.systemRuntime.enabled ? "系统运行中，点击暂停" : "系统已暂停，点击恢复"}
           className={bootstrap.systemRuntime.enabled ? "system-master active" : "system-master paused"}
-          disabled={!auth.status.permissions.includes("system:control")}
-          onClick={async () => {
-            try {
-              await api.updateSystemRuntime(!bootstrap.systemRuntime.enabled);
-              await loadBootstrap();
-            } catch (cause) {
-              setError(getErrorMessage(cause));
-            }
-          }}
+          disabled={runtimeBusy || !auth.status.permissions.includes("system:control")}
+          onClick={() => void toggleSystemRuntime()}
           title={bootstrap.systemRuntime.enabled ? "系统运行中，点击暂停" : "系统已暂停，点击恢复"}
           type="button"
         >
@@ -348,11 +385,7 @@ function ConsoleApp() {
         </div>
 
         <nav className="nav-list">
-          {navItems.filter((item) => {
-            if (item.key === "system-users") return auth.status.permissions.includes("users:manage");
-            if (item.key === "maintenance") return auth.status.permissions.includes("system:control");
-            return true;
-          }).map((item) => {
+          {navItems.filter((item) => canAccessNavigationItem(item.key, auth.status.permissions)).map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -392,7 +425,7 @@ function ConsoleApp() {
               <Search size={15} /><span>跳转账户、规则、任务…</span><kbd>Ctrl K</kbd>
             </button>
             {commandOpen && <div className="command-menu" role="menu">
-              {navItems.filter((item) => item.key !== "overview").map((item) => {
+              {navItems.filter((item) => item.key !== "overview" && canAccessNavigationItem(item.key, auth.status.permissions)).map((item) => {
                 const Icon = item.icon;
                 return <button key={item.key} type="button" role="menuitem" onClick={() => { navigateTo(item.key); setCommandOpen(false); }}><Icon size={15} /><span>{item.label}</span><small>{item.description}</small></button>;
               })}
@@ -401,6 +434,27 @@ function ConsoleApp() {
           <span className={bootstrap.systemRuntime.enabled ? "runtime-chip active" : "runtime-chip paused"}>
             <i />{bootstrap.systemRuntime.enabled ? "稳定运行" : "已暂停"}
           </span>
+          <button
+            aria-label={bootstrap.systemRuntime.enabled ? "关闭全局自动化" : "开启全局自动化"}
+            className={bootstrap.systemRuntime.enabled ? "global-automation-toggle active" : "global-automation-toggle"}
+            disabled={runtimeBusy || !auth.status.permissions.includes("system:control")}
+            onClick={() => void toggleSystemRuntime()}
+            title={bootstrap.systemRuntime.enabled ? "关闭全局自动化" : "开启全局自动化"}
+            type="button"
+          >
+            <span className={bootstrap.systemRuntime.enabled ? "mini-switch checked" : "mini-switch"}><i /></span>
+            <span>全局自动化</span>
+          </button>
+          <button
+            aria-label={theme === "light" ? "切换到深色模式" : "切换到浅色模式"}
+            className="theme-toggle"
+            onClick={onThemeToggle}
+            title={theme === "light" ? "切换到深色模式" : "切换到浅色模式"}
+            type="button"
+          >
+            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+            <span>{theme === "light" ? "深色" : "浅色"}</span>
+          </button>
           <div className="topbar-user">
             <span><strong>{auth.status.user?.displayName}</strong><small>{auth.status.user?.role}</small></span>
             <button type="button" onClick={() => void auth.logout()}>退出</button>
@@ -596,6 +650,8 @@ function UsersPage({
   onChanged: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
+  const auth = useAuth();
+  const canManageAccounts = auth.status.permissions.includes("accounts:manage");
   const [editing, setEditing] = useState<AccountConfig | null>(null);
   const [form, setForm] = useState<AccountEditorInput>(defaultAccountEditorInput);
   const [showForm, setShowForm] = useState(false);
@@ -623,12 +679,14 @@ function UsersPage({
   }, [onChanged]);
 
   const openNew = () => {
+    if (!canManageAccounts) return;
     setEditing(null);
     setForm(defaultAccountEditorInput);
     setShowForm(true);
   };
 
   const openEdit = (account: AccountConfig) => {
+    if (!canManageAccounts) return;
     setEditing(account);
     setForm(settingsFromAccount(account));
     setShowForm(true);
@@ -636,6 +694,7 @@ function UsersPage({
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
+    if (!canManageAccounts) return;
     try {
       setSaving(true);
       const enablesAutomation = form.enabled && (!editing || !editing.enabled);
@@ -661,6 +720,7 @@ function UsersPage({
   };
 
   const toggleAccount = async (account: AccountConfig) => {
+    if (!canManageAccounts) return;
     try {
       if (
         !account.enabled
@@ -679,6 +739,7 @@ function UsersPage({
   };
 
   const enableAfterConnection = async (account: AccountConfig) => {
+    if (!canManageAccounts) return;
     const capabilities = await api.getAccountCapabilities(account.id);
     if (!canEnableAccountAutomation(capabilities)) {
       await onChanged();
@@ -695,7 +756,8 @@ function UsersPage({
   };
 
   const deleteAccount = async (account: AccountConfig) => {
-    const confirmation = `确认删除广告账户“${account.displayName}”吗？\n\n此操作不可撤销，将删除该账户的本地接入凭据及账户级数据；其他账户、全局规则和通知配置不会受影响。`;
+    if (!canManageAccounts) return;
+    const confirmation = `确认删除广告账户“${account.displayName}”吗？\n\n此操作不可撤销，将删除该账户的本地接入凭据、投放计划、操作记录及全部账户级数据。若它是多账户计划的来源，该共享计划也会删除；其他账户的凭据、规则和配置不会受影响。`;
     if (!window.confirm(confirmation)) return;
     try {
       setSaving(true);
@@ -720,7 +782,7 @@ function UsersPage({
               <p>账户开启自动化后默认按全局规则执行；接入凭据仍按账户独立保存。</p>
             </div>
           </div>
-          <button className="primary-button" onClick={openNew} type="button">
+          <button className="primary-button" disabled={!canManageAccounts} onClick={openNew} title={canManageAccounts ? undefined : "需要 accounts:manage 权限"} type="button">
             <Plus size={17} /> 新增账户
           </button>
         </div>
@@ -753,7 +815,7 @@ function UsersPage({
                     <div className="account-automation-toggle">
                       <Toggle
                         checked={account.enabled}
-                        disabled={!account.enabled && !automationReady}
+                        disabled={!canManageAccounts || (!account.enabled && !automationReady)}
                         label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
                         onChange={() => void toggleAccount(account)}
                       />
@@ -762,9 +824,9 @@ function UsersPage({
                   </td>
                   <td>
                     <div className="row-actions">
-                      <button type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
-                      <button type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
-                      <button className="danger-button" disabled={saving} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
+                      <button disabled={!canManageAccounts} type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
+                      <button disabled={!canManageAccounts} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
+                      <button className="danger-button" disabled={saving || !canManageAccounts} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
                     </div>
                   </td></>;
                 })()}</tr>
@@ -839,34 +901,37 @@ function AdsManagementPage({
   capabilities: AccountProviderCapabilities | undefined;
   onError: (message: string | null) => void;
 }) {
+  const auth = useAuth();
+  const canOperateAds = auth.status.permissions.includes("ads:operate");
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
   const [schedules, setSchedules] = useState<ScheduledEntityActionRecord[]>([]);
   const [query, setQuery] = useState("");
-  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("all");
+  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("ad-group");
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>("all");
+  const [manualTakeovers, setManualTakeovers] = useState<IgnoredEntityRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
-  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
   const [scheduling, setScheduling] = useState<ManagedEntityRecord | null>(null);
   const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
   const [scheduledAction, setScheduledAction] = useState<"enable" | "disable">("disable");
   const [runAt, setRunAt] = useState("");
   const [disableAt, setDisableAt] = useState("");
   const [enableAt, setEnableAt] = useState("");
-  const canRead = hasProviderCapability(capabilities, "read-campaigns");
   const canChangeStatus = hasProviderCapability(capabilities, "change-status");
-  const canAppeal = hasProviderCapability(capabilities, "appeal-ads");
 
   const load = useCallback(async () => {
     try {
-      const [nextEntities, nextOperations, nextSchedules] = await Promise.all([
+      const [nextEntities, nextOperations, nextSchedules, nextManualTakeovers] = await Promise.all([
         api.getManagedEntities(account.id),
         api.getAdOperations(account.id),
         api.getSchedules(account.id),
+        api.getManualTakeovers(account.id),
       ]);
       setEntities(nextEntities);
       setOperations(nextOperations);
       setSchedules(nextSchedules);
+      setManualTakeovers(nextManualTakeovers);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -878,25 +943,13 @@ function AdsManagementPage({
     void load();
   }, [load]);
 
-  const refreshFromProvider = async () => {
-    try {
-      setBusy("refresh");
-      setSyncFeedback(null);
-      const result = await api.previewAutomation(account.id);
-      if (result.status === "failed") {
-        setSyncFeedback(result.errorMessage ?? "读取广告数据失败，未返回具体原因。");
-      } else {
-        setSyncFeedback(`已完成只读同步：检测到 ${result.candidateCount} 项候选规则，不会修改广告。`);
-      }
-      await load();
-    } catch (cause) {
-      const message = getErrorMessage(cause);
-      setSyncFeedback(message);
-      onError(message);
-    } finally {
-      setBusy(null);
-    }
-  };
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClock(Date.now());
+      void load();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -912,6 +965,7 @@ function AdsManagementPage({
   }, [entities, level, query, statusFilter]);
 
   const changeStatus = async (entity: ManagedEntityRecord) => {
+    if (!canOperateAds) return;
     if (entity.status === "unknown") return;
     const action = entity.status === "enabled" ? "disable" : "enable";
     if (!window.confirm(`确认${action === "enable" ? "开启" : "关闭"}“${entity.name}”吗？`)) return;
@@ -931,13 +985,14 @@ function AdsManagementPage({
     }
   };
 
-  const toggleIgnore = async (entity: ManagedEntityRecord) => {
+  const toggleManualTakeover = async (entity: ManagedEntityRecord) => {
+    if (!canOperateAds) return;
     try {
-      setBusy(`${entity.entityType}:${entity.externalId}:ignore`);
+      setBusy(`${entity.entityType}:${entity.externalId}:takeover`);
       if (entity.ignored) {
         await api.unignoreEntity(account.id, entity.entityType, entity.externalId);
       } else {
-        const reason = window.prompt("请输入忽略原因：", "人工排除，不参与自动化")?.trim();
+        const reason = window.prompt("请输入人工接管原因：", "人工接管，不参与自动化")?.trim();
         if (!reason) return;
         await api.ignoreEntity(
           account.id,
@@ -954,12 +1009,25 @@ function AdsManagementPage({
     }
   };
 
-  const queueAppeal = async (entity: ManagedEntityRecord) => {
-    const reason = window.prompt("请输入申诉原因或备注：")?.trim();
-    if (!reason) return;
+  const restoreManualTakeover = async (takeover: IgnoredEntityRecord) => {
+    if (!canOperateAds) return;
     try {
-      setBusy(`${entity.externalId}:appeal`);
-      await api.queueAppeal(account.id, entity.externalId, reason);
+      setBusy(`${takeover.entityType}:${takeover.externalId}:takeover`);
+      await api.unignoreEntity(account.id, takeover.entityType, takeover.externalId);
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restoreAllManualTakeovers = async () => {
+    if (!canOperateAds || manualTakeovers.length === 0) return;
+    if (!window.confirm(`确认恢复 ${manualTakeovers.length} 个广告组的自动化？`)) return;
+    try {
+      setBusy("restore-all-takeovers");
+      await api.restoreAllManualTakeovers(account.id);
       await load();
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -970,7 +1038,7 @@ function AdsManagementPage({
 
   const saveSchedule = async (event: FormEvent) => {
     event.preventDefault();
-    if (!scheduling) return;
+    if (!scheduling || !canOperateAds) return;
     try {
       setBusy(`${scheduling.externalId}:schedule`);
       if (scheduleKind === "once") {
@@ -996,6 +1064,7 @@ function AdsManagementPage({
   };
 
   const cancelSchedule = async (schedule: ScheduledEntityActionRecord) => {
+    if (!canOperateAds) return;
     try {
       if (schedule.groupId) {
         await api.cancelOvernightSchedule(account.id, schedule.groupId);
@@ -1009,6 +1078,8 @@ function AdsManagementPage({
   };
 
   if (!entities) return <EmptyState text="正在读取广告对象…" loading />;
+  const secondsUntilLocalRefresh = Math.max(1, 30 - Math.floor((clock / 1_000) % 30));
+  const entityNameByKey = new Map(entities.map((entity) => [`${entity.entityType}:${entity.externalId}`, entity.name]));
 
   return (
     <section className="page-stack">
@@ -1038,10 +1109,9 @@ function AdsManagementPage({
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象</h2><p>共 {filtered.length} 项；忽略对象不会参与自动化决策。</p></div></div>
-          <button className="secondary-button" disabled={busy !== null || !canRead} onClick={() => void refreshFromProvider()} type="button" title={canRead ? undefined : "当前账户未开放数据读取能力"}><RefreshCcw size={16} /> {busy === "refresh" ? "同步中…" : "刷新"}</button>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象</h2><p>共 {filtered.length} 项；人工接管的广告组不会参与自动化决策。</p></div></div>
+          <small className="inline-protection-note" title="仅刷新本地已同步数据，不会触发 TikTok 请求">下次本地更新：{secondsUntilLocalRefresh} 秒</small>
         </div>
-        {syncFeedback && <div className={`automation-run-feedback ${syncFeedback.includes("失败") || syncFeedback.includes("错误") ? "error" : "success"}`}>{syncFeedback}</div>}
         <div className="table-wrap">
           <table>
             <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPC</th><th>转化</th><th>自动化</th><th>操作</th></tr></thead>
@@ -1056,13 +1126,12 @@ function AdsManagementPage({
                     <td>{formatMetric(entity.metrics.spend)}</td>
                     <td>{formatMetric(entity.metrics.cost_per_click)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
-                    <td>{entity.ignored ? <span className="risk-badge destructive">已忽略</span> : "参与"}</td>
+                    <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
                     <td><div className="row-actions">
-                      {canChangeStatus && <button disabled={busy !== null || entity.status === "unknown"} title={entity.status === "unknown" ? "状态未知：请先执行检测预览或等待下一次同步后再操作。" : undefined} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>}
-                      {entity.status === "unknown" && <small className="inline-protection-note">请先同步状态</small>}
-                      <button disabled={busy !== null} onClick={() => void toggleIgnore(entity)} type="button"><Ban size={14} /> {entity.ignored ? "取消忽略" : "忽略"}</button>
-                      {canChangeStatus && entity.entityType === "ad-group" && <button disabled={busy !== null} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
-                      {canAppeal && entity.entityType === "ad" && <button disabled={busy !== null} onClick={() => void queueAppeal(entity)} type="button">加入申诉</button>}
+                      {canChangeStatus && <button disabled={busy !== null || !canOperateAds || entity.status === "unknown"} title={!canOperateAds ? "需要 ads:operate 权限" : entity.status === "unknown" ? "状态未知：请先执行检测预览或等待下一次同步后再操作。" : undefined} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>}
+                      {entity.status === "unknown" && <small className="inline-protection-note" title="最近同步未返回可识别的启停字段，不能执行启停或参与自动化决策">状态待确认</small>}
+                      {entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void toggleManualTakeover(entity)} type="button"><Ban size={14} /> {entity.ignored ? "恢复自动化" : "人工接管"}</button>}
+                      {canChangeStatus && entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
                     </div></td>
                   </tr>
                 );
@@ -1073,8 +1142,18 @@ function AdsManagementPage({
       </div>
 
       <div className="panel table-panel">
+        <div className="panel-heading">
+          <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组</h2><p>接管后不会生成或执行该广告组的自动化建议；恢复后从下一轮检测重新参与。</p></div></div>
+          <button className="secondary-button" disabled={busy !== null || !canOperateAds || manualTakeovers.length === 0} onClick={() => void restoreAllManualTakeovers()} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">全部恢复自动化</button>
+        </div>
+        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th>操作</th></tr></thead><tbody>
+          {manualTakeovers.length === 0 ? <tr><td colSpan={4}>暂无人工接管的广告组。</td></tr> : manualTakeovers.map((takeover) => <tr key={`${takeover.entityType}:${takeover.externalId}`}><td>{entityNameByKey.get(`${takeover.entityType}:${takeover.externalId}`) ?? takeover.externalId}<br /><small>{takeover.externalId}</small></td><td>{takeover.reason}</td><td>{new Date(takeover.createdAt).toLocaleString()}</td><td><button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void restoreManualTakeover(takeover)} type="button">恢复自动化</button></td></tr>)}
+        </tbody></table></div>
+      </div>
+
+      <div className="panel table-panel">
         <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务</h2><p>单次定时只执行一次；过夜开关会每日按设置时间关闭和开启。账户自动化或软件总开关关闭时不会执行。</p></div></div></div>
-        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" onClick={() => void cancelSchedule(schedule)} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
+        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
 
       <div className="panel table-panel">
@@ -1099,7 +1178,7 @@ function AdsManagementPage({
             <div className="schedule-kind-tabs"><button className={scheduleKind === "once" ? "active" : ""} onClick={() => setScheduleKind("once")} type="button">单次定时</button><button className={scheduleKind === "overnight" ? "active" : ""} onClick={() => setScheduleKind("overnight")} type="button">每日过夜</button></div>
             {scheduleKind === "once" ? <div className="form-grid"><Field label="执行动作"><select value={scheduledAction} onChange={(event) => setScheduledAction(event.target.value as typeof scheduledAction)}><option value="enable">开启</option><option value="disable">关闭</option></select></Field><Field label="执行时间"><input required type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} /></Field></div> : <div className="form-grid"><Field label="每日关闭时间（首次）"><input required type="datetime-local" value={disableAt} onChange={(event) => setDisableAt(event.target.value)} /></Field><Field label="每日开启时间（首次）"><input required type="datetime-local" value={enableAt} onChange={(event) => setEnableAt(event.target.value)} /></Field></div>}
             <p className="provider-endpoint-note">时间使用本机时区。未到时间前不会写入 TikTok；执行时仍要求账户连接正常且两个自动化总开关均开启。</p>
-            <div className="modal-actions"><button className="secondary-button" onClick={() => setScheduling(null)} type="button">取消</button><button className="primary-button" disabled={busy !== null} type="submit">保存任务</button></div>
+          <div className="modal-actions"><button className="secondary-button" onClick={() => setScheduling(null)} type="button">取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds} type="submit">保存任务</button></div>
           </form>
         </div>
       )}
@@ -1364,12 +1443,12 @@ function AutomationPage({
     }
   };
 
-  const saveLowRiskPolicy = async (enabled: boolean, dailyActionLimit: number) => {
+  const saveLowRiskPolicy = async (enabled: boolean) => {
     try {
       setBusy("low-risk-policy");
       const next = await api.updateLowRiskAutomation(account.id, {
         enabled,
-        dailyActionLimit,
+        dailyActionLimit: 0,
       });
       setLowRiskState(next);
       onError(null);
@@ -1458,12 +1537,22 @@ function AutomationPage({
         <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动关闭</h2><p>默认关闭；只允许关闭，不允许自动开启。每日限额由数据库原子控制，多实例不会重复领取同一建议。</p></div></div></div>
         <div className="sync-count-grid">
           <span>策略 <strong>{lowRiskState.policy.enabled ? "已启用" : "已关闭"}</strong></span>
-          <span>今日用量 <strong>{lowRiskState.todayUsage} / {lowRiskState.policy.dailyActionLimit}</strong></span>
+          <span>今日自动关闭 <strong>{lowRiskState.todayUsage} 次（不限量）</strong></span>
           <span>熔断 <strong>{lowRiskState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
         </div>
         <div className="automation-actions">
-          <label className="field"><span>每日自动关闭上限</span><input min="1" max="100" type="number" value={lowRiskState.policy.dailyActionLimit} disabled={busy !== null || lowRiskState.policy.enabled} onChange={(event) => setLowRiskState({ ...lowRiskState, policy: { ...lowRiskState.policy, dailyActionLimit: Number(event.target.value) } })} /></label>
-          <button className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"} disabled={busy !== null || !canChangeStatus || (account.executionMode !== "automatic" && !lowRiskState.policy.enabled) || Boolean(lowRiskState.circuit?.openedAt)} onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled, lowRiskState.policy.dailyActionLimit)} type="button">{busy === "low-risk-policy" ? "保存中…" : lowRiskState.policy.enabled ? "关闭低风险自动化" : "启用低风险自动化"}</button>
+          <button
+            className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
+            disabled={busy !== null || (!lowRiskState.policy.enabled && (
+              !canChangeStatus
+              || account.executionMode !== "automatic"
+              || Boolean(lowRiskState.circuit?.openedAt)
+            ))}
+            onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled)}
+            type="button"
+          >
+            {busy === "low-risk-policy" ? "保存中…" : lowRiskState.policy.enabled ? "关闭低风险自动化" : "启用低风险自动化"}
+          </button>
           {lowRiskState.circuit?.openedAt && <button className="secondary-button" disabled={busy !== null || lowRiskState.policy.enabled} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>}
         </div>
         {account.executionMode !== "automatic" && <p className="retention-note">请先在用户管理中将账户执行模式明确设为“自动执行”；启用后仍只开放关闭规则。</p>}
@@ -1474,6 +1563,25 @@ function AutomationPage({
         <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>账户接入状态</h2><p>由后台轮询维护；页面只展示已保存的最新结果，不会因切换页面重新检测。</p></div></div></div>
         <div className="sync-count-grid"><span>已接入 <strong>{overview.connectedCount}</strong></span><span>已开启自动化 <strong>{overview.automationEnabledCount}</strong></span><span>待处理接入 <strong>{unreadyAccounts.length}</strong></span></div>
         {unreadyAccounts.length > 0 ? <div className="sheet-issues warning"><strong>以下已开启自动化的账户尚不能运行</strong><ul>{unreadyAccounts.map((item) => <li key={item.accountId}><strong>{item.displayName}</strong>：{item.message}</li>)}</ul></div> : <p className="retention-note">所有已开启自动化的账户均已通过连接检测。</p>}
+      </div>
+
+      <div className="panel table-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="panel-icon"><Activity size={18} /></span>
+            <div>
+              <h2>最近轮询记录</h2>
+              <p>每次完成的后台轮询都会保留记录；候选为 0 表示本轮正常完成且无需操作。</p>
+            </div>
+          </div>
+          <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>开始时间</th><th>来源</th><th>候选</th><th>执行结果</th><th>状态</th><th>说明</th></tr></thead>
+            <tbody>{runs.length === 0 ? <tr><td colSpan={6}>暂无已完成轮询记录。</td></tr> : runs.map((run) => <tr key={run.id}><td>{new Date(run.startedAt).toLocaleString()}</td><td>{automationTriggerLabel(run.trigger)}</td><td>{run.candidateCount}</td><td>{run.successCount} 成功 / {run.failureCount} 失败</td><td><span className={`status ${run.status === "completed" ? "active" : run.status === "failed" ? "danger" : "warning"}`}>{automationRunStatusLabel(run.status)}</span></td><td><small>{run.errorMessage ?? (run.candidateCount === 0 ? "本轮轮询正常完成，无需操作。" : "已生成规则建议，详见下方记录。")}</small></td></tr>)}</tbody>
+          </table>
+        </div>
       </div>
 
       <div className="panel table-panel">
@@ -1657,6 +1765,7 @@ function connectionStateLabel(
         connection: ProviderConnection | null;
         readiness: CookieConnectionReadiness | null;
         latestSync: ReadOnlySyncResult | null;
+        capabilities: AccountProviderCapabilities | undefined;
   }
     | undefined,
   kind: ProviderKind,
@@ -1689,7 +1798,8 @@ function connectionStateLabel(
         : latestSync.warnings.length > 0
           ? <span className="status warning">数据读取：部分数据</span>
           : <span className="status active">数据读取：已接入</span>;
-    return <div className="capability-statuses">{readStatus}<span className="status active">启停：已接入</span><span className="status">创建功能：暂未就绪</span></div>;
+    const canCreate = hasProviderCapability(state?.capabilities, "create-campaigns");
+    return <div className="capability-statuses">{readStatus}<span className="status active">启停：已接入</span><span className={canCreate ? "status active" : "status warning"}>创建：{canCreate ? "已接入" : "未就绪"}</span></div>;
   }
   if (connection.status === "failed" && kind === "cookie") {
     return <span className="status danger">Cookie 已失效</span>;
@@ -1762,6 +1872,14 @@ function decisionStatusLabel(
     unknown: "执行结果待确认",
     skipped: "安全跳过",
   }[status];
+}
+
+function automationTriggerLabel(trigger: AutomationRunRecord["trigger"]): string {
+  return ({ scheduler: "后台轮询", manual: "手动生成建议", preview: "检测预览" })[trigger];
+}
+
+function automationRunStatusLabel(status: AutomationRunRecord["status"]): string {
+  return ({ running: "进行中", completed: "已完成", failed: "失败" })[status];
 }
 
 function approvalStatusLabel(status: AutomationApprovalRecord["status"]): string {

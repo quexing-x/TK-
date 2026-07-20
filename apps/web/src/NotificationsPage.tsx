@@ -21,6 +21,7 @@ import type {
   PollCycleRecord,
 } from "@tk-auto/core";
 import { api } from "./api";
+import { useAuth } from "./AuthGate";
 
 type EmailSettings = Extract<
   NotificationChannelSettings,
@@ -62,6 +63,8 @@ export function NotificationsPage({
 }: {
   onError: (message: string | null) => void;
 }) {
+  const auth = useAuth();
+  const canManageRules = auth.status.permissions.includes("rules:manage");
   const [channels, setChannels] = useState<NotificationChannelRecord[]>([]);
   const [deliveries, setDeliveries] = useState<NotificationDeliveryRecord[]>([]);
   const [cycles, setCycles] = useState<PollCycleRecord[]>([]);
@@ -123,6 +126,7 @@ export function NotificationsPage({
     action: () => Promise<void>,
     successMessage: string,
   ) => {
+    if (!canManageRules) return;
     try {
       setBusy(key);
       setFeedback((current) => ({ ...current, [key]: "" }));
@@ -230,6 +234,7 @@ export function NotificationsPage({
 
   return (
     <section className="page-stack notification-page">
+      {!canManageRules && <div className="alert warning-alert"><ShieldCheck size={18} /><span>当前角色仅可查看通知配置；保存、测试和删除凭据需要 rules:manage 权限。</span></div>}
       <div className="notification-hero panel">
         <span className="notification-hero-icon"><BellRing size={24} /></span>
         <div>
@@ -244,7 +249,7 @@ export function NotificationsPage({
         </button>
       </div>
 
-      <div className="notification-channel-grid">
+      <fieldset className="notification-channel-grid" disabled={!canManageRules} style={{ border: 0, margin: 0, minInlineSize: 0, padding: 0 }}>
         <ChannelCard
           channel={channelMap.get("email")}
           icon={<Mail size={21} />}
@@ -263,7 +268,7 @@ export function NotificationsPage({
             <Switch checked={email.enabled} label="启用邮箱推送" onChange={(enabled) => setEmail({ ...email, enabled })} />
             <Switch checked={email.secure} label="使用 SSL/TLS（通常为 465 端口）" onChange={(secure) => setEmail({ ...email, secure })} />
           </div>
-          <ChannelActions kind="email" busy={busy} feedback={feedback.email} hasCredential={channelMap.get("email")?.hasCredential ?? false} onDelete={deleteCredential} onSave={() => void saveEmail()} onTest={(kind) => void testChannel(kind)} />
+          <ChannelActions canManage={canManageRules} kind="email" busy={busy} feedback={feedback.email} hasCredential={channelMap.get("email")?.hasCredential ?? false} onDelete={deleteCredential} onSave={() => void saveEmail()} onTest={(kind) => void testChannel(kind)} />
           <Tutorial
             docsUrl="https://nodemailer.com/smtp"
             steps={[
@@ -288,7 +293,7 @@ export function NotificationsPage({
             <Switch checked={wecom.enabled} label="启用企业微信推送" onChange={(enabled) => setWecom({ ...wecom, enabled })} />
             <Switch checked={wecom.mentionAll} label="消息中提醒所有人" onChange={(mentionAll) => setWecom({ ...wecom, mentionAll })} />
           </div>
-          <ChannelActions kind="wecom" busy={busy} feedback={feedback.wecom} hasCredential={channelMap.get("wecom")?.hasCredential ?? false} onDelete={deleteCredential} onSave={() => void saveWecom()} onTest={(kind) => void testChannel(kind)} />
+          <ChannelActions canManage={canManageRules} kind="wecom" busy={busy} feedback={feedback.wecom} hasCredential={channelMap.get("wecom")?.hasCredential ?? false} onDelete={deleteCredential} onSave={() => void saveWecom()} onTest={(kind) => void testChannel(kind)} />
           <Tutorial
             docsUrl="https://developer.work.weixin.qq.com/document/path/91770"
             steps={[
@@ -314,7 +319,7 @@ export function NotificationsPage({
             <Switch checked={feishu.enabled} label="启用飞书推送" onChange={(enabled) => setFeishu({ ...feishu, enabled })} />
             <Switch checked={feishu.mentionAll} label="消息中提醒所有人" onChange={(mentionAll) => setFeishu({ ...feishu, mentionAll })} />
           </div>
-          <ChannelActions kind="feishu" busy={busy} feedback={feedback.feishu} hasCredential={channelMap.get("feishu")?.hasCredential ?? false} onDelete={deleteCredential} onSave={() => void saveFeishu()} onTest={(kind) => void testChannel(kind)} />
+          <ChannelActions canManage={canManageRules} kind="feishu" busy={busy} feedback={feedback.feishu} hasCredential={channelMap.get("feishu")?.hasCredential ?? false} onDelete={deleteCredential} onSave={() => void saveFeishu()} onTest={(kind) => void testChannel(kind)} />
           <Tutorial
             docsUrl="https://open.feishu.cn/document/ukTMukTMukTM/ucTM5YjL3ETO24yNxkjN"
             steps={[
@@ -325,7 +330,7 @@ export function NotificationsPage({
             title="飞书接入教程"
           />
         </ChannelCard>
-      </div>
+      </fieldset>
 
       <HistoryTables deliveries={deliveries} cycles={cycles} />
     </section>
@@ -367,6 +372,7 @@ function ChannelCard({
 }
 
 function ChannelActions({
+  canManage,
   kind,
   busy,
   feedback,
@@ -375,6 +381,7 @@ function ChannelActions({
   onTest,
   onDelete,
 }: {
+  canManage: boolean;
   kind: NotificationChannelKind;
   busy: string | null;
   feedback: string | undefined;
@@ -388,9 +395,9 @@ function ChannelActions({
     <div className="notification-actions">
       <span className="credential-state"><ShieldCheck size={14} />{hasCredential ? "凭据已在本机加密保存" : "尚未保存凭据"}</span>
       <div>
-        {hasCredential && <button className="danger-button compact-button" disabled={working} onClick={() => onDelete(kind)} type="button"><Trash2 size={14} />删除凭据</button>}
-        <button className="secondary-button compact-button" disabled={working || !hasCredential} onClick={() => onTest(kind)} type="button"><Send size={14} />发送测试</button>
-        <button className="primary-button compact-button" disabled={working} onClick={onSave} type="button"><Save size={14} />{working ? "处理中…" : "保存配置"}</button>
+        {hasCredential && <button className="danger-button compact-button" disabled={working || !canManage} onClick={() => onDelete(kind)} type="button"><Trash2 size={14} />删除凭据</button>}
+        <button className="secondary-button compact-button" disabled={working || !hasCredential || !canManage} onClick={() => onTest(kind)} type="button"><Send size={14} />发送测试</button>
+        <button className="primary-button compact-button" disabled={working || !canManage} onClick={onSave} type="button"><Save size={14} />{working ? "处理中…" : "保存配置"}</button>
       </div>
       {feedback && <small>{feedback}</small>}
     </div>

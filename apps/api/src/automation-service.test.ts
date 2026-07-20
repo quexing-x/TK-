@@ -645,7 +645,7 @@ describe("AutomationService", () => {
     );
   });
 
-  it("enforces a daily automatic-action limit before a second entity is dispatched", async () => {
+  it("does not cap automatic disable actions per day", async () => {
     provider.scenario = "priority";
     store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
@@ -654,13 +654,8 @@ describe("AutomationService", () => {
 
     const run = await service.runAccount("demo-account", "scheduler");
 
-    expect(run.actionCount).toBe(1);
-    expect(provider.mutations).toHaveLength(1);
-    expect(store.listAutomationDecisions("demo-account")).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ status: "skipped", errorMessage: expect.stringContaining("每日") }),
-      ]),
-    );
+    expect(run.actionCount).toBe(2);
+    expect(provider.mutations).toHaveLength(2);
   });
 
   it("lets only one service instance claim an identical automatic disable", async () => {

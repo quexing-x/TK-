@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "./api";
+import { api, onUnauthorized, setAuthSession } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -64,6 +64,27 @@ describe("web API client", () => {
     );
   });
 
+  it("loads and bulk-restores manual ad-group takeovers", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ restoredCount: 2 }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.getManualTakeovers("account-1");
+    await expect(api.restoreAllManualTakeovers("account-1")).resolves.toEqual({ restoredCount: 2 });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/accounts/account-1/manual-takeovers",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/accounts/account-1/manual-takeovers",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
   it("loads account-scoped provider capabilities", async () => {
     const payload = {
       accountId: "account-1",
@@ -102,6 +123,40 @@ describe("web API client", () => {
     );
 
     await expect(api.bootstrap()).rejects.toThrow("配置保存失败。");
+  });
+
+  it("clears local authentication and notifies the app when logout finds an expired session", async () => {
+    const unauthorized = vi.fn();
+    const unsubscribe = onUnauthorized(unauthorized);
+    setAuthSession({
+      setupRequired: false,
+      authenticated: true,
+      user: null,
+      permissions: [],
+      csrfToken: "csrf-token",
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: "session expired" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.logout()).rejects.toThrow("session expired");
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+
+    await api.previewAutomation("account-1");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/accounts/account-1/automation/preview",
+      expect.objectContaining({
+        headers: expect.not.objectContaining({ "x-csrf-token": "csrf-token" }),
+      }),
+    );
+    unsubscribe();
   });
 
   it("sends the selected Cookie onboarding step", async () => {

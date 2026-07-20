@@ -20,6 +20,7 @@ import type {
   AdOperationRecord,
   MetricBatchRecord,
   ManagedEntityRecord,
+  IgnoredEntityRecord,
   ManualStatusInput,
   NotificationChannelKind,
   NotificationChannelRecord,
@@ -126,9 +127,17 @@ export interface WriteTaskFilters {
 }
 
 let csrfToken: string | null = null;
+let unauthorizedHandler: (() => void) | null = null;
 
 export function setAuthSession(status: AuthStatus | null): void {
   csrfToken = status?.csrfToken ?? null;
+}
+
+export function onUnauthorized(handler: () => void): () => void {
+  unauthorizedHandler = handler;
+  return () => {
+    if (unauthorizedHandler === handler) unauthorizedHandler = null;
+  };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -146,6 +155,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
+    if (response.status === 401) unauthorizedHandler?.();
     const payload = (await response.json().catch(() => null)) as {
       message?: string;
     } | null;
@@ -182,11 +192,13 @@ export const api = {
     return status;
   },
   logout: async () => {
-    const result = await request<{ ok: boolean }>("/api/auth/logout", {
-      method: "POST",
-    });
-    setAuthSession(null);
-    return result;
+    try {
+      return await request<{ ok: boolean }>("/api/auth/logout", {
+        method: "POST",
+      });
+    } finally {
+      setAuthSession(null);
+    }
   },
   changePassword: (input: PasswordChangeInput) =>
     request<{ ok: boolean; reauthenticationRequired: boolean }>(
@@ -485,6 +497,8 @@ export const api = {
     ),
   getManagedEntities: (accountId: string) =>
     request<ManagedEntityRecord[]>(`/api/accounts/${accountId}/entities`),
+  getManualTakeovers: (accountId: string) =>
+    request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),
   changeEntityStatus: (accountId: string, input: ManualStatusInput) =>
     request<ManualStatusResult>(`/api/accounts/${accountId}/entities/status`, {
       method: "POST",
@@ -509,13 +523,13 @@ export const api = {
       `/api/accounts/${accountId}/entities/${entityType}/${encodeURIComponent(externalId)}/ignore`,
       { method: "DELETE" },
     ),
+  restoreAllManualTakeovers: (accountId: string) =>
+    request<{ restoredCount: number }>(
+      `/api/accounts/${accountId}/manual-takeovers`,
+      { method: "DELETE" },
+    ),
   getAdOperations: (accountId: string) =>
     request<AdOperationRecord[]>(`/api/accounts/${accountId}/ad-operations`),
-  queueAppeal: (accountId: string, externalId: string, reason: string) =>
-    request<AdOperationRecord>(`/api/accounts/${accountId}/appeals`, {
-      method: "POST",
-      body: JSON.stringify({ externalId, reason }),
-    }),
   getAnalytics: (
     accountId: string,
     range: { from: string; to: string },

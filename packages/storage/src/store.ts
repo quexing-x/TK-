@@ -485,33 +485,15 @@ export class AutomationStore {
   }
 
   /**
-   * Removes one advertising account and its account-scoped database records.
-   * The returned references belong to this account only and must be removed
-   * from the credential vault by the caller.
+   * Returns one advertising account's credential references for destructive
+   * deletion. Deleting the account cascades all related local records,
+   * including plans where the account is the source.
    */
   listAccountCredentialReferences(accountId: string): string[] | null {
     const account = this.db
       .prepare("SELECT credential_ref FROM accounts WHERE id = ?")
       .get(accountId) as SqlRow | undefined;
     if (!account) return null;
-    const launchReference = this.db.prepare(
-      `SELECT 1
-       FROM multi_account_launch_plans plan
-       LEFT JOIN launch_plan_items item ON item.plan_id = plan.id
-       WHERE plan.source_account_id = ? OR item.account_id = ?
-       LIMIT 1`,
-    ).get(accountId, accountId);
-    if (launchReference) {
-      throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
-    }
-    const activeStatusTask = this.db.prepare(
-      `SELECT 1 FROM ad_operations
-       WHERE account_id = ? AND status IN ('pending', 'running', 'unknown')
-       LIMIT 1`,
-    ).get(accountId);
-    if (activeStatusTask) {
-      throw new Error("该账户仍有待处理、执行中或结果未知的启停任务，不能删除。");
-    }
     return this.listCredentialReferencesUnchecked(accountId);
   }
 
@@ -524,26 +506,6 @@ export class AutomationStore {
       if (!account) {
         this.db.exec("COMMIT");
         return false;
-      }
-
-      const launchReference = this.db.prepare(
-        `SELECT 1
-         FROM multi_account_launch_plans plan
-         LEFT JOIN launch_plan_items item ON item.plan_id = plan.id
-         WHERE plan.source_account_id = ? OR item.account_id = ?
-         LIMIT 1`,
-      ).get(accountId, accountId);
-      if (launchReference) {
-        throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
-      }
-
-      const activeStatusTask = this.db.prepare(
-        `SELECT 1 FROM ad_operations
-         WHERE account_id = ? AND status IN ('pending', 'running', 'unknown')
-         LIMIT 1`,
-      ).get(accountId);
-      if (activeStatusTask) {
-        throw new Error("该账户仍有待处理、执行中或结果未知的启停任务，不能删除。");
       }
 
       const currentCredentialReferences = this.listCredentialReferencesUnchecked(accountId);
@@ -684,7 +646,7 @@ export class AutomationStore {
         accountId,
         enabled: false,
         policyVersion: LOW_RISK_AUTOMATION_POLICY_VERSION,
-        dailyActionLimit: 5,
+        dailyActionLimit: 0,
         updatedAt: this.getAccount(accountId)?.updatedAt ?? new Date(0).toISOString(),
       });
     }
@@ -715,7 +677,9 @@ export class AutomationStore {
       accountId,
       toSqlBoolean(policy.enabled),
       LOW_RISK_AUTOMATION_POLICY_VERSION,
-      policy.dailyActionLimit,
+      // Existing SQLite schemas require 1–100. The public 0 sentinel is
+      // persisted as 1 but is always read and enforced as unlimited.
+      policy.dailyActionLimit || 1,
       now,
     );
     this.writeAudit("local-user", accountId, "low-risk-automation.policy.updated", policy);
@@ -743,7 +707,7 @@ export class AutomationStore {
         `SELECT COUNT(*) AS count FROM automatic_action_claims
          WHERE account_id = ? AND local_date = ?`,
       ).get(input.accountId, input.localDate) as SqlRow;
-      if (Number(usage.count) >= input.dailyLimit) {
+      if (input.dailyLimit > 0 && Number(usage.count) >= input.dailyLimit) {
         this.db.exec("COMMIT");
         return "limit-reached";
       }
@@ -6217,7 +6181,7 @@ function mapLowRiskAutomationPolicy(row: SqlRow): LowRiskAutomationPolicy {
     accountId: row.account_id,
     enabled: fromSqlBoolean(row.enabled),
     policyVersion: row.policy_version,
-    dailyActionLimit: Number(row.daily_action_limit),
+    dailyActionLimit: 0,
     updatedAt: row.updated_at,
   });
 }
