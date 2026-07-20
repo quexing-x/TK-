@@ -360,6 +360,8 @@ describe("AutomationStore", () => {
 
       expect(first.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1")).toBe(true);
       expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
+      expect(second.renewLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
+      expect(first.renewLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1")).toBe(true);
       second.releaseLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2");
       expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
       first.releaseLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1");

@@ -2530,6 +2530,19 @@ export class AutomationStore {
     ).run(planId, accountId, campaignName, ownerId);
   }
 
+  renewLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): boolean {
+    const result = this.db.prepare(
+      `UPDATE launch_creation_locks SET claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
+    return result.changes === 1;
+  }
+
   getMultiAccountLaunchPlan(planId: string): MultiAccountLaunchPlanRecord | null {
     const row = this.db
       .prepare("SELECT * FROM multi_account_launch_plans WHERE id = ?")

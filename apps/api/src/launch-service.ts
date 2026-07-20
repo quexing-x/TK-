@@ -260,6 +260,15 @@ export class LaunchService {
         claimed.templateMode === "copy" ? "copy-ads" : "create-campaigns",
       );
 
+      if (!this.store.renewLaunchCreationScope(
+        claimed.planId,
+        claimed.accountId,
+        campaignName,
+        creationScopeOwner,
+      )) {
+        throw new RetryableCreationError("同系列创建锁已失效，当前任务未发送 Provider 请求，请重新执行。");
+      }
+
       providerInvoked = true;
       const creationMutation = {
         row: claimed.launchRow,
@@ -280,7 +289,16 @@ export class LaunchService {
               templateCampaignId: templateCampaignId!,
             }])
           : this.providers.create(account.providerKind, context, [creationMutation]),
-        () => this.launchStore.renew(claimed.itemId, executorId),
+        () => {
+          const itemRenewed = this.launchStore.renew(claimed.itemId, executorId);
+          const scopeRenewed = this.store.renewLaunchCreationScope(
+            claimed.planId,
+            claimed.accountId,
+            campaignName,
+            creationScopeOwner,
+          );
+          return itemRenewed && scopeRenewed;
+        },
         launchLeaseHeartbeatMs,
       );
       if (!created?.ok) {
