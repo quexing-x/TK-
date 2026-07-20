@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { CheckCircle2, Download, FileSpreadsheet, Pencil, Rocket, Trash2, Upload, X } from "lucide-react";
-import { defaultCreationPresetConfig, getCreationTemplateReadiness, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchManualVerificationInput, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
+import { CheckCircle2, CircleCheck, CircleX, Download, FileSpreadsheet, Pencil, RefreshCcw, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
+import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchManualVerificationInput, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
+import { useAuth } from "./AuthGate";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
 import { canUseCopySource, canUseLaunchTarget } from "./provider-capability-view";
 import { createLaunchProgressPoller } from "./launch-progress-polling";
@@ -12,6 +13,36 @@ type LaunchFeedback = {
   title: string;
   lines: string[];
 };
+
+type LaunchAccountReadiness = {
+  account: AccountConfig;
+  ready: boolean;
+  checks: Array<{ label: string; passed: boolean }>;
+};
+
+/** Mirrors the service's final manual-creation authorization boundary. */
+function isLaunchExecutionReady(
+  _account: AccountConfig,
+  connection: ProviderConnection | null | undefined,
+  capabilities: AccountProviderCapabilities | undefined,
+  mode: "create" | "copy",
+): boolean {
+  return connection?.status === "ready"
+    && canUseLaunchTarget(capabilities, mode);
+}
+
+function launchAccountReadiness(
+  account: AccountConfig,
+  connection: ProviderConnection | null | undefined,
+  capabilities: AccountProviderCapabilities | undefined,
+  mode: "create" | "copy",
+): LaunchAccountReadiness {
+  const checks = [
+    { label: "接入检测通过", passed: connection?.status === "ready" },
+    { label: "具备创建权限", passed: canUseLaunchTarget(capabilities, mode) },
+  ];
+  return { account, checks, ready: checks.every((check) => check.passed) };
+}
 
 const freshPreset = (): LaunchPresetInput => ({
   name: "基础预设",
@@ -25,6 +56,7 @@ const freshPreset = (): LaunchPresetInput => ({
 });
 
 export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; preferredAccountId: string; onError: (message: string | null) => void }) {
+  const auth = useAuth();
   const [launchMode, setLaunchMode] = useState<LaunchMode>("single");
   const [sourceAccountId, setSourceAccountId] = useState(accounts[0]?.id ?? "");
   const [targetIds, setTargetIds] = useState<string[]>([]);
@@ -44,6 +76,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   const [fileName, setFileName] = useState("");
   const [busy, setBusy] = useState(false);
   const [executionFeedback, setExecutionFeedback] = useState<LaunchFeedback | null>(null);
+  const [presetFeedback, setPresetFeedback] = useState<LaunchFeedback | null>(null);
   const [verificationTarget, setVerificationTarget] = useState<{ planId: string; item: LaunchPlanItemRecord } | null>(null);
   const [verificationForm, setVerificationForm] = useState<LaunchManualVerificationInput>({
     decision: "confirmed-not-created",
@@ -57,10 +90,22 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   const loadRef = useRef<() => Promise<void>>(async () => {});
 
   const selectedPreset = presets.find((item) => item.id === presetId) ?? null;
+  const selectedPresetCreationConfig = CreationPresetConfigSchema.parse(selectedPreset?.creationConfig ?? {});
+  const selectedPresetReadiness = getCreationTemplateReadiness(selectedPresetCreationConfig);
+  const selectedPresetExecutionReady = selectedPresetReadiness.ready
+    && Boolean(selectedPresetCreationConfig.templateCampaignId);
+  const selectedPresetLaunchReady = launchMode === "copy"
+    ? selectedPresetReadiness.ready
+    : selectedPresetExecutionReady;
+  const canManageLaunchPresets = auth.status.permissions.includes("launch:manage");
   const createTargets = useMemo(
     () => accounts.filter((account) =>
-      connections[account.id]?.status === "ready"
-      && canUseLaunchTarget(accountCapabilities[account.id], "create"),
+      isLaunchExecutionReady(
+        account,
+        connections[account.id],
+        accountCapabilities[account.id],
+        "create",
+      ),
     ),
     [accountCapabilities, accounts, connections],
   );
@@ -73,11 +118,25 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   );
   const copyTargets = useMemo(
     () => accounts.filter((account) =>
-      connections[account.id]?.status === "ready"
-      && canUseLaunchTarget(accountCapabilities[account.id], "copy"),
+      isLaunchExecutionReady(
+        account,
+        connections[account.id],
+        accountCapabilities[account.id],
+        "copy",
+      ),
     ),
     [accountCapabilities, accounts, connections],
   );
+  const accountReadiness = useMemo(
+    () => accounts.map((account) => launchAccountReadiness(
+      account,
+      connections[account.id],
+      accountCapabilities[account.id],
+      launchMode === "copy" ? "copy" : "create",
+    )),
+    [accountCapabilities, accounts, connections, launchMode],
+  );
+  const unreadyAccountCount = accountReadiness.filter((item) => !item.ready).length;
   const sourceAccounts = launchMode === "copy" ? copySources : createTargets;
   const targets = launchMode === "copy" ? copyTargets : createTargets;
   const availableTargets = useMemo(
@@ -96,7 +155,6 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     || !canUseLaunchTarget(accountCapabilities[accountId], launchMode === "copy" ? "copy" : "create"),
   );
   const copySourceReady = launchMode !== "copy" || copySources.some((account) => account.id === sourceAccountId);
-  const templateReadiness = selectedPreset ? getCreationTemplateReadiness(selectedPreset.creationConfig) : null;
   const copyTaskCount = targetIds.length * (sheet?.rows.length ?? 0);
   const canPreviewCopy = Boolean(
     launchMode === "copy"
@@ -108,16 +166,16 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       && copySourceReady
       && notReadyAccountIds.length === 0
       && presetId
-      && templateReadiness?.ready
+      && selectedPresetLaunchReady
       && sheet
       && sheet.errors.length === 0,
   );
-  const canSave = Boolean(selectedAccountIds.length > 0 && notReadyAccountIds.length === 0 && copySourceReady && templateReadiness?.ready && presetId && sheet && sheet.errors.length === 0 && sheet.rows.length > 0 && (launchMode !== "copy" || (copyPreview?.safeToCreate && copyPreview.blockers.length === 0)));
+  const canSave = Boolean(selectedAccountIds.length > 0 && notReadyAccountIds.length === 0 && copySourceReady && presetId && selectedPresetLaunchReady && sheet && sheet.errors.length === 0 && sheet.rows.length > 0 && (launchMode !== "copy" || (copyPreview?.safeToCreate && copyPreview.blockers.length === 0)));
   const publishBlockers = [
     selectedAccountIds.length === 0 ? "请选择至少一个已接入的发布账户。" : null,
     notReadyAccountIds.length > 0 ? "所选账户连接异常，请先在用户管理重新完成接入。" : null,
     !presetId ? "请选择广告预设。" : null,
-    !templateReadiness?.ready ? "创建预设尚未填写完整，请补全预算、出价、地区等必填项。" : null,
+    presetId && !selectedPresetLaunchReady ? (launchMode === "copy" ? "当前预设参数映射尚未完成。" : "当前预设尚未绑定完整草稿模板系列，请先在高级自定义中完成模板映射。") : null,
     !sheet ? "请导入创建信息表。" : null,
     sheet && sheet.errors.length > 0 ? "请先修正导入表错误。" : null,
     launchMode === "copy" && !sourceAdId ? "请选择稳定 ID 对应的源广告。" : null,
@@ -137,9 +195,11 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     setPresets(nextPresets);
     setPlans(nextPlans);
     setActivePlanIds(queuedPlanIds);
+    // Connection availability must not wait for historical task-detail reads.
+    // A failed/slow plan detail must never make a ready account look unconnected.
+    setConnections(Object.fromEntries(connectionLists));
     const itemLists = await Promise.all(nextPlans.map(async (plan) => [plan.id, await api.getLaunchPlanItems(plan.id)] as const));
     setPlanItems(Object.fromEntries(itemLists));
-    setConnections(Object.fromEntries(connectionLists));
     setPresetId((current) => current && nextPresets.some((item) => item.id === current) ? current : (nextPresets[0]?.id ?? ""));
     onError(null);
   };
@@ -198,21 +258,56 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   };
 
   const savePreset = async () => {
+    if (!canManageLaunchPresets) {
+      setPresetFeedback({
+        tone: "warning",
+        title: "当前登录账户没有预设管理权限",
+        lines: ["请使用具备 launch:manage 权限的开发者、管理员或操作员账户登录。"],
+      });
+      return;
+    }
     try {
       setBusy(true);
-      if (editingPresetId) await api.updateLaunchPreset(editingPresetId, presetForm);
-      else await api.createLaunchPreset(presetForm);
-      setPresetForm(freshPreset());
-      setEditingPresetId(null);
+      const isUpdating = Boolean(editingPresetId);
+      const saved = editingPresetId
+        ? await api.updateLaunchPreset(editingPresetId, presetForm)
+        : await api.createLaunchPreset(presetForm);
+      setPresetForm({
+        name: saved.name,
+        region: saved.region,
+        dailyBudget: saved.dailyBudget,
+        bid: saved.bid,
+        startAt: saved.startAt,
+        endAt: saved.endAt,
+        initialStatus: saved.initialStatus,
+        creationConfig: saved.creationConfig,
+      });
+      setEditingPresetId(saved.id);
       await load();
       onError(null);
-    } catch (cause) { onError(messageOf(cause)); }
+      setPresetFeedback({
+        tone: "success",
+        title: isUpdating ? "广告预设已更新" : "广告预设已新增",
+        lines: [`“${saved.name}”已保存，可在下方列表选择并用于导入创建信息。`],
+      });
+    } catch (cause) {
+      const message = messageOf(cause);
+      onError(message);
+      setPresetFeedback({ tone: "danger", title: "广告预设未保存", lines: [message] });
+    }
     finally { setBusy(false); }
   };
   const editPreset = (preset: LaunchPresetRecord) => {
     setEditingPresetId(preset.id);
     setPresetForm({ name: preset.name, region: preset.region, dailyBudget: preset.dailyBudget, bid: preset.bid, startAt: preset.startAt, endAt: preset.endAt, initialStatus: preset.initialStatus, creationConfig: preset.creationConfig });
   };
+  const updateCreationConfig = (patch: Partial<LaunchPresetInput["creationConfig"]>) => {
+    setPresetForm((value) => ({ ...value, creationConfig: { ...(value.creationConfig ?? defaultCreationPresetConfig), ...patch } }));
+  };
+  const presetCreationConfig = CreationPresetConfigSchema.parse(presetForm.creationConfig ?? {});
+  const advancedTemplateReadiness = getCreationTemplateReadiness(presetCreationConfig);
+  const advancedExecutionReady = advancedTemplateReadiness.ready
+    && Boolean(presetCreationConfig.templateCampaignId);
   const removePreset = async (id: string) => {
     try { setBusy(true); await api.deleteLaunchPreset(id); await load(); onError(null); }
     catch (cause) { onError(messageOf(cause)); }
@@ -293,23 +388,26 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   };
 
   return <section className="page-stack">
-    <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>预设统一配置，表格只填系列、广告组、视频和产品 URL</h2><p>预算、出价、地区与创建时间等由广告预设统一管理；广告名称自动按 YYMMDD:XXX 编号。</p></div><span className={templateReadiness?.ready ? "status active" : "status warning"}>{templateReadiness?.ready ? "创建预设完整" : "创建预设待补全"}</span></div>
+    <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>预设统一配置，表格只填系列、广告组、视频和产品 URL</h2><p>完整草稿结构从已绑定的账户模板系列读取；预算、出价、地区与创建时间等由广告预设统一覆盖。</p></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? (launchMode === "copy" ? "复制参数已就绪" : "完整创建模板已就绪") : (launchMode === "copy" ? "复制参数待完善" : "模板系列待绑定")}</span></div>
 
     <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2><p>先选业务目标，系统只展示当前操作所需的信息。</p></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','同一视频代码由各账户的素材库分别解析'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
 
-    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户，系统将在每个账户中分别新建相同结构的广告。"}</p></div></div></div><div className="form-grid">
-      {targets.length === 0 ? <p className="field-error">暂无可用账户。请先在“用户管理”完成账户接入，并等待后台连接检测通过。</p> : <>
+    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户，系统将在每个账户中分别新建相同结构的广告。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} type="button"><RefreshCcw size={14} /> 刷新接入状态</button></div><div className="launch-account-summary">
+      <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
+      {accounts.length === 0 ? <p className="launch-account-empty">先在“用户管理”添加广告账户并完成接入，随后可回到此处选择发布账户。</p> : <div className="launch-account-readiness-grid">{accountReadiness.map(({ account, checks, ready }) => <article className={ready ? "launch-account-readiness ready" : "launch-account-readiness"} key={account.id}><header><div><strong>{account.displayName}</strong><span>{account.providerKind === "cookie" ? "Cookie 接入" : "Marketing API"}</span></div><em className={ready ? "status active" : "status warning"}>{ready ? "可发布" : "待完善"}</em></header><div>{checks.map((check) => <span className={check.passed ? "passed" : "missing"} key={check.label}>{check.passed ? <CircleCheck size={14} /> : <CircleX size={14} />}{check.label}</span>)}</div></article>)}</div>}
+    </div><div className="form-grid">
+      {targets.length === 0 ? <div className="launch-target-empty"><CircleX size={18} /><div><strong>暂时没有可发布账户</strong><span>人工真实创建只要求接入检测通过且具备创建权限；自动化开关和执行模式不再阻止手动发布。</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button">去完善账户</button></div> : <>
         {launchMode === "single" && <label className="field"><span>创建账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>仅显示已授权创建能力的账户。</small></label>}
         {launchMode === "copy" && <><label className="field"><span>源广告账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>源账户只需具备广告读取能力。</small></label><label className="field"><span>源广告（稳定 ID）</span><select value={sourceAdId} onChange={(event) => setSourceAdId(event.target.value)}><option value="">请选择已同步广告</option>{sourceAds.map((ad) => <option key={ad.externalId} value={ad.externalId}>{ad.name} · {ad.externalId}</option>)}</select><small>不会按广告名称、广告组名称或系列名称回退定位。</small></label></>}
         {launchMode !== "single" && <div className="field wide target-account-selector"><span>{launchMode === "copy" ? "目标账户（复制迁移）" : "发布账户（可多选）"}</span><div className="target-account-toolbar"><input aria-label="搜索可用发布账户" placeholder="搜索已接入账户" value={accountQuery} onChange={(event) => setAccountQuery(event.target.value)} /><span>已选 {targetIds.length} / {availableTargets.length}</span><button className="secondary-button compact-button" onClick={() => setTargetIds(visibleTargets.slice(0, launchMode === "copy" ? 3 : visibleTargets.length).map((account) => account.id))} type="button">全选当前结果</button><button className="secondary-button compact-button" onClick={() => setTargetIds([])} type="button">清空</button></div><div className="target-account-grid">{visibleTargets.length === 0 ? <p className="target-account-empty">没有匹配的可用账户。</p> : visibleTargets.map((account) => <label key={account.id}><input checked={targetIds.includes(account.id)} disabled={launchMode === "copy" && !targetIds.includes(account.id) && targetIds.length >= 3} onChange={(event) => setTargetIds((current) => event.target.checked ? [...new Set([...current, account.id])].slice(0, launchMode === "copy" ? 3 : 100) : current.filter((id) => id !== account.id))} type="checkbox" /><span>{account.displayName}</span><small>已接入 · {account.providerKind === "cookie" ? "Cookie" : "Marketing API"}</small></label>)}</div></div>}
       </>}
     </div></div>
 
-    <div className="panel launch-readiness-panel"><div className="panel-heading"><div><span className="panel-icon"><CheckCircle2 size={18} /></span><div><h2>创建检查</h2><p>导入两条 cURL 建立账户会话后，软件使用内置创建协议；再完成广告预设和表格即可发布。</p></div></div><span className={templateReadiness?.ready ? "status active" : "status warning"}>{templateReadiness?.ready ? "可创建" : "预设待补全"}</span></div><div className="sheet-rule-grid">
+    <div className="panel launch-readiness-panel"><div className="panel-heading"><div><span className="panel-icon"><CheckCircle2 size={18} /></span><div><h2>创建检查</h2><p>软件会校验账户接入、稳定模板系列和预设映射；通过后只需导入表格。</p></div></div><span className={selectedPresetLaunchReady && notReadyAccountIds.length === 0 ? "status active" : "status warning"}>{selectedPresetLaunchReady && notReadyAccountIds.length === 0 ? "可创建" : "待完善"}</span></div><div className="sheet-rule-grid">
       <article><strong>数据读取与启停</strong><span>{selectedAccountIds.length === 0 ? "请选择要发布的账户。" : notReadyAccountIds.length === 0 ? `已选 ${selectedAccountIds.length} 个账户均已通过连接检测。` : `有 ${notReadyAccountIds.length} 个已选账户连接异常。`}</span></article>
       <article><strong>视频素材</strong><span>同一视频代码由每个目标账户在自己的素材库中分别引用；不迁移素材 ID。</span></article>
       <article><strong>广告预设</strong><span>{selectedPreset ? `当前使用“${selectedPreset.name}”` : "请选择广告预设。"}</span></article>
-      <article><strong>创建功能</strong><span>{!templateReadiness ? "请选择广告预设后检查创建功能。" : templateReadiness.ready ? "内置创建协议和当前预设均已就绪。" : "内置创建协议无需配置；请补全当前广告预设。"}</span></article>
+      <article><strong>创建功能</strong><span>{selectedAccountIds.length === 0 ? "请选择发布账户。" : notReadyAccountIds.length > 0 ? "所选账户的连接或创建能力尚未就绪。" : selectedPresetLaunchReady ? (launchMode === "copy" ? "复制预设参数完整，可继续生成差异预览。" : "当前预设已绑定完整账户模板，日常投放无需重复填写内部字段。") : (launchMode === "copy" ? "当前复制预设参数不完整。" : "当前预设缺少稳定模板系列，不能发起创建。")}</span></article>
       <article><strong>导入信息</strong><span>{sheet?.errors.length === 0 && sheet.rows.length ? `已校验 ${sheet.rows.length} 条创建信息。` : "导入表只需填写系列名称、广告组名称、视频代码和产品 URL。"}</span></article>
     </div></div>
 
@@ -321,9 +419,27 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       <label className="field"><span>创建时间（留空为立即）</span><input type="datetime-local" value={toLocalInput(presetForm.startAt)} onChange={(event) => setPresetForm((value) => ({ ...value, startAt: toIso(event.target.value) }))} /><span className="quick-time-actions"><button onClick={() => setPresetForm((value) => ({ ...value, startAt: scheduledStartAt("tonight") }))} type="button">当天 24:00</button><button onClick={() => setPresetForm((value) => ({ ...value, startAt: scheduledStartAt("tomorrow-morning") }))} type="button">次日 06:00</button></span></label>
       <label className="field"><span>结束时间（可留空）</span><input type="datetime-local" value={toLocalInput(presetForm.endAt)} onChange={(event) => setPresetForm((value) => ({ ...value, endAt: toIso(event.target.value) }))} /></label>
       <label className="field"><span>初始状态</span><select value={presetForm.initialStatus} onChange={(event) => setPresetForm((value) => ({ ...value, initialStatus: event.target.value as LaunchPresetInput["initialStatus"] }))}><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
-    </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、出价和时间等业务参数。</span></div><div className="form-actions"><button className="primary-button" disabled={busy} onClick={() => void savePreset()} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(freshPreset()); }} type="button">取消编辑</button>}</div>
+    </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、出价和时间等业务参数。</span></div>{!canManageLaunchPresets && <div className="preset-save-feedback warning"><strong>当前账号无预设管理权限</strong><span>登录角色为“{auth.status.user?.role ?? "未知"}”，无法保存广告预设；请切换至开发者、管理员或操作员账号。</span></div>}{presetFeedback && <div className={`preset-save-feedback ${presetFeedback.tone}`}><strong>{presetFeedback.title}</strong><span>{presetFeedback.lines[0]}</span></div>}<div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets} onClick={() => void savePreset()} title={canManageLaunchPresets ? undefined : "需要 launch:manage 权限"} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(freshPreset()); setPresetFeedback(null); }} type="button">取消编辑</button>}</div>
       <div className="table-wrap"><table><thead><tr><th>预设</th><th>地区</th><th>预算</th><th>出价</th><th>创建时间</th><th>初始状态</th><th>操作</th></tr></thead><tbody>{presets.map((preset) => <tr key={preset.id}><td>{preset.name}</td><td>{preset.region}</td><td>{preset.dailyBudget}</td><td>{preset.bid ?? "自动"}</td><td>{preset.startAt ? new Date(preset.startAt).toLocaleString() : "立即"}</td><td>{preset.initialStatus === "enabled" ? "开启" : "关闭"}</td><td><button disabled={busy} onClick={() => editPreset(preset)} type="button">编辑</button> <button disabled={busy} onClick={() => void removePreset(preset.id)} type="button">删除</button></td></tr>)}</tbody></table></div>
     </div>
+
+    <details className="panel creation-config-panel"><summary><span><Settings2 size={18} /></span><div><strong>高级自定义参数</strong><small>完整草稿模板与覆盖值随预设保存；日常投放无需展开</small></div><em className={advancedExecutionReady ? "status active" : "status warning"}>{advancedExecutionReady ? "模板映射完整" : "模板映射不完整"}</em></summary><div className="creation-config-body"><div className="creation-template-note"><strong>{advancedExecutionReady ? "当前预设已绑定完整草稿模板" : "当前预设尚未完成模板映射"}</strong><span>{advancedExecutionReady ? "创建时先读取模板系列的完整行业审核与账户字段，再覆盖下列业务参数。" : "精简枚举不足以完成真实创建，必须绑定当前账户中一个稳定、可复制的推广系列 ID。"}</span></div><div className="creation-config-reference"><div><strong>参数</strong><strong>来源 / 获取位置</strong></div><div><span>完整草稿模板系列</span><span>当前账户已同步广告的稳定推广系列 ID</span></div><div><span>营销目标、购买方式、预算方式</span><span>TikTok Ads Manager 新建推广系列页</span></div><div><span>计费方式、优化目标、转化事件、像素</span><span>广告组设置与事件管理器</span></div><div><span>广告身份、行动号召</span><span>广告创建页的身份与创意设置</span></div><div><span>地区与版位代码</span><span>广告组定向设置</span></div></div><button className="secondary-button creation-guide-button" onClick={() => { window.location.hash = "#manual"; }} type="button">查看完整参数对照与获取方式</button><div className="form-grid">
+      <label className="field"><span>模板推广系列 ID</span><input placeholder="从当前账户已同步广告映射" value={presetCreationConfig.templateCampaignId ?? ""} onChange={(event) => updateCreationConfig({ templateCampaignId: event.target.value || null })} /></label>
+      <label className="field"><span>营销目标</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.objectiveType ?? ""} onChange={(event) => updateCreationConfig({ objectiveType: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>购买方式</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.buyingType ?? ""} onChange={(event) => updateCreationConfig({ buyingType: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>系列预算方式</span><input inputMode="numeric" placeholder="例如 0" value={presetCreationConfig.campaignBudgetMode ?? ""} onChange={(event) => updateCreationConfig({ campaignBudgetMode: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>广告组预算方式</span><input inputMode="numeric" placeholder="例如 0" value={presetCreationConfig.adBudgetMode ?? ""} onChange={(event) => updateCreationConfig({ adBudgetMode: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>计费方式</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.pricing ?? ""} onChange={(event) => updateCreationConfig({ pricing: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>优化目标</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.optimizeGoal ?? ""} onChange={(event) => updateCreationConfig({ optimizeGoal: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>转化事件</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.externalAction ?? ""} onChange={(event) => updateCreationConfig({ externalAction: nullableInteger(event.target.value) })} /></label>
+      <label className="field"><span>广告身份类型</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.identityType ?? ""} onChange={(event) => updateCreationConfig({ identityType: nullableInteger(event.target.value) })} /></label>
+      {presetCreationConfig.identityType !== 0 && <label className="field"><span>广告身份 ID</span><input placeholder="从账户后台复制" value={presetCreationConfig.identityId ?? ""} onChange={(event) => updateCreationConfig({ identityId: event.target.value || null })} /></label>}
+      <label className="field"><span>行动号召 ID</span><input placeholder="从账户后台复制" value={presetCreationConfig.callToActionId ?? ""} onChange={(event) => updateCreationConfig({ callToActionId: event.target.value || null })} /></label>
+      <label className="field"><span>像素 ID</span><input placeholder="从账户后台复制" value={presetCreationConfig.pixelId ?? ""} onChange={(event) => updateCreationConfig({ pixelId: event.target.value || null })} /></label>
+      <label className="field"><span>地区代码（逗号分隔）</span><input inputMode="numeric" placeholder="例如 840,124" value={(presetCreationConfig.countryCodes ?? []).join(",")} onChange={(event) => updateCreationConfig({ countryCodes: parseIntegerList(event.target.value) })} /></label>
+      <label className="field"><span>版位代码（逗号分隔）</span><input inputMode="numeric" placeholder="例如 3000" value={(presetCreationConfig.placementIds ?? []).join(",")} onChange={(event) => updateCreationConfig({ placementIds: parseIntegerList(event.target.value) })} /></label>
+      <label className="field wide"><span>TikTok Post 映射（视频代码 | Post ID）</span><textarea placeholder="每行一条；所有账户共用同一映射" value={formatVideoPostMappings(presetCreationConfig.videoPostMappings)} onChange={(event) => updateCreationConfig({ videoPostMappings: parseVideoPostMappings(event.target.value) })} /><small>账户仅通过 Cookie 区分；已映射代码在所有账户中复用相同 TikTok Post。</small></label>
+    </div><div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets || !advancedExecutionReady} onClick={() => void savePreset()} title={advancedExecutionReady ? undefined : "必须绑定稳定模板系列并完成参数映射后才能保存"} type="button">保存高级自定义</button></div></div></details>
 
     <div className="panel launch-sheet-panel"><div className="panel-heading"><div><span className="panel-icon"><FileSpreadsheet size={18} /></span><div><h2>导入创建信息</h2><p>表格仅保留推广系列名称、广告组名称、视频代码和产品 URL。广告名称自动生成。</p></div></div><button className="secondary-button" onClick={() => void downloadLaunchTemplate().catch((cause) => onError(messageOf(cause)))} type="button"><Download size={16} /> 下载模板</button></div>
       <div className="sheet-rule-grid"><article><strong>1. 选择广告预设</strong><span>{selectedPreset ? `当前：${selectedPreset.name} · ${selectedPreset.region}（预算 ${selectedPreset.dailyBudget}）` : "请先选择预设。"}</span></article><article><strong>2. 表格只填四列</strong><span>推广系列名称、广告组名称、视频代码、产品 URL。</span></article><article><strong>3. 多视频代码</strong><span>同一单元格可用 `；`、`;` 或换行分隔多个代码；每个代码会生成一条广告。</span></article><article><strong>4. 自动命名</strong><span>广告名称使用 YYMMDD:XXX，例如 260716:001。</span></article></div>
@@ -386,6 +502,31 @@ export function launchVerificationIdentityLines(item: LaunchPlanItemRecord, acco
   ];
 }
 function toIso(value: string): string | null { return value ? new Date(value).toISOString() : null; }
+function nullableInteger(value: string): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+function parseIntegerList(value: string): number[] {
+  return value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean)
+    .map(Number).filter((item) => Number.isInteger(item));
+}
+
+function formatVideoPostMappings(
+  mappings: NonNullable<LaunchPresetInput["creationConfig"]>["videoPostMappings"],
+): string {
+  return (mappings ?? []).map((item) => `${item.videoCode} | ${item.postId}`).join("\n");
+}
+
+function parseVideoPostMappings(
+  value: string,
+): NonNullable<LaunchPresetInput["creationConfig"]>["videoPostMappings"] {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const parts = line.split("|").map((part) => part.trim());
+    const [videoCode = "", postId = ""] = parts.length >= 3 ? parts.slice(1, 3) : parts;
+    return { videoCode, postId };
+  });
+}
 function toLocalInput(value: string | null): string {
   if (!value) return "";
   const date = new Date(value);

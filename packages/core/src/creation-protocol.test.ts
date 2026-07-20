@@ -60,6 +60,26 @@ describe("creation protocol", () => {
       .toThrow(CreationPresetIncompleteError);
   });
 
+  it("does not require an identity id for the account-default identity type", () => {
+    const config = {
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 1, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
+      identityType: 0, identityId: null, callToActionId: "0", countryCodes: [1668284],
+      placementIds: [3000], smartTargeting: false, commentDisabled: false, shareDisabled: false,
+    };
+    expect(getCreationTemplateReadiness(config)).toEqual({ ready: true, missingFieldCount: 0 });
+    const payloads = buildDraftPayloads({
+      rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
+      videoCode: "video", productUrl: "https://example.com", region: "TW",
+      dailyBudget: 100, bid: 7, startAt: null, endAt: null, initialStatus: "enabled",
+    }, config);
+    expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
+      identity_type: 0,
+      identity_id: "",
+      call_to_action_id: "0",
+    });
+  });
+
   it("uses an encrypted account snapshot while replacing only creation inputs", () => {
     const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
       campaignPayload: { campaign_sketch_form_data: { campaign_name: "old", objective_type: 9, campaign_id: "old-id" }, risk_info: { browser_name: "saved" } },
@@ -70,6 +90,23 @@ describe("creation protocol", () => {
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ campaign_name: "new campaign", campaign_id: "", objective_type: 9 });
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ ad_name: "new group", budget: "25", cpa_bid: "2.5", identity_only: "kept" });
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: "https://example.com/product", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
+  });
+
+  it("applies a complete advanced preset as an explicit override of the account snapshot", () => {
+    const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: { objective_type: 9, buying_type: 9, budget_mode: 9 } },
+      adGroupPayload: { ad_sketch_form_data: { budget_mode: 9, pricing: 9, optimize_goal: 9, external_action: 9, country: [999] } },
+      creativePayload: { asset_group_sketch_form_data_list: [{ image_list: [{}], identity_type: 9, identity_id: "old", call_to_action_id: "old" }] },
+      publishPayload: {},
+    }, { rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad", videoCode: "video", productUrl: "https://example.com", region: "US", dailyBudget: 10, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }, "UTC", new Date("2026-07-20T00:00:00.000Z"), {
+      objectiveType: 1, buyingType: 2, campaignBudgetMode: 3, adBudgetMode: 4,
+      pricing: 5, optimizeGoal: 6, externalAction: 7, pixelId: "pixel", identityType: 8,
+      identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [11],
+      smartTargeting: false, commentDisabled: true, shareDisabled: true,
+    });
+    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ objective_type: 1, buying_type: 2, budget_mode: 3 });
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 4, pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [11] });
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ identity_type: 8, identity_id: "identity", call_to_action_id: "SHOP_NOW", is_comment_disable: 1, is_share_disable: 1 });
   });
 
 });

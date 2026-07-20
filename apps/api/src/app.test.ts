@@ -63,6 +63,31 @@ describe("local API", () => {
     });
   });
 
+  it("creates a launch preset from the default launch-page form payload", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/launch-presets",
+      payload: {
+        name: "基础预设",
+        region: "未设置",
+        dailyBudget: 100,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        initialStatus: "enabled",
+        creationConfig: {},
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      name: "基础预设",
+      region: "未设置",
+      dailyBudget: 100,
+      initialStatus: "enabled",
+    });
+  });
+
   it("updates global polling and operation limits", async () => {
     const response = await app.inject({
       method: "PUT",
@@ -169,6 +194,52 @@ describe("local API", () => {
     });
     expect(run.statusCode).toBe(409);
     expect(run.json().message).toContain("账户自动化已关闭");
+  });
+
+  it("deletes only the selected account and its encrypted credentials", async () => {
+    const other = store.createAccount({
+      displayName: "保留账户",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "cookie",
+    });
+    const settings = await app.inject({
+      method: "PUT",
+      url: "/api/accounts/demo-account/connections/cookie/settings",
+      payload: {
+        kind: "cookie",
+        advertiserId: "123",
+        healthUrl: "https://ads.tiktok.com/api/read-only",
+        campaignsUrl: "",
+        adGroupsUrl: "",
+        adsUrl: "",
+      },
+    });
+    expect(settings.statusCode).toBe(200);
+    const credential = await app.inject({
+      method: "PUT",
+      url: "/api/accounts/demo-account/connections/cookie/credential",
+      payload: {
+        kind: "cookie",
+        cookie: "sessionid=delete-test-cookie",
+        csrfHeaderName: "x-csrftoken",
+      },
+    });
+    expect(credential.statusCode).toBe(200);
+    const reference = store.getProviderConnection("demo-account", "cookie")?.credentialRef;
+    expect(reference).toBeTruthy();
+
+    const removed = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
+
+    expect(removed.statusCode).toBe(204);
+    expect(store.getAccount("demo-account")).toBeNull();
+    expect(store.getProviderConnection("demo-account", "cookie")).toBeNull();
+    await expect(vault.read(reference!)).resolves.toBeNull();
+    expect(store.getAccount(other.id)).toMatchObject({ displayName: "保留账户" });
+    expect(store.getGlobalAutomationSettings()).toMatchObject({ pollingIntervalMinutes: 5 });
+
+    const missing = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
+    expect(missing.statusCode).toBe(404);
   });
 
   it("stores provider settings and an encrypted credential reference", async () => {
@@ -786,6 +857,30 @@ describe("local API", () => {
     expect(store.listLaunchPlanItems(planId)[0]?.status).toBe("pending");
   });
 
+  it("allows an explicitly requested launch when the account remains in manual-approval mode", async () => {
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "campaign-created",
+        adGroupId: "group-created",
+        adId: "ad-created",
+        message: "created",
+      })),
+    );
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+    store.setAccountExecutionMode("demo-account", "manual-approval", "manual launch test");
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/execute`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createFromPreset).toHaveBeenCalledTimes(1);
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" });
+  });
+
   it("keeps an item succeeded when post-create synchronization fails", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
@@ -1304,11 +1399,14 @@ describe("local API", () => {
     expect(store.listLaunchPlanItemVerifications(item.itemId)).toHaveLength(1);
   });
 
-  it("blocks launch provider writes when the latest sync is not healthy", async () => {
+  it("allows an explicit manual launch when the latest sync is not healthy", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
         ok: true,
+        campaignId: "campaign-created",
+        adGroupId: "adgroup-created",
+        adId: "ad-created",
         message: "created",
       })),
     );
@@ -1333,15 +1431,18 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().results[0]).toMatchObject({ status: "failed" });
-    expect(createFromPreset).not.toHaveBeenCalled();
+    expect(response.json().results[0]).toMatchObject({ status: "succeeded" });
+    expect(createFromPreset).toHaveBeenCalledOnce();
   });
 
-  it("rechecks sync quality immediately before a launch provider write", async () => {
+  it("does not let a concurrent sync-quality downgrade block an explicit manual launch", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
         ok: true,
+        campaignId: "campaign-created",
+        adGroupId: "adgroup-created",
+        adId: "ad-created",
         message: "created",
       })),
     );
@@ -1371,8 +1472,8 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().results[0]).toMatchObject({ status: "failed" });
-    expect(createFromPreset).not.toHaveBeenCalled();
+    expect(response.json().results[0]).toMatchObject({ status: "succeeded" });
+    expect(createFromPreset).toHaveBeenCalledOnce();
   });
 
   it("rechecks the exact authorization and credential generation before launch dispatch", async () => {

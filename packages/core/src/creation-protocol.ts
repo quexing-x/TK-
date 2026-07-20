@@ -153,7 +153,7 @@ export function buildDraftPayloads(
         external_url: row.productUrl,
         image_list: [{ aweme_item_id: row.videoCode }],
         identity_type: config.identityType,
-        identity_id: config.identityId,
+        identity_id: config.identityId ?? "",
         call_to_action_id: config.callToActionId,
         is_comment_disable: config.commentDisabled ? 1 : 0,
         is_share_disable: config.shareDisabled ? 1 : 0,
@@ -165,7 +165,13 @@ export function buildDraftPayloads(
 /** Applies only user-controlled fields to a locally encrypted, account-verified
  * creation snapshot. Identity, pixel, targeting and provider risk fields are
  * retained verbatim instead of being guessed from a list/status cURL. */
-export function buildProfileDraftPayloads(profile: CookieCreationProfile, row: LaunchConfigurationRow, timezone = "UTC", now = new Date()) {
+export function buildProfileDraftPayloads(
+  profile: CookieCreationProfile,
+  row: LaunchConfigurationRow,
+  timezone = "UTC",
+  now = new Date(),
+  customConfig?: CreationPresetConfig,
+) {
   const campaign = clone(profile.campaignPayload);
   const adGroup = clone(profile.adGroupPayload);
   const creative = clone(profile.creativePayload);
@@ -183,7 +189,33 @@ export function buildProfileDraftPayloads(profile: CookieCreationProfile, row: L
   if (typeof asset.open_url === "string") asset.open_url = row.productUrl;
   if (!Array.isArray(asset.image_list) || !isRecord(asset.image_list[0])) throw new Error("本地创建模板缺少视频素材结构，请重新验证该账户的创建模板。");
   asset.image_list[0].aweme_item_id = row.videoCode;
+  if (customConfig && requiredCreationFields(customConfig).length === 0) {
+    applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig);
+  }
   return { campaign, adGroup, creative };
+}
+function applyCreationConfigOverrides(
+  campaignForm: Record<string, unknown>,
+  adForm: Record<string, unknown>,
+  asset: Record<string, unknown>,
+  config: CreationPresetConfig,
+) {
+  campaignForm.objective_type = config.objectiveType;
+  campaignForm.buying_type = config.buyingType;
+  campaignForm.budget_mode = config.campaignBudgetMode;
+  adForm.budget_mode = config.adBudgetMode;
+  adForm.pricing = config.pricing;
+  adForm.optimize_goal = config.optimizeGoal;
+  adForm.external_action = config.externalAction;
+  adForm.ad_ref_pixel_id = config.pixelId ?? "";
+  adForm.automated_targeting = config.smartTargeting ? 1 : 0;
+  if (config.countryCodes.length > 0) adForm.country = [...config.countryCodes];
+  if (config.placementIds.length > 0) adForm.platform = [...config.placementIds];
+  asset.identity_type = config.identityType;
+  asset.identity_id = config.identityId;
+  asset.call_to_action_id = config.callToActionId;
+  asset.is_comment_disable = config.commentDisabled ? 1 : 0;
+  asset.is_share_disable = config.shareDisabled ? 1 : 0;
 }
 function clone(value: Record<string, unknown>): Record<string, unknown> { return JSON.parse(JSON.stringify(value)) as Record<string, unknown>; }
 function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> { if (!isRecord(value[key])) throw new Error(`本地创建模板缺少 ${key}，请重新验证该账户的创建模板。`); return value[key]; }
@@ -199,7 +231,7 @@ function requiredCreationFields(config: CreationPresetConfig): string[] {
     ["优化目标", config.optimizeGoal],
     ["转化事件", config.externalAction],
     ["广告身份类型", config.identityType],
-    ["广告身份 ID", config.identityId],
+    ["广告身份 ID", config.identityType === 0 ? "account-default" : config.identityId],
     ["行动号召", config.callToActionId],
   ];
   return fields.filter(([, value]) => value == null || value === "").map(([name]) => name);

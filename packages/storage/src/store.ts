@@ -483,6 +483,44 @@ export class AutomationStore {
     return this.getAccount(id) as AccountConfig;
   }
 
+  /**
+   * Removes one advertising account and its account-scoped database records.
+   * The returned references belong to this account only and must be removed
+   * from the credential vault by the caller.
+   */
+  deleteAccount(accountId: string): string[] | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const account = this.db
+        .prepare("SELECT credential_ref FROM accounts WHERE id = ?")
+        .get(accountId) as SqlRow | undefined;
+      if (!account) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      const connectionReferences = this.db
+        .prepare(
+          "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND credential_ref IS NOT NULL",
+        )
+        .all(accountId) as SqlRow[];
+      const credentialReferences = [...new Set([
+        account.credential_ref,
+        ...connectionReferences.map((row) => row.credential_ref),
+      ].filter((reference): reference is string => typeof reference === "string" && reference.length > 0))];
+
+      this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+      this.writeAudit("local-user", accountId, "account.deleted", {
+        credentialReferenceCount: credentialReferences.length,
+      });
+      this.db.exec("COMMIT");
+      return credentialReferences;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   getAccount(accountId: string): AccountConfig | null {
     const row = this.db
       .prepare("SELECT * FROM accounts WHERE id = ?")
@@ -3116,7 +3154,11 @@ export class AutomationStore {
     const unknownCount = items.filter((item) => item.status === "unknown").length;
     const message = completed
       ? `已完成 ${items.length} 条广告创建任务。`
-      : `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条；明确失败 ${failedCount} 条，可单独重试；结果未知 ${unknownCount} 条，禁止重试，需人工核验。`;
+      : [
+          `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条`,
+          ...(failedCount > 0 ? [`明确失败 ${failedCount} 条，可单独重试`] : []),
+          ...(unknownCount > 0 ? [`结果未知 ${unknownCount} 条，禁止重试，需人工核验`] : []),
+        ].join("；") + "。";
     this.db
       .prepare(
         `UPDATE multi_account_launch_plans

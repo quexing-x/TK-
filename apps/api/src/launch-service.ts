@@ -152,9 +152,9 @@ export class LaunchService {
     try {
       const account = this.store.getAccount(claimed.accountId);
       if (!account) throw new Error("目标广告账户不存在。");
-      if (!account.enabled || account.executionMode !== "automatic") {
-        throw new Error("目标账户没有明确启用 automatic 模式，批量创建已阻止。");
-      }
+      // A launch plan is an explicit user-triggered write with its own audit,
+      // confirmation and manual-verification path. It must not require the
+      // account's background automation mode to be enabled.
       const connection = this.store.getProviderConnection(claimed.accountId, account.providerKind);
       if (!connection || connection.status !== "ready") {
         throw new Error("目标账户未通过连接验证。");
@@ -165,11 +165,8 @@ export class LaunchService {
         connection,
         claimed.templateMode === "copy" ? "copy-ads" : "create-campaigns",
       );
-      const latestSync = this.store.getLatestReadOnlySync(
-        claimed.accountId,
-        account.providerKind,
-      );
-      if (!latestSync || latestSync.quality.status !== "healthy") {
+      const latestSync = this.store.getLatestReadOnlySync(claimed.accountId, account.providerKind);
+      if (claimed.templateMode === "copy" && (!latestSync || latestSync.quality.status !== "healthy")) {
         throw new Error(
           `目标账户同步数据不是 healthy，批量创建已阻止（当前：${latestSync?.quality.status ?? "none"}）。`,
         );
@@ -197,17 +194,14 @@ export class LaunchService {
         throw new Error("软件总开关已关闭，批量创建写入已暂停。");
       }
       const currentAccount = this.store.getAccount(claimed.accountId);
-      if (!currentAccount?.enabled || currentAccount.executionMode !== "automatic") {
-        throw new Error("目标账户没有明确启用 automatic 模式，批量创建已阻止。");
+      if (!currentAccount) {
+        throw new Error("目标广告账户不存在，批量创建已阻止。");
       }
       if (currentAccount.providerKind !== account.providerKind) {
         throw new Error("目标账户 Provider 已变更，批量创建已阻止。");
       }
-      const currentSync = this.store.getLatestReadOnlySync(
-        claimed.accountId,
-        account.providerKind,
-      );
-      if (!currentSync || currentSync.quality.status !== "healthy") {
+      const currentSync = this.store.getLatestReadOnlySync(claimed.accountId, account.providerKind);
+      if (claimed.templateMode === "copy" && (!currentSync || currentSync.quality.status !== "healthy")) {
         throw new Error(
           `目标账户同步数据已变化，批量创建已阻止（当前：${currentSync?.quality.status ?? "none"}）。`,
         );

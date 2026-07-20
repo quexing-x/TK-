@@ -778,6 +778,16 @@ export async function createApp(
     return reply.status(201).send(dependencies.store.createAccount(body));
   });
 
+  app.delete("/api/accounts/:accountId", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const credentialReferences = dependencies.store.deleteAccount(accountId);
+    if (!credentialReferences) {
+      return reply.status(404).send({ message: "账号不存在。" });
+    }
+    await Promise.all(credentialReferences.map((reference) => dependencies.vault.delete(reference)));
+    return reply.status(204).send();
+  });
+
   app.get("/api/accounts/:accountId", async (request, reply) => {
     const { accountId } = AccountParamsSchema.parse(request.params);
     const account = dependencies.store.getAccount(accountId);

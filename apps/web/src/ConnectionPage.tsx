@@ -20,7 +20,9 @@ import { api, type CookieConnectionReadiness } from "./api";
 import {
   canSubmitCookieImport,
   describeCookieState,
+  displayedCookieReadiness,
   getCookieImportSteps,
+  replaceProviderConnection,
 } from "./cookie-onboarding.js";
 
 const emptyApiSettings: OfficialApiConnectionSettings = {
@@ -104,7 +106,8 @@ export function ConnectionPage({
   }, [load]);
 
   const connection = connections.find((item) => item.kind === providerKind);
-  const cookieState = describeCookieState(readiness, connection);
+  const visibleReadiness = displayedCookieReadiness(readiness, connection);
+  const cookieState = describeCookieState(visibleReadiness, connection);
 
   const copyNetworkFilter = async (value: string) => {
     try {
@@ -130,6 +133,7 @@ export function ConnectionPage({
           importStep.command,
           importStep.step,
         );
+        setConnections((current) => replaceProviderConnection(current, result!));
         if (importStep.step === "read") {
           setReadCurlCommand("");
           await load();
@@ -138,6 +142,7 @@ export function ConnectionPage({
         }
       }
       const nextReadiness = await api.getCookieReadiness(account.id);
+      setReadiness(nextReadiness);
       await load();
       const importReady =
         result?.status === "ready" &&
@@ -247,7 +252,7 @@ export function ConnectionPage({
 
             <div className="cookie-import-steps">
               <CurlStep
-                complete={readiness.dataRequestImported}
+                complete={visibleReadiness.dataRequestImported}
                 copiedFilter={copiedFilter}
                 filter="/adgroup/list/?"
                 label="第 1 段 · 获取账户数据"
@@ -267,7 +272,7 @@ export function ConnectionPage({
               </CurlStep>
 
               <CurlStep
-                complete={readiness.statusRequestImported}
+                complete={visibleReadiness.statusRequestImported}
                 copiedFilter={copiedFilter}
                 filter="/ad/update_status/?"
                 label="第 2 段 · 获取启停能力"
@@ -295,7 +300,7 @@ export function ConnectionPage({
                   !canSubmitCookieImport({
                     busy: busy !== null,
                     readCommand: readCurlCommand,
-                    readiness,
+                    readiness: visibleReadiness,
                     statusCommand: statusCurlCommand,
                   })
                 }
@@ -317,15 +322,15 @@ export function ConnectionPage({
             <div className="required-field-panel">
               <div>
                 <strong>必要字段</strong>
-                <span>{readiness.completedFields}/{readiness.totalFields} 已获取</span>
+                <span>{visibleReadiness.completedFields}/{visibleReadiness.totalFields} 已获取</span>
               </div>
               <div className="required-field-grid">
                 {requiredFieldLabels.map(([key, label]) => (
                   <span
-                    className={readiness.requiredFields[key] ? "complete" : ""}
+                    className={visibleReadiness.requiredFields[key] ? "complete" : ""}
                     key={key}
                   >
-                    {readiness.requiredFields[key]
+                    {visibleReadiness.requiredFields[key]
                       ? <CheckCircle2 size={15} />
                       : <AlertTriangle size={15} />}
                     {label}
