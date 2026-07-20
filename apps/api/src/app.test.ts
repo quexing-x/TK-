@@ -242,6 +242,55 @@ describe("local API", () => {
     expect(missing.statusCode).toBe(404);
   });
 
+  it("keeps the account retriable when encrypted credential deletion fails", async () => {
+    await app.inject({
+      method: "PUT",
+      url: "/api/accounts/demo-account/connections/cookie/settings",
+      payload: {
+        kind: "cookie",
+        advertiserId: "123",
+        healthUrl: "https://ads.tiktok.com/api/read-only",
+        campaignsUrl: "",
+        adGroupsUrl: "",
+        adsUrl: "",
+      },
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/api/accounts/demo-account/connections/cookie/credential",
+      payload: { kind: "cookie", cookie: "sessionid=delete-failure", csrfHeaderName: "x-csrftoken" },
+    });
+    const reference = store.getProviderConnection("demo-account", "cookie")?.credentialRef;
+    expect(reference).toBeTruthy();
+    vi.spyOn(vault, "delete").mockRejectedValueOnce(new Error("vault unavailable"));
+
+    const response = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
+
+    expect(response.statusCode).toBe(409);
+    expect(store.getAccount("demo-account")).not.toBeNull();
+    expect(store.getProviderConnection("demo-account", "cookie")?.credentialRef).toBe(reference);
+    await expect(vault.read(reference!)).resolves.not.toBeNull();
+  });
+
+  it("blocks account deletion while launch history still references it", async () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [apiLaunchRow(2)],
+    });
+
+    const response = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().message).toContain("投放计划或创建记录");
+    expect(store.getAccount("demo-account")).not.toBeNull();
+    expect(store.getMultiAccountLaunchPlan(plan.id)).not.toBeNull();
+    expect(store.listLaunchPlanItems(plan.id)).toHaveLength(1);
+  });
+
   it("stores provider settings and an encrypted credential reference", async () => {
     const settings = await app.inject({
       method: "PUT",
@@ -506,7 +555,7 @@ describe("local API", () => {
     expect(created.statusCode).toBe(201);
     const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${created.json().id}/execute` });
 
-    expect(executed.statusCode).toBe(200);
+    expect(executed.statusCode, executed.body).toBe(200);
     expect(executed.json().plan).toMatchObject({ status: "completed", executionResults: [{ accountId: "demo-account", ok: true, createdCount: 1, failedCount: 0 }, { accountId: second.id, ok: true, createdCount: 1, failedCount: 0 }] });
     expect(executed.json().results).toEqual(expect.arrayContaining([
       expect.objectContaining({ accountId: "demo-account", status: "succeeded" }),
@@ -1694,6 +1743,16 @@ describe("local API", () => {
       message: "ready",
     }),
   ): Promise<string> {
+    store.updateLaunchPreset("default-launch-preset", {
+      name: "创建测试预设",
+      region: "US",
+      dailyBudget: 100,
+      bid: null,
+      startAt: null,
+      endAt: null,
+      initialStatus: "disabled",
+      creationConfig: apiCreationConfig(),
+    });
     let latestCreated: CreationMutationResult | null = null;
     const resolvedSyncReadOnly: AdsProvider["syncReadOnly"] = syncReadOnly ?? (async () => {
       const entities = latestCreated?.ok
@@ -1797,6 +1856,16 @@ describe("local API", () => {
     setRemoteSourceVideoCode: (videoCode: string) => void;
     setRemoteTargetVideoCode: (videoCode: string) => void;
   }> {
+    store.updateLaunchPreset("default-launch-preset", {
+      name: "复制测试预设",
+      region: "US",
+      dailyBudget: 100,
+      bid: null,
+      startAt: null,
+      endAt: null,
+      initialStatus: "disabled",
+      creationConfig: apiCreationConfig(),
+    });
     saveApiCopySource(store, "source-ad", "source-video");
     let remoteSourceVideoCode = "source-video";
     let remoteTargetVideoCode = "video-2";
@@ -1962,6 +2031,27 @@ function apiLaunchRow(rowNumber: number) {
     startAt: null,
     endAt: null,
     initialStatus: "disabled" as const,
+  };
+}
+
+function apiCreationConfig() {
+  return {
+    objectiveType: 1,
+    buyingType: 1,
+    campaignBudgetMode: 0,
+    adBudgetMode: 0,
+    pricing: 1,
+    optimizeGoal: 1,
+    externalAction: 1,
+    pixelId: null,
+    identityType: 1,
+    identityId: "test-identity",
+    callToActionId: "SHOP_NOW",
+    countryCodes: [840],
+    placementIds: [1],
+    smartTargeting: true,
+    commentDisabled: false,
+    shareDisabled: false,
   };
 }
 

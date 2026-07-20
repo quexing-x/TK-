@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
+  getCreationTemplateReadiness,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
@@ -91,6 +92,10 @@ export class LaunchService {
     if (!plan.presetSnapshot) {
       throw new Error("旧版计划缺少冻结的创建预设，请重新导入并创建计划。");
     }
+    const readiness = getCreationTemplateReadiness(plan.presetSnapshot.creationConfig);
+    if (!readiness.ready) {
+      throw new Error(`广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，批量创建已阻止。`);
+    }
 
     // Plan execution claims only pending items. Failed items are retried only
     // through retryItem with an explicit itemId.
@@ -126,6 +131,10 @@ export class LaunchService {
     if (!plan) throw new Error("投放计划不存在。");
     if (plan.status === "cancelled") throw new Error("投放计划已取消。");
     if (!plan.presetSnapshot) throw new Error("投放计划缺少冻结的创建预设。");
+    const readiness = getCreationTemplateReadiness(plan.presetSnapshot.creationConfig);
+    if (!readiness.ready) {
+      throw new Error(`广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，重试已阻止。`);
+    }
     const item = this.launchStore.listItems(planId).find((candidate) => candidate.itemId === itemId);
     if (!item) throw new Error("创建任务不存在或不属于当前计划。");
     if (item.status === "unknown") {

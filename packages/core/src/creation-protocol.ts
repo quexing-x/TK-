@@ -83,7 +83,7 @@ export interface CreationTemplateReadiness {
  * fields stay inside the creation adapter.
  */
 export function getCreationTemplateReadiness(
-  config: CreationPresetConfig,
+  config: Partial<CreationPresetConfig> = {},
 ): CreationTemplateReadiness {
   const missing = requiredCreationFields(config);
   return { ready: missing.length === 0, missingFieldCount: missing.length };
@@ -221,7 +221,7 @@ function clone(value: Record<string, unknown>): Record<string, unknown> { return
 function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> { if (!isRecord(value[key])) throw new Error(`本地创建模板缺少 ${key}，请重新验证该账户的创建模板。`); return value[key]; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 
-function requiredCreationFields(config: CreationPresetConfig): string[] {
+function requiredCreationFields(config: Partial<CreationPresetConfig>): string[] {
   const fields: Array<[string, unknown]> = [
     ["营销目标", config.objectiveType],
     ["购买方式", config.buyingType],

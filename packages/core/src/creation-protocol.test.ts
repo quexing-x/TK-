@@ -3,6 +3,7 @@ import { TikTokCreationSteps, buildDraftPayloads, buildProfileDraftPayloads, bui
 
 describe("creation protocol", () => {
   it("reports template readiness without exposing internal field names", () => {
+    expect(getCreationTemplateReadiness()).toEqual({ ready: false, missingFieldCount: 10 });
     expect(getCreationTemplateReadiness({
       objectiveType: null, buyingType: null, campaignBudgetMode: null, adBudgetMode: null,
       pricing: null, optimizeGoal: null, externalAction: null, pixelId: null,

@@ -309,10 +309,13 @@ export class CookieAdsProvider implements AdsProvider {
         message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。",
       }));
     }
+    const campaignListRequest = credential.requestTemplates?.find(
+      (item) => item.target === "campaign",
+    ) ?? siblingListRequest(sessionRequest, "campaign");
     const results: CreationMutationResult[] = [];
     for (const mutation of mutations) {
       try {
-        results.push(await createCookieDraftChain(sessionRequest, credential, mutation, context.timezone ?? "UTC"));
+        results.push(await createCookieDraftChain(sessionRequest, campaignListRequest, credential, mutation, context.timezone ?? "UTC"));
       } catch (cause) {
         results.push({
           ...mutation,
@@ -460,13 +463,14 @@ function formatDateInTimezone(date: Date, timezone: string): string {
 
 async function createCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
+  campaignListRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
 ): Promise<CreationMutationResult> {
   const dispatchState = { mutationDispatched: false };
   try {
-    return await runCookieDraftChain(sessionRequest, credential, mutation, timezone, dispatchState);
+    return await runCookieDraftChain(sessionRequest, campaignListRequest, credential, mutation, timezone, dispatchState);
   } catch (cause) {
     if (cause instanceof ConfirmedCreationFailureError || cause instanceof UnknownCreationStateError) {
       throw cause;
@@ -510,6 +514,7 @@ function ensureStatisticsMetric(value: unknown, metric: string): boolean {
 
 async function runCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
+  campaignListRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
@@ -533,26 +538,33 @@ async function runCookieDraftChain(
     ? nonEmptyId(mutation.preset.templateCampaignId)
     : undefined;
   const resolvedRow = resolveTikTokPostRow(mutation);
-  const preflightPayload = await requestCreationStep("adgroup/list",
-    () => sessionRequest,
+  const preflightPayloads = await requestCompleteListPages(
+    "adgroup/list",
+    sessionRequest,
     credential,
-    { semantics: "preflight-read", dispatchState },
+    dispatchState,
   );
-  assertAdGroupListPreflight(preflightPayload);
+  const campaignPayloads = copyOnly
+    ? preflightPayloads
+    : await requestCompleteListPages(
+        "campaign/list",
+        campaignListRequest,
+        credential,
+        dispatchState,
+      );
+  const preflightEntities = preflightPayloads.flatMap((payload) => extractEntities(payload, "ad-group"));
+  const campaignEntities = campaignPayloads.flatMap((payload) => extractEntities(payload, "campaign"));
   const exactCampaigns = copyOnly ? [] : [...new Map(
-    extractEntities(preflightPayload, "campaign")
+    campaignEntities
       .filter((entity) => normalizeProviderEntity(entity).name.trim() === mutation.row.campaignName.trim())
       .map((entity) => [entity.externalId, entity]),
   ).values()];
   if (exactCampaigns.length > 1) {
     throw new RetryableCreationError("当前账户存在多个同名推广系列，无法确定应复用哪一个系列。");
   }
-  if (!copyOnly && exactCampaigns.length === 0 && hasExplicitAdditionalPages(preflightPayload)) {
-    throw new RetryableCreationError("推广系列列表未完整返回，无法安全判断同名系列是否已存在。");
-  }
   const existingCampaignId = exactCampaigns[0]?.externalId;
   const creationRow = existingCampaignId
-    ? { ...resolvedRow, adGroupName: uniqueAdGroupName(preflightPayload, resolvedRow.adGroupName, existingCampaignId) }
+    ? { ...resolvedRow, adGroupName: uniqueAdGroupName(preflightEntities, resolvedRow.adGroupName, existingCampaignId) }
     : resolvedRow;
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
@@ -566,7 +578,7 @@ async function runCookieDraftChain(
         credential,
         mutation,
         dispatchState,
-        preflightPayload,
+        campaignEntities,
         initializationTemplateCampaignId,
         copyOnly,
       )
@@ -900,12 +912,12 @@ function resolveTikTokPostRow(
 }
 
 function uniqueAdGroupName(
-  preflightPayload: Record<string, unknown>,
+  preflightEntities: ProviderEntity[],
   requestedName: string,
   campaignId: string,
 ): string {
   const existingNames = new Set(
-    extractEntities(preflightPayload, "ad-group")
+    preflightEntities
       .filter((entity) => nonEmptyId(entity.payload.campaign_id) === campaignId)
       .map((entity) => normalizeProviderEntity(entity).name.trim())
       .filter(Boolean),
@@ -1000,12 +1012,11 @@ async function initializeProfileDraftIds(
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   dispatchState: CreationDispatchState,
-  listPayload: Record<string, unknown>,
+  campaigns: ProviderEntity[],
   templateCampaignId: string,
   requireDisabledSource: boolean,
 ): Promise<InitializedDraftIds> {
   const profile = credential.creationProfile;
-  const campaigns = extractEntities(listPayload, "campaign");
   const sourceCampaign = campaigns.find(
     (entity) => entity.externalId === templateCampaignId,
   );
@@ -1821,6 +1832,108 @@ function isStableExternalId(value: unknown): value is string | number {
   );
 }
 
+async function requestCompleteListPages(
+  step: "campaign/list" | "adgroup/list",
+  template: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  dispatchState: CreationDispatchState,
+): Promise<Record<string, unknown>[]> {
+  const pages: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const payload = await requestCreationStep(
+      `${step} 第 ${page} 页`,
+      () => page === 1 ? template : withRequestedPage(template, page),
+      credential,
+      { semantics: "preflight-read", dispatchState },
+    );
+    assertListPreflight(payload, step);
+    const responsePage = responsePageNumber(payload);
+    if (responsePage !== null && responsePage !== page) {
+      throw new RetryableCreationError(`${step} 未返回请求的第 ${page} 页，无法安全判断同名对象。`);
+    }
+    pages.push(payload);
+    if (!hasExplicitAdditionalPages(payload)) return pages;
+  }
+  throw new RetryableCreationError(`${step} 超过 100 页，无法在创建前完成安全查重。`);
+}
+
+function withRequestedPage(template: CapturedCookieRequest, page: number): CapturedCookieRequest {
+  const url = new URL(template.url);
+  let replaced = false;
+  for (const key of ["page", "page_num", "pageNum", "page_index", "pageIndex"]) {
+    if (!url.searchParams.has(key)) continue;
+    url.searchParams.set(key, String(page));
+    replaced = true;
+  }
+  let body = template.body;
+  const contentType = template.contentType?.toLowerCase() ?? "";
+  if (body && (contentType.includes("json") || body.trim().startsWith("{"))) {
+    const parsed = JSON.parse(body) as unknown;
+    const rewritten = rewritePageValue(parsed, page);
+    body = JSON.stringify(rewritten.value);
+    replaced ||= rewritten.changed;
+  } else if (body && contentType.includes("application/x-www-form-urlencoded")) {
+    const fields = new URLSearchParams(body);
+    for (const key of ["page", "page_num", "pageNum", "page_index", "pageIndex"]) {
+      if (!fields.has(key)) continue;
+      fields.set(key, String(page));
+      replaced = true;
+    }
+    body = fields.toString();
+  }
+  if (!replaced) url.searchParams.set("page", String(page));
+  return { ...template, url: url.toString(), body };
+}
+
+function siblingListRequest(
+  template: CapturedCookieRequest,
+  target: "campaign" | "ad-group",
+): CapturedCookieRequest {
+  const url = new URL(template.url);
+  const segment = target === "campaign" ? "campaign" : "adgroup";
+  url.pathname = url.pathname.replace(
+    /\/(campaign|adgroup)\/list(?=\/|$)/i,
+    `/${segment}/list`,
+  );
+  return { ...template, target, derived: true, url: url.toString() };
+}
+
+function rewritePageValue(value: unknown, page: number): { value: unknown; changed: boolean } {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const output = value.map((item) => {
+      const rewritten = rewritePageValue(item, page);
+      changed ||= rewritten.changed;
+      return rewritten.value;
+    });
+    return { value: output, changed };
+  }
+  if (!isRecord(value)) return { value, changed: false };
+  let changed = false;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (["page", "page_num", "pageNum", "page_index", "pageIndex"].includes(key)) {
+      output[key] = page;
+      changed = true;
+    } else {
+      const rewritten = rewritePageValue(item, page);
+      output[key] = rewritten.value;
+      changed ||= rewritten.changed;
+    }
+  }
+  return { value: output, changed };
+}
+
+function responsePageNumber(payload: Record<string, unknown>): number | null {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const pageInfo = isRecord(data.page_info)
+    ? data.page_info
+    : isRecord(data.pageInfo) ? data.pageInfo : isRecord(data.pagination) ? data.pagination : {};
+  const value = pageInfo.page ?? pageInfo.current_page ?? pageInfo.currentPage;
+  const page = Number(value);
+  return value !== undefined && Number.isInteger(page) ? page : null;
+}
+
 function isCookiePaginationComplete(
   payload: Record<string, unknown>,
   request: CapturedCookieRequest,
@@ -1919,12 +2032,15 @@ function findJsonPage(value: unknown): number | null {
   return null;
 }
 
-function assertAdGroupListPreflight(payload: Record<string, unknown>): void {
+function assertListPreflight(
+  payload: Record<string, unknown>,
+  step: "campaign/list" | "adgroup/list",
+): void {
   const data = isRecord(payload.data) ? payload.data : undefined;
   const listKeys = ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"];
   if (!data || !listKeys.some((key) => Array.isArray(data[key]))) {
     throw new RetryableCreationError(
-      "adgroup/list 预检响应缺少可识别的列表结构，尚未发送任何创建请求。",
+      `${step} 预检响应缺少可识别的列表结构，尚未发送任何创建请求。`,
     );
   }
 }

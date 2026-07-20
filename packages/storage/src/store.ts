@@ -488,33 +488,66 @@ export class AutomationStore {
    * The returned references belong to this account only and must be removed
    * from the credential vault by the caller.
    */
-  deleteAccount(accountId: string): string[] | null {
+  listAccountCredentialReferences(accountId: string): string[] | null {
+    const account = this.db
+      .prepare("SELECT credential_ref FROM accounts WHERE id = ?")
+      .get(accountId) as SqlRow | undefined;
+    if (!account) return null;
+    const launchReference = this.db.prepare(
+      `SELECT 1
+       FROM multi_account_launch_plans plan
+       LEFT JOIN launch_plan_items item ON item.plan_id = plan.id
+       WHERE plan.source_account_id = ? OR item.account_id = ?
+       LIMIT 1`,
+    ).get(accountId, accountId);
+    if (launchReference) {
+      throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
+    }
+    const connectionReferences = this.db
+      .prepare(
+        "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND credential_ref IS NOT NULL",
+      )
+      .all(accountId) as SqlRow[];
+    return [...new Set([
+      account.credential_ref,
+      ...connectionReferences.map((row) => row.credential_ref),
+    ].filter((reference): reference is string => typeof reference === "string" && reference.length > 0))];
+  }
+
+  deleteAccount(accountId: string): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const account = this.db
-        .prepare("SELECT credential_ref FROM accounts WHERE id = ?")
+        .prepare("SELECT id, credential_ref FROM accounts WHERE id = ?")
         .get(accountId) as SqlRow | undefined;
       if (!account) {
         this.db.exec("COMMIT");
-        return null;
+        return false;
       }
 
-      const connectionReferences = this.db
-        .prepare(
-          "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND credential_ref IS NOT NULL",
-        )
-        .all(accountId) as SqlRow[];
-      const credentialReferences = [...new Set([
-        account.credential_ref,
-        ...connectionReferences.map((row) => row.credential_ref),
-      ].filter((reference): reference is string => typeof reference === "string" && reference.length > 0))];
+      const launchReference = this.db.prepare(
+        `SELECT 1
+         FROM multi_account_launch_plans plan
+         LEFT JOIN launch_plan_items item ON item.plan_id = plan.id
+         WHERE plan.source_account_id = ? OR item.account_id = ?
+         LIMIT 1`,
+      ).get(accountId, accountId);
+      if (launchReference) {
+        throw new Error("该账户已有投放计划或创建记录。为保留审计链，请先保留该账户，不能直接删除。");
+      }
+
+      const credentialReferenceCount = Number((this.db.prepare(
+        `SELECT COUNT(DISTINCT credential_ref) AS count
+         FROM provider_connections
+         WHERE account_id = ? AND credential_ref IS NOT NULL`,
+      ).get(accountId) as SqlRow).count ?? 0) + (account.credential_ref ? 1 : 0);
 
       this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
       this.writeAudit("local-user", accountId, "account.deleted", {
-        credentialReferenceCount: credentialReferences.length,
+        credentialReferenceCount,
       });
       this.db.exec("COMMIT");
-      return credentialReferences;
+      return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
