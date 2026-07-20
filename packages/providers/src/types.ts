@@ -61,6 +61,7 @@ export interface CreationMutation {
   operationId?: string;
   attemptId?: string;
   correlationId?: string;
+  batchId?: string;
   onProgress?: (progress: LaunchCreationProgress) => void;
 }
 

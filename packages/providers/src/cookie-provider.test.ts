@@ -960,12 +960,20 @@ describe("CookieAdsProvider", () => {
     }));
     const first = creationTestMutation("none");
     const second = creationTestMutation("none");
+    first.batchId = "plan-1";
+    second.batchId = "plan-1";
     second.row.adName = "260717:002";
+    const provider = new CookieAdsProvider();
 
-    const results = await new CookieAdsProvider().createFromPreset!(
+    const firstResults = await provider.createFromPreset!(
       creationTestContext(false),
-      [first, second],
+      [first],
     );
+    const secondResults = await provider.createFromPreset!(
+      creationTestContext(false),
+      [second],
+    );
+    const results = [...firstResults, ...secondResults];
 
     expect(results).toHaveLength(2);
     expect(results.every((result) => result.ok)).toBe(true);
@@ -974,6 +982,32 @@ describe("CookieAdsProvider", () => {
       .filter((item) => item.url.includes("ad_snap/save"))
       .map((item) => (item.body.ad_sketch_form_data as Record<string, unknown>).ad_name);
     expect(adNames).toEqual(["group", "group-001"]);
+  });
+
+  it("stops later same-campaign calls after an unknown result in the same plan", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("campaign/list") || url.includes("adgroup/list")) {
+        return jsonResponse({ code: 0, data: { table: [], pagination: { page: 1, page_count: 1 } } });
+      }
+      if (url.includes("campaign_snap/save")) throw new TypeError("connection lost");
+      return jsonResponse(successfulCreationPayload(url));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new CookieAdsProvider();
+    const first = creationTestMutation("none");
+    const second = creationTestMutation("none");
+    first.batchId = "plan-unknown";
+    second.batchId = "plan-unknown";
+
+    const [unknown] = await provider.createFromPreset!(creationTestContext(false), [first]);
+    const callsAfterUnknown = fetchMock.mock.calls.length;
+    const [blocked] = await provider.createFromPreset!(creationTestContext(false), [second]);
+
+    expect(unknown).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(blocked).toMatchObject({ ok: false, failureKind: "retryable" });
+    expect(blocked?.message).toContain("前一条同系列任务结果未知");
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterUnknown);
   });
 
   it("bootstraps a zero-create draft from a stable campaign template when no verified profile exists", async () => {

@@ -53,11 +53,18 @@ type ParsedCookieCredential = ReturnType<
   typeof CookieCredentialInputSchema.parse
 >;
 
+interface CreationBatchReservations {
+  campaignIds: Map<string, string>;
+  adGroupNames: Map<string, Set<string>>;
+  uncertainCampaigns: Set<string>;
+}
+
 export class CookieAdsProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Cookie 会话";
   readonly capabilityVersion = "cookie-capabilities-v2-2026-07";
   readonly capabilities = capabilities;
+  private readonly creationBatchReservations = new Map<string, CreationBatchReservations>();
 
   resolveCapabilities(context: ProviderContext): ReadonlySet<ProviderCapability> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -313,12 +320,14 @@ export class CookieAdsProvider implements AdsProvider {
       (item) => item.target === "campaign",
     ) ?? siblingListRequest(sessionRequest, "campaign");
     const results: CreationMutationResult[] = [];
-    const batchCampaignIds = new Map<string, string>();
-    const batchAdGroupNames = new Map<string, Set<string>>();
-    const uncertainCampaigns = new Set<string>();
+    const batchId = mutations[0]?.batchId;
+    const reservationKey = batchId ? `${context.accountId}:${batchId}` : null;
+    const reservations = reservationKey
+      ? this.creationBatchReservations.get(reservationKey) ?? this.createBatchReservations(reservationKey)
+      : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>(), uncertainCampaigns: new Set<string>() };
     for (const mutation of mutations) {
       const campaignKey = mutation.row.campaignName.trim();
-      if (mutation.templateMode === "none" && uncertainCampaigns.has(campaignKey)) {
+      if (mutation.templateMode === "none" && reservations.uncertainCampaigns.has(campaignKey)) {
         results.push({
           ...mutation,
           ok: false,
@@ -335,22 +344,22 @@ export class CookieAdsProvider implements AdsProvider {
           mutation,
           context.timezone ?? "UTC",
           mutation.templateMode === "none" ? {
-            ...(batchCampaignIds.get(campaignKey)
-              ? { campaignId: batchCampaignIds.get(campaignKey)! }
+            ...(reservations.campaignIds.get(campaignKey)
+              ? { campaignId: reservations.campaignIds.get(campaignKey)! }
               : {}),
-            adGroupNames: batchAdGroupNames.get(campaignKey) ?? new Set<string>(),
+            adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
           } : undefined,
         );
         results.push(result);
         if (mutation.templateMode === "none" && result.ok && result.campaignId) {
-          batchCampaignIds.set(campaignKey, result.campaignId);
-          const names = batchAdGroupNames.get(campaignKey) ?? new Set<string>();
+          reservations.campaignIds.set(campaignKey, result.campaignId);
+          const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
           names.add(result.row.adGroupName.trim());
-          batchAdGroupNames.set(campaignKey, names);
+          reservations.adGroupNames.set(campaignKey, names);
         }
       } catch (cause) {
         if (mutation.templateMode === "none" && cause instanceof UnknownCreationStateError) {
-          uncertainCampaigns.add(campaignKey);
+          reservations.uncertainCampaigns.add(campaignKey);
         }
         results.push({
           ...mutation,
@@ -363,6 +372,20 @@ export class CookieAdsProvider implements AdsProvider {
       }
     }
     return results;
+  }
+
+  private createBatchReservations(key: string): CreationBatchReservations {
+    if (this.creationBatchReservations.size >= 100) {
+      const oldest = this.creationBatchReservations.keys().next().value as string | undefined;
+      if (oldest) this.creationBatchReservations.delete(oldest);
+    }
+    const reservations: CreationBatchReservations = {
+      campaignIds: new Map(),
+      adGroupNames: new Map(),
+      uncertainCampaigns: new Set(),
+    };
+    this.creationBatchReservations.set(key, reservations);
+    return reservations;
   }
 
   async create(

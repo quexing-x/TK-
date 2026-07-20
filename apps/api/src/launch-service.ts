@@ -159,6 +159,15 @@ export class LaunchService {
     let providerInvoked = false;
     let providerConfirmed = false;
     try {
+      const uncertainSibling = this.launchStore.listItems(claimed.planId).some((item) =>
+        item.itemId !== claimed.itemId
+        && item.accountId === claimed.accountId
+        && item.launchRow.campaignName.trim() === claimed.launchRow.campaignName.trim()
+        && item.status === "unknown",
+      );
+      if (uncertainSibling) {
+        throw new RetryableCreationError("同计划内已有同系列任务结果未知，已停止后续创建以避免重复系列或广告组。");
+      }
       const account = this.store.getAccount(claimed.accountId);
       if (!account) throw new Error("目标广告账户不存在。");
       // A launch plan is an explicit user-triggered write with its own audit,
@@ -247,6 +256,7 @@ export class LaunchService {
         operationId: claimed.operationId,
         attemptId,
         correlationId: claimed.correlationId,
+        batchId: claimed.planId,
         onProgress: (progress: LaunchCreationProgress) => {
           this.launchStore.progress(claimed.itemId, executorId, progress);
         },
