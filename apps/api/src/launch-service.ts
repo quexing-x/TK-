@@ -159,15 +159,17 @@ export class LaunchService {
     let providerInvoked = false;
     let providerConfirmed = false;
     let creationScopeLocked = false;
+    let creationScopeReservation: { campaignId: string | null; adGroupNames: string[] } | null = null;
     const campaignName = claimed.launchRow.campaignName.trim();
     const creationScopeOwner = `${executorId}:${claimed.itemId}`;
     try {
-      creationScopeLocked = this.store.claimLaunchCreationScope(
+      creationScopeReservation = this.store.claimLaunchCreationScope(
         claimed.planId,
         claimed.accountId,
         campaignName,
         creationScopeOwner,
       );
+      creationScopeLocked = creationScopeReservation !== null;
       if (!creationScopeLocked) {
         throw new RetryableCreationError("同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。");
       }
@@ -278,6 +280,12 @@ export class LaunchService {
         attemptId,
         correlationId: claimed.correlationId,
         batchId: claimed.planId,
+        ...(creationScopeReservation?.campaignId
+          ? { batchCampaignId: creationScopeReservation.campaignId }
+          : {}),
+        ...(creationScopeReservation?.adGroupNames.length
+          ? { batchAdGroupNames: creationScopeReservation.adGroupNames }
+          : {}),
         onProgress: (progress: LaunchCreationProgress) => {
           this.launchStore.progress(claimed.itemId, executorId, progress);
         },
@@ -314,6 +322,17 @@ export class LaunchService {
           "Provider 报告成功，但没有返回完整的系列、广告组和广告 ID；为避免重复投放，系统不会自动重试。",
         );
       }
+      if (!this.store.completeLaunchCreationScope(
+        claimed.planId,
+        claimed.accountId,
+        campaignName,
+        creationScopeOwner,
+        created.campaignId,
+        created.row.adGroupName,
+      )) {
+        throw new UnknownCreationStateError("Provider 已确认创建，但批次系列预留未能持久化；后续同系列任务已阻止。");
+      }
+      creationScopeLocked = false;
 
       this.tasks.succeed(claimed.itemId, executorId, {
         campaignId: created.campaignId,
@@ -409,6 +428,15 @@ export class LaunchService {
       const unknown = cause instanceof UnknownCreationStateError
         || providerConfirmed
         || (providerInvoked && !(cause instanceof RetryableCreationError));
+      if (unknown && creationScopeLocked) {
+        this.store.markLaunchCreationScopeUncertain(
+          claimed.planId,
+          claimed.accountId,
+          campaignName,
+          creationScopeOwner,
+        );
+        creationScopeLocked = false;
+      }
       if (unknown) {
         this.tasks.unknown(
           claimed.itemId,

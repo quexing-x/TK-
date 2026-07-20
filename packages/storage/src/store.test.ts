@@ -358,14 +358,23 @@ describe("AutomationStore", () => {
         launchRows: [launchItemRow(2)],
       });
 
-      expect(first.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1")).toBe(true);
-      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
+      expect(first.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1"))
+        .toEqual({ campaignId: null, adGroupNames: [] });
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBeNull();
       expect(second.renewLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
       expect(first.renewLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1")).toBe(true);
       second.releaseLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2");
-      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(false);
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBeNull();
       first.releaseLaunchCreationScope(plan.id, "demo-account", "系列", "owner-1");
-      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2")).toBe(true);
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-2"))
+        .toEqual({ campaignId: null, adGroupNames: [] });
+      expect(second.completeLaunchCreationScope(
+        plan.id, "demo-account", "系列", "owner-2", "campaign-1", "group-001",
+      )).toBe(true);
+      expect(first.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-3"))
+        .toEqual({ campaignId: "campaign-1", adGroupNames: ["group-001"] });
+      first.markLaunchCreationScopeUncertain(plan.id, "demo-account", "系列", "owner-3");
+      expect(second.claimLaunchCreationScope(plan.id, "demo-account", "系列", "owner-4")).toBeNull();
     } finally {
       second.close();
       first.close();

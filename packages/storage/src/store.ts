@@ -2496,22 +2496,46 @@ export class AutomationStore {
     accountId: string,
     campaignName: string,
     ownerId: string,
-  ): boolean {
+  ): { campaignId: string | null; adGroupNames: string[] } | null {
     const claimedAt = new Date().toISOString();
     const expiredAt = new Date(Date.now() - 30 * 60_000).toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare(
-        `DELETE FROM launch_creation_locks
-         WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND claimed_at <= ?`,
-      ).run(planId, accountId, campaignName, expiredAt);
-      const result = this.db.prepare(
-        `INSERT OR IGNORE INTO launch_creation_locks (
-          plan_id, account_id, campaign_name, owner_id, claimed_at
-        ) VALUES (?, ?, ?, ?, ?)`,
-      ).run(planId, accountId, campaignName, ownerId, claimedAt);
+        `UPDATE launch_creation_locks
+         SET owner_id = NULL, uncertain = 1, claimed_at = ?
+         WHERE plan_id = ? AND account_id = ? AND campaign_name = ?
+           AND owner_id IS NOT NULL AND claimed_at <= ?`,
+      ).run(claimedAt, planId, accountId, campaignName, expiredAt);
+      const existing = this.db.prepare(
+        `SELECT owner_id, campaign_id, ad_group_names_json, uncertain
+         FROM launch_creation_locks
+         WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+      ).get(planId, accountId, campaignName) as SqlRow | undefined;
+      if (existing && (existing.owner_id !== null || Number(existing.uncertain) === 1)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if (existing) {
+        this.db.prepare(
+          `UPDATE launch_creation_locks SET owner_id = ?, claimed_at = ?
+           WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id IS NULL AND uncertain = 0`,
+        ).run(ownerId, claimedAt, planId, accountId, campaignName);
+      } else {
+        this.db.prepare(
+          `INSERT INTO launch_creation_locks (
+            plan_id, account_id, campaign_name, owner_id, claimed_at,
+            campaign_id, ad_group_names_json, uncertain
+          ) VALUES (?, ?, ?, ?, ?, NULL, '[]', 0)`,
+        ).run(planId, accountId, campaignName, ownerId, claimedAt);
+      }
       this.db.exec("COMMIT");
-      return result.changes === 1;
+      return {
+        campaignId: typeof existing?.campaign_id === "string" ? existing.campaign_id : null,
+        adGroupNames: existing?.ad_group_names_json
+          ? JSON.parse(String(existing.ad_group_names_json)) as string[]
+          : [],
+      };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -2525,9 +2549,9 @@ export class AutomationStore {
     ownerId: string,
   ): void {
     this.db.prepare(
-      `DELETE FROM launch_creation_locks
+      `UPDATE launch_creation_locks SET owner_id = NULL, claimed_at = ?
        WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
-    ).run(planId, accountId, campaignName, ownerId);
+    ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
   }
 
   renewLaunchCreationScope(
@@ -2541,6 +2565,40 @@ export class AutomationStore {
        WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
     ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
     return result.changes === 1;
+  }
+
+  completeLaunchCreationScope(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+    campaignId: string,
+    adGroupName: string,
+  ): boolean {
+    const row = this.db.prepare(
+      `SELECT ad_group_names_json FROM launch_creation_locks
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).get(planId, accountId, campaignName, ownerId) as SqlRow | undefined;
+    if (!row) return false;
+    const names = new Set(JSON.parse(String(row.ad_group_names_json ?? "[]")) as string[]);
+    names.add(adGroupName);
+    const result = this.db.prepare(
+      `UPDATE launch_creation_locks SET campaign_id = ?, ad_group_names_json = ?, owner_id = NULL, claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(campaignId, JSON.stringify([...names]), new Date().toISOString(), planId, accountId, campaignName, ownerId);
+    return result.changes === 1;
+  }
+
+  markLaunchCreationScopeUncertain(
+    planId: string,
+    accountId: string,
+    campaignName: string,
+    ownerId: string,
+  ): void {
+    this.db.prepare(
+      `UPDATE launch_creation_locks SET uncertain = 1, owner_id = NULL, claimed_at = ?
+       WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
+    ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
   }
 
   getMultiAccountLaunchPlan(planId: string): MultiAccountLaunchPlanRecord | null {
@@ -5265,8 +5323,11 @@ export class AutomationStore {
         plan_id TEXT NOT NULL REFERENCES multi_account_launch_plans(id) ON DELETE CASCADE,
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         campaign_name TEXT NOT NULL,
-        owner_id TEXT NOT NULL,
+        owner_id TEXT,
         claimed_at TEXT NOT NULL,
+        campaign_id TEXT,
+        ad_group_names_json TEXT NOT NULL DEFAULT '[]',
+        uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
         PRIMARY KEY (plan_id, account_id, campaign_name)
       );
 

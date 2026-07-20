@@ -330,6 +330,12 @@ export class CookieAdsProvider implements AdsProvider {
         : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>(), uncertainCampaigns: new Set<string>() };
       for (const mutation of mutations) {
         const campaignKey = mutation.row.campaignName.trim();
+        if (mutation.batchCampaignId) reservations.campaignIds.set(campaignKey, mutation.batchCampaignId);
+        if (mutation.batchAdGroupNames?.length) {
+          const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+          for (const name of mutation.batchAdGroupNames) names.add(name.trim());
+          reservations.adGroupNames.set(campaignKey, names);
+        }
         if (mutation.templateMode === "none" && reservations.uncertainCampaigns.has(campaignKey)) {
           results.push({
             ...mutation,
