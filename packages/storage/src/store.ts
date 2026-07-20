@@ -3042,6 +3042,10 @@ export class AutomationStore {
         "SELECT * FROM launch_plan_items WHERE item_id = ? AND status = 'unknown'",
       ).get(itemId) as SqlRow | undefined;
       if (!current) throw new Error("只有创建结果未知的任务可以人工核验。");
+      const launchRow = JSON.parse(String(current.launch_row_json)) as {
+        campaignName: string;
+        adGroupName: string;
+      };
       this.db.prepare(
         `INSERT INTO launch_plan_item_verifications (
           id, item_id, actor_id, actor_name, decision, evidence, note,
@@ -3081,6 +3085,37 @@ export class AutomationStore {
            error_message = '人工核验确认未创建；可由用户显式单项重试。', updated_at = ?
            WHERE item_id = ? AND status = 'unknown'`,
         ).run(now, itemId);
+      }
+      if (verification.decision === "confirmed-succeeded") {
+        const existingScope = this.db.prepare(
+          `SELECT ad_group_names_json FROM launch_creation_locks
+           WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+        ).get(String(current.plan_id), String(current.account_id), launchRow.campaignName.trim()) as SqlRow | undefined;
+        const names = new Set(JSON.parse(String(existingScope?.ad_group_names_json ?? "[]")) as string[]);
+        names.add(launchRow.adGroupName);
+        this.db.prepare(
+          `INSERT INTO launch_creation_locks (
+             plan_id, account_id, campaign_name, owner_id, claimed_at,
+             campaign_id, ad_group_names_json, uncertain
+           ) VALUES (?, ?, ?, NULL, ?, ?, ?, 0)
+           ON CONFLICT(plan_id, account_id, campaign_name) DO UPDATE SET
+             owner_id = NULL, claimed_at = excluded.claimed_at,
+             campaign_id = excluded.campaign_id,
+             ad_group_names_json = excluded.ad_group_names_json, uncertain = 0`,
+        ).run(
+          String(current.plan_id),
+          String(current.account_id),
+          launchRow.campaignName.trim(),
+          now,
+          verification.campaignId,
+          JSON.stringify([...names]),
+        );
+      } else {
+        this.db.prepare(
+          `UPDATE launch_creation_locks
+           SET owner_id = NULL, uncertain = 0, claimed_at = ?
+           WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+        ).run(now, String(current.plan_id), String(current.account_id), launchRow.campaignName.trim());
       }
       this.writeAudit(actor.name, String(current.account_id), "launch-item.manually-verified", {
         itemId,
@@ -5760,6 +5795,36 @@ export class AutomationStore {
     this.ensureColumn("launch_plan_items", "source_snapshot_json", "TEXT");
     this.ensureColumn("launch_plan_items", "target_asset_mapping_json", "TEXT");
     this.ensureColumn("launch_plan_items", "idempotency_key", "TEXT");
+    this.applyMigration("launch-creation-locks-v2", () => {
+      const columns = this.db.prepare("PRAGMA table_info(launch_creation_locks)").all() as SqlRow[];
+      const owner = columns.find((column) => column.name === "owner_id");
+      const needsRebuild = Number(owner?.notnull ?? 0) === 1
+        || !columns.some((column) => column.name === "campaign_id")
+        || !columns.some((column) => column.name === "ad_group_names_json")
+        || !columns.some((column) => column.name === "uncertain");
+      if (!needsRebuild) return;
+      this.db.exec(`
+        ALTER TABLE launch_creation_locks RENAME TO launch_creation_locks_legacy;
+        CREATE TABLE launch_creation_locks (
+          plan_id TEXT NOT NULL REFERENCES multi_account_launch_plans(id) ON DELETE CASCADE,
+          account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          campaign_name TEXT NOT NULL,
+          owner_id TEXT,
+          claimed_at TEXT NOT NULL,
+          campaign_id TEXT,
+          ad_group_names_json TEXT NOT NULL DEFAULT '[]',
+          uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
+          PRIMARY KEY (plan_id, account_id, campaign_name)
+        );
+        INSERT INTO launch_creation_locks (
+          plan_id, account_id, campaign_name, owner_id, claimed_at,
+          campaign_id, ad_group_names_json, uncertain
+        )
+        SELECT plan_id, account_id, campaign_name, NULL, claimed_at, NULL, '[]', 1
+        FROM launch_creation_locks_legacy;
+        DROP TABLE launch_creation_locks_legacy;
+      `);
+    });
     this.db.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS launch_plans_copy_preview ON multi_account_launch_plans (copy_preview_id) WHERE copy_preview_id IS NOT NULL",
     );

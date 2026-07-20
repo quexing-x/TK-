@@ -429,13 +429,21 @@ export class LaunchService {
         || providerConfirmed
         || (providerInvoked && !(cause instanceof RetryableCreationError));
       if (unknown && creationScopeLocked) {
-        this.store.markLaunchCreationScopeUncertain(
-          claimed.planId,
-          claimed.accountId,
-          campaignName,
-          creationScopeOwner,
-        );
+        // Never release an unknown provider result, even if persisting the
+        // explicit uncertain marker fails. The retained owner lease expires
+        // into an uncertain scope on the next claim, which remains fail-closed.
         creationScopeLocked = false;
+        try {
+          this.store.markLaunchCreationScopeUncertain(
+            claimed.planId,
+            claimed.accountId,
+            campaignName,
+            creationScopeOwner,
+          );
+        } catch {
+          // The item still transitions to unknown below; the scope must not be
+          // reopened by the finally block.
+        }
       }
       if (unknown) {
         this.tasks.unknown(

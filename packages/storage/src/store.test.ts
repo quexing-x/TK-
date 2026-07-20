@@ -382,6 +382,57 @@ describe("AutomationStore", () => {
     }
   });
 
+  it("migrates legacy creation locks fail-closed and makes owner nullable", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-creation-lock-migration-"));
+    const databasePath = join(directory, "shared.db");
+    const original = new AutomationStore(databasePath);
+    original.seed();
+    const plan = original.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    });
+    original.close();
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      DELETE FROM schema_migrations WHERE migration_key = 'launch-creation-locks-v2';
+      DROP TABLE launch_creation_locks;
+      CREATE TABLE launch_creation_locks (
+        plan_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        campaign_name TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        PRIMARY KEY (plan_id, account_id, campaign_name)
+      );
+    `);
+    legacy.prepare(
+      "INSERT INTO launch_creation_locks VALUES (?, ?, ?, ?, ?)",
+    ).run(plan.id, "demo-account", "campaign-2", "legacy-owner", new Date().toISOString());
+    legacy.close();
+
+    const migrated = new AutomationStore(databasePath);
+    const inspection = new DatabaseSync(databasePath);
+    const columns = inspection.prepare("PRAGMA table_info(launch_creation_locks)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    expect(columns.find((column) => column.name === "owner_id")?.notnull).toBe(0);
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "campaign_id", "ad_group_names_json", "uncertain",
+    ]));
+    expect(migrated.claimLaunchCreationScope(
+      plan.id, "demo-account", "campaign-2", "new-owner",
+    )).toBeNull();
+    inspection.close();
+    migrated.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   it("stores a non-executing multi-account launch plan", () => {
     const target = store.createAccount({
       displayName: "目标账户",
@@ -1285,8 +1336,12 @@ describe("AutomationStore", () => {
     const [confirmed, notCreated] = store.listLaunchPlanItems(plan.id);
     store.claimLaunchPlanItem(confirmed!.itemId, "executor-a", "pending");
     store.completeLaunchPlanItemUnknown(confirmed!.itemId, "executor-a", "response lost");
+    store.claimLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-a");
+    store.markLaunchCreationScopeUncertain(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-a");
     store.claimLaunchPlanItem(notCreated!.itemId, "executor-a", "pending");
     store.completeLaunchPlanItemUnknown(notCreated!.itemId, "executor-a", "response lost");
+    store.claimLaunchCreationScope(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-b");
+    store.markLaunchCreationScopeUncertain(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-b");
 
     expect(() => store.verifyUnknownLaunchPlanItem(confirmed!.itemId, {
       decision: "confirmed-succeeded",
@@ -1321,6 +1376,14 @@ describe("AutomationStore", () => {
       expect.objectContaining({ itemId: notCreated!.itemId, status: "failed", errorMessage: expect.stringContaining("人工核验确认未创建") }),
     ]));
     expect(store.listLaunchPlanItemVerifications(confirmed!.itemId)).toHaveLength(1);
+    expect(store.claimLaunchCreationScope(
+      plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-c",
+    )).toEqual({ campaignId: "campaign-1", adGroupNames: [confirmed!.launchRow.adGroupName] });
+    store.releaseLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-c");
+    expect(store.claimLaunchCreationScope(
+      plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-d",
+    )).toEqual({ campaignId: null, adGroupNames: [] });
+    store.releaseLaunchCreationScope(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-d");
     expect(store.claimLaunchPlanItem(notCreated!.itemId, "executor-b", "failed")).toMatchObject({ attemptCount: 2 });
   });
 
