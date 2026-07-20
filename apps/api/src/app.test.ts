@@ -282,26 +282,32 @@ describe("local API", () => {
     await expect(vault.read(secondReference)).resolves.not.toBeNull();
   });
 
-  it("blocks account deletion while launch history still references it", async () => {
+  it("deletes account launch history by default", async () => {
+    const other = store.createAccount({
+      displayName: "保留账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
       sourceAdId: null,
-      targetAccountIds: ["demo-account"],
+      targetAccountIds: ["demo-account", other.id],
       launchPresetId: "default-launch-preset",
       launchRows: [apiLaunchRow(2)],
     });
 
     const response = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json().message).toContain("投放计划或创建记录");
-    expect(store.getAccount("demo-account")).not.toBeNull();
-    expect(store.getMultiAccountLaunchPlan(plan.id)).not.toBeNull();
-    expect(store.listLaunchPlanItems(plan.id)).toHaveLength(1);
+    expect(response.statusCode).toBe(204);
+    expect(store.getAccount("demo-account")).toBeNull();
+    expect(store.getMultiAccountLaunchPlan(plan.id)).toBeNull();
+    expect(store.listLaunchPlanItems(plan.id)).toHaveLength(0);
+    expect(store.getAccount(other.id)).toMatchObject({ displayName: "保留账户" });
   });
 
-  it("blocks account deletion while a status write task is active", async () => {
+  it("deletes active account status tasks with the account", async () => {
     const task = store.createStatusWriteTask({
       accountId: "demo-account",
       providerKind: "cookie",
@@ -314,10 +320,9 @@ describe("local API", () => {
 
     const response = await app.inject({ method: "DELETE", url: "/api/accounts/demo-account" });
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json().message).toContain("启停任务");
-    expect(store.getAccount("demo-account")).not.toBeNull();
-    expect(store.getAdOperation(task.id)).toMatchObject({ status: "pending" });
+    expect(response.statusCode).toBe(204);
+    expect(store.getAccount("demo-account")).toBeNull();
+    expect(() => store.getAdOperation(task.id)).toThrow("广告操作记录不存在");
   });
 
   it("stores provider settings and an encrypted credential reference", async () => {
@@ -696,6 +701,18 @@ describe("local API", () => {
       method: "GET",
       url: "/api/accounts/demo-account/entities",
     });
+    const manualTakeovers = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/manual-takeovers",
+    });
+    const restoreAll = await app.inject({
+      method: "DELETE",
+      url: "/api/accounts/demo-account/manual-takeovers",
+    });
+    const restoredEntities = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/entities",
+    });
     const latestSync = await app.inject({
       method: "GET",
       url: "/api/accounts/demo-account/automation/latest-sync",
@@ -705,6 +722,14 @@ describe("local API", () => {
     expect(entities.json()[0]).toMatchObject({
       externalId: "adgroup-1",
       ignored: true,
+    });
+    expect(manualTakeovers.json()).toEqual([
+      expect.objectContaining({ externalId: "adgroup-1", reason: "人工排除" }),
+    ]);
+    expect(restoreAll.json()).toEqual({ restoredCount: 1 });
+    expect(restoredEntities.json()[0]).toMatchObject({
+      externalId: "adgroup-1",
+      ignored: false,
     });
     expect(latestSync.json()).toMatchObject({
       counts: { campaign: 0, "ad-group": 1, ad: 0 },
@@ -800,7 +825,7 @@ describe("local API", () => {
     });
     expect(initial.statusCode).toBe(200);
     expect(initial.json()).toMatchObject({
-      policy: { enabled: false, policyVersion: "disable-only-v1", dailyActionLimit: 5 },
+      policy: { enabled: false, policyVersion: "disable-only-v1", dailyActionLimit: 0 },
       todayUsage: 0,
       circuit: null,
     });
@@ -812,7 +837,7 @@ describe("local API", () => {
       payload: { enabled: true, dailyActionLimit: 2 },
     });
     expect(updated.statusCode).toBe(200);
-    expect(updated.json().policy).toMatchObject({ enabled: true, dailyActionLimit: 2 });
+    expect(updated.json().policy).toMatchObject({ enabled: true, dailyActionLimit: 0 });
 
     await app.inject({
       method: "PUT",

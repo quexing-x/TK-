@@ -1627,11 +1627,11 @@ describe("AutomationStore", () => {
     }
   });
 
-  it("keeps low-risk automation off by default and persists an explicit daily limit", () => {
+  it("keeps low-risk automation off by default with no daily cap", () => {
     expect(store.getLowRiskAutomationPolicy("demo-account")).toMatchObject({
       enabled: false,
       policyVersion: "disable-only-v1",
-      dailyActionLimit: 5,
+      dailyActionLimit: 0,
     });
     expect(() => store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
@@ -1641,7 +1641,7 @@ describe("AutomationStore", () => {
     expect(store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
       dailyActionLimit: 2,
-    })).toMatchObject({ enabled: true, dailyActionLimit: 2 });
+    })).toMatchObject({ enabled: true, dailyActionLimit: 0 });
     store.setAccountExecutionMode("demo-account", "manual-approval", "circuit opened");
     expect(store.getLowRiskAutomationPolicy("demo-account").enabled).toBe(false);
   });

@@ -8,6 +8,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  RefreshCcw,
 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
@@ -17,6 +18,7 @@ import type {
   ProviderKind,
 } from "@tk-auto/core";
 import { api, type CookieConnectionReadiness } from "./api";
+import { useAuth } from "./AuthGate";
 import {
   canSubmitCookieImport,
   describeCookieState,
@@ -62,6 +64,8 @@ export function ConnectionPage({
   onConnectionReady?: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
+  const auth = useAuth();
+  const canManageAccounts = auth.status.permissions.includes("accounts:manage");
   const [providerKind, setProviderKind] = useState<ProviderKind>("cookie");
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
   const [readiness, setReadiness] =
@@ -219,6 +223,28 @@ export function ConnectionPage({
     }
   };
 
+  const syncReadOnly = async () => {
+    if (connection?.status !== "ready") return;
+    try {
+      setBusy("sync");
+      const result = await api.syncReadOnly(account.id, providerKind);
+      const qualityMessage = result.quality.status === "healthy"
+        ? "数据完整。"
+        : `数据质量：${result.quality.status}${result.warnings.length ? `；${result.warnings.join("；")}` : "。"}`;
+      setImportFeedback({
+        ok: result.quality.status === "healthy",
+        message: `已完成只读同步：系列 ${result.counts.campaign}、广告组 ${result.counts["ad-group"]}、广告 ${result.counts.ad}。${qualityMessage}`,
+      });
+      await load();
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      setImportFeedback({ message, ok: false });
+      onError(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <section className="page-stack">
       <div className="provider-tabs">
@@ -349,16 +375,19 @@ export function ConnectionPage({
                 <p>{cookieState.message}</p>
               </div>
             </div>
-            {connection?.hasCredential && (
-              <button
-                className="danger-button"
-                disabled={busy !== null}
-                onClick={() => void deleteCredential()}
-                type="button"
-              >
-                <Trash2 size={16} /> 删除本机凭据
-              </button>
-            )}
+            <div className="form-actions split-actions">
+              {connection?.status === "ready" && <button className="secondary-button" disabled={busy !== null || !canManageAccounts} onClick={() => void syncReadOnly()} title={canManageAccounts ? undefined : "需要 accounts:manage 权限"} type="button"><RefreshCcw size={16} /> {busy === "sync" ? "同步中…" : "同步广告数据（只读）"}</button>}
+              {connection?.hasCredential && (
+                <button
+                  className="danger-button"
+                  disabled={busy !== null}
+                  onClick={() => void deleteCredential()}
+                  type="button"
+                >
+                  <Trash2 size={16} /> 删除本机凭据
+                </button>
+              )}
+            </div>
           </div>
         </>
       ) : (
@@ -445,7 +474,9 @@ export function ConnectionPage({
                 <p>{connection?.lastMessage ?? "尚未保存 Marketing API 接入参数。"}</p>
               </div>
             </div>
+            {connection?.status === "ready" && <button className="secondary-button" disabled={busy !== null || !canManageAccounts} onClick={() => void syncReadOnly()} title={canManageAccounts ? undefined : "需要 accounts:manage 权限"} type="button"><RefreshCcw size={16} /> {busy === "sync" ? "同步中…" : "同步广告数据（只读）"}</button>}
           </div>
+          {importFeedback && <div className={`import-feedback ${importFeedback.ok ? "" : "error"}`}>{importFeedback.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}{importFeedback.message}</div>}
         </>
       )}
     </section>

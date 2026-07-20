@@ -9,7 +9,7 @@ import {
 } from "react";
 import { Activity, KeyRound, LogIn, ShieldCheck } from "lucide-react";
 import type { AuthStatus } from "@tk-auto/core";
-import { api } from "./api";
+import { api, onUnauthorized } from "./api";
 
 interface AuthContextValue {
   status: AuthStatus;
@@ -52,6 +52,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  useEffect(() => onUnauthorized(() => {
+    setStatus((current) => current
+      ? { ...current, authenticated: false, user: null, permissions: [], csrfToken: null }
+      : current);
+  }), []);
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
@@ -75,11 +81,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
       status,
       refresh,
       logout: async () => {
-        await api.logout();
-        setStatus({ ...status, authenticated: false, user: null, permissions: [], csrfToken: null });
+        await api.logout().catch(() => undefined);
+        setStatus((current) => current
+          ? { ...current, authenticated: false, user: null, permissions: [], csrfToken: null }
+          : current);
       },
       invalidate: () => {
-        setStatus({ ...status, authenticated: false, user: null, permissions: [], csrfToken: null });
+        setStatus((current) => current
+          ? { ...current, authenticated: false, user: null, permissions: [], csrfToken: null }
+          : current);
       },
     };
   }, [status]);

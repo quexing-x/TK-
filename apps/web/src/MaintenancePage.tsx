@@ -6,8 +6,11 @@ import type {
   UpdateRuntimeStatus,
 } from "@tk-auto/core";
 import { api } from "./api";
+import { useAuth } from "./AuthGate";
 
 export function MaintenancePage({ onError }: { onError: (message: string) => void }) {
+  const auth = useAuth();
+  const canControlSystem = auth.status.permissions.includes("system:control");
   const [status, setStatus] = useState<MaintenanceStatus | null>(null);
   const [backups, setBackups] = useState<DatabaseBackupRecord[]>([]);
   const [audit, setAudit] = useState<AuditLogRecord[]>([]);
@@ -17,6 +20,7 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
   const [notice, setNotice] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
+    if (!canControlSystem) return;
     try {
       const filters = {
         ...(actionFilter.trim() ? { action: actionFilter.trim() } : {}),
@@ -34,7 +38,7 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
     } catch (cause) {
       onError(errorMessage(cause));
     }
-  }, [actionFilter, correlationFilter, onError]);
+  }, [actionFilter, canControlSystem, correlationFilter, onError]);
 
   useEffect(() => { void reload(); }, [reload]);
 
@@ -58,6 +62,10 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
       setStatus((current) => current ? { ...current, update: next } : current);
     });
   };
+
+  if (!canControlSystem) {
+    return <div className="empty-state">当前角色无运维中心访问权限。</div>;
+  }
 
   return <div className="page-stack maintenance-page">
     <section className="panel">

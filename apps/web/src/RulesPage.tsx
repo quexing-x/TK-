@@ -1,13 +1,16 @@
-import { Clock3, Gauge, Layers3, RefreshCcw, Save } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { ChevronDown, ChevronUp, Clock3, Gauge, RefreshCcw, Save } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   automationRuleDefinitions,
+  type AutomationRuleDefinition,
   type GlobalAutomationSettings,
   type RuleConfiguration,
   type RuleConfigurationInput,
   type SyncEntityType,
 } from "@tk-auto/core";
 import { api } from "./api";
+import { useAuth } from "./AuthGate";
+import { adjustRuleValue, formatRuleValue, getRuleSliderMaximum } from "./rule-controls";
 
 export function RulesPage({
   settings,
@@ -18,17 +21,23 @@ export function RulesPage({
   onSettingsSaved: () => Promise<void>;
   onError: (message: string | null) => void;
 }) {
+  const auth = useAuth();
+  const canManageRules = auth.status.permissions.includes("rules:manage");
   const [configuration, setConfiguration] = useState<RuleConfiguration | null>(null);
+  const [persistedRules, setPersistedRules] = useState<RuleConfiguration["rules"]>([]);
   const [globalSettings, setGlobalSettings] = useState({
     pollingIntervalMinutes: settings.pollingIntervalMinutes,
     maxActionsPerRun: settings.maxActionsPerRun,
   });
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingRules, setSavingRules] = useState(false);
+  const saveInFlight = useRef(false);
 
   const load = useCallback(async () => {
     try {
-      setConfiguration(await api.getRuleConfiguration());
+      const loaded = await api.getRuleConfiguration();
+      setConfiguration(loaded);
+      setPersistedRules(loaded.rules);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -52,7 +61,7 @@ export function RulesPage({
   );
 
   const updateLayer = (entityType: SyncEntityType, enabled: boolean) => {
-    if (!configuration) return;
+    if (!configuration || !canManageRules) return;
     const key = entityType === "campaign" ? "campaign" : entityType === "ad-group" ? "adGroup" : "ad";
     setConfiguration({
       ...configuration,
@@ -61,7 +70,7 @@ export function RulesPage({
   };
 
   const updateRuleEnabled = (code: string, enabled: boolean) => {
-    if (!configuration) return;
+    if (!configuration || !canManageRules) return;
     setConfiguration({
       ...configuration,
       rules: configuration.rules.map((rule) =>
@@ -71,7 +80,7 @@ export function RulesPage({
   };
 
   const updateRuleValue = (code: string, key: string, value: number) => {
-    if (!configuration) return;
+    if (!configuration || !canManageRules) return;
     setConfiguration({
       ...configuration,
       rules: configuration.rules.map((rule) =>
@@ -84,21 +93,30 @@ export function RulesPage({
 
   const saveSettings = async (event: FormEvent) => {
     event.preventDefault();
+    if (!canManageRules || !configuration || persistedRules.length === 0 || saveInFlight.current) return;
     try {
+      saveInFlight.current = true;
       setSavingSettings(true);
       await api.updateGlobalAutomationSettings(globalSettings);
+      const saved = await api.updateRuleConfiguration({
+        layers: configuration.layers,
+        rules: persistedRules,
+      });
+      setConfiguration({ ...configuration, updatedAt: saved.updatedAt });
       await onSettingsSaved();
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
     } finally {
+      saveInFlight.current = false;
       setSavingSettings(false);
     }
   };
 
   const saveRules = async () => {
-    if (!configuration) return;
+    if (!configuration || !canManageRules || saveInFlight.current) return;
     try {
+      saveInFlight.current = true;
       setSavingRules(true);
       const ruleInput: RuleConfigurationInput = {
         layers: configuration.layers,
@@ -106,10 +124,12 @@ export function RulesPage({
       };
       const saved = await api.updateRuleConfiguration(ruleInput);
       setConfiguration(saved);
+      setPersistedRules(saved.rules);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
     } finally {
+      saveInFlight.current = false;
       setSavingRules(false);
     }
   };
@@ -126,46 +146,44 @@ export function RulesPage({
   return (
     <section className="page-stack">
       <div className="alert warning-alert"><Gauge size={18} /><span>币种提醒：九条规则当前为全账户共用阈值。不同币种账户会以各自账户币种直接比较，金额阈值可能不具可比性；请先只对同币种账户开启自动化。</span></div>
-      <form className="panel form-panel" onSubmit={(event) => void saveSettings(event)}>
+      {!canManageRules && <div className="alert warning-alert"><Gauge size={18} /><span>当前角色仅可查看规则配置；保存和启停需要 rules:manage 权限。</span></div>}
+      <form className="panel rule-settings-panel" onSubmit={(event) => void saveSettings(event)}>
         <div className="panel-heading">
           <div>
             <span className="panel-icon"><RefreshCcw size={18} /></span>
             <div>
               <h2>全局运行设置</h2>
-              <p>以下设置和九条规则对所有已接入账户统一生效。</p>
+              <p>检测频率、单轮处理量和应用层级直接在这里调整。</p>
             </div>
           </div>
-          <button className="primary-button" disabled={savingSettings} type="submit">
-            <Save size={17} /> {savingSettings ? "保存中…" : "保存运行设置"}
+          <button className="primary-button" disabled={savingSettings || savingRules || !canManageRules} type="submit">
+            <Save size={17} /> {savingSettings ? "保存中…" : "保存全局与层级"}
           </button>
         </div>
-        <div className="rule-runtime-grid">
-          <label className="field">
-            <span>轮询间隔（分钟）</span>
-            <input
-              min="1"
-              max="1440"
-              type="number"
+        <div className="rule-settings-body">
+          <div className="rule-settings-sentence">
+            每
+            <InlineStepper
+              disabled={!canManageRules}
+              label="轮询间隔"
+              maximum={1440}
+              minimum={1}
+              onChange={(pollingIntervalMinutes) => setGlobalSettings({ ...globalSettings, pollingIntervalMinutes })}
+              step={1}
               value={globalSettings.pollingIntervalMinutes}
-              onChange={(event) => setGlobalSettings({
-                ...globalSettings,
-                pollingIntervalMinutes: Number(event.target.value),
-              })}
             />
-          </label>
-          <label className="field">
-            <span>单轮最多启停</span>
-            <input
-              min="1"
-              max="100"
-              type="number"
+            分钟检测一次，单轮最多处理
+            <InlineStepper
+              disabled={!canManageRules}
+              label="单轮最多处理对象"
+              maximum={100}
+              minimum={1}
+              onChange={(maxActionsPerRun) => setGlobalSettings({ ...globalSettings, maxActionsPerRun })}
+              step={5}
               value={globalSettings.maxActionsPerRun}
-              onChange={(event) => setGlobalSettings({
-                ...globalSettings,
-                maxActionsPerRun: Number(event.target.value),
-              })}
             />
-          </label>
+            个对象。
+          </div>
           <div className="rule-window-lock">
             <Clock3 size={18} />
             <div>
@@ -173,40 +191,13 @@ export function RulesPage({
               <span>固定保护范围，不提供修改，避免历史计划过多造成程序不稳定。</span>
             </div>
           </div>
-        </div>
-      </form>
-
-      <section className="panel">
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><Layers3 size={18} /></span>
-            <div>
-              <h2>规则应用层级</h2>
-              <p>三个层级共用同一套规则；推广系列默认不应用。</p>
-            </div>
+          <div className="rule-layer-grid">
+            <LayerToggle label="推广系列" note="默认关闭" checked={configuration.layers.campaign} disabled={!canManageRules} onChange={(checked) => updateLayer("campaign", checked)} />
+            <LayerToggle label="广告组" note="使用九条规则" checked={configuration.layers.adGroup} disabled={!canManageRules} onChange={(checked) => updateLayer("ad-group", checked)} />
+            <LayerToggle label="广告" note="使用九条规则" checked={configuration.layers.ad} disabled={!canManageRules} onChange={(checked) => updateLayer("ad", checked)} />
           </div>
         </div>
-        <div className="rule-layer-grid">
-          <LayerToggle
-            label="推广系列"
-            note="默认关闭"
-            checked={configuration.layers.campaign}
-            onChange={(checked) => updateLayer("campaign", checked)}
-          />
-          <LayerToggle
-            label="广告组"
-            note="使用九条规则"
-            checked={configuration.layers.adGroup}
-            onChange={(checked) => updateLayer("ad-group", checked)}
-          />
-          <LayerToggle
-            label="广告"
-            note="使用九条规则"
-            checked={configuration.layers.ad}
-            onChange={(checked) => updateLayer("ad", checked)}
-          />
-        </div>
-      </section>
+      </form>
 
       <section className="panel rule-panel">
         <div className="panel-heading">
@@ -214,14 +205,14 @@ export function RulesPage({
             <span className="panel-icon"><Gauge size={18} /></span>
             <div>
               <h2>九条固定规则</h2>
-              <p>规则结构、优先级和动作已锁定；红色数值可以修改。开启规则命中时，也会重新开启手动关闭的对象。</p>
+              <p>拖动滑块设定阈值，次数用加减按钮调整；九条规则的动作和保存逻辑保持不变。</p>
             </div>
           </div>
           <div className="row-actions">
             <span className="status active">已启用 {enabledRules}/9</span>
             <button
               className="primary-button"
-              disabled={savingRules}
+              disabled={savingRules || savingSettings || !canManageRules}
               onClick={() => void saveRules()}
               type="button"
             >
@@ -245,33 +236,17 @@ export function RulesPage({
                   </div>
                   <Toggle
                     checked={rule.enabled}
+                    disabled={!canManageRules}
                     label={`${definition.label}${rule.enabled ? "已启用" : "已停用"}`}
                     onChange={(checked) => updateRuleEnabled(definition.code, checked)}
                   />
                 </header>
-                <p>{definition.description}</p>
-                <div className="rule-values">
-                  {definition.parameters.map((parameter) => (
-                    <label key={parameter.key}>
-                      <span>{parameter.label}</span>
-                      <div>
-                        <input
-                          className="editable-rule-value"
-                          min="0"
-                          step={parameter.step}
-                          type="number"
-                          value={rule.values[parameter.key] ?? 0}
-                          onChange={(event) => updateRuleValue(
-                            definition.code,
-                            parameter.key,
-                            Number(event.target.value),
-                          )}
-                        />
-                        <small>{parameter.unit}</small>
-                      </div>
-                    </label>
-                  ))}
-                </div>
+                <RuleControls
+                  definition={definition}
+                  disabled={!canManageRules}
+                  onChange={(key, value) => updateRuleValue(definition.code, key, value)}
+                  values={rule.values}
+                />
               </article>
             );
           })}
@@ -281,15 +256,163 @@ export function RulesPage({
   );
 }
 
+function RuleControls({
+  definition,
+  values,
+  disabled,
+  onChange,
+}: {
+  definition: AutomationRuleDefinition;
+  values: Record<string, number>;
+  disabled: boolean;
+  onChange: (key: string, value: number) => void;
+}) {
+  const countParameters = definition.parameters.filter((parameter) => parameter.step >= 1);
+  const thresholdParameters = definition.parameters.filter((parameter) => parameter.step < 1);
+
+  return (
+    <div className="rule-controls">
+      <div className="rule-sentence">
+        <span>{definition.description}</span>
+        {countParameters.map((parameter) => (
+          <span className="rule-inline-value" key={parameter.key}>
+            <span>{parameter.label}</span>
+            <InlineStepper
+              disabled={disabled}
+              label={parameter.label}
+              minimum={0}
+              onChange={(value) => onChange(parameter.key, value)}
+              step={parameter.step}
+              value={values[parameter.key] ?? 0}
+            />
+            <small>{parameter.unit}</small>
+          </span>
+        ))}
+        <span className={definition.action === "enable" ? "rule-action-badge enable" : "rule-action-badge disable"}>
+          {definition.action === "enable" ? "自动开启" : "自动关闭"}
+        </span>
+      </div>
+      <div className="rule-threshold-list">
+        {thresholdParameters.map((parameter) => (
+          <RuleThreshold
+            definitionLabel={definition.label}
+            disabled={disabled}
+            key={parameter.key}
+            parameter={parameter}
+            value={values[parameter.key] ?? 0}
+            onChange={(value) => onChange(parameter.key, value)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RuleThreshold({
+  definitionLabel,
+  parameter,
+  value,
+  disabled,
+  onChange,
+}: {
+  definitionLabel: string;
+  parameter: AutomationRuleDefinition["parameters"][number];
+  value: number;
+  disabled: boolean;
+  onChange: (value: number) => void;
+}) {
+  const interactionStep = 0.1;
+  const [maximum, setMaximum] = useState(() => getRuleSliderMaximum(parameter.key, value));
+
+  useEffect(() => {
+    setMaximum((current) => Math.max(current, getRuleSliderMaximum(parameter.key, value)));
+  }, [parameter.key, value]);
+
+  return (
+    <label className="rule-threshold">
+      <span className="rule-threshold-head">
+        <span>{parameter.label}</span>
+        <strong>{formatRuleValue(value, parameter.step)}</strong>
+      </span>
+      <span className="rule-range-control">
+        <button
+          aria-label={`下调${definitionLabel} ${parameter.label}`}
+          disabled={disabled || value <= 0}
+          onClick={() => onChange(adjustRuleValue(value, interactionStep, -1, 0, maximum))}
+          title="下调 0.1"
+          type="button"
+        ><ChevronDown size={14} /></button>
+        <input
+          aria-label={`${definitionLabel} ${parameter.label}`}
+          className="rule-range"
+          disabled={disabled}
+          max={maximum}
+          min="0"
+          onChange={(event) => onChange(Number(Number(event.target.value).toFixed(1)))}
+          step={interactionStep}
+          type="range"
+          value={value}
+        />
+        <button
+          aria-label={`上调${definitionLabel} ${parameter.label}`}
+          disabled={disabled || value >= maximum}
+          onClick={() => onChange(adjustRuleValue(value, interactionStep, 1, 0, maximum))}
+          title="上调 0.1"
+          type="button"
+        ><ChevronUp size={14} /></button>
+      </span>
+      <span className="rule-range-scale"><span>0</span><span>安全 ↔ 超限</span><span>{formatRuleValue(maximum, parameter.step)}</span></span>
+    </label>
+  );
+}
+
+function InlineStepper({
+  value,
+  step,
+  minimum,
+  maximum = Number.POSITIVE_INFINITY,
+  disabled,
+  label,
+  onChange,
+}: {
+  value: number;
+  step: number;
+  minimum: number;
+  maximum?: number;
+  disabled: boolean;
+  label: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <span className="rule-stepper" role="group" aria-label={label}>
+      <button
+        aria-label={`减少${label}`}
+        disabled={disabled || value <= minimum}
+        onClick={() => onChange(adjustRuleValue(value, step, -1, minimum, maximum))}
+        type="button"
+      >−</button>
+      <strong>{formatRuleValue(value, step)}</strong>
+      <button
+        aria-label={`增加${label}`}
+        disabled={disabled || value >= maximum}
+        onClick={() => onChange(adjustRuleValue(value, step, 1, minimum, maximum))}
+        type="button"
+      >+</button>
+    </span>
+  );
+}
+
 function LayerToggle({
   label,
   note,
   checked,
+  disabled = false,
   onChange,
 }: {
   label: string;
   note: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -298,17 +421,19 @@ function LayerToggle({
         <strong>{label}</strong>
         <span>{note}</span>
       </div>
-      <Toggle checked={checked} label={`${label}${checked ? "已启用" : "已停用"}`} onChange={onChange} />
+      <Toggle checked={checked} disabled={disabled} label={`${label}${checked ? "已启用" : "已停用"}`} onChange={onChange} />
     </div>
   );
 }
 
 function Toggle({
   checked,
+  disabled = false,
   label,
   onChange,
 }: {
   checked: boolean;
+  disabled?: boolean;
   label: string;
   onChange: (checked: boolean) => void;
 }) {
@@ -317,6 +442,7 @@ function Toggle({
       aria-label={label}
       aria-pressed={checked}
       className={checked ? "toggle checked" : "toggle"}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       type="button"
     >

@@ -67,7 +67,8 @@ export const LowRiskAutomationPolicySchema = z.object({
   accountId: z.string().min(1),
   enabled: z.boolean(),
   policyVersion: z.literal(LOW_RISK_AUTOMATION_POLICY_VERSION),
-  dailyActionLimit: z.number().int().min(1).max(100),
+  /** 0 is the backward-compatible sentinel for no daily cap. */
+  dailyActionLimit: z.number().int().min(0).max(100),
   updatedAt: z.string().datetime(),
 });
 export type LowRiskAutomationPolicy = z.infer<

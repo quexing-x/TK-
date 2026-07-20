@@ -8,6 +8,7 @@ import { canUseCopySource, canUseLaunchTarget } from "./provider-capability-view
 import { createLaunchProgressPoller } from "./launch-progress-polling";
 
 type LaunchMode = "single" | "multi" | "copy";
+type LaunchDispatchMode = "queue" | "immediate";
 type LaunchFeedback = {
   tone: "success" | "warning" | "danger";
   title: string;
@@ -58,6 +59,7 @@ const freshPreset = (): LaunchPresetInput => ({
 export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; preferredAccountId: string; onError: (message: string | null) => void }) {
   const auth = useAuth();
   const [launchMode, setLaunchMode] = useState<LaunchMode>("single");
+  const [dispatchMode, setDispatchMode] = useState<LaunchDispatchMode>("queue");
   const [sourceAccountId, setSourceAccountId] = useState(accounts[0]?.id ?? "");
   const [targetIds, setTargetIds] = useState<string[]>([]);
   const [sourceAds, setSourceAds] = useState<ManagedEntityRecord[]>([]);
@@ -97,6 +99,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     ? selectedPresetReadiness.ready
     : selectedPresetExecutionReady;
   const canManageLaunchPresets = auth.status.permissions.includes("launch:manage");
+  const canDispatchLaunch = auth.status.permissions.includes("ads:operate");
   const createTargets = useMemo(
     () => accounts.filter((account) =>
       isLaunchExecutionReady(
@@ -169,8 +172,10 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       && sheet
       && sheet.errors.length === 0,
   );
-  const canSave = Boolean(selectedAccountIds.length > 0 && notReadyAccountIds.length === 0 && copySourceReady && presetId && selectedPresetLaunchReady && sheet && sheet.errors.length === 0 && sheet.rows.length > 0 && (launchMode !== "copy" || (copyPreview?.safeToCreate && copyPreview.blockers.length === 0)));
+  const canSave = Boolean(canManageLaunchPresets && canDispatchLaunch && selectedAccountIds.length > 0 && notReadyAccountIds.length === 0 && copySourceReady && presetId && selectedPresetLaunchReady && sheet && sheet.errors.length === 0 && sheet.rows.length > 0 && (launchMode !== "copy" || (copyPreview?.safeToCreate && copyPreview.blockers.length === 0)));
   const publishBlockers = [
+    !canManageLaunchPresets ? "当前角色缺少创建计划所需的 launch:manage 权限。" : null,
+    !canDispatchLaunch ? "当前角色缺少执行创建所需的 ads:operate 权限。" : null,
     selectedAccountIds.length === 0 ? "请选择至少一个已接入的发布账户。" : null,
     notReadyAccountIds.length > 0 ? "所选账户连接异常，请先在用户管理重新完成接入。" : null,
     !presetId ? "请选择广告预设。" : null,
@@ -341,9 +346,14 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
         launchPresetId: presetId,
         launchRows: sheet.rows,
       });
-      await api.queueLaunchPlan(plan.id);
-      setActivePlanIds((current) => [...new Set([...current, plan.id])]);
-      setExecutionFeedback({ tone: "warning", title: "已加入后台创建队列", lines: ["页面将持续刷新逐项状态；关闭本页不会中断已领取的任务。"] });
+      if (dispatchMode === "immediate") {
+        const execution = await api.executeLaunchPlan(plan.id);
+        setExecutionFeedback(summarizeExecution(execution, accounts));
+      } else {
+        await api.queueLaunchPlan(plan.id);
+        setActivePlanIds((current) => [...new Set([...current, plan.id])]);
+        setExecutionFeedback({ tone: "warning", title: "已加入后台创建队列", lines: ["页面将持续刷新逐项状态；关闭本页不会中断已领取的任务。"] });
+      }
       setSheet(null); setFileName(""); setTargetIds([]); setCopyPreview(null);
       if (fileInput.current) fileInput.current.value = "";
       await load(); onError(null);
@@ -390,7 +400,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
 
     <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2><p>先选业务目标，系统只展示当前操作所需的信息。</p></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
 
-    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} type="button"><RefreshCcw size={14} /> 刷新接入状态</button></div><div className="launch-account-summary">
+    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
       {accounts.length === 0 ? <p className="launch-account-empty">先在“用户管理”添加广告账户并完成接入，随后可回到此处选择发布账户。</p> : <div className="launch-account-readiness-grid">{accountReadiness.map(({ account, checks, ready }) => <article className={ready ? "launch-account-readiness ready" : "launch-account-readiness"} key={account.id}><header><div><strong>{account.displayName}</strong><span>{account.providerKind === "cookie" ? "Cookie 接入" : "Marketing API"}</span></div><em className={ready ? "status active" : "status warning"}>{ready ? "可发布" : "待完善"}</em></header><div>{checks.map((check) => <span className={check.passed ? "passed" : "missing"} key={check.label}>{check.passed ? <CircleCheck size={14} /> : <CircleX size={14} />}{check.label}</span>)}</div></article>)}</div>}
     </div><div className="form-grid">
@@ -446,7 +456,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       {launchMode === "copy" && <div className="copy-preview-actions"><button className="secondary-button" disabled={busy || !canPreviewCopy} onClick={() => void generateCopyPreview()} type="button">生成复制差异预览</button><small>系统会核对源对象稳定 ID、目标账户素材证据和每一项差异；预览 15 分钟内有效。</small></div>}
       {copyPreview && <div className={copyPreview.safeToCreate ? "creation-template-note copy-preview-result" : "sheet-issues warning copy-preview-result"}><strong>{copyPreview.safeToCreate ? `差异预览已通过 · ${copyPreview.items.length} 项` : "差异预览存在阻断项"}</strong>{copyPreview.blockers.length > 0 && <ul>{copyPreview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}{copyPreview.warnings.length > 0 && <ul>{copyPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}{copyPreview.items.length > 0 && <div className="table-wrap"><table><thead><tr><th>目标账户</th><th>素材证据</th><th>差异</th></tr></thead><tbody>{copyPreview.items.map((item) => <tr key={`${item.accountId}-${item.itemIndex}`}><td>{accounts.find((account) => account.id === item.accountId)?.displayName ?? item.accountId}</td><td>{item.targetAssetMapping.targetVideoCode}<br /><small>广告 ID：{item.targetAssetMapping.evidenceAdId}</small></td><td>{item.differences.length === 0 ? "与源结构一致" : item.differences.map((difference) => `${copyDifferenceLabel(difference.field)}：${difference.sourceValue ?? "空"} → ${difference.targetValue ?? "空"}`).join("；")}</td></tr>)}</tbody></table></div>}</div>}
       {publishBlockers.length > 0 && <div className="sheet-issues warning publish-blockers" id="publish-blockers"><strong>暂不能发布</strong><ul>{publishBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}
-      <div className="form-actions"><button aria-describedby={publishBlockers.length > 0 ? "publish-blockers" : undefined} className="primary-button" disabled={busy || !canSave} title={publishBlockers[0]} onClick={() => void savePlan()} type="button">{launchMode === "single" ? "创建并发布" : launchMode === "copy" ? "确认差异并发布迁移" : "向所选账户发布"}{sheet?.rows.length ? `（${sheet.rows.length} 条 × ${selectedAccountIds.length} 个账户）` : ""}</button></div>
+      <div className="launch-dispatch-mode"><strong>执行方式</strong><label><input checked={dispatchMode === "queue"} name="launch-dispatch-mode" onChange={() => setDispatchMode("queue")} type="radio" /> 后台队列（默认）</label><label><input checked={dispatchMode === "immediate"} name="launch-dispatch-mode" onChange={() => setDispatchMode("immediate")} type="radio" /> 立即执行（等待本批结果）</label></div><div className="form-actions"><button aria-describedby={publishBlockers.length > 0 ? "publish-blockers" : undefined} className="primary-button" disabled={busy || !canSave} title={publishBlockers[0]} onClick={() => void savePlan()} type="button">{dispatchMode === "immediate" ? "立即创建" : launchMode === "single" ? "创建并发布" : launchMode === "copy" ? "确认差异并发布迁移" : "向所选账户发布"}{sheet?.rows.length ? `（${sheet.rows.length} 条 × ${selectedAccountIds.length} 个账户）` : ""}</button></div>
       {executionFeedback && <div className={executionFeedback.tone === "success" ? "creation-template-note" : `sheet-issues ${executionFeedback.tone}`}><strong>{executionFeedback.title}</strong><ul>{executionFeedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul></div>}
     </div>
 

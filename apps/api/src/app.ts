@@ -17,7 +17,6 @@ import {
   SyncEntityTypeSchema,
   IgnoreEntityInputSchema,
   ManualStatusInputSchema,
-  AppealQueueInputSchema,
   NotificationChannelKindSchema,
   NotificationChannelSettingsSchema,
   NotificationCredentialInputSchema,
@@ -598,6 +597,12 @@ export async function createApp(
     if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
     }
+    const hasDispatchableItems = dependencies.store
+      .listLaunchPlanItems(planId)
+      .some((item) => item.status === "pending");
+    if (hasDispatchableItems && !dependencies.store.getSystemRuntimeState().enabled) {
+      return reply.status(409).send({ message: "软件总开关已关闭，批量创建写入已暂停。请重新开启后再立即执行。" });
+    }
     const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
     if (!readiness.ready) {
       return reply.status(409).send({ message: `广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，不能执行。` });
@@ -758,6 +763,31 @@ export async function createApp(
       return { ok: true };
     },
   );
+
+  app.get("/api/accounts/:accountId/manual-takeovers", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    return dependencies.store.listIgnoredEntities(accountId, account.providerKind)
+      .filter((item) => item.entityType === "ad-group");
+  });
+
+  app.delete("/api/accounts/:accountId/manual-takeovers", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    const takeovers = dependencies.store.listIgnoredEntities(accountId, account.providerKind)
+      .filter((item) => item.entityType === "ad-group");
+    for (const takeover of takeovers) {
+      dependencies.store.removeEntityIgnored(
+        accountId,
+        account.providerKind,
+        takeover.entityType,
+        takeover.externalId,
+      );
+    }
+    return { restoredCount: takeovers.length };
+  });
 
   app.post(
     "/api/notifications/channels/:channelKind/test",
@@ -1417,15 +1447,9 @@ export async function createApp(
       const { accountId } = AccountParamsSchema.parse(request.params);
       const account = dependencies.store.getAccount(accountId);
       if (!account) return reply.status(404).send({ message: "账号不存在。" });
-      const body = AppealQueueInputSchema.parse(request.body);
-      return reply.status(201).send(
-        dependencies.store.queueAppeal(
-          accountId,
-          account.providerKind,
-          body.externalId,
-          body.reason,
-        ),
-      );
+      return reply.status(409).send({
+        message: "当前 Provider 未实现申诉执行，无法加入队列。请在 TikTok Ads Manager 中完成申诉。",
+      });
     },
   );
 
@@ -1669,6 +1693,7 @@ export function requiredPermission(
   ) {
     return "ads:operate";
   }
+  if (path.includes("/manual-takeovers")) return "ads:operate";
   if (path.startsWith("/api/launch-plans") || path.startsWith("/api/launch-presets")) return "launch:manage";
   if (path.startsWith("/api/accounts")) return "accounts:manage";
   return method === "DELETE" ? "system:control" : null;

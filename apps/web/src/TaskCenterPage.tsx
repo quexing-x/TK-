@@ -2,7 +2,9 @@ import { Activity, AlertTriangle, CheckCircle2, RefreshCcw, RotateCcw, ShieldChe
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AccountConfig,
+  LaunchManualVerificationRecord,
   StatusManualVerificationInput,
+  StatusManualVerificationRecord,
   WriteTaskKind,
   WriteTaskStatus,
   WriteTaskSummaryRecord,
@@ -35,6 +37,7 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
   const [tasks, setTasks] = useState<WriteTaskSummaryRecord[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [attempts, setAttempts] = useState<WriteTaskAttemptRecord[]>([]);
+  const [verifications, setVerifications] = useState<Array<LaunchManualVerificationRecord | StatusManualVerificationRecord>>([]);
   const [busy, setBusy] = useState(false);
   const [verification, setVerification] = useState<StatusManualVerificationInput>({
     decision: "confirmed-succeeded",
@@ -72,11 +75,24 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
   useEffect(() => {
     if (!selected) {
       setAttempts([]);
+      setVerifications([]);
       return;
     }
-    void api.getWriteTaskAttempts(selected.kind, selected.taskId)
-      .then(setAttempts)
-      .catch((cause) => onError(messageOf(cause)));
+    let active = true;
+    void Promise.all([
+      api.getWriteTaskAttempts(selected.kind, selected.taskId),
+      selected.kind === "launch" && selected.parentId
+        ? api.getLaunchPlanItemVerifications(selected.parentId, selected.taskId)
+        : selected.kind === "status"
+          ? api.getStatusWriteTaskVerifications(selected.taskId)
+          : Promise.resolve([]),
+    ])
+      .then(([nextAttempts, nextVerifications]) => {
+        if (!active) return;
+        setAttempts(nextAttempts);
+        setVerifications(nextVerifications);
+      })
+      .catch((cause) => { if (active) onError(messageOf(cause)); });
     setVerification((current) => ({
       ...current,
       decision: "confirmed-succeeded",
@@ -84,6 +100,7 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
       evidence: "",
       note: "",
     }));
+    return () => { active = false; };
   }, [onError, selected]);
 
   async function retry(task: WriteTaskSummaryRecord) {
@@ -169,6 +186,8 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
         <div className="form-actions"><button className="primary-button" disabled={busy || !canOperate || verification.evidence.trim().length < 10} onClick={() => void verifyStatusTask()} type="button">保存核验结论</button></div>
       </div>}
       {selected.requiresVerification && selected.kind === "launch" && <div className="alert warning-alert"><AlertTriangle size={18} /><span>创建结果待确认。请前往“创建广告”页面填写三个正式 ID 或确认未创建；核验前不会自动重试。</span><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#launch"; }} type="button">前往核验</button></div>}
+
+      <div className="table-wrap"><table><thead><tr><th>人工核验时间</th><th>结论</th><th>证据</th><th>备注</th><th>核验人</th></tr></thead><tbody>{verifications.length === 0 ? <tr><td colSpan={5}>暂无人工核验记录。</td></tr> : verifications.map((item) => <tr key={item.id}><td>{new Date(item.createdAt).toLocaleString()}</td><td>{item.decision}</td><td><small>{item.evidence}</small></td><td><small>{item.note || "—"}</small></td><td>{"actorName" in item ? item.actorName : item.actor.name}</td></tr>)}</tbody></table></div>
 
       <div className="table-wrap"><table><thead><tr><th>次数</th><th>状态</th><th>阶段</th><th>执行者</th><th>开始</th><th>完成</th><th>信息</th></tr></thead><tbody>{attempts.length === 0 ? <tr><td colSpan={7}>尚无执行尝试。</td></tr> : attempts.map((attempt) => <tr key={attempt.attemptId}><td>{attempt.attemptNumber}</td><td>{statusLabel(attempt.status)}</td><td>{phaseLabel(attempt.phase === "campaign_draft" || attempt.phase === "adgroup_draft" || attempt.phase === "creative_draft" || attempt.phase === "publishing" ? "dispatch" : attempt.phase)}</td><td>{attempt.actor.name}</td><td>{new Date(attempt.createdAt).toLocaleString()}</td><td>{attempt.completedAt ? new Date(attempt.completedAt).toLocaleString() : "—"}</td><td>{"message" in attempt ? attempt.message ?? "—" : attempt.errorMessage ?? "—"}</td></tr>)}</tbody></table></div>
     </div>}
