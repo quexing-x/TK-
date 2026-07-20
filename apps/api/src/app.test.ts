@@ -1423,12 +1423,18 @@ describe("local API", () => {
 
   it("resolves an unknown item only through an evidence-backed manual verification", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
-      mutations.map((mutation): CreationMutationResult => ({
-        ...mutation,
-        ok: false,
-        failureKind: "unknown",
-        message: "response lost after dispatch",
-      })),
+      mutations.map((mutation): CreationMutationResult => {
+        mutation.onProgress?.({
+          phase: "validation",
+          evidence: { resolvedAdGroupName: mutation.row.adGroupName },
+        });
+        return {
+          ...mutation,
+          ok: false,
+          failureKind: "unknown",
+          message: "response lost after dispatch",
+        };
+      }),
     );
     const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
     await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
