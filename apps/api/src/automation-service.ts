@@ -3,7 +3,7 @@ import {
   ProviderCredentialInputSchema,
   automationRuleDefinitions,
   evaluateRuleConfiguration,
-  filterEntitiesToRecentCampaigns,
+  filterEntitiesToRecentWindow,
   type AutomationCandidate,
   type AutomationRunRecord,
   type AutomationTrigger,
@@ -51,6 +51,7 @@ export interface PollNotificationDispatcher {
 
 export class AutomationService {
   private readonly runningAccounts = new Set<string>();
+  private readonly manualStatusQueues = new Map<string, Promise<void>>();
   private readonly statusTasks: WriteTaskKernel<AdOperationRecord, string>;
 
   constructor(
@@ -77,6 +78,9 @@ export class AutomationService {
     this.store.recoverInterruptedAutomationApprovals(
       new Date(Date.now() - writeLeaseTimeoutMs).toISOString(),
     );
+    for (const task of this.store.listPendingManualStatusWriteTasks()) {
+      this.queuePersistedManualStatusTask(task);
+    }
   }
 
   getLowRiskAutomationState(accountId: string) {
@@ -214,7 +218,7 @@ export class AutomationService {
           rulePredicate: buildRulePredicate(ruleConfiguration, candidate),
         },
       );
-      const recent = filterEntitiesToRecentCampaigns(
+      const recent = filterEntitiesToRecentWindow(
         output.entities,
         new Date(),
         ruleConfiguration.lookbackHours,
@@ -230,7 +234,7 @@ export class AutomationService {
           recent.excludedCount > 0
             ? [
                 ...output.result.warnings,
-                `已排除 ${recent.excludedCount} 个不属于最近 ${ruleConfiguration.lookbackHours} 小时推广系列的对象。`,
+                `已排除 ${recent.excludedCount} 个不属于最近 ${ruleConfiguration.lookbackHours} 小时广告组窗口的对象。`,
               ]
             : output.result.warnings,
       };
@@ -362,6 +366,10 @@ export class AutomationService {
               },
               "automation",
               { id: "automation-scheduler", name: "低风险自动化", kind: "system" },
+              undefined,
+              true,
+              undefined,
+              `命中「${candidate.reason.split("：", 1)[0]}」规则，自动关闭`,
             );
             if (result.ok) {
               successCount += 1;
@@ -463,10 +471,79 @@ export class AutomationService {
     }
     this.runningAccounts.add(accountId);
     try {
-      return (await this.changeStatus(accountId, input, "manual", actor)).result;
+      return (await this.changeStatus(
+        accountId,
+        input,
+        "manual",
+        actor,
+        undefined,
+        false,
+      )).result;
     } finally {
       this.runningAccounts.delete(accountId);
     }
+  }
+
+  /** Persists the user intent first, then performs cookie I/O in a serial backend queue. */
+  enqueueManualStatusChange(
+    accountId: string,
+    input: ManualStatusInput,
+    actor: WriteTaskActor = { id: "local-user", name: "local-user", kind: "user" },
+  ): AdOperationRecord {
+    if (!this.store.getSystemRuntimeState().enabled) {
+      throw new Error("System automation is paused.");
+    }
+    const account = this.store.getAccount(accountId);
+    if (!account) throw new Error("Account does not exist.");
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") {
+      throw new Error(connectionUnavailableMessage(
+        account.displayName,
+        account.providerKind,
+        connection?.status,
+      ));
+    }
+    this.assertWriteAllowed(accountId, false);
+    const entity = this.store.listManagedEntities(accountId, account.providerKind).find(
+      (item) => item.entityType === input.entityType && item.externalId === input.externalId,
+    );
+    if (!entity) throw new Error("Ad object is missing or has not been synced.");
+    const task = this.store.createStatusWriteTask({
+      accountId,
+      providerKind: account.providerKind,
+      entityType: input.entityType,
+      externalId: input.externalId,
+      entityName: entity.name,
+      action: input.action,
+      source: "manual",
+    }, actor);
+    this.queuePersistedManualStatusTask(task);
+    return task;
+  }
+
+  private queuePersistedManualStatusTask(task: AdOperationRecord): void {
+    const previous = this.manualStatusQueues.get(task.accountId) ?? Promise.resolve();
+    const queued = previous.catch(() => undefined).then(async () => {
+      try {
+        await this.waitForAccountIdle(task.accountId);
+        this.runningAccounts.add(task.accountId);
+        await this.changeStatus(task.accountId, {
+          entityType: task.entityType,
+          externalId: task.externalId,
+          action: task.action === "enable" ? "enable" : "disable",
+        }, "manual", task.actor, undefined, false, task);
+      } catch (cause) {
+        this.failQueuedStatusTask(task, task.actor, cause);
+      } finally {
+        this.runningAccounts.delete(task.accountId);
+      }
+    });
+    this.manualStatusQueues.set(task.accountId, queued);
+    void queued.finally(() => {
+      if (this.manualStatusQueues.get(task.accountId) === queued) {
+        this.manualStatusQueues.delete(task.accountId);
+      }
+    });
   }
 
   async retryStatusOperation(
@@ -499,7 +576,7 @@ export class AutomationService {
         ));
       }
       const context = await this.loadContext(accountId, account.providerKind, account.timezone);
-      this.assertWriteAllowed(accountId, true);
+      this.assertWriteAllowed(accountId, false);
       const executorId = randomUUID();
       const claimed = this.statusTasks.claim(task.id, executorId, "failed", actor);
       if (!claimed) throw new Error("状态写任务正在执行或状态已经变化。");
@@ -507,7 +584,7 @@ export class AutomationService {
         entityType: task.entityType,
         externalId: task.externalId,
         action: task.action === "enable" ? "enable" : "disable",
-      }, claimed, executorId, connection);
+      }, claimed, executorId, connection, false);
     } finally {
       this.runningAccounts.delete(accountId);
     }
@@ -719,7 +796,7 @@ export class AutomationService {
   ): Promise<void> {
     if (!this.store.getSystemRuntimeState().enabled) return;
     const account = this.store.getAccount(accountId);
-    if (!account?.enabled || account.executionMode !== "automatic") return;
+    if (!account?.enabled) return;
     if (this.runningAccounts.has(accountId)) return;
     const staleBefore = new Date(Date.now() - writeLeaseTimeoutMs).toISOString();
     this.store.recoverInterruptedStatusWriteTasks(staleBefore);
@@ -751,6 +828,7 @@ export class AutomationService {
                 task.operationId,
               );
             },
+            false,
           );
           result = changed.result.ok
             ? "succeeded"
@@ -785,6 +863,68 @@ export class AutomationService {
     }
   }
 
+  /**
+   * At 23:45 in the account timezone, preserve converting ad groups with the
+   * daily overnight pair and queue a single close for every other open group.
+   * Unknown and manually-taken-over groups never receive an automatic write.
+   */
+  enrollNightlyAdGroups(
+    accountId: string,
+    asOf = new Date().toISOString(),
+  ): { overnight: number; closing: number } {
+    if (!this.store.getSystemRuntimeState().enabled) return { overnight: 0, closing: 0 };
+    const account = this.store.getAccount(accountId);
+    if (!account?.enabled) return { overnight: 0, closing: 0 };
+    const now = new Date(asOf);
+    const localTime = timePartsInTimeZone(now, account.timezone);
+    if (localTime.hour !== 23 || localTime.minute < 45) {
+      return { overnight: 0, closing: 0 };
+    }
+
+    const minutesSinceWindowStart = (localTime.minute - 45) + localTime.second / 60;
+    const windowStartedAt = new Date(
+      now.getTime() - minutesSinceWindowStart * 60_000,
+    ).toISOString();
+    const nextMidnight = new Date(
+      now.getTime() + (60 - localTime.minute) * 60_000 - localTime.second * 1_000,
+    ).toISOString();
+    let overnight = 0;
+    let closing = 0;
+
+    for (const entity of this.store.listManagedEntities(accountId, account.providerKind)) {
+      if (
+        entity.entityType !== "ad-group" ||
+        entity.status !== "enabled" ||
+        entity.ignored
+      ) continue;
+
+      if ((entity.metrics.conversions ?? 0) > 0) {
+        if (this.store.hasScheduledOvernightForEntity(accountId, entity.externalId)) continue;
+        this.store.createOvernightSchedule(accountId, {
+          externalId: entity.externalId,
+          disableAt: asOf,
+          enableAt: nextMidnight,
+        });
+        overnight += 1;
+        continue;
+      }
+
+      if (this.store.hasScheduledActionSince(
+        accountId,
+        entity.externalId,
+        "disable",
+        windowStartedAt,
+      )) continue;
+      this.store.createOneTimeSchedule(accountId, {
+        externalId: entity.externalId,
+        action: "disable",
+        runAt: asOf,
+      });
+      closing += 1;
+    }
+    return { overnight, closing };
+  }
+
   private async changeStatus(
     accountId: string,
     input: ManualStatusInput,
@@ -792,6 +932,8 @@ export class AutomationService {
     actor: WriteTaskActor,
     onTaskCreated?: (task: AdOperationRecord) => void,
     requireAutomatic = true,
+    existingTask?: AdOperationRecord,
+    successMessage?: string,
   ): Promise<{ result: StatusMutationResult; task: AdOperationRecord }> {
     if (!this.store.getSystemRuntimeState().enabled) {
       throw new Error("软件总开关已关闭，广告启停操作已暂停。");
@@ -822,7 +964,7 @@ export class AutomationService {
           item.entityType === input.entityType &&
           item.externalId === input.externalId,
       );
-    const task = this.store.createStatusWriteTask({
+    const task = existingTask ?? this.store.createStatusWriteTask({
       accountId,
       providerKind: account.providerKind,
       entityType: input.entityType,
@@ -844,9 +986,30 @@ export class AutomationService {
         connection,
         requireAutomatic,
         source === "automation" && requireAutomatic,
+        successMessage,
       ),
       task,
     };
+  }
+
+  private async waitForAccountIdle(accountId: string): Promise<void> {
+    const deadline = Date.now() + 5 * 60_000;
+    while (this.runningAccounts.has(accountId)) {
+      if (Date.now() >= deadline) {
+        throw new AutomationBusyError("Account queue timed out.");
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  private failQueuedStatusTask(
+    task: AdOperationRecord,
+    actor: WriteTaskActor,
+    cause: unknown,
+  ): void {
+    const executorId = randomUUID();
+    const claimed = this.statusTasks.claim(task.id, executorId, "pending", actor);
+    if (claimed) this.statusTasks.fail(task.id, executorId, safeMessage(cause));
   }
 
   private async executeStatusTask(
@@ -857,6 +1020,7 @@ export class AutomationService {
     expectedCredentialGeneration: CredentialGeneration,
     requireAutomatic = true,
     requireLowRiskPolicy = false,
+    successMessage?: string,
   ): Promise<StatusMutationResult> {
     const account = this.store.getAccount(task.accountId);
     if (!account) throw new Error("账号不存在。");
@@ -891,7 +1055,6 @@ export class AutomationService {
         return result;
       }
       providerConfirmed = true;
-      this.statusTasks.succeed(task.id, executorId, result.message);
     } catch (cause) {
       const message = safeMessage(cause);
       const unknown = !(cause instanceof WriteBlockedBeforeDispatchError)
@@ -905,47 +1068,61 @@ export class AutomationService {
       }
       throw cause;
     }
-    if (result.ok) {
-      let syncWarning: string | null = null;
-      try {
-        const refreshed = await this.providers.syncReadOnly(
-          account.providerKind,
-          context,
-        );
-        this.store.saveReadOnlySync(
-          task.accountId,
-          account.providerKind,
-          refreshed.entities,
-          refreshed.result,
-        );
-        if (refreshed.result.quality.status !== "healthy") {
-          syncWarning = `状态写入后同步数据不完整：${refreshed.result.warnings.join("；")}`;
-          this.store.setAccountExecutionMode(
-            task.accountId,
-            "manual-approval",
-            `状态写入后同步数据不完整：${refreshed.result.warnings.join("；").slice(0, 500)}`,
-          );
-        }
-      } catch (cause) {
-        syncWarning = safeMessage(cause);
-        this.store.updateProviderStatus(
-          task.accountId,
-          account.providerKind,
-          "failed",
-          `状态写入后同步异常：${safeMessage(cause)}`,
-        );
+    let syncWarning: string | null = null;
+    try {
+      const refreshed = await this.providers.syncReadOnly(
+        account.providerKind,
+        context,
+      );
+      this.store.saveReadOnlySync(
+        task.accountId,
+        account.providerKind,
+        refreshed.entities,
+        refreshed.result,
+      );
+      const desiredStatus = input.action === "enable" ? "enabled" : "disabled";
+      const observedStatus = this.store.listManagedEntities(
+        task.accountId,
+        account.providerKind,
+      ).find(
+        (entity) => entity.entityType === input.entityType && entity.externalId === input.externalId,
+      )?.status;
+      if (refreshed.result.quality.status !== "healthy") {
+        syncWarning = `状态写入后同步数据不完整：${refreshed.result.warnings.join("；")}`;
+      } else if (observedStatus !== desiredStatus) {
+        syncWarning = `状态写入后回读未确认目标状态：期望 ${desiredStatus}，实际 ${observedStatus ?? "未返回"}`;
+      }
+      if (syncWarning) {
         this.store.setAccountExecutionMode(
           task.accountId,
           "manual-approval",
-          "状态写入后 Provider 数据同步失败，已自动熔断写入。",
+          syncWarning.slice(0, 500),
         );
+        this.statusTasks.unknown(task.id, executorId, syncWarning);
+        return { ...result, ok: false, failureKind: "unknown", message: syncWarning };
       }
-      try {
-        this.store.completeStatusWriteTaskSync(task.id, syncWarning);
-      } catch {
-        // Provider success is already durable; sync metadata failure must not
-        // turn a confirmed status write into an unknown/retryable operation.
-      }
+    } catch (cause) {
+      syncWarning = safeMessage(cause);
+      this.store.updateProviderStatus(
+        task.accountId,
+        account.providerKind,
+        "failed",
+        `状态写入后同步异常：${syncWarning}`,
+      );
+      this.store.setAccountExecutionMode(
+        task.accountId,
+        "manual-approval",
+        "状态写入后 Provider 数据同步失败，已自动熔断写入。",
+      );
+      this.statusTasks.unknown(task.id, executorId, syncWarning);
+      return { ...result, ok: false, failureKind: "unknown", message: syncWarning };
+    }
+    this.statusTasks.succeed(task.id, executorId, successMessage ?? result.message);
+    try {
+      this.store.completeStatusWriteTaskSync(task.id, null);
+    } catch {
+      // The state change and readback are already durable. Keep the successful
+      // task rather than re-dispatching a confirmed provider write.
     }
     return result;
   }
@@ -1121,10 +1298,13 @@ export class AutomationService {
     if (latestSync.quality.status === "invalid") {
       throw new WriteBlockedBeforeDispatchError("同步契约已失效，所有真实 Provider 写入已阻止。");
     }
-    if (requireAutomatic && latestSync.quality.status !== "healthy") {
-      throw new WriteBlockedBeforeDispatchError(`同步数据为 ${latestSync.quality.status}，自动写入已阻止。`);
+    if (latestSync.quality.status !== "healthy") {
+      throw new WriteBlockedBeforeDispatchError(`同步数据为 ${latestSync.quality.status}，状态写入已阻止。`);
     }
-    if (requireAutomatic && (!account.enabled || account.executionMode !== "automatic")) {
+    if (!account.enabled) {
+      throw new WriteBlockedBeforeDispatchError("账户未启用，真实 Provider 写入已阻止。");
+    }
+    if (requireAutomatic && account.executionMode !== "automatic") {
       throw new WriteBlockedBeforeDispatchError("账户没有明确启用 automatic 模式，真实 Provider 写入已阻止。");
     }
     if (requireLowRiskPolicy && !this.store.getLowRiskAutomationPolicy(accountId).enabled) {
@@ -1278,6 +1458,7 @@ export class AutomationScheduler {
           connection?.hasCredential &&
           connection.status === "ready"
         ) {
+          this.service.enrollNightlyAdGroups(account.id);
           await this.service.runDueScheduledActions(account.id);
         }
       }
@@ -1384,6 +1565,24 @@ function dateKeyInTimeZone(value: Date, timeZone: string): string {
   const part = (type: "year" | "month" | "day") =>
     parts.find((item) => item.type === type)?.value ?? "00";
   return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function timePartsInTimeZone(value: Date, timeZone: string): {
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(value);
+  const part = (type: "hour" | "minute" | "second") => Number(
+    parts.find((item) => item.type === type)?.value ?? "0",
+  );
+  return { hour: part("hour"), minute: part("minute"), second: part("second") };
 }
 
 function buildAutomaticActionKey(

@@ -1,0 +1,327 @@
+/* Notifications and manual workspaces. Presentation only; business state stays in page components. */
+
+.notification-page,
+.manual-page {
+  width: min(100%, 1480px);
+  margin-inline: auto;
+  padding-block: var(--ui-section-compact);
+}
+
+.notification-page-heading,
+.manual-page-heading {
+  min-height: 80px;
+  margin-bottom: 48px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 32px;
+}
+
+.notification-page-heading h1,
+.manual-page-heading h1 {
+  margin: 6px 0 8px;
+  color: var(--ink);
+  font-size: clamp(28px, 2.4vw, 40px);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.notification-page-heading p,
+.manual-page-heading p {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+.notification-workspace {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+
+.notification-workspace-nav {
+  position: sticky;
+  top: 24px;
+  padding: 16px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.notification-nav-heading,
+.notification-nav-heading > div {
+  display: flex;
+  align-items: center;
+}
+
+.notification-nav-heading {
+  min-height: 56px;
+  padding: 0 8px 16px;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.notification-nav-heading > div {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notification-nav-heading svg { color: var(--primary); }
+.notification-nav-heading strong { color: var(--ink); font-size: 13px; }
+.notification-nav-heading span { color: var(--ink-faint); font-size: 11px; }
+
+.notification-workspace-nav nav {
+  padding-top: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.notification-workspace-nav nav button {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.notification-workspace-nav nav button:hover {
+  color: var(--primary);
+  background: var(--primary-tint);
+}
+
+.notification-workspace-nav nav button .status {
+  padding: 3px 6px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.notification-workspace-main {
+  min-width: 0;
+  display: grid;
+  gap: 32px;
+}
+
+.notification-page .notification-hero {
+  min-height: 136px;
+  margin: 0;
+  padding: 24px 32px;
+  grid-template-columns: auto minmax(0, 1fr);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.notification-page .notification-channel-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+}
+
+.notification-page .notification-channel {
+  scroll-margin-top: 24px;
+  border-radius: 10px;
+  box-shadow: none;
+  overflow: clip;
+}
+
+.notification-page .notification-channel:hover { transform: none; }
+
+.notification-page .notification-channel > header {
+  min-height: 96px;
+  padding: 24px 32px;
+}
+
+.notification-page .notification-form-grid {
+  padding: 24px 32px;
+  gap: 16px;
+}
+
+.notification-page .notification-switches {
+  padding: 0 32px 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.notification-page .notification-actions {
+  padding: 20px 32px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 24px;
+}
+
+.notification-page .notification-actions > small { grid-column: 1 / -1; }
+.notification-page .notification-tutorial summary { padding: 18px 32px; }
+.notification-page .notification-tutorial ol { padding: 0 48px 16px 52px; }
+.notification-page .notification-tutorial a { margin: 0 32px 20px; }
+:root[data-theme="dark"] .notification-page .notification-tutorial {
+  border-color: var(--line);
+  background: var(--surface-raised);
+}
+:root[data-theme="dark"] .notification-page .notification-tutorial summary {
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+:root[data-theme="dark"] .notification-page .notification-tutorial summary span,
+:root[data-theme="dark"] .notification-page .notification-tutorial ol {
+  color: var(--ink-soft);
+}
+.notification-page #notification-history { scroll-margin-top: 24px; }
+.notification-page .notification-history-grid { gap: 24px; }
+
+.manual-page { display: block; }
+
+.manual-version {
+  min-height: 48px;
+  padding: 8px 14px;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 2px 8px;
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.manual-version svg { grid-row: 1 / 3; color: var(--primary); }
+.manual-version span { font-size: 10px; }
+.manual-version strong { color: var(--ink); font-size: 12px; }
+
+.manual-page .manual-layout {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr) 184px;
+  gap: 32px;
+  align-items: start;
+}
+
+.manual-page .manual-index,
+.manual-page .manual-page-nav {
+  position: sticky;
+  top: 24px;
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  padding: 16px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.manual-page .manual-index nav { gap: 4px; }
+
+.manual-page .manual-index button,
+.manual-page .manual-page-nav button {
+  min-height: 40px;
+  color: var(--ink-soft);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.manual-page .manual-index button:hover,
+.manual-page .manual-page-nav button:hover {
+  color: var(--primary);
+  background: var(--primary-tint);
+}
+
+.manual-page-nav > strong {
+  display: block;
+  padding: 8px 8px 14px;
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.manual-page-nav nav {
+  padding-top: 10px;
+  display: grid;
+  gap: 2px;
+}
+
+.manual-page .manual-page-nav button {
+  width: 100%;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.manual-page-nav button span {
+  color: var(--ink-faint);
+  font-family: "IBM Plex Mono", Consolas, monospace;
+}
+
+.manual-page .manual-content { gap: 24px; }
+
+.manual-page .manual-hero {
+  min-height: 184px;
+  padding: 32px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.manual-page .manual-section {
+  padding: 32px;
+  scroll-margin-top: 24px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.manual-page .manual-section:hover { transform: none; }
+
+.notification-page button,
+.manual-page button,
+.notification-page a,
+.manual-page a {
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (max-width: 1240px) {
+  .manual-page .manual-layout { grid-template-columns: 208px minmax(0, 1fr); }
+  .manual-page .manual-page-nav { display: none; }
+}
+
+@media (max-width: 980px) {
+  .notification-workspace,
+  .manual-page .manual-layout { grid-template-columns: 1fr; }
+
+  .notification-workspace-nav,
+  .manual-page .manual-index {
+    position: static;
+    max-height: none;
+  }
+
+  .notification-workspace-nav nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .manual-page .manual-index nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .notification-page,
+  .manual-page { padding-block: 80px; }
+
+  .notification-page-heading,
+  .manual-page-heading { flex-direction: column; margin-bottom: 32px; }
+  .notification-page .notification-hero { padding: 24px; }
+  .notification-page .notification-form-grid { grid-template-columns: 1fr; padding-inline: 24px; }
+  .notification-page .notification-switches { grid-template-columns: 1fr; padding-inline: 24px; }
+  .notification-page .notification-actions { grid-template-columns: 1fr; padding-inline: 24px; }
+  .notification-page .notification-actions > small { grid-column: auto; }
+  .manual-page .manual-hero,
+  .manual-page .manual-section { padding: 24px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notification-page *,
+  .manual-page * { scroll-behavior: auto !important; }
+}

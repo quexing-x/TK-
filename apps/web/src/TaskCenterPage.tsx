@@ -147,7 +147,19 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
   }
 
   return <section className="page-stack task-center-page">
-    <div className="panel filter-panel">
+    <header className="task-center-header">
+      <div><span className="eyebrow">执行控制台</span><h2>统一任务中心</h2><p>跟踪广告创建和启停写入，处理失败恢复与人工核验。</p></div>
+      <button className="secondary-button" disabled={busy} onClick={() => void load()} type="button"><RefreshCcw size={15} /> 刷新任务</button>
+    </header>
+
+    <div className="task-metric-strip" aria-label="任务状态概览">
+      <span><small>当前结果</small><strong>{tasks.length}</strong></span>
+      <span><small>执行中</small><strong>{tasks.filter((task) => task.status === "running").length}</strong></span>
+      <span><small>明确失败</small><strong>{tasks.filter((task) => task.status === "failed").length}</strong></span>
+      <span><small>待核验</small><strong>{tasks.filter((task) => task.status === "unknown").length}</strong></span>
+    </div>
+
+    <div className="panel filter-panel task-filter-bar">
       <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>统一任务中心</h2><p>查看创建和启停写入的执行状态、尝试记录、恢复入口与人工核验。</p></div></div><button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={15} /> 刷新</button></div>
       <div className="form-grid management-filters">
         <label className="field"><span>任务类型</span><select value={kind} onChange={(event) => setKind(event.target.value as "" | WriteTaskKind)}><option value="">全部任务</option><option value="launch">广告创建</option><option value="status">广告启停</option></select></label>
@@ -156,22 +168,26 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
       </div>
     </div>
 
-    <div className="panel table-panel">
+    <div className="task-workbench">
+
+    <div className="panel table-panel task-list-pane">
       <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>任务历史</h2><p>明确失败可由用户单项重试；结果未知必须先核验，系统不会自动重放。</p></div></div></div>
       <div className="table-wrap"><table><thead><tr><th>账户</th><th>任务</th><th>动作</th><th>状态</th><th>阶段</th><th>尝试</th><th>更新时间</th></tr></thead><tbody>{tasks.length === 0 ? <tr><td colSpan={7}>没有符合条件的任务。</td></tr> : tasks.map((task) => <tr className={selectedId === task.taskId ? "selected-row" : undefined} key={`${task.kind}:${task.taskId}`} onClick={() => setSelectedId(task.taskId)}><td>{accountName(accounts, task.accountId)}</td><td><strong>{task.label}</strong><br /><small>{task.kind === "launch" ? "广告创建" : "广告启停"}</small></td><td>{actionLabel(task.action)}</td><td><TaskStatus task={task} /></td><td>{phaseLabel(task.phase)}</td><td>{task.attemptCount}</td><td>{new Date(task.updatedAt).toLocaleString()}</td></tr>)}</tbody></table></div>
     </div>
 
-    {selected && <div className="panel task-detail-panel">
+    {selected ? <aside className="panel task-detail-panel">
       <div className="panel-heading"><div><span className="panel-icon"><CheckCircle2 size={18} /></span><div><h2>任务详情</h2><p>{selected.label} · {accountName(accounts, selected.accountId)}</p></div></div><div className="task-center-actions">{selected.retryable && <button className="primary-button" disabled={busy || !canOperate} onClick={() => void retry(selected)} type="button"><RotateCcw size={15} /> 单项重试</button>}{selected.kind === "launch" && ["pending", "failed"].includes(selected.status) && <button className="secondary-button" disabled={busy || !canOperate} onClick={() => void cancelPlan(selected)} type="button"><XCircle size={15} /> 取消所属计划</button>}</div></div>
       <div className="task-detail-grid">
         <Detail label="任务 ID" value={selected.taskId} />
         <Detail label="操作 ID" value={selected.operationId} />
         <Detail label="关联 ID" value={selected.correlationId} />
         <Detail label="本次尝试 ID" value={selected.attemptId ?? "尚未领取"} />
-        <Detail label="任务发起者" value={`${selected.actor.name}（${selected.actor.kind === "system" ? "系统" : "用户"}）`} />
-        <Detail label="领取时间" value={selected.claimedAt ? new Date(selected.claimedAt).toLocaleString() : "—"} />
+        <Detail label="操作" value={`${actionLabel(selected.action)}${selected.kind === "status" ? "广告组" : "广告"}`} />
+        <Detail label="当前状态" value={statusLabel(selected.status)} />
+        <Detail label="发起人" value={`${selected.actor.name}（${selected.actor.kind === "system" ? "系统" : "用户"}）`} />
+        <Detail label="开始执行" value={selected.claimedAt ? new Date(selected.claimedAt).toLocaleString() : "等待执行"} />
         <Detail label="完成时间" value={selected.completedAt ? new Date(selected.completedAt).toLocaleString() : "—"} />
-        <Detail label="执行信息" value={selected.message ?? "—"} />
+        <Detail label="结果说明" value={humanTaskMessage(selected.status, selected.action, selected.message)} />
       </div>
       {selected.syncWarning && <div className="alert warning-alert"><AlertTriangle size={18} /><span><strong>同步警告：</strong>{selected.syncWarning}</span></div>}
 
@@ -189,8 +205,9 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
 
       <div className="table-wrap"><table><thead><tr><th>人工核验时间</th><th>结论</th><th>证据</th><th>备注</th><th>核验人</th></tr></thead><tbody>{verifications.length === 0 ? <tr><td colSpan={5}>暂无人工核验记录。</td></tr> : verifications.map((item) => <tr key={item.id}><td>{new Date(item.createdAt).toLocaleString()}</td><td>{item.decision}</td><td><small>{item.evidence}</small></td><td><small>{item.note || "—"}</small></td><td>{"actorName" in item ? item.actorName : item.actor.name}</td></tr>)}</tbody></table></div>
 
-      <div className="table-wrap"><table><thead><tr><th>次数</th><th>状态</th><th>阶段</th><th>执行者</th><th>开始</th><th>完成</th><th>信息</th></tr></thead><tbody>{attempts.length === 0 ? <tr><td colSpan={7}>尚无执行尝试。</td></tr> : attempts.map((attempt) => <tr key={attempt.attemptId}><td>{attempt.attemptNumber}</td><td>{statusLabel(attempt.status)}</td><td>{phaseLabel(attempt.phase === "campaign_draft" || attempt.phase === "adgroup_draft" || attempt.phase === "creative_draft" || attempt.phase === "publishing" ? "dispatch" : attempt.phase)}</td><td>{attempt.actor.name}</td><td>{new Date(attempt.createdAt).toLocaleString()}</td><td>{attempt.completedAt ? new Date(attempt.completedAt).toLocaleString() : "—"}</td><td>{"message" in attempt ? attempt.message ?? "—" : attempt.errorMessage ?? "—"}</td></tr>)}</tbody></table></div>
-    </div>}
+      <div className="table-wrap"><table><thead><tr><th>次数</th><th>状态</th><th>阶段</th><th>执行者</th><th>开始</th><th>完成</th><th>结果说明</th></tr></thead><tbody>{attempts.length === 0 ? <tr><td colSpan={7}>尚无执行尝试。</td></tr> : attempts.map((attempt) => <tr key={attempt.attemptId}><td>{attempt.attemptNumber}</td><td>{statusLabel(attempt.status)}</td><td>{phaseLabel(attempt.phase === "campaign_draft" || attempt.phase === "adgroup_draft" || attempt.phase === "creative_draft" || attempt.phase === "publishing" ? "dispatch" : attempt.phase)}</td><td>{attempt.actor.name}</td><td>{new Date(attempt.createdAt).toLocaleString()}</td><td>{attempt.completedAt ? new Date(attempt.completedAt).toLocaleString() : "—"}</td><td>{humanTaskMessage(attempt.status, selected.action, "message" in attempt ? attempt.message : attempt.errorMessage)}</td></tr>)}</tbody></table></div>
+    </aside> : <aside className="panel task-detail-panel task-detail-empty"><CheckCircle2 size={28} /><strong>选择一条任务查看详情</strong><span>执行尝试、核验记录和恢复入口将在这里显示。</span></aside>}
+    </div>
   </section>;
 }
 
@@ -243,6 +260,25 @@ function statusLabel(status: string): string {
 
 function phaseLabel(phase: string): string {
   return ({ validation: "校验", dispatch: "平台请求", readback: "结果回读", sync: "数据同步" } as Record<string, string>)[phase] ?? phase;
+}
+
+function humanTaskMessage(status: string, action: string, message: string | null | undefined): string {
+  const actionName = actionLabel(action);
+  const original = message?.trim();
+  const summary = status === "succeeded"
+    ? `已确认${actionName}完成。`
+    : status === "pending"
+      ? "已创建，等待执行。"
+      : status === "running"
+        ? "正在执行，请稍候。"
+        : status === "unknown"
+          ? "请求已发出，但暂时无法确认最终状态。"
+          : status === "cancelled"
+            ? "已取消，未再执行。"
+            : status === "failed"
+              ? `${actionName}未完成，请重试或查看平台状态。`
+              : "暂无结果说明。";
+  return original ? `${summary} 原始信息：${original}` : summary;
 }
 
 function messageOf(cause: unknown): string {

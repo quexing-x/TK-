@@ -182,6 +182,15 @@ export function evaluateAutomation(
 
     for (const entity of snapshots) {
       if (entity.entityType !== threshold.entityType) continue;
+      if (entity.status === "unknown") {
+        skipped.push({
+          thresholdId: threshold.id,
+          entityType: entity.entityType,
+          externalId: entity.externalId,
+          reason: "启停状态未确认，跳过自动写入。",
+        });
+        continue;
+      }
       const metricValue =
         threshold.metric === "custom"
           ? null
@@ -205,15 +214,6 @@ export function evaluateAutomation(
       if (!compare(metricValue, threshold.operator, threshold.value)) continue;
 
       const desiredStatus = threshold.action === "enable" ? "enabled" : "disabled";
-      if (entity.status === "unknown") {
-        skipped.push({
-          thresholdId: threshold.id,
-          entityType: entity.entityType,
-          externalId: entity.externalId,
-          reason: "无法识别当前启停状态。",
-        });
-        continue;
-      }
       if (entity.status === desiredStatus) continue;
 
       candidates.push({
@@ -328,20 +328,12 @@ function normalizeStatus(
       "operation_status",
     ],
   };
+  let hasProviderStatus = false;
   for (const key of keys[entityType]) {
     const value = source[key];
-    if (typeof value !== "string") continue;
-    const normalized = value.toLowerCase();
-    if (
-      normalized === "enable" ||
-      normalized === "enabled" ||
-      normalized === "active" ||
-      normalized === "delivery_ok" ||
-      normalized.endsWith("_delivery_ok") ||
-      normalized.endsWith("_enable")
-    ) {
-      return "enabled";
-    }
+    if (typeof value !== "string" || !value.trim()) continue;
+    hasProviderStatus = true;
+    const normalized = value.trim().toLowerCase();
     if (
       normalized === "disable" ||
       normalized === "disabled" ||
@@ -352,7 +344,9 @@ function normalizeStatus(
       return "disabled";
     }
   }
-  return "unknown";
+  // TikTok primary status may describe delivery or review rather than the
+  // enable/disable switch. Any non-disabled provider state is operationally on.
+  return hasProviderStatus ? "enabled" : "unknown";
 }
 
 function firstNumber(

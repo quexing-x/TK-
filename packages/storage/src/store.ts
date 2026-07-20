@@ -2114,6 +2114,15 @@ export class AutomationStore {
     }
   }
 
+  listPendingManualStatusWriteTasks(): AdOperationRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM ad_operations
+       WHERE status = 'pending' AND source = 'manual'
+         AND action IN ('enable', 'disable')
+       ORDER BY created_at ASC`,
+    ).all() as SqlRow[]).map(mapAdOperation);
+  }
+
   getAdOperation(id: string): AdOperationRecord {
     const row = this.db.prepare("SELECT * FROM ad_operations WHERE id = ?").get(id) as SqlRow | undefined;
     if (!row) throw new Error("广告操作记录不存在。");
@@ -2197,6 +2206,31 @@ export class AutomationStore {
         groupId,
       }),
     ];
+  }
+
+  hasScheduledOvernightForEntity(accountId: string, externalId: string): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 FROM scheduled_entity_actions
+       WHERE account_id = ? AND external_id = ?
+         AND schedule_type = 'overnight' AND status = 'scheduled'
+       LIMIT 1`,
+    ).get(accountId, externalId) as SqlRow | undefined;
+    return Boolean(row);
+  }
+
+  hasScheduledActionSince(
+    accountId: string,
+    externalId: string,
+    action: "enable" | "disable",
+    since: string,
+  ): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 FROM scheduled_entity_actions
+       WHERE account_id = ? AND external_id = ? AND action = ?
+         AND created_at >= ?
+       LIMIT 1`,
+    ).get(accountId, externalId, action, since) as SqlRow | undefined;
+    return Boolean(row);
   }
 
   listScheduledActions(

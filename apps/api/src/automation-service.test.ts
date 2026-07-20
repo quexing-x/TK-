@@ -25,7 +25,9 @@ class FakeProvider implements AdsProvider {
   throwStatusError = false;
   statusDelayMs = 0;
   adGroupStatus = "enable";
+  priorityHighStatus = "enable";
   shouldSyncFail = false;
+  ignoreStatusWrites = false;
   failReadbackAfterStatus = false;
   failNextSync = false;
   afterSync: (() => void | Promise<void>) | null = null;
@@ -66,6 +68,7 @@ class FakeProvider implements AdsProvider {
         campaign_id: "campaign-1",
         ad_name: "测试广告组",
         ad_primary_status: this.adGroupStatus,
+        create_time: this.campaignCreatedAt,
         row_data: {
           campaign_id: "campaign-1",
           stat_cost: "20",
@@ -156,7 +159,8 @@ class FakeProvider implements AdsProvider {
         payload: {
           campaign_id: "campaign-1",
           ad_name: "高优先级广告组",
-          ad_primary_status: "enable",
+          ad_primary_status: this.priorityHighStatus,
+          create_time: this.campaignCreatedAt,
           row_data: {
             campaign_id: "campaign-1",
             stat_cost: "5",
@@ -204,8 +208,13 @@ class FakeProvider implements AdsProvider {
     this.mutations.push(...mutations);
     if (this.throwStatusError) throw new Error("connection lost after dispatch");
     for (const mutation of mutations) {
-      if (mutation.entityType === "ad-group" && this.statusFailureKind === null && !this.shouldFail) {
-        this.adGroupStatus = mutation.action === "enable" ? "enable" : "disable";
+      if (mutation.entityType === "ad-group" && this.statusFailureKind === null && !this.shouldFail && !this.ignoreStatusWrites) {
+        const status = mutation.action === "enable" ? "enable" : "disable";
+        if (this.scenario === "priority" && mutation.externalId === "adgroup-high-priority") {
+          this.priorityHighStatus = status;
+        } else {
+          this.adGroupStatus = status;
+        }
       }
     }
     if (this.failReadbackAfterStatus) this.failNextSync = true;
@@ -364,11 +373,11 @@ describe("AutomationService", () => {
       entityType: "ad-group",
       externalId: "adgroup-1",
       action: "disable",
-    })).rejects.toThrow("自动写入已阻止");
+    })).rejects.toThrow("状态写入已阻止");
     expect(provider.mutations).toHaveLength(0);
   });
 
-  it("downgrades automatic mode when status write readback fails", async () => {
+  it("marks the status task unknown when status write readback fails", async () => {
     provider.shouldSyncFail = true;
 
     const result = await service.changeStatusManually("demo-account", {
@@ -377,13 +386,95 @@ describe("AutomationService", () => {
       action: "disable",
     });
 
-    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
     expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
     expect(store.listAdOperations("demo-account")[0]).toMatchObject({
-      status: "succeeded",
-      phase: "sync",
-      syncWarning: "sync unavailable",
+      status: "unknown",
+      message: "sync unavailable",
+    });
+  });
+
+  it("allows a manual status write while the account uses manual approval", async () => {
+    const account = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+      executionMode: "manual-approval",
+    });
+
+    const result = await service.changeStatusManually("demo-account", {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "disable",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]);
+  });
+
+  it("queues manual status requests without waiting for cookie I/O", async () => {
+    provider.statusDelayMs = 30;
+
+    const first = service.enqueueManualStatusChange("demo-account", {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "disable",
+    });
+    const second = service.enqueueManualStatusChange("demo-account", {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "enable",
+    });
+
+    expect(first.status).toBe("pending");
+    expect(second.status).toBe("pending");
+    await vi.waitFor(() => expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+      { entityType: "ad-group", externalId: "adgroup-1", action: "enable" },
+    ]));
+    expect(store.getAdOperation(first.id).status).toBe("succeeded");
+    expect(store.getAdOperation(second.id).status).toBe("succeeded");
+  });
+
+  it("resumes a persisted pending manual status task after service restart", async () => {
+    const task = store.createStatusWriteTask({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      entityName: "测试广告组",
+      action: "disable",
+      source: "manual",
+    }, { id: "user-1", name: "tester", kind: "user" });
+
+    new AutomationService(store, vault, new ProviderRegistry([provider]));
+
+    await vi.waitFor(() => expect(store.getAdOperation(task.id).status).toBe("succeeded"));
+    expect(provider.mutations).toContainEqual({
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "disable",
+    });
+  });
+
+  it("marks an accepted status write unknown until the readback reaches its target", async () => {
+    provider.ignoreStatusWrites = true;
+
+    const result = await service.changeStatusManually("demo-account", {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "disable",
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(store.listAdOperations("demo-account")[0]).toMatchObject({
+      status: "unknown",
+      message: expect.stringContaining("回读未确认目标状态"),
     });
   });
 
@@ -912,7 +1003,7 @@ describe("AutomationService", () => {
 
     expect(approval).toMatchObject({
       status: "unknown",
-      errorMessage: expect.stringContaining("禁止重复批准"),
+      errorMessage: "post-write sync unavailable",
     });
     expect(store.getAutomationDecision(decision.id)?.status).toBe("unknown");
     expect(provider.mutations).toHaveLength(1);
@@ -1063,6 +1154,56 @@ describe("AutomationService", () => {
       source: "scheduled",
       action: "disable",
     });
+  });
+
+  it("puts converting groups into overnight and closes non-converting groups at 23:45", async () => {
+    provider.scenario = "priority";
+    await service.runAccount("demo-account", "preview");
+    // demo-account is in Asia/Shanghai, so 23:45 local is 15:45 UTC.
+    const atNightWindow = "2026-07-20T15:45:00.000Z";
+
+    expect(service.enrollNightlyAdGroups("demo-account", atNightWindow)).toEqual({
+      overnight: 1,
+      closing: 1,
+    });
+    await service.runDueScheduledActions("demo-account", atNightWindow);
+
+    expect(provider.mutations).toEqual(expect.arrayContaining([
+      { entityType: "ad-group", externalId: "adgroup-low-priority", action: "disable" },
+      { entityType: "ad-group", externalId: "adgroup-high-priority", action: "disable" },
+    ]));
+    expect(store.listScheduledActions("demo-account")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ externalId: "adgroup-high-priority", scheduleType: "overnight", action: "enable", status: "scheduled" }),
+      expect.objectContaining({ externalId: "adgroup-low-priority", scheduleType: "once", action: "disable", status: "completed" }),
+    ]));
+    expect(service.enrollNightlyAdGroups("demo-account", atNightWindow)).toEqual({
+      overnight: 0,
+      closing: 0,
+    });
+  });
+
+  it("executes a user-created schedule while the account is in manual-approval mode", async () => {
+    const account = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+      executionMode: "manual-approval",
+    });
+    const schedule = store.createOneTimeSchedule("demo-account", {
+      externalId: "adgroup-1",
+      action: "disable",
+      runAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await service.runDueScheduledActions("demo-account");
+
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]);
+    expect(store.listScheduledActions("demo-account").find((item) => item.id === schedule.id))
+      .toMatchObject({ status: "completed", lastResult: "succeeded" });
   });
 
   it("does not reschedule a repeating action after an unknown live write result", async () => {

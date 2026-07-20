@@ -1,0 +1,522 @@
+.connection-page {
+  --connection-radius: 8px;
+  color: var(--ink);
+}
+
+.connection-page :is(button, input, textarea, .cookie-import-step, .connection-form-block) {
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.connection-identity {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) minmax(480px, 2fr) auto;
+  align-items: center;
+  gap: 24px;
+  min-height: 136px;
+  padding: 24px 32px;
+  border-bottom: 1px solid var(--line);
+}
+
+.connection-account-mark {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  border: 1px solid color-mix(in srgb, var(--primary) 42%, var(--line));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary) 70%, var(--surface));
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  box-shadow: inset 0 0 0 6px color-mix(in srgb, var(--surface) 22%, transparent);
+}
+
+.connection-account-copy > span,
+.connection-status-heading > div > span {
+  color: var(--ink-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connection-account-copy h2 {
+  margin: 4px 0 5px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.connection-account-copy p,
+.connection-section-title p,
+.connection-subheading p,
+.connection-capabilities-heading p,
+.connection-quality-score p,
+.connection-security-panel > div > p {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.connection-account-meta {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+
+.connection-account-meta > div {
+  min-height: 56px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  padding: 0 24px;
+  border-left: 1px solid var(--line);
+}
+
+.connection-account-meta dt,
+.connection-status-facts dt,
+.connection-quality-facts dt {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.connection-account-meta dd,
+.connection-status-facts dd,
+.connection-quality-facts dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connection-identity-status {
+  min-height: 32px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.connection-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+
+.connection-identity-status.ready .connection-state-dot { background: var(--success); }
+.connection-identity-status.failed .connection-state-dot { background: var(--danger); }
+.connection-identity-status.untested .connection-state-dot { background: var(--amber); }
+
+.connection-section {
+  padding: 80px 32px;
+  border-bottom: 1px solid var(--line);
+}
+
+.connection-section:last-child { border-bottom: 0; }
+
+.connection-section-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.connection-section-title > span,
+.connection-subheading-icon {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--primary);
+  border-radius: var(--connection-radius);
+  background: var(--primary-tint);
+}
+
+.connection-section-title h2,
+.connection-subheading h3,
+.connection-readiness h3,
+.connection-status-panel h3,
+.connection-capabilities h3,
+.connection-quality-panel h3,
+.connection-security-panel h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.connection-section-title p { margin-top: 5px; }
+
+.connection-page .provider-tabs {
+  width: min(100%, 520px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.connection-page .provider-tabs button {
+  min-height: 44px;
+  justify-content: center;
+  color: var(--ink-soft);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connection-page .provider-tabs button:hover:not(:disabled) {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--surface-active);
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.connection-page .provider-tabs button.active {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--primary-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 24%, transparent);
+}
+
+.connection-setup-grid,
+.connection-observability-grid,
+.connection-quality-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  gap: 48px;
+  align-items: start;
+  margin-top: 32px;
+}
+
+.connection-subheading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.connection-subheading h3 { margin-bottom: 4px; }
+
+.connection-page .cookie-import-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0;
+}
+
+.connection-page .cookie-import-step {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--connection-radius);
+  background: var(--surface);
+}
+
+.connection-page .cookie-import-step:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-strong);
+  box-shadow: var(--ambient-shadow-hover);
+}
+
+.connection-page .cookie-import-step.complete {
+  border-color: color-mix(in srgb, var(--success) 36%, var(--line));
+  background: color-mix(in srgb, var(--success-tint) 54%, var(--surface));
+}
+
+.connection-page .cookie-import-step header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.connection-page .cookie-step-number {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  border-radius: 50%;
+  background: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.connection-page .cookie-import-step.complete .cookie-step-number { background: var(--success); }
+.connection-page .cookie-import-step .eyebrow { color: var(--ink-faint); font-size: 9px; letter-spacing: 0.04em; }
+.connection-page .cookie-import-step h3 { margin: 3px 0 0; font-size: 13px; }
+.connection-page .cookie-step-state { color: var(--amber); font-size: 10px; }
+.connection-page .cookie-import-step.complete .cookie-step-state { color: var(--success); }
+.connection-page .cookie-import-step > p { min-height: 50px; margin: 16px 0 12px; color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
+
+.connection-page .network-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
+.connection-page .network-filter-row button {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-raised);
+}
+
+.connection-page .network-filter-row button:hover { color: var(--primary); border-color: var(--primary); }
+.connection-page .network-filter-row button.copied { color: var(--success); border-color: color-mix(in srgb, var(--success) 42%, var(--line)); }
+.connection-page .network-filter-row code { font-size: 9px; }
+.connection-page .curl-input { min-height: 128px; font-size: 10px; }
+
+.connection-page .curl-import-actions {
+  min-height: 64px;
+  margin-top: 16px;
+  padding-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.connection-page .curl-import-actions > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.connection-readiness,
+.connection-status-panel,
+.connection-capabilities,
+.connection-quality-panel,
+.connection-security-panel {
+  min-width: 0;
+}
+
+.connection-readiness {
+  padding-left: 32px;
+  border-left: 1px solid var(--line);
+}
+
+.connection-readiness-heading,
+.connection-capabilities-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.connection-readiness-heading p { margin: 5px 0 0; color: var(--ink-faint); font-size: 10px; }
+.connection-readiness-heading > strong { color: var(--primary); font-size: 11px; }
+
+.connection-readiness-list { display: grid; }
+
+.connection-readiness-list > div {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.connection-readiness-list > div.ready > svg { color: var(--success); }
+.connection-readiness-list > div.pending > svg { color: var(--amber); }
+.connection-readiness-list small { color: var(--ink-faint); font-size: 9px; }
+
+.connection-readiness-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  margin-top: 16px;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.connection-readiness-foot strong { color: var(--ink-soft); text-align: right; }
+
+.official-api-forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+
+.connection-form-block {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--connection-radius);
+  background: var(--surface);
+}
+
+.connection-form-block:hover { transform: translateY(-2px); border-color: var(--line-strong); box-shadow: var(--ambient-shadow-hover); }
+.connection-form-block .field { margin-top: 8px; }
+.connection-form-block textarea { min-height: 112px; }
+
+.connection-page .provider-endpoint-note {
+  margin-top: 12px;
+  padding: 16px;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  font-size: 9px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.connection-inline-actions,
+.connection-status-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.connection-observability-grid { grid-template-columns: minmax(320px, 0.7fr) minmax(500px, 1.3fr); }
+
+.connection-status-panel { padding-right: 32px; border-right: 1px solid var(--line); }
+.connection-status-heading { display: flex; align-items: flex-start; gap: 14px; }
+.connection-status-symbol { width: 40px; height: 40px; flex: 0 0 auto; display: grid; place-items: center; color: var(--ink-faint); border-radius: 50%; background: var(--surface); }
+.connection-status-symbol.ready { color: var(--success); background: var(--success-tint); }
+.connection-status-symbol.untested { color: var(--amber); background: var(--amber-tint); }
+.connection-status-symbol.failed { color: var(--danger); background: var(--danger-tint); }
+.connection-status-heading h3 { margin: 4px 0; font-size: 18px; }
+.connection-status-heading p { margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
+
+.connection-status-facts,
+.connection-quality-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 24px 0 0;
+  border-block: 1px solid var(--line);
+}
+
+.connection-status-facts > div,
+.connection-quality-facts > div {
+  min-height: 64px;
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  padding: 8px 16px 8px 0;
+}
+
+.connection-capabilities-heading > div:last-child {
+  min-width: 220px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  color: var(--ink-faint);
+  font-size: 9px;
+  text-align: center;
+}
+
+.connection-capability-list > div {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 106px 106px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.connection-capability-list > div > span:first-child { display: flex; align-items: baseline; gap: 8px; }
+.connection-capability-list strong { color: var(--ink-soft); font-size: 10px; font-weight: 600; }
+.connection-capability-list small { color: var(--ink-faint); font-size: 8px; }
+.connection-capability-list .available,
+.connection-capability-list .unavailable { display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-size: 9px; }
+.connection-capability-list .available { color: var(--success); }
+.connection-capability-list .unavailable { color: var(--ink-faint); }
+
+.connection-quality-grid { grid-template-columns: minmax(0, 1fr) minmax(360px, 0.8fr); }
+.connection-quality-panel { padding-right: 48px; border-right: 1px solid var(--line); }
+.connection-quality-score { display: flex; align-items: center; gap: 14px; }
+.connection-quality-score > span { width: 48px; height: 48px; display: grid; place-items: center; color: var(--ink-faint); border-radius: 50%; background: var(--surface); }
+.connection-quality-score > span.healthy { color: var(--success); background: var(--success-tint); }
+.connection-quality-score > span.warning { color: var(--amber); background: var(--amber-tint); }
+.connection-quality-score h3 { margin-bottom: 4px; }
+.connection-quality-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.connection-quality-feedback {
+  min-height: 48px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.connection-quality-feedback.success { color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, var(--line)); background: var(--success-tint); }
+.connection-quality-feedback.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); background: var(--danger-tint); }
+.connection-quality-feedback svg { flex: 0 0 auto; margin-top: 1px; }
+
+.connection-security-panel { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 16px; }
+.connection-security-icon { width: 48px; height: 48px; display: grid; place-items: center; color: var(--primary); border: 1px solid var(--line); border-radius: 50%; background: var(--primary-tint); }
+.connection-security-panel h3 { margin-bottom: 5px; }
+.connection-security-list { grid-column: 1 / -1; display: grid; gap: 12px; margin-top: 8px; }
+.connection-security-list > span { display: flex; align-items: flex-start; gap: 9px; color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.connection-security-list svg { flex: 0 0 auto; margin-top: 1px; color: var(--success); }
+
+@media (max-width: 1120px) {
+  .connection-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .connection-account-meta { grid-column: 1 / -1; }
+  .connection-account-meta > div:first-child { border-left: 0; }
+  .connection-setup-grid,
+  .connection-observability-grid,
+  .connection-quality-grid { grid-template-columns: 1fr; gap: 32px; }
+  .connection-readiness { padding: 32px 0 0; border-top: 1px solid var(--line); border-left: 0; }
+  .connection-status-panel,
+  .connection-quality-panel { padding: 0 0 32px; border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+@media (max-width: 860px) {
+  .connection-identity { grid-template-columns: auto minmax(0, 1fr); padding-inline: 24px; }
+  .connection-identity-status { grid-column: 1 / -1; justify-self: start; }
+  .connection-account-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .connection-account-meta > div:nth-child(3) { border-left: 0; }
+  .connection-section { padding: 80px 24px; }
+  .connection-page .cookie-import-steps,
+  .official-api-forms { grid-template-columns: 1fr; }
+  .connection-page .cookie-import-step > p { min-height: 0; }
+  .connection-capability-list > div { grid-template-columns: minmax(160px, 1fr) 92px 92px; }
+  .connection-capabilities-heading > div:last-child { min-width: 192px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-page :is(button, input, textarea, .cookie-import-step, .connection-form-block) { transition: none; }
+}

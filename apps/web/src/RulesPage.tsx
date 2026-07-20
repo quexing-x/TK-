@@ -11,6 +11,7 @@ import {
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
 import { adjustRuleValue, formatRuleValue, getRuleSliderMaximum } from "./rule-controls";
+import "./ui/pages/automation-rules.css";
 
 export function RulesPage({
   settings,
@@ -144,10 +145,25 @@ export function RulesPage({
   }
 
   return (
-    <section className="page-stack">
-      <div className="alert warning-alert"><Gauge size={18} /><span>币种提醒：九条规则当前为全账户共用阈值。不同币种账户会以各自账户币种直接比较，金额阈值可能不具可比性；请先只对同币种账户开启自动化。</span></div>
-      {!canManageRules && <div className="alert warning-alert"><Gauge size={18} /><span>当前角色仅可查看规则配置；保存和启停需要 rules:manage 权限。</span></div>}
-      <form className="panel rule-settings-panel" onSubmit={(event) => void saveSettings(event)}>
+    <section className="page-stack rules-page rules-workspace">
+      <header className="rules-status-band">
+        <div>
+          <span className="rules-status-icon"><Gauge size={20} /></span>
+          <div><h1>规则配置</h1><p>九条全局规则按固定优先级顺序执行，阈值与应用层级可在当前页面维护。</p></div>
+        </div>
+        <dl>
+          <div><dt>规则状态</dt><dd>{enabledRules}/9 已启用</dd></div>
+          <div><dt>权限</dt><dd>{canManageRules ? "可编辑" : "仅查看"}</dd></div>
+          <div><dt>最近保存</dt><dd>{new Date(configuration.updatedAt).toLocaleString()}</dd></div>
+        </dl>
+      </header>
+
+      <div className="rules-notice-stack">
+        <div className="alert warning-alert"><Gauge size={18} /><span>币种提醒：九条规则当前为全账户共用阈值。不同币种账户会以各自账户币种直接比较，金额阈值可能不具可比性；请先只对同币种账户开启自动化。</span></div>
+        {!canManageRules && <div className="alert warning-alert"><Gauge size={18} /><span>当前角色仅可查看规则配置；保存和启停需要 rules:manage 权限。</span></div>}
+      </div>
+
+      <form className="rule-settings-panel rules-runtime-section" onSubmit={(event) => void saveSettings(event)}>
         <div className="panel-heading">
           <div>
             <span className="panel-icon"><RefreshCcw size={18} /></span>
@@ -161,34 +177,36 @@ export function RulesPage({
           </button>
         </div>
         <div className="rule-settings-body">
-          <div className="rule-settings-sentence">
-            每
-            <InlineStepper
-              disabled={!canManageRules}
-              label="轮询间隔"
-              maximum={1440}
-              minimum={1}
-              onChange={(pollingIntervalMinutes) => setGlobalSettings({ ...globalSettings, pollingIntervalMinutes })}
-              step={1}
-              value={globalSettings.pollingIntervalMinutes}
-            />
-            分钟检测一次，单轮最多处理
-            <InlineStepper
-              disabled={!canManageRules}
-              label="单轮最多处理对象"
-              maximum={100}
-              minimum={1}
-              onChange={(maxActionsPerRun) => setGlobalSettings({ ...globalSettings, maxActionsPerRun })}
-              step={5}
-              value={globalSettings.maxActionsPerRun}
-            />
-            个对象。
-          </div>
-          <div className="rule-window-lock">
-            <Clock3 size={18} />
-            <div>
-              <strong>只处理最近 {configuration.lookbackHours} 小时创建的推广系列</strong>
-              <span>固定保护范围，不提供修改，避免历史计划过多造成程序不稳定。</span>
+          <div className="rule-runtime-primary">
+            <div className="rule-settings-sentence">
+              每
+              <InlineStepper
+                disabled={!canManageRules}
+                label="轮询间隔"
+                maximum={1440}
+                minimum={1}
+                onChange={(pollingIntervalMinutes) => setGlobalSettings({ ...globalSettings, pollingIntervalMinutes })}
+                step={1}
+                value={globalSettings.pollingIntervalMinutes}
+              />
+              分钟检测一次，单轮最多处理
+              <InlineStepper
+                disabled={!canManageRules}
+                label="单轮最多处理对象"
+                maximum={100}
+                minimum={1}
+                onChange={(maxActionsPerRun) => setGlobalSettings({ ...globalSettings, maxActionsPerRun })}
+                step={5}
+                value={globalSettings.maxActionsPerRun}
+              />
+              个对象。
+            </div>
+            <div className="rule-window-lock">
+              <Clock3 size={18} />
+              <div>
+                <strong>只处理最近 {configuration.lookbackHours} 小时创建的推广系列</strong>
+                <span>固定保护范围，不提供修改，避免历史计划过多造成程序不稳定。</span>
+              </div>
             </div>
           </div>
           <div className="rule-layer-grid">
@@ -199,7 +217,7 @@ export function RulesPage({
         </div>
       </form>
 
-      <section className="panel rule-panel">
+      <section className="rule-panel rules-matrix-section">
         <div className="panel-heading">
           <div>
             <span className="panel-icon"><Gauge size={18} /></span>
@@ -220,12 +238,15 @@ export function RulesPage({
             </button>
           </div>
         </div>
+        <div className="rule-table-head" aria-hidden="true">
+          <span>规则与状态</span><span>触发条件与阈值</span><span>执行动作</span>
+        </div>
         <div className="rule-card-grid">
           {automationRuleDefinitions.map((definition, index) => {
             const rule = configuration.rules.find((item) => item.code === definition.code);
             if (!rule) return null;
             return (
-              <article className={rule.enabled ? "rule-card" : "rule-card disabled"} key={definition.code}>
+              <article className={rule.enabled ? "rule-card rule-row" : "rule-card rule-row disabled"} key={definition.code}>
                 <header>
                   <div className="rule-title">
                     <span className="rule-number">{index + 1}</span>
@@ -272,38 +293,40 @@ function RuleControls({
 
   return (
     <div className="rule-controls">
-      <div className="rule-sentence">
-        <span>{definition.description}</span>
-        {countParameters.map((parameter) => (
-          <span className="rule-inline-value" key={parameter.key}>
-            <span>{parameter.label}</span>
-            <InlineStepper
+      <div className="rule-condition-cell">
+        <div className="rule-sentence">
+          <span>{definition.description}</span>
+          {countParameters.map((parameter) => (
+            <span className="rule-inline-value" key={parameter.key}>
+              <span>{parameter.label}</span>
+              <InlineStepper
+                disabled={disabled}
+                label={parameter.label}
+                minimum={0}
+                onChange={(value) => onChange(parameter.key, value)}
+                step={parameter.step}
+                value={values[parameter.key] ?? 0}
+              />
+              <small>{parameter.unit}</small>
+            </span>
+          ))}
+        </div>
+        <div className="rule-threshold-list">
+          {thresholdParameters.map((parameter) => (
+            <RuleThreshold
+              definitionLabel={definition.label}
               disabled={disabled}
-              label={parameter.label}
-              minimum={0}
-              onChange={(value) => onChange(parameter.key, value)}
-              step={parameter.step}
+              key={parameter.key}
+              parameter={parameter}
               value={values[parameter.key] ?? 0}
+              onChange={(value) => onChange(parameter.key, value)}
             />
-            <small>{parameter.unit}</small>
-          </span>
-        ))}
-        <span className={definition.action === "enable" ? "rule-action-badge enable" : "rule-action-badge disable"}>
-          {definition.action === "enable" ? "自动开启" : "自动关闭"}
-        </span>
+          ))}
+        </div>
       </div>
-      <div className="rule-threshold-list">
-        {thresholdParameters.map((parameter) => (
-          <RuleThreshold
-            definitionLabel={definition.label}
-            disabled={disabled}
-            key={parameter.key}
-            parameter={parameter}
-            value={values[parameter.key] ?? 0}
-            onChange={(value) => onChange(parameter.key, value)}
-          />
-        ))}
-      </div>
+      <span className={definition.action === "enable" ? "rule-action-badge rule-action-cell enable" : "rule-action-badge rule-action-cell disable"}>
+        {definition.action === "enable" ? "自动开启" : "自动关闭"}
+      </span>
     </div>
   );
 }

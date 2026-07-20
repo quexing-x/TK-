@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Activity, ArchiveRestore, DatabaseBackup, FileClock, RefreshCw, ShieldCheck } from "lucide-react";
 import type {
   AuditLogRecord,
   DatabaseBackupRecord,
@@ -7,6 +8,7 @@ import type {
 } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
+import "./ui/pages/system-maintenance.css";
 
 export function MaintenancePage({ onError }: { onError: (message: string) => void }) {
   const auth = useAuth();
@@ -64,46 +66,99 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
   };
 
   if (!canControlSystem) {
-    return <div className="empty-state">当前角色无运维中心访问权限。</div>;
+    return <div className="system-access-denied maintenance-access-denied"><ShieldCheck size={22} /><div><strong>无运维中心访问权限</strong><p>当前角色不能读取或执行系统运维操作。</p></div></div>;
   }
 
-  return <div className="page-stack maintenance-page">
-    <section className="panel">
-      <div className="panel-heading"><div><h2>版本与升级安全</h2><p>升级包必须同时通过签名清单、SHA-256 和 Windows 代码签名校验；安装前自动创建数据库备份。</p></div></div>
-      {status ? <div className="maintenance-status-grid">
-        <Status label="当前版本" value={status.appVersion} />
-        <Status label="数据库结构" value={status.schemaVersion} />
-        <Status label="代码签名" value={signatureLabel(status.update.signatureStatus)} {...(status.update.signatureStatus === "invalid" ? { tone: "danger" as const } : {})} />
-        <Status label="升级状态" value={updateStateLabel(status.update)} {...(status.update.state === "error" ? { tone: "danger" as const } : {})} />
-      </div> : <p>正在读取运维状态…</p>}
-      {status?.pendingRestore && <p className="inline-warning">已有待应用的数据库恢复请求，请重启软件。</p>}
-      {status?.update.message && <p className="muted-note">{status.update.message}</p>}
-      <div className="button-row">
-        <button className="secondary-button" disabled={busy !== null || !status?.update.configured} onClick={() => void update(api.checkForUpdates)} type="button">检查更新</button>
-        <button className="secondary-button" disabled={busy !== null || status?.update.state !== "available"} onClick={() => void update(api.downloadUpdate)} type="button">下载并验证</button>
-        <button className="primary-button" disabled={busy !== null || status?.update.state !== "downloaded"} onClick={() => {
-          if (window.confirm("安装前将自动创建并校验数据库备份。确认启动升级程序吗？")) void update(api.installUpdate);
-        }} type="button">备份并安装</button>
-      </div>
-    </section>
+  return (
+    <main className="system-maintenance-page maintenance-page">
+      <header className="system-page-header">
+        <div>
+          <span className="system-page-kicker">系统可靠性</span>
+          <h1>运维中心</h1>
+          <p>集中查看运行版本、升级安全、数据库备份恢复与审计轨迹。</p>
+        </div>
+        <button className="secondary-button" disabled={busy !== null} onClick={() => void reload()} type="button"><RefreshCw size={15} /> 刷新状态</button>
+      </header>
 
-    <section className="panel">
-      <div className="panel-heading"><div><h2>数据库备份与恢复</h2><p>最多保留最近 5 份一致性快照。恢复会在下次启动应用，失败时自动回滚当前数据库。</p></div><button className="primary-button" disabled={busy !== null} onClick={() => void run("backup", api.createDatabaseBackup, "数据库备份已创建并通过完整性检查。")} type="button">立即备份</button></div>
-      {notice && <p className="success-note">{notice}</p>}
-      <div className="table-wrap"><table><thead><tr><th>时间</th><th>用途</th><th>版本</th><th>大小</th><th>校验</th><th>操作</th></tr></thead><tbody>{backups.length === 0 ? <tr><td colSpan={6}>尚无数据库备份。</td></tr> : backups.map((backup) => <tr key={backup.id}><td>{new Date(backup.createdAt).toLocaleString()}</td><td>{backupKindLabel(backup.kind)}</td><td>{backup.appVersion}<br /><small>{backup.schemaVersion}</small></td><td>{formatBytes(backup.sizeBytes)}</td><td><span className={backup.status === "verified" ? "status active" : "status danger"}>{backup.status === "verified" ? "已验证" : "无效"}</span>{backup.errorMessage && <><br /><small>{backup.errorMessage}</small></>}</td><td><div className="table-actions"><button className="secondary-button compact-button" disabled={busy !== null} onClick={() => void run(`verify:${backup.id}`, () => api.verifyDatabaseBackup(backup.id))} type="button">重新校验</button><button className="secondary-button compact-button" disabled={busy !== null || backup.status !== "verified"} onClick={() => {
-          if (window.confirm(`确认将数据库恢复到 ${new Date(backup.createdAt).toLocaleString()}？请求保存后需要重启软件。`)) void run(`restore:${backup.id}`, () => api.requestDatabaseRestore(backup.id), "恢复请求已保存，请重启软件。");
-        }} type="button">恢复</button></div></td></tr>)}</tbody></table></div>
-    </section>
+      <section className="maintenance-status-section" aria-label="运行状态">
+        <div className="maintenance-status-heading"><Activity size={18} /><span><strong>运行状态</strong><small>{status ? "系统状态已同步" : "正在读取运维状态"}</small></span></div>
+        <div className="maintenance-status-strip">
+          <Status label="当前版本" value={status?.appVersion ?? "读取中"} />
+          <Status label="数据库结构" value={status?.schemaVersion ?? "读取中"} />
+          <Status label="代码签名" value={status ? signatureLabel(status.update.signatureStatus) : "读取中"} tone={status?.update.signatureStatus === "invalid" ? "danger" : undefined} />
+          <Status label="升级状态" value={status ? updateStateLabel(status.update) : "读取中"} tone={status?.update.state === "error" ? "danger" : undefined} />
+        </div>
+        {status?.pendingRestore && <p className="system-inline-warning">已有待应用的数据库恢复请求，请重启软件。</p>}
+        {status?.update.message && <p className="system-muted-note">{status.update.message}</p>}
+      </section>
 
-    <section className="panel">
-      <div className="panel-heading"><div><h2>审计日志</h2><p>记录真实操作人、请求 ID、关联 ID、账户和动作。默认显示最近 100 条。</p></div><button className="secondary-button" onClick={() => void reload()} type="button">刷新</button></div>
-      <div className="filter-row"><label>动作<input value={actionFilter} onChange={(event) => setActionFilter(event.target.value)} placeholder="例如 write-task" /></label><label>关联 ID<input value={correlationFilter} onChange={(event) => setCorrelationFilter(event.target.value)} placeholder="精确关联 ID" /></label></div>
-      <div className="table-wrap"><table><thead><tr><th>时间</th><th>操作人</th><th>账户</th><th>动作</th><th>关联信息</th></tr></thead><tbody>{audit.length === 0 ? <tr><td colSpan={5}>没有符合条件的审计记录。</td></tr> : audit.map((item) => <tr key={item.id}><td>{new Date(item.createdAt).toLocaleString()}</td><td>{item.actor.name}<br /><small>{item.actor.kind === "system" ? "系统" : item.actor.id}</small></td><td>{item.accountId}</td><td>{item.action}</td><td><small>关联：{item.correlationId}<br />请求：{item.requestId ?? "后台任务"}</small></td></tr>)}</tbody></table></div>
-    </section>
-  </div>;
+      <section className="maintenance-operations-grid" aria-label="运维操作">
+        <article className="system-surface audit-panel">
+          <div className="system-section-heading">
+            <div><FileClock size={18} /><span><strong>审计日志</strong><small>最近 100 条真实操作记录</small></span></div>
+            <button className="system-text-button" onClick={() => void reload()} type="button"><RefreshCw size={13} /> 刷新</button>
+          </div>
+          <div className="system-filter-row">
+            <label><span>动作</span><input value={actionFilter} onChange={(event) => setActionFilter(event.target.value)} placeholder="例如 write-task" /></label>
+            <label><span>关联 ID</span><input value={correlationFilter} onChange={(event) => setCorrelationFilter(event.target.value)} placeholder="精确关联 ID" /></label>
+          </div>
+          <div className="system-table-wrap audit-table-wrap">
+            <table className="system-table">
+              <thead><tr><th>时间</th><th>操作人</th><th>账户</th><th>动作</th><th>关联信息</th></tr></thead>
+              <tbody>{audit.length === 0 ? <tr><td colSpan={5}><div className="system-empty">没有符合条件的审计记录</div></td></tr> : audit.map((item) => <tr key={item.id}><td>{new Date(item.createdAt).toLocaleString()}</td><td><strong>{item.actor.name}</strong><small>{item.actor.kind === "system" ? "系统" : item.actor.id}</small></td><td>{item.accountId}</td><td><code>{item.action}</code></td><td><small>关联：{item.correlationId}<br />请求：{item.requestId ?? "后台任务"}</small></td></tr>)}</tbody>
+            </table>
+          </div>
+        </article>
+
+        <article className="system-surface backup-panel">
+          <div className="system-section-heading">
+            <div><DatabaseBackup size={18} /><span><strong>备份与恢复</strong><small>最多保留最近 5 份一致性快照</small></span></div>
+            <button className="primary-button" disabled={busy !== null} onClick={() => void run("backup", api.createDatabaseBackup, "数据库备份已创建并通过完整性检查。") } type="button">立即备份</button>
+          </div>
+          {notice && <p className="system-success-note">{notice}</p>}
+          <div className="backup-list">
+            {backups.length === 0 ? <div className="system-empty">尚无数据库备份</div> : backups.map((backup) => (
+              <div className="backup-item" key={backup.id}>
+                <div className="backup-item-main">
+                  <span className={backup.status === "verified" ? "system-status is-active" : "system-status is-disabled"}>{backup.status === "verified" ? "已验证" : "无效"}</span>
+                  <strong>{new Date(backup.createdAt).toLocaleString()}</strong>
+                  <small>{backupKindLabel(backup.kind)} · {backup.appVersion} / {backup.schemaVersion} · {formatBytes(backup.sizeBytes)}</small>
+                  {backup.errorMessage && <small className="backup-error">{backup.errorMessage}</small>}
+                </div>
+                <div className="system-row-actions">
+                  <button className="system-text-button" disabled={busy !== null} onClick={() => void run(`verify:${backup.id}`, () => api.verifyDatabaseBackup(backup.id))} type="button">重新校验</button>
+                  <button className="system-text-button" disabled={busy !== null || backup.status !== "verified"} onClick={() => {
+                    if (window.confirm(`确认将数据库恢复到 ${new Date(backup.createdAt).toLocaleString()}？请求保存后需要重启软件。`)) void run(`restore:${backup.id}`, () => api.requestDatabaseRestore(backup.id), "恢复请求已保存，请重启软件。");
+                  }} type="button"><ArchiveRestore size={13} /> 恢复</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="system-footnote">恢复会在下次启动时应用；失败时自动回滚当前数据库。</p>
+        </article>
+
+        <article className="system-surface update-panel">
+          <div className="system-section-heading"><div><ShieldCheck size={18} /><span><strong>升级检查</strong><small>签名、哈希与安装前备份</small></span></div></div>
+          <div className="update-facts">
+            <div><span>当前版本</span><strong>{status?.appVersion ?? "—"}</strong></div>
+            <div><span>最新版本</span><strong>{status?.update.availableVersion ?? "未发现"}</strong></div>
+            <div><span>发布状态</span><strong>{status ? updateStateLabel(status.update) : "读取中"}</strong></div>
+          </div>
+          <div className="update-actions">
+            <button className="secondary-button" disabled={busy !== null || !status?.update.configured} onClick={() => void update(api.checkForUpdates)} type="button">检查更新</button>
+            <button className="secondary-button" disabled={busy !== null || status?.update.state !== "available"} onClick={() => void update(api.downloadUpdate)} type="button">下载并验证</button>
+            <button className="primary-button" disabled={busy !== null || status?.update.state !== "downloaded"} onClick={() => {
+              if (window.confirm("安装前将自动创建并校验数据库备份。确认启动升级程序吗？")) void update(api.installUpdate);
+            }} type="button">备份并安装</button>
+          </div>
+          <p className="system-footnote">升级包必须同时通过签名清单、SHA-256 与 Windows 代码签名校验。</p>
+        </article>
+      </section>
+    </main>
+  );
 }
 
-function Status({ label, value, tone }: { label: string; value: string; tone?: "danger" }) {
+function Status({ label, value, tone }: { label: string; value: string; tone?: "danger" | undefined }) {
   return <div className={`maintenance-status-card${tone ? ` ${tone}` : ""}`}><small>{label}</small><strong>{value}</strong></div>;
 }
 

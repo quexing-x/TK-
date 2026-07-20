@@ -1,0 +1,15 @@
+/*
+ * UI migration entrypoint.
+ *
+ * `structure.css` preserves the stable class contract used by business-heavy
+ * page components. `system.css` is the authoritative visual layer and owns
+ * tokens, themes, layout, components, responsive behavior and interactions.
+ */
+@import "./structure.css";
+@import "./system.css";
+@import "./pages/ads-analytics.css";
+@import "./pages/automation-rules.css";
+@import "./pages/connection.css";
+@import "./pages/launch-tasks.css";
+@import "./pages/notifications-manual.css";
+@import "./pages/system-maintenance.css";

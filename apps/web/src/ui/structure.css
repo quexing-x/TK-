@@ -137,6 +137,10 @@ button { cursor: pointer; }
 .notice-card strong { font-size: 13px; }
 .notice-card p { margin: 5px 0 0; color: #78869b; font-size: 11px; line-height: 1.55; }
 .table-panel { overflow: hidden; }
+.ads-workspace { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+.ads-rule-suggestions { align-self: stretch; }
+.ads-rule-suggestions .overview-decision { padding: 12px 14px; }
+.ads-rule-suggestions .overview-decision small { display: block; margin-top: 4px; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th { padding: 12px 16px; color: #7c8899; text-align: left; background: #fafbfd; font-size: 11px; letter-spacing: .2px; }
@@ -758,8 +762,9 @@ button, input, select, textarea { font-family: inherit; }
 .summary-icon.violet { color: var(--danger) !important; background: var(--danger-tint) !important; }
 .summary-icon.green { color: var(--success) !important; background: var(--success-tint) !important; }
 .panel-heading { min-height: 68px; padding: 15px 18px; border-bottom-color: var(--line); }
+.panel-heading > button { margin-left: auto; flex: 0 0 auto; }
 .panel-heading h2, .section-heading h2 { color: var(--ink); font-size: 15px; font-weight: 500; }
-.panel-heading p, .section-heading p { margin-top: 3px; font-size: 11px; }
+.panel-heading p, .section-heading p { display: none; }
 .panel-icon { width: 32px; height: 32px; border-radius: 9px; }
 .primary-button, .secondary-button, .danger-button {
   min-height: 36px; padding: 0 13px; border-radius: 7px; font-size: 12px; font-weight: 500; box-shadow: none;

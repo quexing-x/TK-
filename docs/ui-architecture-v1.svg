@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120">
+  <defs>
+    <style>
+      .bg{fill:#f5f7fb}.title{font:700 30px 'Microsoft YaHei',Arial,sans-serif;fill:#152238}.sub{font:400 15px 'Microsoft YaHei',Arial,sans-serif;fill:#5d6b7d}.section{font:700 16px 'Microsoft YaHei',Arial,sans-serif;fill:#23344d}.label{font:600 14px 'Microsoft YaHei',Arial,sans-serif;fill:#1f2e44}.small{font:400 12px 'Microsoft YaHei',Arial,sans-serif;fill:#65748a}.tiny{font:400 11px 'Microsoft YaHei',Arial,sans-serif;fill:#6d7b8e}.box{fill:#fff;stroke:#cbd5e1;stroke-width:1.5}.blue{fill:#eef4ff;stroke:#6d8dcc;stroke-width:1.5}.green{fill:#edf8f3;stroke:#5a9d80;stroke-width:1.5}.amber{fill:#fff8e8;stroke:#d6a44e;stroke-width:1.5}.rose{fill:#fff1ef;stroke:#d37b6d;stroke-width:1.5}.purple{fill:#f4efff;stroke:#9675c9;stroke-width:1.5}.line{stroke:#718096;stroke-width:1.7;fill:none;marker-end:url(#arrow)}.dashed{stroke:#9aa7b8;stroke-width:1.4;stroke-dasharray:6 5;fill:none;marker-end:url(#arrow)}.divider{stroke:#d9e1eb;stroke-width:1}
+    </style>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#718096"/></marker>
+  </defs>
+  <rect class="bg" width="1600" height="1120"/>
+  <text x="64" y="58" class="title">TK Ads Automation · 前端 UI 架构基线 v1</text>
+  <text x="64" y="87" class="sub">基于当前工作区 D:\Dev\TK自动化 的只读功能盘点。重构范围仅限表现层、布局层与组件组织。</text>
+
+  <rect x="64" y="120" width="1472" height="252" rx="16" class="blue"/>
+  <text x="88" y="151" class="section">一、Web / Desktop UI Shell</text>
+  <rect x="88" y="174" width="300" height="170" rx="12" class="box"/>
+  <text x="108" y="202" class="label">AuthGate</text>
+  <text x="108" y="225" class="small">本地登录、会话、角色权限</text>
+  <text x="108" y="250" class="small">HttpOnly Session + CSRF</text>
+  <text x="108" y="275" class="small">未登录时阻断控制台</text>
+  <text x="108" y="308" class="tiny">保持：认证流程与权限判定</text>
+
+  <rect x="412" y="174" width="430" height="170" rx="12" class="box"/>
+  <text x="432" y="202" class="label">ConsoleApp / App.tsx</text>
+  <text x="432" y="225" class="small">Hash 导航：#overview 等固定页面标识</text>
+  <text x="432" y="250" class="small">Bootstrap 数据、错误、主题、命令面板</text>
+  <text x="432" y="275" class="small">30 秒刷新本地配置与账户状态</text>
+  <text x="432" y="308" class="tiny">保持：路由、快捷键 Ctrl/Cmd+K、账户选择</text>
+
+  <rect x="866" y="174" width="310" height="170" rx="12" class="box"/>
+  <text x="886" y="202" class="label">Global Topbar</text>
+  <text x="886" y="225" class="small">当前页面标题 / 账户上下文</text>
+  <text x="886" y="250" class="small">运行总开关、主题切换</text>
+  <text x="886" y="275" class="small">命令搜索、登录用户、全局错误提示</text>
+  <text x="886" y="308" class="tiny">保持：系统运行状态与操作反馈</text>
+
+  <rect x="1200" y="174" width="312" height="170" rx="12" class="box"/>
+  <text x="1220" y="202" class="label">Sidebar Navigation</text>
+  <text x="1220" y="225" class="small">总览、自动化、广告、分析、规则</text>
+  <text x="1220" y="250" class="small">通知、创建、任务、权限、运维</text>
+  <text x="1220" y="275" class="small">操作手册独立入口</text>
+  <text x="1220" y="308" class="tiny">保持：页面标签、权限可见性、旧书签</text>
+
+  <path d="M388 258 H412" class="line"/><path d="M842 258 H866" class="line"/><path d="M1176 258 H1200" class="line"/>
+
+  <rect x="64" y="400" width="1472" height="350" rx="16" class="box"/>
+  <text x="88" y="431" class="section">二、业务页面层 · 现有功能不变</text>
+  <rect x="88" y="456" width="330" height="120" rx="12" class="green"/>
+  <text x="108" y="484" class="label">运营总览 #overview</text>
+  <text x="108" y="508" class="small">账户管理、连接状态、待处理决策</text>
+  <text x="108" y="532" class="small">快捷创建、运行流、账户健康</text>
+  <text x="108" y="557" class="tiny">OverviewPage + UsersPage</text>
+
+  <rect x="438" y="456" width="330" height="120" rx="12" class="green"/>
+  <text x="458" y="484" class="label">自动化域</text>
+  <text x="458" y="508" class="small">#automation 预览、执行、审批</text>
+  <text x="458" y="532" class="small">#rules 九条规则、阈值、单条开关</text>
+  <text x="458" y="557" class="tiny">AutomationPage + RulesPage</text>
+
+  <rect x="788" y="456" width="330" height="120" rx="12" class="green"/>
+  <text x="808" y="484" class="label">广告与投放域</text>
+  <text x="808" y="508" class="small">#ads 账户范围、实体状态、忽略</text>
+  <text x="808" y="532" class="small">#launch Excel/CSV、多账户投放计划</text>
+  <text x="808" y="557" class="tiny">AdsManagementPage + LaunchPage</text>
+
+  <rect x="1138" y="456" width="374" height="120" rx="12" class="green"/>
+  <text x="1158" y="484" class="label">观察与处置域</text>
+  <text x="1158" y="508" class="small">#analytics 指标、批次、日历范围</text>
+  <text x="1158" y="532" class="small">#tasks 写入任务、人工核验、恢复</text>
+  <text x="1158" y="557" class="tiny">AnalyticsPage + TaskCenterPage</text>
+
+  <rect x="88" y="606" width="330" height="116" rx="12" class="amber"/>
+  <text x="108" y="634" class="label">连接与 Provider</text>
+  <text x="108" y="658" class="small">账户连接、Cookie / Official API</text>
+  <text x="108" y="682" class="small">能力就绪、同步质量、凭据导入</text>
+  <text x="108" y="706" class="tiny">ConnectionPage + capability view</text>
+
+  <rect x="438" y="606" width="330" height="116" rx="12" class="amber"/>
+  <text x="458" y="634" class="label">通知与说明</text>
+  <text x="458" y="658" class="small">#notifications 邮件、企业微信、飞书</text>
+  <text x="458" y="682" class="small">#manual 操作手册与 API / Cookie 教程</text>
+  <text x="458" y="706" class="tiny">NotificationsPage + ManualPage</text>
+
+  <rect x="788" y="606" width="330" height="116" rx="12" class="rose"/>
+  <text x="808" y="634" class="label">系统控制</text>
+  <text x="808" y="658" class="small">#system-users 登录用户、角色权限</text>
+  <text x="808" y="682" class="small">#maintenance 审计、备份、恢复、升级</text>
+  <text x="808" y="706" class="tiny">权限控制下的管理员页面</text>
+
+  <rect x="1138" y="606" width="374" height="116" rx="12" class="purple"/>
+  <text x="1158" y="634" class="label">共享 UI 架构</text>
+  <text x="1158" y="658" class="small">AccountScopedPage、Panel、Table、Modal</text>
+  <text x="1158" y="682" class="small">Loading / Empty / Error / Success 状态</text>
+  <text x="1158" y="706" class="tiny">重构重点：抽取视觉与布局，不抽走业务语义</text>
+
+  <rect x="64" y="778" width="1472" height="278" rx="16" class="blue"/>
+  <text x="88" y="809" class="section">三、数据与安全边界 · UI 仅通过现有 API 访问</text>
+  <rect x="88" y="834" width="272" height="184" rx="12" class="box"/>
+  <text x="108" y="862" class="label">apps/web/src/api.ts</text>
+  <text x="108" y="888" class="small">Bootstrap / accounts</text>
+  <text x="108" y="911" class="small">automation / ads / analytics</text>
+  <text x="108" y="934" class="small">launch / tasks / rules</text>
+  <text x="108" y="957" class="small">notifications / maintenance</text>
+  <text x="108" y="990" class="tiny">不改变 endpoint、payload、错误语义</text>
+
+  <rect x="396" y="834" width="292" height="184" rx="12" class="box"/>
+  <text x="416" y="862" class="label">apps/api</text>
+  <text x="416" y="888" class="small">Fastify 本地 API</text>
+  <text x="416" y="911" class="small">认证、CSRF、权限</text>
+  <text x="416" y="934" class="small">自动化服务、写入任务</text>
+  <text x="416" y="957" class="small">通知、启动 Worker</text>
+  <text x="416" y="990" class="tiny">默认 127.0.0.1</text>
+
+  <rect x="724" y="834" width="292" height="184" rx="12" class="box"/>
+  <text x="744" y="862" class="label">packages/core</text>
+  <text x="744" y="888" class="small">领域模型与规则评估</text>
+  <text x="744" y="911" class="small">决策、阈值、调度、创建协议</text>
+  <text x="744" y="934" class="small">账户、运行时、写入内核</text>
+  <text x="744" y="990" class="tiny">UI 不复制业务逻辑</text>
+
+  <rect x="1052" y="834" width="224" height="184" rx="12" class="box"/>
+  <text x="1072" y="862" class="label">Provider</text>
+  <text x="1072" y="888" class="small">Cookie</text>
+  <text x="1072" y="911" class="small">Official API</text>
+  <text x="1072" y="934" class="small">能力与同步质量</text>
+  <text x="1072" y="990" class="tiny">不改变适配接口</text>
+
+  <rect x="1312" y="834" width="200" height="184" rx="12" class="box"/>
+  <text x="1332" y="862" class="label">本地存储</text>
+  <text x="1332" y="888" class="small">SQLite</text>
+  <text x="1332" y="911" class="small">DPAPI 凭据</text>
+  <text x="1332" y="934" class="small">审计 / 备份</text>
+  <text x="1332" y="990" class="tiny">不接触明文凭据</text>
+
+  <path d="M800 372 V400" class="line"/><path d="M800 750 V778" class="line"/>
+  <path d="M360 926 H396" class="line"/><path d="M688 926 H724" class="line"/><path d="M1016 926 H1052" class="line"/><path d="M1276 926 H1312" class="line"/>
+
+  <text x="88" y="1090" class="tiny">重构契约：保留 hash 页面标识、现有功能入口、账户作用域、权限可见性、认证与 Provider 安全边界。</text>
+</svg>

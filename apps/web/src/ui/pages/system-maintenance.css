@@ -1,0 +1,750 @@
+.system-maintenance-page {
+  display: grid;
+  gap: var(--ui-section-compact, 80px);
+  width: 100%;
+  color: var(--ink);
+}
+
+.system-page-header {
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
+  padding: 24px 8px 32px;
+  border-bottom: 1px solid var(--line);
+}
+
+.system-page-header h1 {
+  margin: 8px 0;
+  color: var(--ink);
+  font-size: clamp(24px, 2vw, 32px);
+  font-weight: 650;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.system-page-header p,
+.system-access-denied p,
+.system-password-copy p {
+  max-width: 64ch;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.system-page-kicker {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.system-security-summary,
+.maintenance-status-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--primary);
+}
+
+.system-security-summary {
+  min-width: 280px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.system-security-summary span,
+.maintenance-status-heading span,
+.system-section-heading span {
+  display: grid;
+  gap: 4px;
+}
+
+.system-security-summary strong,
+.maintenance-status-heading strong,
+.system-section-heading strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.system-security-summary small,
+.maintenance-status-heading small,
+.system-section-heading small {
+  color: var(--ink-faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.system-users-workspace {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.6fr) minmax(288px, 0.9fr) minmax(288px, 0.9fr);
+  align-items: stretch;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.system-surface {
+  min-width: 0;
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+
+.system-users-workspace > .system-surface + .system-surface {
+  border-left: 1px solid var(--line);
+}
+
+.system-section-heading {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.system-section-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--primary);
+}
+
+.system-table-wrap {
+  width: 100%;
+  overflow: auto;
+}
+
+.system-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.system-table th {
+  height: 40px;
+  padding: 8px 12px;
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 550;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.system-table td {
+  min-height: 56px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.system-table tbody tr {
+  transition: var(--motion-fluid);
+}
+
+.system-table tbody tr:hover,
+.system-table tbody tr.is-selected {
+  background: var(--primary-tint);
+}
+
+.system-table td > strong,
+.system-table td > small {
+  display: block;
+}
+
+.system-table td > strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.system-table td > small {
+  margin-top: 4px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+
+.system-table code {
+  color: var(--primary);
+  font: inherit;
+}
+
+.system-table .inline-select {
+  min-width: 96px;
+  min-height: 32px;
+  padding: 0 24px 0 8px;
+  font-size: 11px;
+}
+
+.system-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.system-status.is-active {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  background: var(--success-tint);
+}
+
+.system-status.is-disabled {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  background: var(--danger-tint);
+}
+
+.system-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.system-text-button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 4px;
+  color: var(--primary);
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--motion-fluid);
+}
+
+.system-text-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  text-shadow: 0 8px 24px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+
+.system-text-button:active:not(:disabled),
+.system-maintenance-page button:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.system-text-button:disabled {
+  color: var(--ink-faint);
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.system-editor-form {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+}
+
+.system-editor-form .field,
+.system-password-form .field {
+  display: grid;
+  gap: 8px;
+}
+
+.system-editor-form .field input,
+.system-editor-form .field select,
+.system-password-form .field input,
+.system-filter-row input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  outline: none;
+  background: var(--surface);
+  transition: var(--motion-fluid);
+}
+
+.system-editor-form .field input:hover:not(:disabled),
+.system-editor-form .field select:hover:not(:disabled),
+.system-password-form .field input:hover:not(:disabled),
+.system-filter-row input:hover:not(:disabled) {
+  border-color: var(--primary);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.system-editor-form .field input:focus,
+.system-editor-form .field select:focus,
+.system-password-form .field input:focus,
+.system-filter-row input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-tint);
+}
+
+.system-radio-field {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin: 0;
+  padding: 0;
+  color: var(--ink-soft);
+  border: 0;
+  font-size: 12px;
+}
+
+.system-radio-field legend {
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.system-radio-field label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.system-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.system-protection-note,
+.system-footnote,
+.system-muted-note {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.role-overview-list {
+  display: grid;
+  padding: 8px 24px;
+}
+
+.role-overview-item {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.role-overview-item > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.role-overview-item strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.role-overview-item span,
+.role-overview-item > small {
+  color: var(--primary);
+  font-size: 11px;
+}
+
+.role-overview-item p {
+  margin: 8px 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.role-overview-panel > .system-footnote,
+.backup-panel > .system-footnote,
+.update-panel > .system-footnote {
+  margin: 16px 24px 24px;
+}
+
+.system-password-section {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.7fr) minmax(600px, 1.3fr);
+  align-items: end;
+  gap: 48px;
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.system-password-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  color: var(--primary);
+}
+
+.system-password-copy h2 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.system-password-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 16px;
+}
+
+.system-access-denied {
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 24px;
+  color: var(--primary);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.system-access-denied strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.maintenance-access-denied {
+  margin: 80px 0;
+}
+
+.maintenance-status-section {
+  display: grid;
+  grid-template-columns: minmax(176px, 0.4fr) minmax(0, 1.6fr);
+  align-items: center;
+  gap: 32px;
+  padding: 24px;
+  border-block: 1px solid var(--line);
+}
+
+.maintenance-status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.maintenance-status-card {
+  min-height: 72px;
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: none;
+}
+
+.maintenance-status-card small {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.maintenance-status-card strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.maintenance-status-card.danger strong {
+  color: var(--danger);
+}
+
+.system-inline-warning,
+.system-success-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, transparent);
+  border-radius: 6px;
+  color: var(--amber);
+  background: var(--amber-tint);
+  font-size: 11px;
+}
+
+.system-success-note {
+  margin: 16px 24px 0;
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 34%, transparent);
+  background: var(--success-tint);
+}
+
+.maintenance-status-section > .system-muted-note {
+  grid-column: 1 / -1;
+}
+
+.maintenance-operations-grid {
+  display: grid;
+  grid-template-columns: minmax(480px, 1.45fr) minmax(360px, 1fr) minmax(272px, 0.7fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.maintenance-operations-grid > .system-surface {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.system-filter-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.system-filter-row label {
+  display: grid;
+  gap: 8px;
+}
+
+.system-filter-row label > span {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.audit-table-wrap {
+  max-height: 448px;
+}
+
+.backup-list {
+  display: grid;
+  padding: 8px 24px;
+}
+
+.backup-item {
+  display: grid;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.backup-item:last-child {
+  border-bottom: 0;
+}
+
+.backup-item-main {
+  display: grid;
+  gap: 8px;
+}
+
+.backup-item-main .system-status {
+  justify-self: start;
+}
+
+.backup-item-main strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.backup-item-main small {
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.backup-item-main .backup-error {
+  color: var(--danger);
+}
+
+.update-facts {
+  display: grid;
+  padding: 8px 24px;
+}
+
+.update-facts > div {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.update-facts span {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.update-facts strong {
+  color: var(--ink);
+  font-size: 12px;
+  text-align: right;
+}
+
+.update-actions {
+  display: grid;
+  gap: 8px;
+  padding: 16px 24px;
+}
+
+.system-empty {
+  min-height: 80px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.system-maintenance-page button,
+.system-maintenance-page select,
+.system-maintenance-page a {
+  transition: var(--motion-fluid);
+}
+
+.system-maintenance-page .primary-button:hover:not(:disabled),
+.system-maintenance-page .secondary-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+@media (max-width: 1400px) {
+  .system-users-workspace {
+    grid-template-columns: minmax(520px, 1.5fr) minmax(288px, 0.8fr);
+  }
+
+  .role-overview-panel {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--line);
+    border-left: 0 !important;
+  }
+
+  .role-overview-list {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 24px;
+  }
+
+  .role-overview-item {
+    border-bottom: 0;
+  }
+
+  .maintenance-operations-grid {
+    grid-template-columns: minmax(480px, 1.4fr) minmax(320px, 1fr);
+  }
+
+  .update-panel {
+    grid-column: 1 / -1;
+  }
+
+  .update-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 24px;
+  }
+
+  .update-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1040px) {
+  .system-users-workspace,
+  .maintenance-operations-grid,
+  .system-password-section {
+    grid-template-columns: 1fr;
+  }
+
+  .system-users-workspace > .system-surface + .system-surface {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .role-overview-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .update-panel {
+    grid-column: auto;
+  }
+
+  .system-password-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .system-password-form > button {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
+  .maintenance-status-section {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .system-maintenance-page {
+    gap: var(--ui-section-compact, 80px);
+  }
+
+  .system-page-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-inline: 0;
+  }
+
+  .system-security-summary {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .system-users-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-section-heading,
+  .system-password-section {
+    padding: 16px;
+  }
+
+  .system-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .system-section-heading > button {
+    width: 100%;
+  }
+
+  .role-overview-list,
+  .maintenance-status-strip,
+  .system-filter-row,
+  .update-facts,
+  .update-actions,
+  .system-password-form {
+    grid-template-columns: 1fr;
+  }
+
+  .system-password-form > button {
+    grid-column: auto;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .system-maintenance-page *,
+  .system-maintenance-page *::before,
+  .system-maintenance-page *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

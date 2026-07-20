@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultRuleConfiguration,
   evaluateRuleConfiguration,
-  filterEntitiesToRecentCampaigns,
+  filterEntitiesToRecentWindow,
   type ProviderEntity,
   type RuleConfiguration,
 } from "./index.js";
@@ -25,7 +25,7 @@ function campaign(id: string, createdAt: string): ProviderEntity {
   };
 }
 
-function adGroup(campaignId: string): ProviderEntity {
+function adGroup(campaignId: string, createdAt?: string): ProviderEntity {
   return {
     entityType: "ad-group",
     externalId: `group-${campaignId}`,
@@ -33,6 +33,7 @@ function adGroup(campaignId: string): ProviderEntity {
       campaign_id: campaignId,
       adgroup_id: `group-${campaignId}`,
       ad_primary_status: "enable",
+      ...(createdAt ? { create_time: createdAt } : {}),
       row_data: {
         campaign_id: campaignId,
         time_attr_convert_cnt: 0,
@@ -44,47 +45,67 @@ function adGroup(campaignId: string): ProviderEntity {
   };
 }
 
-describe("48 hour campaign window", () => {
-  it("keeps only campaigns created during the previous 48 hours and their children", () => {
+function ad(adGroupId: string): ProviderEntity {
+  return {
+    entityType: "ad",
+    externalId: `ad-${adGroupId}`,
+    payload: {
+      ad_id: `ad-${adGroupId}`,
+      adgroup_id: adGroupId,
+      ad_primary_status: "enable",
+    },
+  };
+}
+
+describe("48 hour ad-group window", () => {
+  it("keeps a recent ad group even when its parent campaign predates the window", () => {
     const recent = campaign("recent", "2026-07-14T04:00:00.000Z");
     const old = campaign("old", "2026-07-12T03:59:59.000Z");
 
-    const result = filterEntitiesToRecentCampaigns(
-      [recent, adGroup("recent"), old, adGroup("old")],
+    const result = filterEntitiesToRecentWindow(
+      [
+        recent,
+        adGroup("recent", "2026-07-14T04:00:00.000Z"),
+        old,
+        adGroup("old", "2026-07-15T03:00:00.000Z"),
+        ad("group-old"),
+      ],
       now,
     );
 
     expect(result.entities.map((entity) => entity.externalId)).toEqual([
       "recent",
       "group-recent",
+      "group-old",
+      "ad-group-old",
     ]);
-    expect(result.excludedCount).toBe(2);
+    expect(result.excludedCount).toBe(1);
   });
 
   it("excludes entities when campaign creation time cannot be verified", () => {
-    const result = filterEntitiesToRecentCampaigns([adGroup("missing")], now);
+    const result = filterEntitiesToRecentWindow([adGroup("missing")], now);
 
     expect(result.entities).toHaveLength(0);
     expect(result.excludedCount).toBe(1);
   });
 
-  it("does not mistake a child create_time for the campaign creation time", () => {
+  it("uses an ad group's own create time rather than its campaign's age", () => {
     const child = adGroup("old-campaign");
     child.payload.create_time = "2026-07-15T03:00:00.000Z";
 
-    const result = filterEntitiesToRecentCampaigns([child], now);
+    const result = filterEntitiesToRecentWindow([child], now);
 
-    expect(result.entities).toHaveLength(0);
-    expect(result.excludedCount).toBe(1);
+    expect(result.entities).toEqual([child]);
+    expect(result.excludedCount).toBe(0);
   });
 
-  it("accepts an explicit campaign creation time carried by a child row", () => {
+  it("does not use a campaign timestamp carried by an ad group", () => {
     const child = adGroup("recent-campaign");
     child.payload.campaign_create_time = "2026-07-15T03:00:00.000Z";
 
-    const result = filterEntitiesToRecentCampaigns([child], now);
+    const result = filterEntitiesToRecentWindow([child], now);
 
-    expect(result.entities).toEqual([child]);
+    expect(result.entities).toHaveLength(0);
   });
 });
 

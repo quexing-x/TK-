@@ -395,10 +395,29 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     finally { setBusy(false); }
   };
 
-  return <section className="page-stack">
+  return <section className="page-stack launch-page">
     <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>预设统一配置，表格只填系列、广告组、视频和产品 URL</h2><p>完整创建协议由当前账户会话提供；预算、出价、地区与创建时间等由广告预设统一覆盖。</p></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? "创建参数已就绪" : "创建参数待完善"}</span></div>
 
+    <nav aria-label="广告创建流程" className="launch-workflow-steps">
+      <span className="active"><b>1</b><strong>选择方式</strong><small>确定创建范围</small></span>
+      <span className={selectedAccountIds.length > 0 ? "complete" : ""}><b>2</b><strong>账户与预设</strong><small>配置发布上下文</small></span>
+      <span className={sheet?.errors.length === 0 && sheet.rows.length ? "complete" : ""}><b>3</b><strong>导入校验</strong><small>核对创建内容</small></span>
+      <span className={canSave ? "ready" : ""}><b>4</b><strong>执行发布</strong><small>进入后台队列</small></span>
+    </nav>
+
+    <div className="launch-workbench">
+      <aside className="launch-mode-sidebar">
+
     <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2><p>先选业务目标，系统只展示当前操作所需的信息。</p></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
+
+        <div className="launch-sidebar-summary">
+          <span><small>已选账户</small><strong>{selectedAccountIds.length}</strong></span>
+          <span><small>导入条目</small><strong>{sheet?.rows.length ?? 0}</strong></span>
+          <span><small>待处理计划</small><strong>{activePlanIds.length}</strong></span>
+        </div>
+      </aside>
+
+      <main className="launch-workspace">
 
     <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
@@ -419,13 +438,12 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       <article><strong>导入信息</strong><span>{sheet?.errors.length === 0 && sheet.rows.length ? `已校验 ${sheet.rows.length} 条创建信息。` : "导入表只需填写系列名称、广告组名称、视频代码和产品 URL。"}</span></article>
     </div></div>
 
-    <div className="panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间、结束时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
+    <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
       <label className="field"><span>预设名称</span><input value={presetForm.name} onChange={(event) => setPresetForm((value) => ({ ...value, name: event.target.value }))} /></label>
       <label className="field"><span>投放地区</span><input placeholder="例如：US、美国、US/CA" value={presetForm.region} onChange={(event) => setPresetForm((value) => ({ ...value, region: event.target.value }))} /></label>
       <label className="field"><span>广告组日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.dailyBudget} onChange={(event) => setPresetForm((value) => ({ ...value, dailyBudget: Number(event.target.value) }))} /></label>
       <label className="field"><span>出价（留空为自动）</span><input min="0" step="0.01" type="number" value={presetForm.bid ?? ""} onChange={(event) => setPresetForm((value) => ({ ...value, bid: event.target.value === "" ? null : Number(event.target.value) }))} /></label>
       <label className="field"><span>创建时间（留空为立即）</span><input type="datetime-local" value={toLocalInput(presetForm.startAt)} onChange={(event) => setPresetForm((value) => ({ ...value, startAt: toIso(event.target.value) }))} /><span className="quick-time-actions"><button onClick={() => setPresetForm((value) => ({ ...value, startAt: scheduledStartAt("tonight") }))} type="button">当天 24:00</button><button onClick={() => setPresetForm((value) => ({ ...value, startAt: scheduledStartAt("tomorrow-morning") }))} type="button">次日 06:00</button></span></label>
-      <label className="field"><span>结束时间（可留空）</span><input type="datetime-local" value={toLocalInput(presetForm.endAt)} onChange={(event) => setPresetForm((value) => ({ ...value, endAt: toIso(event.target.value) }))} /></label>
       <label className="field"><span>初始状态</span><select value={presetForm.initialStatus} onChange={(event) => setPresetForm((value) => ({ ...value, initialStatus: event.target.value as LaunchPresetInput["initialStatus"] }))}><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
     </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、出价和时间等业务参数。</span></div>{!canManageLaunchPresets && <div className="preset-save-feedback warning"><strong>当前账号无预设管理权限</strong><span>登录角色为“{auth.status.user?.role ?? "未知"}”，无法保存广告预设；请切换至开发者、管理员或操作员账号。</span></div>}{presetFeedback && <div className={`preset-save-feedback ${presetFeedback.tone}`}><strong>{presetFeedback.title}</strong><span>{presetFeedback.lines[0]}</span></div>}<div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets} onClick={() => void savePreset()} title={canManageLaunchPresets ? undefined : "需要 launch:manage 权限"} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(freshPreset()); setPresetFeedback(null); }} type="button">取消编辑</button>}</div>
       <div className="table-wrap"><table><thead><tr><th>预设</th><th>地区</th><th>预算</th><th>出价</th><th>创建时间</th><th>初始状态</th><th>操作</th></tr></thead><tbody>{presets.map((preset) => <tr key={preset.id}><td>{preset.name}</td><td>{preset.region}</td><td>{preset.dailyBudget}</td><td>{preset.bid ?? "自动"}</td><td>{preset.startAt ? new Date(preset.startAt).toLocaleString() : "立即"}</td><td>{preset.initialStatus === "enabled" ? "开启" : "关闭"}</td><td><button disabled={busy} onClick={() => editPreset(preset)} type="button">编辑</button> <button disabled={busy} onClick={() => void removePreset(preset.id)} type="button">删除</button></td></tr>)}</tbody></table></div>
@@ -461,6 +479,9 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     </div>
 
     <div className="panel table-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>后台执行时会自动刷新逐项状态和当前阶段。</p></div></div></div><div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>{plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => { const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0); const failed = plan.executionResults.reduce((total, item) => total + item.failedCount, 0); const unknown = plan.executionResults.reduce((total, item) => total + item.unknownCount, 0); const items = planItems[plan.id] ?? []; const failedItems = items.filter((item) => item.status === "failed"); const unknownItems = items.filter((item) => item.status === "unknown"); return <tr key={plan.id}><td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.launchRows.length} 条 × {plan.targetAccountIds.length} 个账户</td><td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : ["failed", "unknown"].includes(item.status) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adName} · {launchItemStatusLabel(item.status)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td><td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">成功 {created} · 失败 {failed} · 待核验 {unknown}</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{item.accountId}：{detail.text}</small> : null; })}</td><td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重试 {item.launchRow.adName}</button>)}{unknownItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => setVerificationTarget({ planId: plan.id, item })} type="button">人工核验 {item.launchRow.adName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td></tr>; })}</tbody></table></div></div>
+
+      </main>
+    </div>
 
     {verificationTarget && <LaunchVerificationDialog
       accountName={accounts.find((account) => account.id === verificationTarget.item.accountId)?.displayName ?? verificationTarget.item.accountId}
