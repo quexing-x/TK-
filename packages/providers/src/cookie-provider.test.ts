@@ -965,14 +965,10 @@ describe("CookieAdsProvider", () => {
     second.row.adName = "260717:002";
     const provider = new CookieAdsProvider();
 
-    const firstResults = await provider.createFromPreset!(
-      creationTestContext(false),
-      [first],
-    );
-    const secondResults = await provider.createFromPreset!(
-      creationTestContext(false),
-      [second],
-    );
+    const [firstResults, secondResults] = await Promise.all([
+      provider.createFromPreset!(creationTestContext(false), [first]),
+      provider.createFromPreset!(creationTestContext(false), [second]),
+    ]);
     const results = [...firstResults, ...secondResults];
 
     expect(results).toHaveLength(2);

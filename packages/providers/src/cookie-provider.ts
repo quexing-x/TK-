@@ -65,6 +65,7 @@ export class CookieAdsProvider implements AdsProvider {
   readonly capabilityVersion = "cookie-capabilities-v2-2026-07";
   readonly capabilities = capabilities;
   private readonly creationBatchReservations = new Map<string, CreationBatchReservations>();
+  private readonly creationBatchLocks = new Map<string, Promise<void>>();
 
   resolveCapabilities(context: ProviderContext): ReadonlySet<ProviderCapability> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -322,63 +323,64 @@ export class CookieAdsProvider implements AdsProvider {
     const results: CreationMutationResult[] = [];
     const batchId = mutations[0]?.batchId;
     const reservationKey = batchId ? `${context.accountId}:${batchId}` : null;
-    const reservations = reservationKey
-      ? this.creationBatchReservations.get(reservationKey) ?? this.createBatchReservations(reservationKey)
-      : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>(), uncertainCampaigns: new Set<string>() };
-    for (const mutation of mutations) {
-      const campaignKey = mutation.row.campaignName.trim();
-      if (mutation.templateMode === "none" && reservations.uncertainCampaigns.has(campaignKey)) {
-        results.push({
-          ...mutation,
-          ok: false,
-          failureKind: "retryable",
-          message: "同批次前一条同系列任务结果未知，已停止后续创建以避免重复系列或广告组。",
-        });
-        continue;
-      }
-      try {
-        const result = await createCookieDraftChain(
-          sessionRequest,
-          campaignListRequest,
-          credential,
-          mutation,
-          context.timezone ?? "UTC",
-          mutation.templateMode === "none" ? {
-            ...(reservations.campaignIds.get(campaignKey)
-              ? { campaignId: reservations.campaignIds.get(campaignKey)! }
-              : {}),
-            adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
-          } : undefined,
-        );
-        results.push(result);
-        if (mutation.templateMode === "none" && result.ok && result.campaignId) {
-          reservations.campaignIds.set(campaignKey, result.campaignId);
-          const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
-          names.add(result.row.adGroupName.trim());
-          reservations.adGroupNames.set(campaignKey, names);
+    const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
+    try {
+      const reservations = reservationKey
+        ? this.creationBatchReservations.get(reservationKey) ?? this.createBatchReservations(reservationKey)
+        : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>(), uncertainCampaigns: new Set<string>() };
+      for (const mutation of mutations) {
+        const campaignKey = mutation.row.campaignName.trim();
+        if (mutation.templateMode === "none" && reservations.uncertainCampaigns.has(campaignKey)) {
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            message: "同批次前一条同系列任务结果未知，已停止后续创建以避免重复系列或广告组。",
+          });
+          continue;
         }
-      } catch (cause) {
-        if (mutation.templateMode === "none" && cause instanceof UnknownCreationStateError) {
-          reservations.uncertainCampaigns.add(campaignKey);
+        try {
+          const result = await createCookieDraftChain(
+            sessionRequest,
+            campaignListRequest,
+            credential,
+            mutation,
+            context.timezone ?? "UTC",
+            mutation.templateMode === "none" ? {
+              ...(reservations.campaignIds.get(campaignKey)
+                ? { campaignId: reservations.campaignIds.get(campaignKey)! }
+                : {}),
+              adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
+            } : undefined,
+          );
+          results.push(result);
+          if (mutation.templateMode === "none" && result.ok && result.campaignId) {
+            reservations.campaignIds.set(campaignKey, result.campaignId);
+            const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+            names.add(result.row.adGroupName.trim());
+            reservations.adGroupNames.set(campaignKey, names);
+          }
+        } catch (cause) {
+          if (mutation.templateMode === "none" && cause instanceof UnknownCreationStateError) {
+            reservations.uncertainCampaigns.add(campaignKey);
+          }
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: cause instanceof UnknownCreationStateError
+              ? "unknown"
+              : "retryable",
+            message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
+          });
         }
-        results.push({
-          ...mutation,
-          ok: false,
-          failureKind: cause instanceof UnknownCreationStateError
-            ? "unknown"
-            : "retryable",
-          message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
-        });
       }
+      return results;
+    } finally {
+      releaseBatchLock?.();
     }
-    return results;
   }
 
   private createBatchReservations(key: string): CreationBatchReservations {
-    if (this.creationBatchReservations.size >= 100) {
-      const oldest = this.creationBatchReservations.keys().next().value as string | undefined;
-      if (oldest) this.creationBatchReservations.delete(oldest);
-    }
     const reservations: CreationBatchReservations = {
       campaignIds: new Map(),
       adGroupNames: new Map(),
@@ -386,6 +388,19 @@ export class CookieAdsProvider implements AdsProvider {
     };
     this.creationBatchReservations.set(key, reservations);
     return reservations;
+  }
+
+  private async acquireBatchLock(key: string): Promise<() => void> {
+    const previous = this.creationBatchLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => current);
+    this.creationBatchLocks.set(key, tail);
+    await previous;
+    return () => {
+      release();
+      if (this.creationBatchLocks.get(key) === tail) this.creationBatchLocks.delete(key);
+    };
   }
 
   async create(
