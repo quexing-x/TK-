@@ -3098,10 +3098,10 @@ export class AutomationStore {
         const resolvedAdGroupName = typeof creationEvidence.resolvedAdGroupName === "string"
           ? creationEvidence.resolvedAdGroupName.trim()
           : "";
-        if (!resolvedAdGroupName && names.has(launchRow.adGroupName)) {
-          throw new Error("未知创建记录缺少实际广告组名称，请升级后重新核验，禁止猜测后续名。");
+        if (!resolvedAdGroupName) {
+          throw new Error("未知创建记录缺少实际广告组名称，禁止猜测原名或后续名并确认成功。");
         }
-        names.add(resolvedAdGroupName || launchRow.adGroupName);
+        names.add(resolvedAdGroupName);
         this.db.prepare(
           `INSERT INTO launch_creation_locks (
              plan_id, account_id, campaign_name, owner_id, claimed_at,

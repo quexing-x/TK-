@@ -1331,9 +1331,9 @@ describe("AutomationStore", () => {
       sourceAdId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
-      launchRows: [launchItemRow(2), launchItemRow(3)],
+      launchRows: [launchItemRow(2), launchItemRow(3), launchItemRow(4)],
     });
-    const [confirmed, notCreated] = store.listLaunchPlanItems(plan.id);
+    const [confirmed, notCreated, legacyUnknown] = store.listLaunchPlanItems(plan.id);
     store.claimLaunchPlanItem(confirmed!.itemId, "executor-a", "pending");
     store.updateLaunchPlanItemProgress(confirmed!.itemId, "executor-a", {
       phase: "validation",
@@ -1355,6 +1355,8 @@ describe("AutomationStore", () => {
     store.completeLaunchPlanItemUnknown(notCreated!.itemId, "executor-a", "response lost");
     store.claimLaunchCreationScope(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-b");
     store.markLaunchCreationScopeUncertain(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-b");
+    store.claimLaunchPlanItem(legacyUnknown!.itemId, "executor-a", "pending");
+    store.completeLaunchPlanItemUnknown(legacyUnknown!.itemId, "executor-a", "legacy response lost");
 
     expect(() => store.verifyUnknownLaunchPlanItem(confirmed!.itemId, {
       decision: "confirmed-succeeded",
@@ -1364,6 +1366,15 @@ describe("AutomationStore", () => {
       adGroupId: null,
       adId: null,
     }, { id: "user-1", name: "reviewer" })).toThrow("必须填写");
+
+    expect(() => store.verifyUnknownLaunchPlanItem(legacyUnknown!.itemId, {
+      decision: "confirmed-succeeded",
+      evidence: "TikTok 后台可见但旧任务没有记录实际广告组名称",
+      note: "legacy unknown",
+      campaignId: "campaign-legacy",
+      adGroupId: "group-legacy",
+      adId: "ad-legacy",
+    }, { id: "user-1", name: "reviewer" })).toThrow("缺少实际广告组名称");
 
     const success = store.verifyUnknownLaunchPlanItem(confirmed!.itemId, {
       decision: "confirmed-succeeded",
