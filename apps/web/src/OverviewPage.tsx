@@ -80,7 +80,12 @@ export function OverviewPage({
     operations,
     statuses: ["preview", "pending"],
   }), [approvals, decisions, entities, operations]);
-  const stream = useMemo(() => decisions.slice(0, 5), [decisions]);
+  const stream = useMemo(
+    () => decisions
+      .filter((decision) => ["succeeded", "failed", "unknown"].includes(decision.status))
+      .slice(0, 5),
+    [decisions],
+  );
   const accountExceptions = useMemo(() => connectionStates.flatMap((state) => {
     const accountName = accounts.find((account) => account.id === state.accountId)?.displayName ?? "未命名账户";
     const disconnected = state.connection?.status === "failed"
@@ -118,8 +123,8 @@ export function OverviewPage({
         <div className="runtime-stat-grid">
           <OverviewStat label="已接入账户" value={String(readyCount)} meta={`共 ${accounts.length} 个`} />
           <OverviewStat label="自动化账户" value={String(enabledCount)} meta="当前启用" />
-          <OverviewStat label="待处理决策" value={String(pending.length)} meta="需要确认" tone={pending.length ? "warning" : undefined} />
-          <OverviewStat label="累计决策" value={String(decisions.length)} meta="本地可追溯" />
+          <OverviewStat label="自动执行" value={String(stream.length)} meta="最近完成" />
+          <OverviewStat label="执行记录" value={String(decisions.length)} meta="本地可追溯" />
         </div>
         <div className={`runtime-state-card ${runtime.enabled ? "active" : "paused"}`}>
           <span>主控状态</span>
@@ -182,9 +187,18 @@ export function OverviewPage({
           </div>
         </article>
 
+        <article className="overview-zone connection-health-zone">
+          <header className="zone-heading"><div><h2>连接健康</h2><span>本地服务状态</span></div></header>
+          <div className="connection-health-list">
+            <ConnectionHealth icon={<ShieldCheck size={17} />} label="账户接入" detail={`${readyCount}/${accounts.length} 正常`} healthy={readyCount === accounts.length} />
+            <ConnectionHealth icon={<Database size={17} />} label="本地数据" detail="读取正常" healthy />
+            <ConnectionHealth icon={<Activity size={17} />} label="任务队列" detail={runtime.enabled ? "运行中" : "已暂停"} healthy={runtime.enabled} />
+          </div>
+        </article>
+
         <article className="overview-zone activity-zone">
           <header className="zone-heading">
-            <div><h2>最近活动</h2><span>自动化决策流</span></div>
+            <div><h2>最近执行</h2><span>自动化操作记录</span></div>
             <button className="icon-text-link" type="button" onClick={() => onNavigate("tasks")}>查看全部 <ArrowRight size={14} /></button>
           </header>
           <div className="activity-list">
@@ -193,12 +207,20 @@ export function OverviewPage({
                 <span className={`activity-icon ${decision.status === "succeeded" ? "success" : decision.status === "failed" || decision.status === "unknown" ? "danger" : "info"}`}>
                   {decision.status === "succeeded" ? <CheckCircle2 size={15} /> : decision.status === "failed" || decision.status === "unknown" ? <CircleAlert size={15} /> : <Radio size={15} />}
                 </span>
-                <div><strong>{decision.entityName}</strong><small>{decision.action === "enable" ? "建议开启" : "建议关闭"} · {decision.reason}</small></div>
+                <div><strong>{decision.entityName}</strong><small>{decision.action === "enable" ? "自动开启" : "自动关闭"} · {decision.reason}</small></div>
                 <time>{new Date(decision.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>
               </div>
-            )) : <p className="overview-empty"><Activity size={17} /> 暂无决策记录</p>}
+            )) : <p className="overview-empty"><Activity size={17} /> 暂无自动执行记录</p>}
           </div>
         </article>
+      </section>
+
+      <section className="overview-account-section">
+        <header className="account-section-heading">
+          <div><span className="section-kicker">ACCOUNT OPERATIONS</span><h2>账户管理</h2></div>
+          <p>账户默认自动执行；人工接管仅作用于广告管理中的单一广告组。</p>
+        </header>
+        {children}
       </section>
 
       <section className="overview-lower-grid">
@@ -212,22 +234,6 @@ export function OverviewPage({
           </div>
         </article>
 
-        <article className="connection-health-zone">
-          <header className="zone-heading"><div><h2>连接健康</h2><span>本地服务状态</span></div></header>
-          <div className="connection-health-list">
-            <ConnectionHealth icon={<ShieldCheck size={17} />} label="账户接入" detail={`${readyCount}/${accounts.length} 正常`} healthy={readyCount === accounts.length} />
-            <ConnectionHealth icon={<Database size={17} />} label="本地数据" detail="读取正常" healthy />
-            <ConnectionHealth icon={<Activity size={17} />} label="任务队列" detail={runtime.enabled ? "运行中" : "已暂停"} healthy={runtime.enabled} />
-          </div>
-        </article>
-      </section>
-
-      <section className="overview-account-section">
-        <header className="account-section-heading">
-          <div><span className="section-kicker">ACCOUNT OPERATIONS</span><h2>账户管理</h2></div>
-          <p>原账户新增、编辑、接入、同步、自动化开关和删除能力完整保留。</p>
-        </header>
-        {children}
       </section>
     </section>
   );

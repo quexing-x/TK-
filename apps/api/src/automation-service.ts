@@ -122,13 +122,11 @@ export class AutomationService {
     }
 
     this.runningAccounts.add(accountId);
-    const lowRiskPolicy = this.store.getLowRiskAutomationPolicy(accountId);
     const writeCircuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
     const automaticDisableRun =
-      trigger === "scheduler" &&
+      trigger !== "preview" &&
       account.enabled &&
       account.executionMode === "automatic" &&
-      lowRiskPolicy.enabled &&
       !writeCircuit?.openedAt;
     const executionMode = automaticDisableRun ? "automatic" as const : "observe" as const;
     const run = this.store.createAutomationRun(
@@ -177,21 +175,7 @@ export class AutomationService {
             ? `Cookie 已失效或数据同步异常：${message}`
             : `API 数据同步异常：${message}`,
         );
-        if (account.executionMode === "automatic") {
-          this.store.setAccountExecutionMode(
-            accountId,
-            "manual-approval",
-            "Provider 数据同步失败，已自动熔断写入。",
-          );
-        }
         throw cause;
-      }
-      if (output.result.quality.status !== "healthy" && account.executionMode === "automatic") {
-        this.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          `同步数据不完整：${output.result.warnings.join("；").slice(0, 500)}`,
-        );
       }
       const ruleConfiguration = this.store.getRuleConfiguration();
       const dataQualityWarnings = [
@@ -343,7 +327,7 @@ export class AutomationService {
             accountId,
             actionKey: buildAutomaticActionKey(accountId, suggestionMetadata.ruleVersion, candidate),
             localDate,
-            dailyLimit: lowRiskPolicy.dailyActionLimit,
+            dailyLimit: 0,
           });
           if (reservation !== "claimed") {
             this.store.updateAutomationDecision(
@@ -351,7 +335,7 @@ export class AutomationService {
               "skipped",
               reservation === "duplicate"
                 ? "相同规则输入已被其他执行器领取，本轮跳过。"
-                : `已达到每日自动关闭上限 ${lowRiskPolicy.dailyActionLimit}。`,
+                : "已达到每日自动关闭上限。",
             );
             continue;
           }
@@ -373,6 +357,14 @@ export class AutomationService {
             );
             if (result.ok) {
               successCount += 1;
+              if (candidate.entity.entityType === "ad-group") {
+                this.store.expireOpenAutomationDecisionsForEntity(
+                  accountId,
+                  candidate.entity.entityType,
+                  candidate.entity.externalId,
+                  decision.id,
+                );
+              }
               this.store.updateAutomationDecision(decision.id, "succeeded");
             } else if (result.failureKind === "unknown") {
               failureCount += 1;
@@ -437,11 +429,6 @@ export class AutomationService {
         health.message,
       );
       if (health.status !== "ready") {
-        this.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          "Cookie 或 Provider 连接检测未通过，已自动熔断写入。",
-        );
       }
     } catch (cause) {
       const message = safeMessage(cause);
@@ -452,11 +439,6 @@ export class AutomationService {
         account.providerKind === "cookie"
           ? `Cookie 已失效或连接异常：${message}`
           : `API 连接异常：${message}`,
-      );
-      this.store.setAccountExecutionMode(
-        accountId,
-        "manual-approval",
-        "Cookie 或 Provider 连接检测失败，已自动熔断写入。",
       );
     }
   }
@@ -669,11 +651,6 @@ export class AutomationService {
           account.providerKind,
           "failed",
           `批准执行前同步异常：${message}`,
-        );
-        this.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          "批准执行前 Provider 同步失败，已自动熔断写入。",
         );
         throw cause;
       }
@@ -936,7 +913,7 @@ export class AutomationService {
     successMessage?: string,
   ): Promise<{ result: StatusMutationResult; task: AdOperationRecord }> {
     if (!this.store.getSystemRuntimeState().enabled) {
-      throw new Error("软件总开关已关闭，广告启停操作已暂停。");
+      throw new WriteBlockedBeforeDispatchError("软件总开关已关闭，广告启停操作已暂停。");
     }
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
@@ -985,7 +962,7 @@ export class AutomationService {
         executorId,
         connection,
         requireAutomatic,
-        source === "automation" && requireAutomatic,
+        false,
         successMessage,
       ),
       task,
@@ -1093,11 +1070,6 @@ export class AutomationService {
         syncWarning = `状态写入后回读未确认目标状态：期望 ${desiredStatus}，实际 ${observedStatus ?? "未返回"}`;
       }
       if (syncWarning) {
-        this.store.setAccountExecutionMode(
-          task.accountId,
-          "manual-approval",
-          syncWarning.slice(0, 500),
-        );
         this.statusTasks.unknown(task.id, executorId, syncWarning);
         return { ...result, ok: false, failureKind: "unknown", message: syncWarning };
       }
@@ -1108,11 +1080,6 @@ export class AutomationService {
         account.providerKind,
         "failed",
         `状态写入后同步异常：${syncWarning}`,
-      );
-      this.store.setAccountExecutionMode(
-        task.accountId,
-        "manual-approval",
-        "状态写入后 Provider 数据同步失败，已自动熔断写入。",
       );
       this.statusTasks.unknown(task.id, executorId, syncWarning);
       return { ...result, ok: false, failureKind: "unknown", message: syncWarning };
@@ -1328,11 +1295,6 @@ export class AutomationService {
       message,
     );
     if (failures >= 3) {
-      this.store.setAccountExecutionMode(
-        context.accountId,
-        "manual-approval",
-        "连续 3 次 Provider 写入失败，已自动熔断。",
-      );
     }
   }
 

@@ -376,11 +376,6 @@ export class LaunchService {
         ];
         if (safetyWarnings.length > 0) {
           syncWarning = [syncWarning, ...safetyWarnings].filter(Boolean).join("；");
-          this.store.setAccountExecutionMode(
-            claimed.accountId,
-            "manual-approval",
-            `创建后同步数据不完整：${syncWarning.slice(0, 500)}`,
-          );
         }
       } catch (cause) {
         syncWarning = [syncWarning, safeError(cause)].filter(Boolean).join("；");
@@ -389,11 +384,6 @@ export class LaunchService {
           account.providerKind,
           "failed",
           `创建后同步异常：${syncWarning}`,
-        );
-        this.store.setAccountExecutionMode(
-          claimed.accountId,
-          "manual-approval",
-          "创建后 Provider 数据同步失败，已自动熔断写入。",
         );
       }
       try {
@@ -486,13 +476,6 @@ export class LaunchService {
     message: string,
   ): void {
     const failures = this.store.recordProviderWriteFailure(accountId, providerKind, message);
-    if (failures >= 3) {
-      this.store.setAccountExecutionMode(
-        accountId,
-        "manual-approval",
-        "连续 3 次创建写入失败，已自动熔断。",
-      );
-    }
   }
 
   private recoverExpiredLeases(): void {

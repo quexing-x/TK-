@@ -585,13 +585,8 @@ const defaultAccountInput: AccountCreateInput = {
   providerKind: "cookie",
 };
 
-type AccountEditorInput = AccountCreateInput & {
-  executionMode: AccountConfig["executionMode"];
-};
-
-const defaultAccountEditorInput: AccountEditorInput = {
+const defaultAccountEditorInput: AccountCreateInput = {
   ...defaultAccountInput,
-  executionMode: "manual-approval",
 };
 
 interface AccountAutomationOverview {
@@ -688,7 +683,7 @@ function UsersPage({
   const auth = useAuth();
   const canManageAccounts = auth.status.permissions.includes("accounts:manage");
   const [editing, setEditing] = useState<AccountConfig | null>(null);
-  const [form, setForm] = useState<AccountEditorInput>(defaultAccountEditorInput);
+  const [form, setForm] = useState<AccountCreateInput>(defaultAccountEditorInput);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [connecting, setConnecting] = useState<AccountConfig | null>(null);
@@ -740,10 +735,7 @@ function UsersPage({
         throw new Error("账户缺少数据读取或广告启停能力，不能开启自动化。");
       }
       if (editing) await api.updateSettings(editing.id, form);
-      else {
-        const { executionMode: _executionMode, ...createInput } = form;
-        await api.createAccount(createInput);
-      }
+      else await api.createAccount(form);
       await onChanged();
       setShowForm(false);
       onError(null);
@@ -896,13 +888,6 @@ function UsersPage({
                 </select>
               </Field>
               <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} disabled={!form.enabled && (!editing || !canEnableAccountAutomation(connectionStates[editing.id]?.capabilities))} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
-              <Field label="执行模式">
-                <select value={form.executionMode} onChange={(event) => setForm({ ...form, executionMode: event.target.value as AccountConfig["executionMode"] })}>
-                  <option value="observe">仅观察</option>
-                  <option value="manual-approval">人工批准（默认）</option>
-                  <option value="automatic">自动执行（高风险）</option>
-                </select>
-              </Field>
             </div>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
@@ -1214,7 +1199,6 @@ function AdsManagementPage({
       <div className="panel table-panel">
         <div className="panel-heading">
           <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组 <em className="heading-count">{manualTakeovers.length}</em></h2></div></div>
-          <button className="secondary-button" disabled={busy !== null || !canOperateAds || manualTakeovers.length === 0} onClick={() => void restoreAllManualTakeovers()} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">全部恢复自动化</button>
         </div>
         <div className="table-wrap"><table><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th>操作</th></tr></thead><tbody>
           {manualTakeovers.length === 0 ? <tr><td colSpan={4}>暂无人工接管的广告组。</td></tr> : manualTakeovers.map((takeover) => <tr key={`${takeover.entityType}:${takeover.externalId}`}><td>{entityNameByKey.get(`${takeover.entityType}:${takeover.externalId}`) ?? takeover.externalId}<br /><small>{takeover.externalId}</small></td><td>{takeover.reason}</td><td>{new Date(takeover.createdAt).toLocaleString()}</td><td><button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void restoreManualTakeover(takeover)} type="button">恢复自动化</button></td></tr>)}
@@ -1551,9 +1535,9 @@ function AutomationPage({
   const [decisions, setDecisions] = useState<
     AutomationDecisionRecord[] | null
   >(null);
-  const [approvals, setApprovals] = useState<AutomationApprovalRecord[] | null>(null);
-  const [managedEntities, setManagedEntities] = useState<ManagedEntityRecord[] | null>(null);
-  const [adOperations, setAdOperations] = useState<AdOperationRecord[] | null>(null);
+  // Legacy approval records are no longer fetched or rendered. Keep the local
+  // value only while older client bundles finish upgrading.
+  const [approvals, setApprovals] = useState<AutomationApprovalRecord[]>([]);
   const [lowRiskState, setLowRiskState] = useState<LowRiskAutomationState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<string | null>(null);
@@ -1561,24 +1545,17 @@ function AutomationPage({
   const canRunAutomation = connection?.status === "ready"
     && hasProviderCapability(capabilities, "read-campaigns");
   const canChangeStatus = hasProviderCapability(capabilities, "change-status");
-  const unreadyAccounts = overview.unreadyAccounts ?? [];
 
   const load = useCallback(async () => {
     try {
-      const [nextRuns, nextDecisions, nextApprovals, nextLowRiskState, nextEntities, nextOperations] = await Promise.all([
+      const [nextRuns, nextDecisions, nextLowRiskState] = await Promise.all([
         api.getAutomationRuns(account.id),
         api.getAutomationDecisions(account.id),
-        api.getAutomationApprovals(account.id),
         api.getLowRiskAutomation(account.id),
-        api.getManagedEntities(account.id),
-        api.getAdOperations(account.id),
       ]);
       setRuns(nextRuns);
       setDecisions(nextDecisions);
-      setApprovals(nextApprovals);
       setLowRiskState(nextLowRiskState);
-      setManagedEntities(nextEntities);
-      setAdOperations(nextOperations);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -1588,10 +1565,7 @@ function AutomationPage({
   useEffect(() => {
     setRuns(null);
     setDecisions(null);
-    setApprovals(null);
     setLowRiskState(null);
-    setManagedEntities(null);
-    setAdOperations(null);
     void load();
   }, [load]);
 
@@ -1608,7 +1582,7 @@ function AutomationPage({
         setRunFeedback(
           preview
             ? `检测完成：生成 ${result.candidateCount} 项规则建议，未修改广告。`
-            : `建议生成完成：共 ${result.candidateCount} 项，未调用 TikTok 写接口。`,
+            : `自动执行完成：命中 ${result.candidateCount} 项，成功关闭 ${result.successCount} 项，失败 ${result.failureCount} 项。`,
         );
       }
       await load();
@@ -1702,21 +1676,14 @@ function AutomationPage({
     }
   };
 
-  if (!runs || !decisions || !approvals || !lowRiskState || !managedEntities || !adOperations) {
+  if (!runs || !decisions || !lowRiskState) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
   const latest = runs[0];
-  const approvalByDecision = new Map(
-    approvals.map((approval) => [approval.decisionId, approval]),
-  );
-  const pendingDecisions = selectPendingAutomationDecisions({
-    decisions,
-    approvals,
-    entities: managedEntities.map((entity) => ({ ...entity, accountId: account.id })),
-    operations: adOperations,
-  });
-  const pendingDecisionIds = new Set(pendingDecisions.map((decision) => decision.id));
+  const pendingDecisions: AutomationDecisionRecord[] = [];
+  const pendingDecisionIds = new Set<string>();
+  const approvalByDecision = new Map<string, AutomationApprovalRecord>();
   const automationHealthy = canRunAutomation && !lowRiskState.circuit?.openedAt;
   return (
     <section className="page-stack automation-page">
@@ -1734,7 +1701,7 @@ function AutomationPage({
         <dl className="automation-status-metrics">
           <div><dt>账户自动化</dt><dd>{account.enabled ? "已开启" : "已关闭"}</dd></div>
           <div><dt>最近候选</dt><dd>{latest?.candidateCount ?? 0} 项</dd></div>
-          <div><dt>待审批决策</dt><dd>{pendingDecisions.length} 项</dd></div>
+          <div><dt>本轮自动关闭</dt><dd>{latest?.successCount ?? 0} 项</dd></div>
           <div><dt>单轮操作上限</dt><dd>{maxActionsPerRun} 项</dd></div>
         </dl>
       </header>
@@ -1742,8 +1709,8 @@ function AutomationPage({
       <section className="automation-safety-panel" aria-labelledby="automation-safety-title">
         <div>
           <span className="eyebrow">安全执行建议</span>
-          <h2 id="automation-safety-title">先预览，再生成只读建议</h2>
-          <p>检测预览和“生成建议”不会修改广告；批准执行时仍会重新检查连接、数据质量和对象状态。</p>
+          <h2 id="automation-safety-title">自动关闭，异常即止</h2>
+          <p>后台轮询会直接执行已验证的关闭规则；每次写入前仍会检查连接、数据质量、广告状态和熔断保护。</p>
           {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
         <div className="automation-actions">
@@ -1762,10 +1729,10 @@ function AutomationPage({
             disabled={busy !== null || !account.enabled || !canRunAutomation}
             onClick={() => void execute(false)}
             type="button"
-            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则生成只读建议" : "请先在用户管理中开启账户自动化"}
+            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则立即执行自动关闭" : "请先在用户管理中开启账户自动化"}
           >
             <Play size={17} />
-            {busy === "run" ? "生成中…" : "生成建议"}
+            {busy === "run" ? "执行中…" : "立即执行"}
           </button>
         </div>
       </section>
@@ -1779,17 +1746,16 @@ function AutomationPage({
           <ol className="automation-flow" aria-label="自动化执行流程">
             <li className={runs.length > 0 ? "complete" : "current"}><span><Check size={14} /></span><small>检测</small></li>
             <li className={latest ? "complete" : "pending"}><span><Check size={14} /></span><small>评估</small></li>
-            <li className={decisions.length > 0 ? "complete" : "pending"}><span><Check size={14} /></span><small>预设</small></li>
-            <li className={pendingDecisions.length > 0 ? "current" : "pending"}><span>{pendingDecisions.length}</span><small>待执行</small></li>
-            <li className={approvals.some((item) => item.status === "running") ? "current" : "pending"}><span><Play size={12} /></span><small>执行</small></li>
-            <li className={approvals.some((item) => item.status === "succeeded") ? "complete" : "pending"}><span><Check size={14} /></span><small>完成</small></li>
+            <li className={latest?.candidateCount ? "complete" : "pending"}><span><Check size={14} /></span><small>命中规则</small></li>
+            <li className={latest?.actionCount ? "complete" : "pending"}><span><Play size={12} /></span><small>直接执行</small></li>
+            <li className={latest?.successCount ? "complete" : "pending"}><span><Check size={14} /></span><small>回读确认</small></li>
           </ol>
           <p className="automation-flow-note">
             {lowRiskState.circuit?.openedAt
               ? `熔断已触发：${lowRiskState.circuit.lastError ?? "未知错误"}`
-              : pendingDecisions.length > 0
-                ? `当前有 ${pendingDecisions.length} 项建议等待人工审批。`
-                : "当前没有待审批建议，可先执行检测预览。"}
+              : latest?.failureCount
+                ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
+                : "无需人工审批；广告组可在广告管理中单独接管。"}
           </p>
           <div className="automation-actions">
             <button className="secondary-button" disabled={busy !== null || !canRunAutomation} onClick={() => void execute(true)} type="button">
@@ -1824,6 +1790,17 @@ function AutomationPage({
             ))}
           </div>
         </section>
+
+        <section className="automation-readiness-panel account-readiness-panel">
+          <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2><p>仅显示当前账户的接入与自动化状态。</p></div></div></div>
+          <div className="automation-account-status-grid">
+            <span>接入状态 <strong className={connection?.status === "ready" ? "status active" : "status warning"}>{connection?.status === "ready" ? "已接入" : "未接入"}</strong></span>
+            <span>自动化 <strong className={account.enabled ? "status active" : "status warning"}>{account.enabled ? "已开启" : "已关闭"}</strong></span>
+          </div>
+          {connection?.status === "ready"
+            ? <p className="retention-note">当前账户已通过连接检测，可按全局规则自动执行。</p>
+            : <p className="retention-note">{connectionStatusSummary(account, connection)}</p>}
+        </section>
       </div>
 
       <section className="automation-policy-panel low-risk-panel">
@@ -1850,12 +1827,6 @@ function AutomationPage({
         </div>
         {account.executionMode !== "automatic" && <p className="retention-note">请先在用户管理中将账户执行模式明确设为“自动执行”；启用后仍只开放关闭规则。</p>}
         {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
-      </section>
-
-      <section className="automation-readiness-panel account-readiness-panel">
-        <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2><p>由后台轮询维护；页面只展示已保存的最新结果，不会因切换页面重新检测。</p></div></div></div>
-        <div className="sync-count-grid"><span>已接入 <strong>{overview.connectedCount}</strong></span><span>已开启自动化 <strong>{overview.automationEnabledCount}</strong></span><span>待处理接入 <strong>{unreadyAccounts.length}</strong></span></div>
-        {unreadyAccounts.length > 0 ? <div className="sheet-issues warning"><strong>以下已开启自动化的账户尚不能运行</strong><ul>{unreadyAccounts.map((item) => <li key={item.accountId}><strong>{item.displayName}</strong>：{item.message}</li>)}</ul></div> : <p className="retention-note">所有已开启自动化的账户均已通过连接检测。</p>}
       </section>
 
       <section className="automation-history-section">
@@ -2022,7 +1993,6 @@ function settingsFromAccount(account: AccountConfig): AccountSettingsUpdate {
     accountType: account.accountType,
     enabled: account.enabled,
     providerKind: account.providerKind,
-    executionMode: account.executionMode,
   };
 }
 

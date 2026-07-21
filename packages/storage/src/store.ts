@@ -435,7 +435,7 @@ export class AutomationStore {
         "Asia/Shanghai",
         5,
         15,
-        "manual-approval",
+        "automatic",
         now,
       );
 
@@ -473,7 +473,7 @@ export class AutomationStore {
         "Asia/Shanghai",
         5,
         15,
-        "manual-approval",
+        "automatic",
         now,
       );
     this.writeSwitches(id, createDefaultAutomationSwitches(), false);
@@ -553,6 +553,8 @@ export class AutomationStore {
     settings: AccountSettingsUpdate,
   ): AccountConfig | null {
     const now = new Date().toISOString();
+    const current = this.getAccount(accountId);
+    if (!current) return null;
     const result = this.db
       .prepare(
         `UPDATE accounts SET
@@ -565,7 +567,7 @@ export class AutomationStore {
         settings.accountType,
         toSqlBoolean(settings.enabled),
         settings.providerKind,
-        settings.executionMode,
+        current.executionMode,
         now,
         accountId,
       );
@@ -573,7 +575,7 @@ export class AutomationStore {
     if (result.changes === 0) {
       return null;
     }
-    if (settings.executionMode !== "automatic") {
+    if (current.executionMode !== "automatic") {
       this.db.prepare(
         `UPDATE account_low_risk_automation_policies
          SET enabled = 0, updated_at = ? WHERE account_id = ?`,
@@ -4237,6 +4239,24 @@ export class AutomationStore {
     return decision;
   }
 
+  /** A completed group closure makes older open reminders for that group stale. */
+  expireOpenAutomationDecisionsForEntity(
+    accountId: string,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+    exceptDecisionId: string,
+  ): number {
+    const result = this.db.prepare(
+      `UPDATE automation_decisions
+       SET status = 'skipped',
+           error_message = '广告组已关闭，已清除过期决策提醒',
+           executed_at = COALESCE(executed_at, ?)
+       WHERE account_id = ? AND entity_type = ? AND external_id = ?
+         AND id != ? AND status IN ('preview', 'pending')`,
+    ).run(new Date().toISOString(), accountId, entityType, externalId, exceptDecisionId);
+    return Number(result.changes);
+  }
+
   getAutomationDecision(decisionId: string): AutomationDecisionRecord | null {
     const row = this.db
       .prepare("SELECT * FROM automation_decisions WHERE id = ?")
@@ -5907,6 +5927,19 @@ export class AutomationStore {
            WHERE status = 'pending'`,
         )
         .run();
+    });
+    this.applyMigration("direct-automation-default-v1", () => {
+      const now = new Date().toISOString();
+      this.db.prepare(
+        "UPDATE accounts SET execution_mode = 'automatic', updated_at = ? WHERE execution_mode != 'automatic'",
+      ).run(now);
+      this.db.prepare(
+        `UPDATE automation_decisions
+         SET status = 'skipped',
+             error_message = COALESCE(error_message, '已切换为直接自动执行，过期决策提醒已清除'),
+             executed_at = COALESCE(executed_at, ?)
+         WHERE status IN ('preview', 'pending')`,
+      ).run(now);
     });
     this.ensureGlobalDefaults();
   }
