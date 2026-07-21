@@ -1227,9 +1227,13 @@ export async function createApp(
       }
       const body = ManualStatusInputSchema.parse(request.body);
       const user = request.authSession?.user;
-      return automation.changeStatusManually(accountId, body, user
-        ? { id: user.id, name: user.username, kind: "user" }
-        : { id: "local-user", name: "本地用户", kind: "user" });
+      try {
+        return automation.enqueueManualStatusChange(accountId, body, user
+          ? { id: user.id, name: user.username, kind: "user" }
+          : { id: "local-user", name: "本地用户", kind: "user" });
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
     },
   );
 

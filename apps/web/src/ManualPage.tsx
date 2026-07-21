@@ -6,10 +6,24 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { userGuide } from "@tk-auto/manual";
+import "./ui/pages/notifications-manual.css";
 
 export function ManualPage() {
+  const scrollToSection = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
-    <section className="manual-layout">
+    <section className="manual-page">
+      <header className="manual-page-heading">
+        <div>
+          <span className="eyebrow">TK Ads Automation</span>
+          <p>使用说明与接入指南</p>
+        </div>
+        <div className="manual-version"><BookOpen size={16} /><span>手册版本</span><strong>{userGuide.version}</strong></div>
+      </header>
+
+      <div className="manual-layout">
       <aside className="manual-index panel">
         <div className="manual-index-heading">
           <BookOpen size={19} />
@@ -22,7 +36,7 @@ export function ManualPage() {
           {userGuide.sections.map((section) => (
             <button
               key={section.id}
-              onClick={() => document.getElementById(section.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              onClick={() => scrollToSection(section.id)}
               type="button"
             >
               {section.title}
@@ -74,6 +88,18 @@ export function ManualPage() {
             )}
           </article>
         ))}
+      </div>
+
+      <aside className="manual-page-nav panel" aria-label="本页导航">
+        <strong>本页导航</strong>
+        <nav>
+          {userGuide.sections.map((section, index) => (
+            <button key={section.id} onClick={() => scrollToSection(section.id)} type="button">
+              <span>{String(index + 1).padStart(2, "0")}</span>{section.title}
+            </button>
+          ))}
+        </nav>
+      </aside>
       </div>
     </section>
   );

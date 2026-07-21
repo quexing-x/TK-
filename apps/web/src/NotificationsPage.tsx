@@ -22,6 +22,7 @@ import type {
 } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
+import "./ui/pages/notifications-manual.css";
 
 type EmailSettings = Extract<
   NotificationChannelSettings,
@@ -66,6 +67,7 @@ export function NotificationsPage({
   const auth = useAuth();
   const canManageRules = auth.status.permissions.includes("rules:manage");
   const [channels, setChannels] = useState<NotificationChannelRecord[]>([]);
+  const [activeChannel, setActiveChannel] = useState<"email" | "wecom" | "feishu" | "history">("email");
   const [deliveries, setDeliveries] = useState<NotificationDeliveryRecord[]>([]);
   const [cycles, setCycles] = useState<PollCycleRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -235,22 +237,51 @@ export function NotificationsPage({
   return (
     <section className="page-stack notification-page">
       {!canManageRules && <div className="alert warning-alert"><ShieldCheck size={18} /><span>当前角色仅可查看通知配置；保存、测试和删除凭据需要 rules:manage 权限。</span></div>}
-      <div className="notification-hero panel">
-        <span className="notification-hero-icon"><BellRing size={24} /></span>
+      <header className="notification-page-heading">
         <div>
-          <span className="eyebrow">轮询结果通知</span>
-          <h2>每轮自动化结束后发送一份汇总</h2>
-          <p>
-            仅在存在到期账户并实际完成一轮轮询后发送，按账户统计开启、关闭、无操作、失败和跳过；空轮询不发送，推送失败也不会阻断广告启停。
-          </p>
+          <span className="eyebrow">系统通知中心</span>
+          <p>配置并验证自动化轮询结果的推送渠道。</p>
         </div>
         <button className="secondary-button" onClick={() => void load()} type="button">
           <RefreshCcw size={16} />刷新状态
         </button>
-      </div>
+      </header>
 
-      <fieldset className="notification-channel-grid" disabled={!canManageRules} style={{ border: 0, margin: 0, minInlineSize: 0, padding: 0 }}>
-        <ChannelCard
+      <div className="notification-workspace">
+        <aside className="notification-workspace-nav panel" aria-label="推送配置导航">
+          <div className="notification-nav-heading">
+            <BellRing size={18} />
+            <div><strong>推送配置</strong><span>3 个可用渠道</span></div>
+          </div>
+          <nav>
+            <button className={activeChannel === "email" ? "active" : ""} onClick={() => setActiveChannel("email")} type="button">
+              <Mail size={16} /><span>邮箱 SMTP</span><StatusBadge status={channelMap.get("email")?.status ?? "not-configured"} />
+            </button>
+            <button className={activeChannel === "wecom" ? "active" : ""} onClick={() => setActiveChannel("wecom")} type="button">
+              <MessageSquareText size={16} /><span>企业微信</span><StatusBadge status={channelMap.get("wecom")?.status ?? "not-configured"} />
+            </button>
+            <button className={activeChannel === "feishu" ? "active" : ""} onClick={() => setActiveChannel("feishu")} type="button">
+              <Send size={16} /><span>飞书</span><StatusBadge status={channelMap.get("feishu")?.status ?? "not-configured"} />
+            </button>
+            <button className={activeChannel === "history" ? "active" : ""} onClick={() => setActiveChannel("history")} type="button">
+              <RefreshCcw size={16} /><span>推送记录</span>
+            </button>
+          </nav>
+        </aside>
+
+        <div className="notification-workspace-main">
+          <div className="notification-hero panel">
+            <span className="notification-hero-icon"><BellRing size={24} /></span>
+            <div>
+              <span className="eyebrow">轮询结果通知</span>
+              <h2>每轮自动化结束后发送一份汇总</h2>
+              <p>仅在存在到期账户并实际完成一轮轮询后发送，按账户统计开启、关闭、无操作、失败和跳过；空轮询不发送，推送失败也不会阻断广告启停。</p>
+            </div>
+          </div>
+
+          <fieldset className="notification-channel-grid" disabled={!canManageRules} style={{ border: 0, margin: 0, minInlineSize: 0, padding: 0 }}>
+        {activeChannel === "email" && (<ChannelCard
+          id="notification-email"
           channel={channelMap.get("email")}
           icon={<Mail size={21} />}
           title="邮箱 SMTP"
@@ -278,9 +309,10 @@ export function NotificationsPage({
             ]}
             title="邮箱接入教程"
           />
-        </ChannelCard>
+        </ChannelCard>)}
 
-        <ChannelCard
+        {activeChannel === "wecom" && (<ChannelCard
+          id="notification-wecom"
           channel={channelMap.get("wecom")}
           icon={<MessageSquareText size={21} />}
           title="企业微信群机器人"
@@ -303,9 +335,10 @@ export function NotificationsPage({
             ]}
             title="企业微信接入教程"
           />
-        </ChannelCard>
+        </ChannelCard>)}
 
-        <ChannelCard
+        {activeChannel === "feishu" && (<ChannelCard
+          id="notification-feishu"
           channel={channelMap.get("feishu")}
           icon={<Send size={21} />}
           title="飞书群自定义机器人"
@@ -329,21 +362,25 @@ export function NotificationsPage({
             ]}
             title="飞书接入教程"
           />
-        </ChannelCard>
-      </fieldset>
+        </ChannelCard>)}
+          </fieldset>
 
-      <HistoryTables deliveries={deliveries} cycles={cycles} />
+          {activeChannel === "history" && <div id="notification-history"><HistoryTables deliveries={deliveries} cycles={cycles} /></div>}
+        </div>
+      </div>
     </section>
   );
 }
 
 function ChannelCard({
+  id,
   channel,
   icon,
   title,
   description,
   children,
 }: {
+  id: string;
   channel: NotificationChannelRecord | undefined;
   icon: React.ReactNode;
   title: string;
@@ -351,7 +388,7 @@ function ChannelCard({
   children: React.ReactNode;
 }) {
   return (
-    <article className="notification-channel panel">
+    <article className="notification-channel panel" id={id}>
       <header>
         <span className="notification-channel-icon">{icon}</span>
         <div>

@@ -12,32 +12,31 @@ import {
   type RuleConfiguration,
 } from "./rules.js";
 
-export interface RecentCampaignFilterResult {
+export interface RecentWindowFilterResult {
   entities: ProviderEntity[];
   excludedCount: number;
 }
 
-export function filterEntitiesToRecentCampaigns(
+export function filterEntitiesToRecentWindow(
   entities: ProviderEntity[],
   now = new Date(),
   lookbackHours = RULE_LOOKBACK_HOURS,
-): RecentCampaignFilterResult {
+): RecentWindowFilterResult {
   const cutoff = now.getTime() - lookbackHours * 60 * 60 * 1_000;
   const futureTolerance = now.getTime() + 5 * 60 * 1_000;
-  const campaignCreatedAt = new Map<string, number>();
+  const adGroupCreatedAt = new Map<string, number>();
 
   for (const entity of entities) {
-    if (entity.entityType !== "campaign") continue;
-    const createdAt = extractCampaignCreatedAt(entity.payload, true);
-    if (createdAt !== null) campaignCreatedAt.set(entity.externalId, createdAt);
+    if (entity.entityType !== "ad-group") continue;
+    const createdAt = extractEntityCreatedAt(entity.payload);
+    if (createdAt !== null) adGroupCreatedAt.set(entity.externalId, createdAt);
   }
 
   const filtered = entities.filter((entity) => {
-    const campaignId = getCampaignId(entity);
-    if (!campaignId) return false;
-    const createdAt =
-      campaignCreatedAt.get(campaignId) ??
-      extractCampaignCreatedAt(entity.payload, entity.entityType === "campaign");
+    const createdAt = entity.entityType === "ad"
+      ? adGroupCreatedAt.get(getAdGroupId(entity) ?? "") ??
+        extractAdGroupCreatedAt(entity.payload)
+      : extractEntityCreatedAt(entity.payload);
     return (
       createdAt !== null && createdAt >= cutoff && createdAt <= futureTolerance
     );
@@ -187,24 +186,30 @@ function layerEnabled(
   return configuration.layers.ad;
 }
 
-function getCampaignId(entity: ProviderEntity): string | null {
-  if (entity.entityType === "campaign") return entity.externalId;
+function getAdGroupId(entity: ProviderEntity): string | null {
+  if (entity.entityType === "ad-group") return entity.externalId;
   const source = flattenPayload(entity.payload);
-  return firstString(source, ["campaign_id", "campaignId"]);
+  return firstString(source, ["adgroup_id", "ad_group_id", "adGroupId"]);
 }
 
-function extractCampaignCreatedAt(
-  payload: Record<string, unknown>,
-  allowGenericCreateTime: boolean,
-): number | null {
+function extractEntityCreatedAt(payload: Record<string, unknown>): number | null {
+  const source = flattenPayload(payload);
+  const keys = ["create_time", "created_at", "createTime"];
+  for (const key of keys) {
+    const timestamp = parseTimestamp(source[key]);
+    if (timestamp !== null) return timestamp;
+  }
+  return null;
+}
+
+function extractAdGroupCreatedAt(payload: Record<string, unknown>): number | null {
   const source = flattenPayload(payload);
   const keys = [
-    "campaign_create_time",
-    "campaign_created_at",
-    "campaignCreateTime",
-    ...(allowGenericCreateTime
-      ? ["create_time", "created_at", "createTime"]
-      : []),
+    "adgroup_create_time",
+    "adgroup_created_at",
+    "adGroupCreateTime",
+    "ad_group_create_time",
+    "ad_group_created_at",
   ];
   for (const key of keys) {
     const timestamp = parseTimestamp(source[key]);

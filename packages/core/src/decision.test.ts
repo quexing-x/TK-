@@ -56,6 +56,29 @@ describe("evaluateAutomation", () => {
     expect(snapshot.status).toBe("enabled");
   });
 
+  it("treats TikTok delivery-limited ad groups as enabled", () => {
+    const snapshot = normalizeProviderEntity({
+      entityType: "ad-group",
+      externalId: "adgroup-delivery-limited",
+      payload: {
+        ad_primary_status: "delivery_limited",
+        ad_status: "ads_review_partially_approved",
+      },
+    });
+
+    expect(snapshot.status).toBe("enabled");
+  });
+
+  it("keeps an explicit paused provider state closed", () => {
+    const snapshot = normalizeProviderEntity({
+      entityType: "ad-group",
+      externalId: "adgroup-paused",
+      payload: { ad_primary_status: "paused" },
+    });
+
+    expect(snapshot.status).toBe("disabled");
+  });
+
   it("creates a disable candidate when a guarded threshold matches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.manageAdGroupStatus = true;
@@ -68,6 +91,26 @@ describe("evaluateAutomation", () => {
       metricValue: 1.2,
       entity: { externalId: "adgroup-1", status: "enabled" },
     });
+  });
+
+  it("skips automatic writes when the provider status is unknown", () => {
+    const switches = createDefaultAutomationSwitches();
+    switches.manageAdGroupStatus = true;
+    const unknown = {
+      ...entity,
+      payload: {
+        ...entity.payload,
+        ad_primary_status: undefined,
+      },
+    };
+
+    const result = evaluateAutomation([unknown], [threshold], switches);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.skipped).toContainEqual(expect.objectContaining({
+      externalId: "adgroup-1",
+      reason: "启停状态未确认，跳过自动写入。",
+    }));
   });
 
   it("does not create a candidate below minimum spend", () => {

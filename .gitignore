@@ -10,7 +10,10 @@ apps/desktop/release/
 !.env.example
 data/*.db
 data/*.db-*
+data/*.bak
 data/logs/
+data/performance/
+data/performance-smoke*/
 data/credentials/
 *.log
 /private/

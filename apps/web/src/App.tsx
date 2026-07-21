@@ -81,9 +81,14 @@ import {
   type AnalysisPreset,
 } from "./analytics";
 import { syncQualityPresentation } from "./sync-quality-view";
+import { selectPendingAutomationDecisions } from "./automation-decision-view";
 import { nextUiTheme, resolveUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from "./ui-theme";
+import {
+  nextLocalRefreshAt,
+  secondsUntilLocalRefresh,
+} from "./local-refresh";
 
-type PageKey =
+export type PageKey =
   | "overview"
   | "manual"
   | "users"
@@ -99,7 +104,7 @@ type PageKey =
 
 const selectedAccountStorageKey = "tk-auto:selected-account-id";
 
-const pageHash: Record<PageKey, string> = {
+export const pageHash: Record<PageKey, string> = {
   overview: "#overview",
   manual: "#manual",
   users: "#users",
@@ -114,11 +119,23 @@ const pageHash: Record<PageKey, string> = {
   "system-users": "#system-users",
 };
 
-function pageFromHash(hash = window.location.hash): PageKey {
+export function pageFromHash(hash = window.location.hash): PageKey {
+  // Account management now lives on the home page. Preserve old bookmarks by
+  // redirecting them to the home page instead of keeping a duplicate route.
+  if (hash === "#users") return "overview";
   const found = (Object.entries(pageHash) as Array<[PageKey, string]>).find(
     ([, value]) => value === hash,
   );
   return found?.[0] ?? "overview";
+}
+
+export function accountIdForPage(
+  accounts: AccountConfig[],
+  selectedAccountId: string,
+  page: PageKey,
+): string {
+  if (selectedAccountId !== "all" || page === "ads") return selectedAccountId;
+  return accounts[0]?.id ?? "";
 }
 
 function preferredAccountId(
@@ -128,6 +145,7 @@ function preferredAccountId(
 ): string {
   const available = new Set(accounts.map((account) => account.id));
   const remembered = window.localStorage.getItem(selectedAccountStorageKey) ?? "";
+  if (current === "all" || remembered === "all") return "all";
   if (available.has(current)) return current;
   if (available.has(remembered)) return remembered;
   return states.find((state) => state.connection?.status === "ready")?.accountId
@@ -146,12 +164,6 @@ const navItems: Array<{
     label: "总览",
     description: "运行状态、待处理决策与快捷操作",
     icon: LayoutDashboard,
-  },
-  {
-    key: "users",
-    label: "用户管理",
-    description: "多广告账户与独立配置",
-    icon: UserRound,
   },
   {
     key: "automation",
@@ -190,12 +202,6 @@ const navItems: Array<{
     icon: Plus,
   },
   {
-    key: "tasks",
-    label: "任务中心",
-    description: "写入任务、恢复与人工核验",
-    icon: ListChecks,
-  },
-  {
     key: "system-users",
     label: "系统权限",
     description: "登录账户与角色权限",
@@ -209,7 +215,7 @@ const navItems: Array<{
   },
 ];
 
-function canAccessNavigationItem(
+export function canAccessNavigationItem(
   key: PageKey,
   permissions: readonly string[],
 ): boolean {
@@ -247,6 +253,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
   const auth = useAuth();
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
+  const [analyticsScope, setAnalyticsScope] = useState("all");
   const [page, setPage] = useState<PageKey>(() => pageFromHash());
   const [error, setError] = useState<string | null>(null);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -272,6 +279,10 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
   }, [loadBootstrap]);
 
   useEffect(() => {
+    if (!window.location.hash || window.location.hash === "#users") {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${pageHash.overview}`);
+      setPage("overview");
+    }
     const syncPageFromUrl = () => setPage(pageFromHash());
     window.addEventListener("hashchange", syncPageFromUrl);
     return () => window.removeEventListener("hashchange", syncPageFromUrl);
@@ -306,17 +317,18 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
     return () => window.clearInterval(interval);
   }, [loadBootstrap]);
 
+  const pageAccountId = accountIdForPage(bootstrap?.accounts ?? [], selectedAccountId, page);
   const account = bootstrap?.accounts.find(
-    (item) => item.id === selectedAccountId,
+    (item) => item.id === pageAccountId,
   );
   const selectedConnection = bootstrap?.accountConnectionStates.find(
-    (item) => item.accountId === selectedAccountId,
+    (item) => item.accountId === pageAccountId,
   )?.connection ?? null;
   const selectedLatestSync = bootstrap?.accountConnectionStates.find(
-    (item) => item.accountId === selectedAccountId,
+    (item) => item.accountId === pageAccountId,
   )?.latestSync ?? null;
   const selectedCapabilities = bootstrap?.accountConnectionStates.find(
-    (item) => item.accountId === selectedAccountId,
+    (item) => item.accountId === pageAccountId,
   )?.capabilities;
 
   if (!bootstrap) {
@@ -418,7 +430,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         <header className="topbar">
           <div>
             <span className="eyebrow">核心控制台</span>
-            <h1>{page === "manual" ? "操作手册" : navItems.find((item) => item.key === page)?.label}</h1>
+            <h1>{page === "overview" ? "运营总览" : page === "manual" ? "操作手册" : navItems.find((item) => item.key === page)?.label}</h1>
           </div>
           <div className="command-area">
             <button className="command-trigger" type="button" onClick={() => setCommandOpen((open) => !open)} aria-expanded={commandOpen}>
@@ -472,35 +484,37 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         )}
 
         {page === "overview" ? (
-          <OverviewPage
-            accounts={bootstrap.accounts}
-            connectionStates={bootstrap.accountConnectionStates}
-            runtime={bootstrap.systemRuntime}
-            onNavigate={navigateTo}
-          />
+          <>
+            <OverviewPage
+              accounts={bootstrap.accounts}
+              connectionStates={bootstrap.accountConnectionStates}
+              runtime={bootstrap.systemRuntime}
+              onNavigate={navigateTo}
+            >
+              <UsersPage
+                accounts={bootstrap.accounts}
+                initialConnectionStates={Object.fromEntries(
+                  bootstrap.accountConnectionStates.map((state) => [
+                    state.accountId,
+                    {
+                      connection: state.connection,
+                      readiness: null,
+                      latestSync: state.latestSync,
+                      capabilities: state.capabilities,
+                    },
+                  ]),
+                )}
+                onChanged={loadBootstrap}
+                onError={setError}
+              />
+            </OverviewPage>
+          </>
         ) : page === "manual" ? (
           <ManualPage />
         ) : page === "system-users" ? (
           <SystemUsersPage onError={setError} />
         ) : page === "maintenance" ? (
           <MaintenancePage onError={setError} />
-        ) : page === "users" ? (
-          <UsersPage
-            accounts={bootstrap.accounts}
-            initialConnectionStates={Object.fromEntries(
-              bootstrap.accountConnectionStates.map((state) => [
-                state.accountId,
-                {
-                  connection: state.connection,
-                  readiness: null,
-                  latestSync: state.latestSync,
-                  capabilities: state.capabilities,
-                },
-              ]),
-            )}
-            onChanged={loadBootstrap}
-            onError={setError}
-          />
         ) : page === "rules" ? (
           <RulesPage
             settings={bootstrap.globalAutomationSettings}
@@ -515,26 +529,47 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             accountCapabilities={Object.fromEntries(
               bootstrap.accountConnectionStates.map((state) => [state.accountId, state.capabilities]),
             )}
-            preferredAccountId={selectedAccountId}
+            preferredAccountId={pageAccountId}
             onError={setError}
           />
         ) : page === "tasks" ? (
-          <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={selectedAccountId} onError={setError} />
+          <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={pageAccountId} onError={setError} />
+        ) : page === "ads" ? (
+          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
+            {selectedAccountId === "all" ? (
+              <AllAccountsAdsView
+                accounts={bootstrap.accounts}
+                accountCapabilities={Object.fromEntries(
+                  bootstrap.accountConnectionStates.map((state) => [state.accountId, state.capabilities]),
+                )}
+                onError={setError}
+              />
+            ) : account ? (
+              <AdsManagementPage account={account} capabilities={selectedCapabilities} onError={setError} />
+            ) : <EmptyState text="请选择一个账户。" />}
+          </AccountScopedPage>
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
-          <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
+          <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={pageAccountId} onSelect={selectAccount}>
             <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} onError={setError} />
             <AutomationFeaturesPage onError={setError} />
           </AccountScopedPage></section>
-        ) : page === "ads" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
-            <AdsManagementPage account={account} capabilities={selectedCapabilities} onError={setError} />
-          </AccountScopedPage>
         ) : page === "analytics" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount}>
-            <AnalyticsPage account={account} connection={selectedConnection} latestSync={selectedLatestSync} onError={setError} />
-          </AccountScopedPage>
+          <>
+            <AccountScopedPage accounts={bootstrap.accounts} selectedId={analyticsScope} onSelect={setAnalyticsScope} allowAll>
+              {analyticsScope === "all" ? (
+                <AllAccountsAnalyticsView accounts={bootstrap.accounts} onError={setError} />
+              ) : (() => {
+                const scopedAccount = bootstrap.accounts.find((item) => item.id === analyticsScope);
+                const scopedState = bootstrap.accountConnectionStates.find((state) => state.accountId === analyticsScope);
+                return scopedAccount
+                  ? <AnalyticsPage account={scopedAccount} connection={scopedState?.connection ?? null} latestSync={scopedState?.latestSync ?? null} onError={setError} />
+                  : <EmptyState text="请选择账户。" />;
+              })()}
+            </AccountScopedPage>
+            <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={pageAccountId} onError={setError} />
+          </>
         ) : (
           <EmptyState text="页面不存在。" />
         )}
@@ -772,7 +807,7 @@ function UsersPage({
   };
 
   return (
-    <section className="page-stack">
+    <section className="page-stack" id="account-management">
       <div className="panel table-panel">
         <div className="panel-heading">
           <div>
@@ -905,13 +940,16 @@ function AdsManagementPage({
   const canOperateAds = auth.status.permissions.includes("ads:operate");
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
+  const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
   const [schedules, setSchedules] = useState<ScheduledEntityActionRecord[]>([]);
   const [query, setQuery] = useState("");
-  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("ad-group");
+  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>("all");
   const [manualTakeovers, setManualTakeovers] = useState<IgnoredEntityRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
+  const [nextRefreshAt, setNextRefreshAt] = useState(() => nextLocalRefreshAt());
+  const [statusConfirming, setStatusConfirming] = useState<ManagedEntityRecord | null>(null);
   const [scheduling, setScheduling] = useState<ManagedEntityRecord | null>(null);
   const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
   const [scheduledAction, setScheduledAction] = useState<"enable" | "disable">("disable");
@@ -922,14 +960,16 @@ function AdsManagementPage({
 
   const load = useCallback(async () => {
     try {
-      const [nextEntities, nextOperations, nextSchedules, nextManualTakeovers] = await Promise.all([
+      const [nextEntities, nextOperations, nextDecisions, nextSchedules, nextManualTakeovers] = await Promise.all([
         api.getManagedEntities(account.id),
         api.getAdOperations(account.id),
+        api.getAutomationDecisions(account.id),
         api.getSchedules(account.id),
         api.getManualTakeovers(account.id),
       ]);
       setEntities(nextEntities);
       setOperations(nextOperations);
+      setDecisions(nextDecisions);
       setSchedules(nextSchedules);
       setManualTakeovers(nextManualTakeovers);
       onError(null);
@@ -944,12 +984,27 @@ function AdsManagementPage({
   }, [load]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setClock(Date.now());
-      void load();
-    }, 30_000);
-    return () => window.clearInterval(timer);
-  }, [load]);
+    let stopped = false;
+    let refreshTimer: number | null = null;
+    const clockTimer = window.setInterval(() => setClock(Date.now()), 1_000);
+
+    const scheduleRefresh = (at: number) => {
+      refreshTimer = window.setTimeout(async () => {
+        setClock(Date.now());
+        await load();
+        if (stopped) return;
+        const next = nextLocalRefreshAt();
+        setNextRefreshAt(next);
+      }, Math.max(0, at - Date.now()));
+    };
+
+    scheduleRefresh(nextRefreshAt);
+    return () => {
+      stopped = true;
+      window.clearInterval(clockTimer);
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+    };
+  }, [load, nextRefreshAt]);
 
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -963,21 +1018,24 @@ function AdsManagementPage({
       );
     });
   }, [entities, level, query, statusFilter]);
+  const pendingStatusKeys = useMemo(() => new Set(
+    operations
+      .filter((operation) => operation.status === "pending" || operation.status === "running")
+      .map((operation) => `${operation.entityType}:${operation.externalId}`),
+  ), [operations]);
 
   const changeStatus = async (entity: ManagedEntityRecord) => {
     if (!canOperateAds) return;
-    if (entity.status === "unknown") return;
-    const action = entity.status === "enabled" ? "disable" : "enable";
-    if (!window.confirm(`确认${action === "enable" ? "开启" : "关闭"}“${entity.name}”吗？`)) return;
+    const action = entity.status === "disabled" ? "enable" : "disable";
     try {
       setBusy(`${entity.entityType}:${entity.externalId}:status`);
-      const result = await api.changeEntityStatus(account.id, {
+      const task = await api.changeEntityStatus(account.id, {
         entityType: entity.entityType,
         externalId: entity.externalId,
         action,
       });
-      if (!result.ok) throw new Error(result.message);
-      await load();
+      setOperations((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+      void load();
     } catch (cause) {
       onError(getErrorMessage(cause));
     } finally {
@@ -1078,15 +1136,32 @@ function AdsManagementPage({
   };
 
   if (!entities) return <EmptyState text="正在读取广告对象…" loading />;
-  const secondsUntilLocalRefresh = Math.max(1, 30 - Math.floor((clock / 1_000) % 30));
+  const refreshSeconds = secondsUntilLocalRefresh(nextRefreshAt, clock);
   const entityNameByKey = new Map(entities.map((entity) => [`${entity.entityType}:${entity.externalId}`, entity.name]));
+  const enabledCount = filtered.filter((entity) => entity.status === "enabled").length;
+  const ignoredCount = filtered.filter((entity) => entity.ignored).length;
+  const currentSpend = filtered.reduce((total, entity) => total + (entity.metrics.spend ?? 0), 0);
 
   return (
-    <section className="page-stack">
+    <section className="page-stack ads-page">
+      <div className="ads-metric-rail" aria-label="广告管理摘要">
+        <article><small>当前对象</small><strong>{filtered.length}</strong><span>今日开启或有消耗</span></article>
+        <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
+        <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>当前账户汇总</span></article>
+        <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
+        <article><small>定时任务</small><strong>{schedules.length}</strong><span>单次与过夜计划</span></article>
+      </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
           <Field label="名称或 ID">
             <input placeholder="搜索广告系列、广告组或广告" value={query} onChange={(event) => setQuery(event.target.value)} />
+          </Field>
+          <Field label="状态">
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+              <option value="all">全部状态</option>
+              <option value="enabled">已开启</option>
+              <option value="disabled">已关闭</option>
+            </select>
           </Field>
           <Field label="层级">
             <select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}>
@@ -1096,42 +1171,37 @@ function AdsManagementPage({
               <option value="ad">广告</option>
             </select>
           </Field>
-          <Field label="状态">
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
-              <option value="all">全部状态</option>
-              <option value="enabled">已开启</option>
-              <option value="disabled">已关闭</option>
-              <option value="unknown">未知</option>
-            </select>
-          </Field>
         </div>
       </div>
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象</h2><p>共 {filtered.length} 项；人工接管的广告组不会参与自动化决策。</p></div></div>
-          <small className="inline-protection-note" title="仅刷新本地已同步数据，不会触发 TikTok 请求">下次本地更新：{secondsUntilLocalRefresh} 秒</small>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em></h2><p>人工接管的广告组不参与自动化决策</p></div></div>
+          <small className="inline-protection-note" title="仅刷新本地已同步数据，不会触发 TikTok 请求">下次本地更新：{refreshSeconds} 秒</small>
         </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPC</th><th>转化</th><th>自动化</th><th>操作</th></tr></thead>
+            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
             <tbody>
-              {filtered.length === 0 ? <tr><td colSpan={8}>暂无数据，请先在用户管理完成账户接入，或在自动化中心执行一次检测。</td></tr> : filtered.map((entity) => {
+              {filtered.length === 0 ? <tr><td colSpan={10}>暂无数据，请先在用户管理完成账户接入，或在自动化中心执行一次检测。</td></tr> : filtered.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
+                const statusPending = pendingStatusKeys.has(key);
                 return (
                   <tr key={key}>
                     <td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
                     <td>{entityTypeLabel(entity.entityType)}</td>
                     <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
                     <td>{formatMetric(entity.metrics.spend)}</td>
-                    <td>{formatMetric(entity.metrics.cost_per_click)}</td>
+                    <td>{formatMetric(entity.metrics.cost_per_conversion)}</td>
+                    <td>{formatMetric(entity.metrics.carts)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
+                    <td>{formatMetric(entity.metrics.cost_per_click)}</td>
                     <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
                     <td><div className="row-actions">
-                      {canChangeStatus && <button disabled={busy !== null || !canOperateAds || entity.status === "unknown"} title={!canOperateAds ? "需要 ads:operate 权限" : entity.status === "unknown" ? "状态未知：请先执行检测预览或等待下一次同步后再操作。" : undefined} onClick={() => void changeStatus(entity)} type="button">{entity.status === "enabled" ? "关闭" : "开启"}</button>}
-                      {entity.status === "unknown" && <small className="inline-protection-note" title="最近同步未返回可识别的启停字段，不能执行启停或参与自动化决策">状态待确认</small>}
+                      {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}
+                      {entity.status === "unknown" && <small className="inline-protection-note">状态待确认</small>}
                       {entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void toggleManualTakeover(entity)} type="button"><Ban size={14} /> {entity.ignored ? "恢复自动化" : "人工接管"}</button>}
-                      {canChangeStatus && entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => { setScheduling(entity); setRunAt(""); setDisableAt(""); setEnableAt(""); }} type="button">定时 / 过夜</button>}
+                      {canChangeStatus && entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => { const overnight = nextOvernightScheduleTimes(); setScheduling(entity); setRunAt(nextLocalMidnightInputValue()); setDisableAt(localDateTimeInputValue(overnight.disableAt)); setEnableAt(localDateTimeInputValue(overnight.enableAt)); }} type="button">定时 / 过夜</button>}
                     </div></td>
                   </tr>
                 );
@@ -1143,7 +1213,7 @@ function AdsManagementPage({
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组</h2><p>接管后不会生成或执行该广告组的自动化建议；恢复后从下一轮检测重新参与。</p></div></div>
+          <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组 <em className="heading-count">{manualTakeovers.length}</em></h2></div></div>
           <button className="secondary-button" disabled={busy !== null || !canOperateAds || manualTakeovers.length === 0} onClick={() => void restoreAllManualTakeovers()} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">全部恢复自动化</button>
         </div>
         <div className="table-wrap"><table><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th>操作</th></tr></thead><tbody>
@@ -1152,36 +1222,152 @@ function AdsManagementPage({
       </div>
 
       <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务</h2><p>单次定时只执行一次；过夜开关会每日按设置时间关闭和开启。账户自动化或软件总开关关闭时不会执行。</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{schedules.length}</em></h2><p>总开关关闭时不执行</p></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
 
-      <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>广告操作记录</h2><p>当前仅显示账户「{account.displayName}」的手动和自动启停、忽略名单变更。</p></div></div></div>
+      <details className="panel table-panel collapsible-panel">
+        <summary className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>广告操作记录 <em className="heading-count">{operations.length}</em></h2></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>对象</th><th>动作</th><th>来源</th><th>结果</th><th>信息</th><th>时间</th></tr></thead>
           <tbody>{operations.length === 0 ? <tr><td colSpan={6}>暂无操作记录。</td></tr> : operations.slice(0, 50).map((operation) => <tr key={operation.id}>
             <td>{operation.entityName}<br /><small>{operation.externalId}</small></td>
             <td>{operationActionLabel(operation.action)}</td>
             <td>{operation.source === "automation" ? "自动化" : operation.source === "scheduled" ? "定时" : "手动"}</td>
-            <td><span className={operation.status === "succeeded" ? "status active" : "status"}>{operation.status === "succeeded" ? "成功" : operation.status === "pending" ? "等待" : "失败"}</span></td>
+            <td><span className={operation.status === "succeeded" ? "status active" : operation.status === "failed" || operation.status === "cancelled" ? "status danger" : "status warning"}>{operation.status === "succeeded" ? "成功" : operation.status === "pending" ? "等待" : operation.status === "running" ? "执行中" : operation.status === "unknown" ? "待确认" : operation.status === "cancelled" ? "已取消" : "失败"}</span></td>
             <td>{operation.message ?? "—"}</td>
             <td>{new Date(operation.createdAt).toLocaleString()}</td>
           </tr>)}</tbody>
         </table></div>
-      </div>
+      </details>
+
+      {statusConfirming && (
+        <div className="modal-backdrop" onMouseDown={() => setStatusConfirming(null)}>
+          <div className="modal confirmation-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading"><div><span className="eyebrow">确认状态变更</span><h2>{statusConfirming.status === "disabled" ? "开启" : "关闭"}广告组</h2></div><button type="button" onClick={() => setStatusConfirming(null)}><X size={20} /></button></div>
+            <p>将对“{statusConfirming.name}”发送{statusConfirming.status === "disabled" ? "开启" : "关闭"}请求，并在平台回读确认后更新状态。</p>
+            <div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setStatusConfirming(null)}>取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds} type="button" onClick={() => { const entity = statusConfirming; setStatusConfirming(null); void changeStatus(entity); }}>确认{statusConfirming.status === "disabled" ? "开启" : "关闭"}</button></div>
+          </div>
+        </div>
+      )}
 
       {scheduling && (
         <div className="modal-backdrop" onMouseDown={() => setScheduling(null)}>
           <form className="modal schedule-modal" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void saveSchedule(event)}>
             <div className="modal-heading"><div><span className="eyebrow">广告组定时</span><h2>{scheduling.name}</h2></div><button type="button" onClick={() => setScheduling(null)}><X size={20} /></button></div>
             <div className="schedule-kind-tabs"><button className={scheduleKind === "once" ? "active" : ""} onClick={() => setScheduleKind("once")} type="button">单次定时</button><button className={scheduleKind === "overnight" ? "active" : ""} onClick={() => setScheduleKind("overnight")} type="button">每日过夜</button></div>
-            {scheduleKind === "once" ? <div className="form-grid"><Field label="执行动作"><select value={scheduledAction} onChange={(event) => setScheduledAction(event.target.value as typeof scheduledAction)}><option value="enable">开启</option><option value="disable">关闭</option></select></Field><Field label="执行时间"><input required type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} /></Field></div> : <div className="form-grid"><Field label="每日关闭时间（首次）"><input required type="datetime-local" value={disableAt} onChange={(event) => setDisableAt(event.target.value)} /></Field><Field label="每日开启时间（首次）"><input required type="datetime-local" value={enableAt} onChange={(event) => setEnableAt(event.target.value)} /></Field></div>}
+            {scheduleKind === "once" ? <div className="form-grid"><Field label="执行动作"><select value={scheduledAction} onChange={(event) => setScheduledAction(event.target.value as typeof scheduledAction)}><option value="enable">开启</option><option value="disable">关闭</option></select></Field><Field label="执行时间"><div className="schedule-time-input"><input required type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} /><button type="button" className="secondary-button compact-button" onClick={() => setRunAt(nextLocalMidnightInputValue())}>当日 24:00</button></div></Field></div> : <div className="form-grid"><Field label="每日关闭时间（首次）"><input required type="datetime-local" value={disableAt} onChange={(event) => setDisableAt(event.target.value)} /></Field><Field label="每日开启时间（首次）"><input required type="datetime-local" value={enableAt} onChange={(event) => setEnableAt(event.target.value)} /></Field></div>}
             <p className="provider-endpoint-note">时间使用本机时区。未到时间前不会写入 TikTok；执行时仍要求账户连接正常且两个自动化总开关均开启。</p>
           <div className="modal-actions"><button className="secondary-button" onClick={() => setScheduling(null)} type="button">取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds} type="submit">保存任务</button></div>
           </form>
         </div>
       )}
+    </section>
+  );
+}
+
+function AllAccountsAdsView({
+  accounts,
+  accountCapabilities,
+  onError,
+}: {
+  accounts: AccountConfig[];
+  accountCapabilities: Record<string, AccountProviderCapabilities | undefined>;
+  onError: (message: string | null) => void;
+}) {
+  const auth = useAuth();
+  const canOperateAds = auth.status.permissions.includes("ads:operate");
+  const [entitiesByAccount, setEntitiesByAccount] = useState<Array<{
+    account: AccountConfig;
+    entity: ManagedEntityRecord;
+  }>>([]);
+  const [page, setPage] = useState(0);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [statusConfirming, setStatusConfirming] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const results = await Promise.all(accounts.map(async (account) => ({
+        account,
+        entities: await api.getManagedEntities(account.id),
+      })));
+      setEntitiesByAccount(results.flatMap(({ account, entities }) => entities.map((entity) => ({ account, entity }))));
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    }
+  }, [accounts, onError]);
+
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  const visible = useMemo(() => entitiesByAccount.filter(({ entity }) => (
+    entity.entityType === "ad-group" &&
+    (entity.status === "enabled" || (entity.metrics.spend ?? 0) > 0)
+  )), [entitiesByAccount]);
+  const pageCount = Math.max(1, Math.ceil(visible.length / 12));
+  const currentPage = Math.min(page, pageCount - 1);
+  const paged = visible.slice(currentPage * 12, currentPage * 12 + 12);
+
+  useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
+
+  const changeStatus = async (account: AccountConfig, entity: ManagedEntityRecord) => {
+    if (!hasProviderCapability(accountCapabilities[account.id], "change-status")) return;
+    try {
+      setBusy(`${account.id}:${entity.externalId}:status`);
+      await api.changeEntityStatus(account.id, {
+        entityType: entity.entityType,
+        externalId: entity.externalId,
+        action: entity.status === "disabled" ? "enable" : "disable",
+      });
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleManualTakeover = async (account: AccountConfig, entity: ManagedEntityRecord) => {
+    try {
+      setBusy(`${account.id}:${entity.externalId}:takeover`);
+      if (entity.ignored) await api.unignoreEntity(account.id, entity.entityType, entity.externalId);
+      else {
+        const reason = window.prompt("请输入人工接管原因：", "人工接管，不参与自动化")?.trim();
+        if (!reason) return;
+        await api.ignoreEntity(account.id, entity.entityType, entity.externalId, reason);
+      }
+      await load();
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="page-stack all-accounts-ads-page">
+      <div className="panel table-panel">
+        <div className="panel-heading">
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户已同步的当日开启或有消耗广告组；可直接执行与独立账户页相同的启停和人工接管操作。</p></div></div>
+          <small className="inline-protection-note">每 30 秒更新本地数据</small>
+        </div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
+          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>暂无已同步的开启或有消耗广告组。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
+            <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
+            <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
+            <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
+            <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
+            <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button></div></td>
+          </tr>)}</tbody>
+        </table></div>
+        {visible.length > 12 && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {visible.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
+      </div>
+      {statusConfirming && <div className="modal-backdrop" onMouseDown={() => setStatusConfirming(null)}><div className="modal confirmation-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="eyebrow">确认状态变更</span><h2>{statusConfirming.entity.status === "disabled" ? "开启" : "关闭"}广告组</h2></div><button type="button" onClick={() => setStatusConfirming(null)}><X size={20} /></button></div><p>将对“{statusConfirming.account.displayName} / {statusConfirming.entity.name}”发送启停请求。</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setStatusConfirming(null)}>取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[statusConfirming.account.id], "change-status")} type="button" onClick={() => { const target = statusConfirming; setStatusConfirming(null); void changeStatus(target.account, target.entity); }}>确认</button></div></div></div>}
     </section>
   );
 }
@@ -1238,33 +1424,40 @@ function AnalyticsPage({
   if (!batches) return <EmptyState text="正在分析指标快照…" loading />;
 
   return (
-    <section className="page-stack">
-      <div className={connection?.status === "ready" ? "alert info-alert" : "alert warning-alert"}><Activity size={18} /><span><strong>账户「{account.displayName}」</strong> · 当前连接{connection?.status === "ready" ? "正常" : "异常或待检测"} · 最后健康同步：{latestSync?.quality.lastHealthyAt ? new Date(latestSync.quality.lastHealthyAt).toLocaleString() : "暂无"} · 数据质量：{latestSync ? syncQualityPresentation(latestSync.quality.status).label : "暂无"} · 指标图表为本机历史快照 · 币种：当前接入未提供，金额请以 TikTok 广告账户币种为准。</span></div>
+    <section className="page-stack analytics-page">
       <div className="panel filter-panel">
+        <div className="analytics-context-bar">
+          <div>
+            <span className={connection?.status === "ready" ? "status active" : "status warning"}>{connection?.status === "ready" ? "连接正常" : "连接待检查"}</span>
+            <small>健康同步 {latestSync?.quality.lastHealthyAt ? new Date(latestSync.quality.lastHealthyAt).toLocaleString() : "暂无"} · 数据质量 {latestSync ? syncQualityPresentation(latestSync.quality.status).label : "暂无"}</small>
+          </div>
+        </div>
         <div className="form-grid management-filters">
           <Field label="时间范围"><select value={preset} onChange={(event) => setPreset(event.target.value as AnalysisPreset)}><option value="today">今天</option><option value="yesterday">昨天</option><option value="3d">三天</option><option value="7d">七天</option><option value="30d">三十天</option><option value="custom">自定义</option></select></Field>
           <Field label="分析层级"><select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}><option value="all">全部层级</option><option value="campaign">广告系列</option><option value="ad-group">广告组</option>{account.providerKind === "official-api" && <option value="ad">广告</option>}</select></Field>
           {preset === "custom" && <><Field label="开始日期"><input type="date" max={customTo || today} value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></Field><Field label="结束日期"><input type="date" min={customFrom} max={today} value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></Field></>}
         </div>
         {!range && <p className="error-text">请选择有效日期，且范围不超过 90 天。</p>}
-        <p className="retention-note">本地指标快照默认保留 90 天。Cookie 接入当前不展示广告层级分析，因为其广告 list 并非独立真实列表请求。</p>
+        <p className="retention-note">本地快照保留 90 天；Cookie 接入不含广告层级分析。</p>
       </div>
       <div className="summary-grid">
         <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
         <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
         <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
       </div>
       <div className="panel batch-chart-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>批次数据透视</h2><p>数据与下方“检测批次趋势”完全一致；柱状和折线在同一张图中按各自刻度展示。</p></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>批次数据透视</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
         <BatchTrendChart batches={analysis.batches} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
-      <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次趋势</h2><p>相同检测时间的对象聚合为一个批次，避免把多次累计指标重复相加。</p></div></div></div>
+      <details className="panel table-panel collapsible-panel">
+        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次明细 <em className="heading-count">{analysis.batches.length}</em></h2></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
           <tbody>{analysis.batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : analysis.batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
         </table></div>
-      </div>
+      </details>
     </section>
   );
 }
@@ -1359,6 +1552,8 @@ function AutomationPage({
     AutomationDecisionRecord[] | null
   >(null);
   const [approvals, setApprovals] = useState<AutomationApprovalRecord[] | null>(null);
+  const [managedEntities, setManagedEntities] = useState<ManagedEntityRecord[] | null>(null);
+  const [adOperations, setAdOperations] = useState<AdOperationRecord[] | null>(null);
   const [lowRiskState, setLowRiskState] = useState<LowRiskAutomationState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<string | null>(null);
@@ -1370,16 +1565,20 @@ function AutomationPage({
 
   const load = useCallback(async () => {
     try {
-      const [nextRuns, nextDecisions, nextApprovals, nextLowRiskState] = await Promise.all([
+      const [nextRuns, nextDecisions, nextApprovals, nextLowRiskState, nextEntities, nextOperations] = await Promise.all([
         api.getAutomationRuns(account.id),
         api.getAutomationDecisions(account.id),
         api.getAutomationApprovals(account.id),
         api.getLowRiskAutomation(account.id),
+        api.getManagedEntities(account.id),
+        api.getAdOperations(account.id),
       ]);
       setRuns(nextRuns);
       setDecisions(nextDecisions);
       setApprovals(nextApprovals);
       setLowRiskState(nextLowRiskState);
+      setManagedEntities(nextEntities);
+      setAdOperations(nextOperations);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -1391,6 +1590,8 @@ function AutomationPage({
     setDecisions(null);
     setApprovals(null);
     setLowRiskState(null);
+    setManagedEntities(null);
+    setAdOperations(null);
     void load();
   }, [load]);
 
@@ -1426,6 +1627,7 @@ function AutomationPage({
     try {
       setBusy(`approve:${decision.id}`);
       const approval = await api.approveAutomationDecision(account.id, decision.id);
+      setApprovals((current) => current ? [approval, ...current.filter((item) => item.decisionId !== approval.decisionId)] : current);
       setRunFeedback(
         approval.status === "succeeded"
           ? `${decision.entityName}：${action}成功`
@@ -1433,6 +1635,35 @@ function AutomationPage({
             ? `${decision.entityName}：执行结果待确认，禁止重复批准`
             : `${decision.entityName}：${approval.errorMessage ?? approval.providerMessage ?? "执行失败"}`,
       );
+      await load();
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      setRunFeedback(message);
+      onError(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const approveAll = async () => {
+    if (!window.confirm(`确认依次批准当前全部 ${pendingDecisions.length} 项决策？\n每项仍会独立执行连接、数据质量和对象状态校验。`)) return;
+    let succeeded = 0;
+    let unknown = 0;
+    let failed = 0;
+    try {
+      setBusy("approve-all");
+      for (const decision of pendingDecisions) {
+        try {
+          const approval = await api.approveAutomationDecision(account.id, decision.id);
+          setApprovals((current) => current ? [approval, ...current.filter((item) => item.decisionId !== approval.decisionId)] : current);
+          if (approval.status === "succeeded") succeeded += 1;
+          else if (approval.status === "unknown") unknown += 1;
+          else failed += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      setRunFeedback(`批量批准完成：成功 ${succeeded} 项，待确认 ${unknown} 项，失败 ${failed} 项。`);
       await load();
     } catch (cause) {
       const message = getErrorMessage(cause);
@@ -1471,41 +1702,48 @@ function AutomationPage({
     }
   };
 
-  if (!runs || !decisions || !approvals || !lowRiskState) {
+  if (!runs || !decisions || !approvals || !lowRiskState || !managedEntities || !adOperations) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
   const latest = runs[0];
+  const approvalByDecision = new Map(
+    approvals.map((approval) => [approval.decisionId, approval]),
+  );
+  const pendingDecisions = selectPendingAutomationDecisions({
+    decisions,
+    approvals,
+    entities: managedEntities.map((entity) => ({ ...entity, accountId: account.id })),
+    operations: adOperations,
+  });
+  const pendingDecisionIds = new Set(pendingDecisions.map((decision) => decision.id));
+  const automationHealthy = canRunAutomation && !lowRiskState.circuit?.openedAt;
   return (
-    <section className="page-stack">
-      <div className="summary-grid">
-        <SummaryCard
-          icon={<CircleGauge size={20} />}
-          label="账户自动化"
-          value={account.enabled ? "已开启" : "已关闭"}
-          tone="blue"
-        />
-        <SummaryCard
-          icon={<Gauge size={20} />}
-          label="最近候选"
-          value={`${latest?.candidateCount ?? 0} 项`}
-          tone="violet"
-        />
-        <SummaryCard
-          icon={<Check size={20} />}
-          label="最近执行"
-          value={`${latest?.successCount ?? 0} 成功 / ${latest?.failureCount ?? 0} 失败`}
-          tone="green"
-        />
-      </div>
+    <section className="page-stack automation-page">
+      <header className="automation-status-band">
+        <div className="automation-status-copy">
+          <span className={`automation-health-icon ${automationHealthy ? "active" : "warning"}`}>
+            {automationHealthy ? <Check size={28} /> : <AlertTriangle size={24} />}
+          </span>
+          <div>
+            <span className="eyebrow">当前运行状态</span>
+            <h2>{automationHealthy ? "自动化已就绪" : "自动化等待处理"}</h2>
+            <p>{automationHealthy ? `${account.displayName} 已具备只读检测能力。` : connectionMessage}</p>
+          </div>
+        </div>
+        <dl className="automation-status-metrics">
+          <div><dt>账户自动化</dt><dd>{account.enabled ? "已开启" : "已关闭"}</dd></div>
+          <div><dt>最近候选</dt><dd>{latest?.candidateCount ?? 0} 项</dd></div>
+          <div><dt>待审批决策</dt><dd>{pendingDecisions.length} 项</dd></div>
+          <div><dt>单轮操作上限</dt><dd>{maxActionsPerRun} 项</dd></div>
+        </dl>
+      </header>
 
-      <div className="panel automation-control-panel">
+      <section className="automation-safety-panel" aria-labelledby="automation-safety-title">
         <div>
-          <span className="eyebrow">检测 → 判断 → 建议</span>
-          <h2>规则建议中心</h2>
-          <p>
-            检测预览和“生成建议”始终只读。只有账户明确启用下方低风险策略后，后台轮询才可执行已验证的关闭规则。
-          </p>
+          <span className="eyebrow">安全执行建议</span>
+          <h2 id="automation-safety-title">先预览，再生成只读建议</h2>
+          <p>检测预览和“生成建议”不会修改广告；批准执行时仍会重新检查连接、数据质量和对象状态。</p>
           {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
         <div className="automation-actions">
@@ -1530,11 +1768,66 @@ function AutomationPage({
             {busy === "run" ? "生成中…" : "生成建议"}
           </button>
         </div>
-      </div>
+      </section>
       {runFeedback && <div className={`automation-run-feedback ${latest?.status === "failed" ? "error" : "success"}`}>{runFeedback}</div>}
 
-      <div className="panel automation-sync-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动关闭</h2><p>默认关闭；只允许关闭，不允许自动开启。每日限额由数据库原子控制，多实例不会重复领取同一建议。</p></div></div></div>
+      <div className="automation-primary-grid">
+        <section className="automation-flow-panel">
+          <div className="automation-section-heading">
+            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动化电路状态</h2><p>检测、评估、预设、待执行、执行与完成的真实运行链路。</p></div></div>
+          </div>
+          <ol className="automation-flow" aria-label="自动化执行流程">
+            <li className={runs.length > 0 ? "complete" : "current"}><span><Check size={14} /></span><small>检测</small></li>
+            <li className={latest ? "complete" : "pending"}><span><Check size={14} /></span><small>评估</small></li>
+            <li className={decisions.length > 0 ? "complete" : "pending"}><span><Check size={14} /></span><small>预设</small></li>
+            <li className={pendingDecisions.length > 0 ? "current" : "pending"}><span>{pendingDecisions.length}</span><small>待执行</small></li>
+            <li className={approvals.some((item) => item.status === "running") ? "current" : "pending"}><span><Play size={12} /></span><small>执行</small></li>
+            <li className={approvals.some((item) => item.status === "succeeded") ? "complete" : "pending"}><span><Check size={14} /></span><small>完成</small></li>
+          </ol>
+          <p className="automation-flow-note">
+            {lowRiskState.circuit?.openedAt
+              ? `熔断已触发：${lowRiskState.circuit.lastError ?? "未知错误"}`
+              : pendingDecisions.length > 0
+                ? `当前有 ${pendingDecisions.length} 项建议等待人工审批。`
+                : "当前没有待审批建议，可先执行检测预览。"}
+          </p>
+          <div className="automation-actions">
+            <button className="secondary-button" disabled={busy !== null || !canRunAutomation} onClick={() => void execute(true)} type="button">
+              <RefreshCcw size={16} /> {busy === "preview" ? "检测中…" : "检测预览"}
+            </button>
+          </div>
+        </section>
+
+        <section className="automation-decisions-panel">
+          <div className="automation-section-heading">
+            <div><span className="panel-icon"><ListChecks size={18} /></span><div><h2>待审批决策 <span className="automation-count-badge">{pendingDecisions.length}</span></h2><p>仅显示尚未消费的一次性建议，完整记录保留在下方。</p></div></div>
+            {pendingDecisions.length > 0 && <button className="primary-button automation-approve-all" disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled} onClick={() => void approveAll()} type="button">{busy === "approve-all" ? "批量执行中…" : `全部批准（${pendingDecisions.length}）`}</button>}
+          </div>
+          <div className="automation-decision-list">
+            {pendingDecisions.length === 0 ? (
+              <p className="automation-empty-copy">暂无待审批决策。</p>
+            ) : pendingDecisions.slice(0, 5).map((decision) => (
+              <article key={decision.id}>
+                <span className={`risk-badge ${decision.dataQualityStatus === "healthy" ? "" : "destructive"}`}>{decision.dataQualityStatus}</span>
+                <div><strong>{decision.entityName}</strong><small>{decision.reason}</small></div>
+                <span className="automation-decision-impact">{decision.action === "enable" ? "开启" : "关闭"}</span>
+                <button
+                  className="secondary-button"
+                  disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled}
+                  onClick={() => void approve(decision)}
+                  type="button"
+                  title="批准后会重新检查连接、数据质量和对象状态；每条建议只能消费一次"
+                >
+                  {busy === `approve:${decision.id}` ? "执行中…" : "批准"}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <section className="automation-policy-panel low-risk-panel">
+        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动关闭</h2><p>默认关闭；只允许关闭，不允许自动开启。每日限额由数据库原子控制，多实例不会重复领取同一建议。</p></div></div></div>
         <div className="sync-count-grid">
           <span>策略 <strong>{lowRiskState.policy.enabled ? "已启用" : "已关闭"}</strong></span>
           <span>今日自动关闭 <strong>{lowRiskState.todayUsage} 次（不限量）</strong></span>
@@ -1557,99 +1850,70 @@ function AutomationPage({
         </div>
         {account.executionMode !== "automatic" && <p className="retention-note">请先在用户管理中将账户执行模式明确设为“自动执行”；启用后仍只开放关闭规则。</p>}
         {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
-      </div>
+      </section>
 
-      <div className="panel automation-sync-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>账户接入状态</h2><p>由后台轮询维护；页面只展示已保存的最新结果，不会因切换页面重新检测。</p></div></div></div>
+      <section className="automation-readiness-panel account-readiness-panel">
+        <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2><p>由后台轮询维护；页面只展示已保存的最新结果，不会因切换页面重新检测。</p></div></div></div>
         <div className="sync-count-grid"><span>已接入 <strong>{overview.connectedCount}</strong></span><span>已开启自动化 <strong>{overview.automationEnabledCount}</strong></span><span>待处理接入 <strong>{unreadyAccounts.length}</strong></span></div>
         {unreadyAccounts.length > 0 ? <div className="sheet-issues warning"><strong>以下已开启自动化的账户尚不能运行</strong><ul>{unreadyAccounts.map((item) => <li key={item.accountId}><strong>{item.displayName}</strong>：{item.message}</li>)}</ul></div> : <p className="retention-note">所有已开启自动化的账户均已通过连接检测。</p>}
-      </div>
+      </section>
 
-      <div className="panel table-panel">
-        <div className="panel-heading">
+      <section className="automation-history-section">
+        <div className="automation-section-heading">
           <div>
             <span className="panel-icon"><Activity size={18} /></span>
             <div>
-              <h2>最近轮询记录</h2>
+              <h2>最近运行</h2>
               <p>每次完成的后台轮询都会保留记录；候选为 0 表示本轮正常完成且无需操作。</p>
             </div>
           </div>
           <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
         </div>
-        <div className="table-wrap">
+        <div className="table-wrap automation-history-table">
           <table>
             <thead><tr><th>开始时间</th><th>来源</th><th>候选</th><th>执行结果</th><th>状态</th><th>说明</th></tr></thead>
             <tbody>{runs.length === 0 ? <tr><td colSpan={6}>暂无已完成轮询记录。</td></tr> : runs.map((run) => <tr key={run.id}><td>{new Date(run.startedAt).toLocaleString()}</td><td>{automationTriggerLabel(run.trigger)}</td><td>{run.candidateCount}</td><td>{run.successCount} 成功 / {run.failureCount} 失败</td><td><span className={`status ${run.status === "completed" ? "active" : run.status === "failed" ? "danger" : "warning"}`}>{automationRunStatusLabel(run.status)}</span></td><td><small>{run.errorMessage ?? (run.candidateCount === 0 ? "本轮轮询正常完成，无需操作。" : "已生成规则建议，详见下方记录。")}</small></td></tr>)}</tbody>
           </table>
         </div>
-      </div>
+      </section>
 
-      <div className="panel table-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="panel-icon"><Activity size={18} /></span>
-            <div>
-              <h2>最近规则建议</h2>
-              <p>每条建议保存触发规则、指标快照、规则版本、数据质量和冲突处理结果。</p>
-            </div>
-          </div>
-          <button className="secondary-button" onClick={() => void load()} type="button">
-            <RefreshCcw size={16} /> 刷新
-          </button>
+      <section className="automation-history-section automation-decision-history">
+        <div className="automation-section-heading">
+          <div><span className="panel-icon"><ListChecks size={18} /></span><div><h2>规则建议与审批记录</h2><p>保留触发规则、指标快照、规则版本、数据质量和一次性批准结果。</p></div></div>
+          <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
         </div>
-        <div className="table-wrap">
+        <div className="table-wrap automation-history-table">
           <table>
-            <thead>
-              <tr>
-                <th>对象</th>
-                <th>层级</th>
-                <th>命中条件</th>
-                <th>动作</th>
-                <th>结果</th>
-                <th>时间</th>
-              </tr>
-            </thead>
+            <thead><tr><th>对象</th><th>层级</th><th>命中条件</th><th>动作</th><th>结果</th><th>时间</th></tr></thead>
             <tbody>
-              {decisions.length === 0 ? (
-                <tr><td colSpan={6}>暂无决策记录，请先执行“检测预览”。</td></tr>
-              ) : decisions.map((decision) => {
-                const approval = approvals.find((item) => item.decisionId === decision.id);
+              {decisions.length === 0 ? <tr><td colSpan={6}>暂无决策记录，请先执行“检测预览”。</td></tr> : decisions.map((decision) => {
+                const approval = approvalByDecision.get(decision.id);
                 return (
-                <tr key={decision.id}>
-                  <td><strong>{decision.entityName}</strong><br /><small>{decision.externalId}</small></td>
-                  <td>{entityTypeLabel(decision.entityType)}</td>
-                  <td>{metricLabel(decision.metric)} {operatorLabel(decision.operator)} {decision.thresholdValue}<br /><small>当前 {decision.metricValue} · {decision.thresholdCode}</small><br /><small>{decision.reason}</small><br /><small>规则版本 {formatRuleVersion(decision.ruleVersion)}</small><br /><small>指标快照：{formatMetricSnapshot(decision.metricSnapshot)}</small></td>
-                  <td>{decision.action === "enable" ? "开启" : "关闭"}</td>
-                  <td>
-                    <span className={`status ${decision.status === "succeeded" ? "active" : ""}`}>
-                      {decisionStatusLabel(decision.status)}
-                    </span>
-                    {decision.errorMessage && <small className="decision-error">{decision.errorMessage}</small>}
-                    {approval ? (
-                      <small className={approval.status === "succeeded" ? undefined : "decision-error"}>
-                        批准执行：{approvalStatusLabel(approval.status)}
-                        {(approval.errorMessage || approval.providerMessage) ? ` · ${approval.errorMessage ?? approval.providerMessage}` : ""}
-                      </small>
-                    ) : decision.status === "preview" ? (
-                      <button
-                        className="secondary-button"
-                        disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled}
-                        onClick={() => void approve(decision)}
-                        type="button"
-                        title="批准后会重新检查连接、数据质量和对象状态；每条建议只能消费一次"
-                      >
-                        {busy === `approve:${decision.id}` ? "执行中…" : "批准并执行"}
-                      </button>
-                    ) : null}
-                    <small className={decision.dataQualityStatus === "healthy" ? undefined : "decision-error"}>数据质量：{decision.dataQualityStatus}。{decision.dataQualityWarnings.length > 0 ? decision.dataQualityWarnings.join("；") : "无警告"}</small>
-                  </td>
-                  <td>{new Date(decision.createdAt).toLocaleString()}</td>
-                </tr>
-              );})}
+                  <tr key={decision.id}>
+                    <td><strong>{decision.entityName}</strong><br /><small>{decision.externalId}</small></td>
+                    <td>{entityTypeLabel(decision.entityType)}</td>
+                    <td>{metricLabel(decision.metric)} {operatorLabel(decision.operator)} {decision.thresholdValue}<br /><small>当前 {decision.metricValue} · {decision.thresholdCode}</small><br /><small>{decision.reason}</small><br /><small>规则版本 {formatRuleVersion(decision.ruleVersion)}</small><br /><small>指标快照：{formatMetricSnapshot(decision.metricSnapshot)}</small></td>
+                    <td>{decision.action === "enable" ? "开启" : "关闭"}</td>
+                    <td>
+                      <span className={`status ${decision.status === "succeeded" ? "active" : decision.status === "failed" || decision.status === "unknown" ? "danger" : "warning"}`}>{decisionStatusLabel(decision.status)}</span>
+                      {decision.errorMessage && <small className="decision-error">{decision.errorMessage}</small>}
+                      {approval ? (
+                        <small className={approval.status === "succeeded" ? undefined : "decision-error"}>批准执行：{approvalStatusLabel(approval.status)}{(approval.errorMessage || approval.providerMessage) ? ` · ${approval.errorMessage ?? approval.providerMessage}` : ""}</small>
+                      ) : pendingDecisionIds.has(decision.id) ? (
+                        <button className="secondary-button" disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled} onClick={() => void approve(decision)} type="button" title="批准后会重新检查连接、数据质量和对象状态；每条建议只能消费一次">{busy === `approve:${decision.id}` ? "执行中…" : "批准并执行"}</button>
+                      ) : decision.status === "preview" ? (
+                        <small>已被更新决策或对象状态取代</small>
+                      ) : null}
+                      <small className={decision.dataQualityStatus === "healthy" ? undefined : "decision-error"}>数据质量：{decision.dataQualityStatus}。{decision.dataQualityWarnings.length > 0 ? decision.dataQualityWarnings.join("；") : "无警告"}</small>
+                    </td>
+                    <td>{new Date(decision.createdAt).toLocaleString()}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
     </section>
   );
 }
@@ -1715,11 +1979,13 @@ function AccountScopedPage({
   accounts,
   selectedId,
   onSelect,
+  allowAll = false,
   children,
 }: {
   accounts: AccountConfig[];
   selectedId: string;
   onSelect: (id: string) => void;
+  allowAll?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -1730,6 +1996,7 @@ function AccountScopedPage({
           <span>这里只切换当前页面的数据视图，不改变全局自动化规则。</span>
         </div>
         <select aria-label="当前数据账户" value={selectedId} onChange={(event) => onSelect(event.target.value)}>
+          {allowAll && <option value="all">全部账户</option>}
           {accounts.map((account) => (
             <option key={account.id} value={account.id}>{account.displayName}</option>
           ))}
@@ -1795,9 +2062,7 @@ function connectionStateLabel(
           </span>
         : latestSync.counts["ad-group"] === 0
         ? <span className="status warning">数据读取：无广告组</span>
-        : latestSync.warnings.length > 0
-          ? <span className="status warning">数据读取：部分数据</span>
-          : <span className="status active">数据读取：已接入</span>;
+        : <span className="status active">数据读取：已接入</span>;
     const canCreate = hasProviderCapability(state?.capabilities, "create-campaigns");
     return <div className="capability-statuses">{readStatus}<span className="status active">启停：已接入</span><span className={canCreate ? "status active" : "status warning"}>创建：{canCreate ? "已接入" : "未就绪"}</span></div>;
   }
@@ -1895,7 +2160,7 @@ function approvalStatusLabel(status: AutomationApprovalRecord["status"]): string
 function operationalStatusLabel(
   status: ManagedEntityRecord["status"],
 ): string {
-  return { enabled: "已开启", disabled: "已关闭", unknown: "未知" }[status];
+  return { enabled: "已开启", disabled: "已关闭", unknown: "待确认" }[status];
 }
 
 function operationActionLabel(action: AdOperationRecord["action"]): string {
@@ -1918,6 +2183,26 @@ function formatMetric(value: number | null): string {
     : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
 
+function localDateTimeInputValue(value: Date): string {
+  const timezoneOffset = value.getTimezoneOffset() * 60_000;
+  return new Date(value.getTime() - timezoneOffset).toISOString().slice(0, 16);
+}
+
+function nextLocalMidnightInputValue(): string {
+  const next = new Date();
+  next.setHours(24, 0, 0, 0);
+  return localDateTimeInputValue(next);
+}
+
+function nextOvernightScheduleTimes(): { disableAt: Date; enableAt: Date } {
+  const disableAt = new Date();
+  disableAt.setHours(23, 45, 0, 0);
+  if (disableAt.getTime() <= Date.now()) disableAt.setDate(disableAt.getDate() + 1);
+  const enableAt = new Date(disableAt);
+  enableAt.setHours(24, 0, 0, 0);
+  return { disableAt, enableAt };
+}
+
 function formatDateInput(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -1934,6 +2219,91 @@ function analyzeMetricBatches(batches: MetricBatchRecord[]) {
     latestConversions: latest?.conversions ?? 0,
     batches: sorted,
   };
+}
+
+function aggregateAccountBatches(lists: MetricBatchRecord[][]): MetricBatchRecord[] {
+  const byTime = new Map<string, MetricBatchRecord>();
+  for (const list of lists) {
+    for (const batch of list) {
+      const existing = byTime.get(batch.capturedAt);
+      if (existing) {
+        existing.count += batch.count;
+        existing.spend += batch.spend;
+        existing.clicks += batch.clicks;
+        existing.conversions += batch.conversions;
+      } else {
+        byTime.set(batch.capturedAt, { ...batch });
+      }
+    }
+  }
+  return [...byTime.values()];
+}
+
+function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConfig[]; onError: (message: string | null) => void }) {
+  const today = formatDateInput(new Date());
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+  const [preset, setPreset] = useState<AnalysisPreset>("7d");
+  const [customFrom, setCustomFrom] = useState(formatDateInput(sevenDaysAgo));
+  const [customTo, setCustomTo] = useState(today);
+  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("ad-group");
+  const [barMetric, setBarMetric] = useState<BatchBarMetric>("spend");
+  const [lineMetric, setLineMetric] = useState<BatchLineMetric>("cpc");
+  const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
+  const range = useMemo(() => {
+    try { return resolveAnalysisRange(preset, customFrom, customTo); } catch { return null; }
+  }, [customFrom, customTo, preset]);
+
+  useEffect(() => {
+    if (!range) return;
+    setBatches(null);
+    void Promise.all(
+      accounts.map((account) => api.getAnalytics(account.id, range, level === "all" ? undefined : level).catch(() => [] as MetricBatchRecord[])),
+    )
+      .then((lists) => { setBatches(aggregateAccountBatches(lists)); onError(null); })
+      .catch((cause) => onError(getErrorMessage(cause)));
+  }, [accounts, level, onError, range?.from, range?.to]);
+
+  const analysis = useMemo(() => analyzeMetricBatches(batches ?? []), [batches]);
+  if (!batches) return <EmptyState text="正在汇总全部账户指标…" loading />;
+
+  return (
+    <section className="page-stack analytics-page">
+      <div className="panel filter-panel">
+        <div className="analytics-context-bar">
+          <div>
+            <span className="status active">全部账户</span>
+            <small>汇总 {accounts.length} 个账户的检测批次；跨币种金额直接相加，仅供趋势参考。</small>
+          </div>
+        </div>
+        <div className="form-grid management-filters">
+          <Field label="时间范围"><select value={preset} onChange={(event) => setPreset(event.target.value as AnalysisPreset)}><option value="today">今天</option><option value="yesterday">昨天</option><option value="3d">三天</option><option value="7d">七天</option><option value="30d">三十天</option><option value="custom">自定义</option></select></Field>
+          <Field label="分析层级"><select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}><option value="all">全部层级</option><option value="campaign">广告系列</option><option value="ad-group">广告组</option><option value="ad">广告</option></select></Field>
+          {preset === "custom" && <><Field label="开始日期"><input type="date" max={customTo || today} value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></Field><Field label="结束日期"><input type="date" min={customFrom} max={today} value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></Field></>}
+        </div>
+        {!range && <p className="error-text">请选择有效日期，且范围不超过 90 天。</p>}
+        <p className="retention-note">本地快照保留 90 天；已按检测时间聚合全部账户。</p>
+      </div>
+      <div className="summary-grid">
+        <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
+      </div>
+      <div className="panel batch-chart-panel">
+        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>批次数据透视</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
+        <BatchTrendChart batches={analysis.batches} barMetric={barMetric} lineMetric={lineMetric} />
+      </div>
+      <details className="panel table-panel collapsible-panel">
+        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次明细 <em className="heading-count">{analysis.batches.length}</em></h2></div></div></summary>
+        <div className="table-wrap"><table>
+          <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
+          <tbody>{analysis.batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : analysis.batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
+        </table></div>
+      </details>
+    </section>
+  );
 }
 
 function getErrorMessage(cause: unknown): string {

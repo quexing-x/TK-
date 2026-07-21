@@ -500,7 +500,7 @@ export const api = {
   getManualTakeovers: (accountId: string) =>
     request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),
   changeEntityStatus: (accountId: string, input: ManualStatusInput) =>
-    request<ManualStatusResult>(`/api/accounts/${accountId}/entities/status`, {
+    request<AdOperationRecord>(`/api/accounts/${accountId}/entities/status`, {
       method: "POST",
       body: JSON.stringify(input),
     }),
