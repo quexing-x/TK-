@@ -37,6 +37,6 @@ describe("user guide", () => {
       (section) => section.id === "quick-start",
     );
     expect(quickStart?.steps.join(" ")).toContain("更高版本安装包");
-    expect(quickStart?.notes.join(" ")).toContain("%APPDATA%");
+    expect(quickStart?.notes.join(" ")).toContain("文档\\TK Ads Automation");
   });
 });
