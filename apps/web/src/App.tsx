@@ -953,6 +953,10 @@ function UsersPage({
   );
 }
 
+function scrollToSection(id: string): void {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function AdsManagementPage({
   account,
   capabilities,
@@ -1212,8 +1216,8 @@ function AdsManagementPage({
         <article><small>当前对象</small><strong>{filtered.length}</strong><span>最近 48 小时筛选结果</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
         <article><small>区间消耗</small><strong>{formatMetric(currentSpend)}</strong><span>最近 48 小时汇总</span></article>
-        <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
+        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
+        <article className="stat-jump" role="button" tabIndex={0} title="查看广告组定时任务" onClick={() => scrollToSection("schedule-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("schedule-section"); } }}><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1281,7 +1285,7 @@ function AdsManagementPage({
         {filtered.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {filtered.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
 
-      <div className="panel table-panel">
+      <div className="panel table-panel" id="manual-takeover-section">
         <div className="panel-heading">
           <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组 <em className="heading-count">{manualTakeovers.length}</em></h2></div></div>
         </div>
@@ -1290,7 +1294,7 @@ function AdsManagementPage({
         </tbody></table></div>
       </div>
 
-      <div className="panel table-panel">
+      <div className="panel table-panel" id="schedule-section">
         <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2><p>总开关关闭时不执行；已取消和已完成任务不计入计数。</p></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>

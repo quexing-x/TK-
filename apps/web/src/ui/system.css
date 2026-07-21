@@ -1394,3 +1394,9 @@ td strong { color: var(--ink); }
   :where(button, a, [role="button"], .nav-item, .manual-launch, .interactive, .switch-card, .rule-card):hover,
   :where(button, [role="button"]):active { transform: none !important; }
 }
+
+/* 可点击跳转的统计卡（人工接管 / 定时任务） */
+.stat-jump { cursor: pointer; transition: border-color .15s, box-shadow .15s, transform .1s; }
+.stat-jump:hover { border-color: var(--primary); box-shadow: var(--ambient-shadow-hover); }
+.stat-jump:active { transform: translateY(1px); }
+.stat-jump:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
