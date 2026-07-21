@@ -69,7 +69,6 @@ import { AuthGate, useAuth } from "./AuthGate";
 import { SystemUsersPage } from "./SystemUsersPage";
 import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
 import { LaunchPage } from "./LaunchPage";
-import { TaskCenterPage } from "./TaskCenterPage";
 import { MaintenancePage } from "./MaintenancePage";
 import { OverviewPage } from "./OverviewPage";
 import {
@@ -107,7 +106,6 @@ export type PageKey =
   | "rules"
   | "notifications"
   | "launch"
-  | "tasks"
   | "maintenance"
   | "system-users";
 
@@ -123,7 +121,6 @@ export const pageHash: Record<PageKey, string> = {
   rules: "#rules",
   notifications: "#notifications",
   launch: "#launch",
-  tasks: "#tasks",
   maintenance: "#maintenance",
   "system-users": "#system-users",
 };
@@ -571,8 +568,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             preferredAccountId={pageAccountId}
             onError={setError}
           />
-        ) : page === "tasks" ? (
-          <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={pageAccountId} onError={setError} />
         ) : page === "ads" ? (
           <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
             {selectedAccountId === "all" ? (
@@ -613,7 +608,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
                   : <EmptyState text="请选择账户。" />;
               })()}
             </AccountScopedPage>
-            <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={pageAccountId} onError={setError} />
           </>
         ) : (
           <EmptyState text="页面不存在。" />

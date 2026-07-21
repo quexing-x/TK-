@@ -9,7 +9,6 @@ import {
   Radio,
   ShieldCheck,
   Users,
-  Zap,
 } from "lucide-react";
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import type {
@@ -24,7 +23,7 @@ import { api, type BootstrapPayload } from "./api";
 import { selectPendingAutomationDecisions } from "./automation-decision-view";
 import { hasProviderCapability } from "./provider-capability-view";
 
-type OverviewDestination = "launch" | "ads" | "tasks" | "users";
+type OverviewDestination = "launch" | "ads" | "users";
 
 export function OverviewPage({
   accounts,
@@ -199,7 +198,6 @@ export function OverviewPage({
         <article className="overview-zone activity-zone">
           <header className="zone-heading">
             <div><h2>最近执行</h2><span>自动化操作记录</span></div>
-            <button className="icon-text-link" type="button" onClick={() => onNavigate("tasks")}>查看全部 <ArrowRight size={14} /></button>
           </header>
           <div className="activity-list">
             {stream.length ? stream.map((decision) => (
@@ -230,7 +228,6 @@ export function OverviewPage({
             <button type="button" onClick={() => onNavigate("launch")}><Plus size={22} /><strong>创建广告</strong><span>批量导入与发布</span></button>
             <button type="button" onClick={() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" })}><Users size={22} /><strong>管理账户</strong><span>接入与能力检测</span></button>
             <button type="button" onClick={() => onNavigate("ads")}><CircleGauge size={22} /><strong>广告管理</strong><span>筛选与人工启停</span></button>
-            <button type="button" onClick={() => onNavigate("tasks")}><Zap size={22} /><strong>任务中心</strong><span>重试与人工核验</span></button>
           </div>
         </article>
 
