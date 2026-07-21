@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.3.7
+## Windows 桌面版 1.3.8
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.3.7.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.3.8.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
