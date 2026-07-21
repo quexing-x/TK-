@@ -1,6 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import fastifyStatic from "@fastify/static";
 import { createApp } from "@tk-auto/api";
 import { WindowsDpapiCredentialVault } from "@tk-auto/credentials";
@@ -34,7 +34,6 @@ const PRODUCT_NAME = "TK Ads Automation";
 const HOST = "127.0.0.1";
 const isSchedulerProcess = process.argv.includes("--scheduler");
 const isSmokeTest = process.argv.includes("--smoke-test");
-const clientSessionProcessId = Number(process.argv.find((argument) => argument.startsWith("--client-session="))?.split("=", 2)[1]);
 const legacyUserDataDirectory = join(app.getPath("appData"), PRODUCT_NAME);
 
 app.setPath("userData", join(app.getPath("documents"), PRODUCT_NAME));
@@ -60,9 +59,7 @@ async function startSchedulerProcess(): Promise<void> {
   runtime = await startRuntime(schedulerOrigin());
   const enabled = runtime.store.getSystemRuntimeState().enabled;
   await setBackgroundStartup(backgroundExecutablePath(), enabled);
-  if (!enabled && Number.isInteger(clientSessionProcessId) && clientSessionProcessId > 0) {
-    stopWhenClientSessionEnds(clientSessionProcessId, runtime.store);
-  }
+  if (!enabled) beginDisabledShutdown(runtime.store);
   if (isSmokeTest) {
     const response = await fetch(`${runtime.origin}/api/health`);
     if (!response.ok) throw new Error(`后台程序健康检查失败（HTTP ${response.status}）。`);
@@ -73,6 +70,8 @@ async function startSchedulerProcess(): Promise<void> {
 }
 
 async function startClientProcess(): Promise<void> {
+  writeClientSessionPid();
+  app.on("will-quit", clearClientSessionPid);
   const origin = await ensureSchedulerRunning();
   mainWindow = createWindow(origin);
   tray = createTray();
@@ -161,7 +160,7 @@ async function startRuntime(origin: string) {
     onSystemRuntimeChanged: async (enabled) => {
       if (!isSchedulerProcess) return;
       await setBackgroundStartup(backgroundExecutablePath(), enabled);
-      if (!enabled) setTimeout(() => app.quit(), 250);
+      if (!enabled) beginDisabledShutdown(store);
     },
   });
   const webRoot = app.isPackaged ? join(process.resourcesPath, "web") : resolve(__dirname, "../../web/dist");
@@ -213,20 +212,86 @@ function exitClient(): void {
   app.quit();
 }
 
-function stopWhenClientSessionEnds(parentProcessId: number, store: AutomationStore): void {
-  const timer = setInterval(() => {
+function clientSessionPidPath(): string {
+  const paths = resolveDesktopRuntimePaths({
+    downloadsDirectory: app.getPath("downloads"),
+    legacyUserDataDirectory,
+    userDataDirectory: app.getPath("userData"),
+  });
+  return join(paths.dataDirectory, "client-session.pid");
+}
+
+function writeClientSessionPid(): void {
+  try {
+    const file = clientSessionPidPath();
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, String(process.pid), "utf8");
+  } catch (cause) {
+    console.error("Failed to record the client session pid.", cause);
+  }
+}
+
+function clearClientSessionPid(): void {
+  try {
+    unlinkSync(clientSessionPidPath());
+  } catch {
+    // The pid file is already gone.
+  }
+}
+
+function readClientSessionPid(): number | null {
+  try {
+    const file = clientSessionPidPath();
+    if (!existsSync(file)) return null;
+    const pid = Number(readFileSync(file, "utf8").trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(processId: number): boolean {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Turning global automation off must not kill a scheduler a client is still
+// viewing (the client renders the scheduler's server). Keep serving the
+// attached client until it closes; only then—still disabled—does the
+// background scheduler exit. A headless scheduler with no client exits promptly.
+function beginDisabledShutdown(store: AutomationStore): void {
+  const clientPid = readClientSessionPid();
+  if (clientPid !== null && isProcessAlive(clientPid)) {
+    watchClientSession(clientPid, store);
+  } else {
+    setTimeout(() => app.quit(), 250);
+  }
+}
+
+let clientSessionWatchTimer: ReturnType<typeof setInterval> | null = null;
+
+function watchClientSession(clientProcessId: number, store: AutomationStore): void {
+  if (clientSessionWatchTimer) return;
+  clientSessionWatchTimer = setInterval(() => {
     if (store.getSystemRuntimeState().enabled) {
-      clearInterval(timer);
+      clearClientSessionWatch();
       return;
     }
-    try {
-      process.kill(parentProcessId, 0);
-    } catch {
-      clearInterval(timer);
+    if (!isProcessAlive(clientProcessId) || readClientSessionPid() === null) {
+      clearClientSessionWatch();
       app.quit();
     }
   }, 2_000);
-  timer.unref();
+  clientSessionWatchTimer.unref();
+}
+
+function clearClientSessionWatch(): void {
+  if (clientSessionWatchTimer) clearInterval(clientSessionWatchTimer);
+  clientSessionWatchTimer = null;
 }
 
 async function stopRuntime(activeRuntime: NonNullable<typeof runtime>) {
