@@ -191,6 +191,14 @@ export const api = {
     setAuthSession(status);
     return status;
   },
+  resetLocalAccess: async () => {
+    const status = await request<AuthStatus>("/api/auth/recover", {
+      method: "POST",
+      body: JSON.stringify({ confirmation: "RESET" }),
+    });
+    setAuthSession(status);
+    return status;
+  },
   logout: async () => {
     try {
       return await request<{ ok: boolean }>("/api/auth/logout", {

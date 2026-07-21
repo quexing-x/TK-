@@ -114,6 +114,9 @@ const AnalyticsQuerySchema = z.object({
 const NotificationParamsSchema = z.object({
   channelKind: NotificationChannelKindSchema,
 });
+const LocalAccessResetSchema = z.object({
+  confirmation: z.literal("RESET"),
+});
 
 export interface AppDependencies {
   store: AutomationStore;
@@ -129,6 +132,8 @@ export interface AppDependencies {
   appVersion?: string;
   packaged?: boolean;
   maintenanceUpdates?: MaintenanceUpdateRuntime;
+  /** Desktop-only lifecycle bridge for the separately hosted scheduler. */
+  onSystemRuntimeChanged?: (enabled: boolean) => void | Promise<void>;
 }
 
 export async function createApp(
@@ -323,6 +328,13 @@ export async function createApp(
     return auth.status(session);
   });
 
+  app.post("/api/auth/recover", async (request, reply) => {
+    LocalAccessResetSchema.parse(request.body);
+    auth.resetLocalAccess();
+    clearSessionCookie(reply, dependencies.secureCookies ?? false);
+    return auth.status(null);
+  });
+
   app.post("/api/auth/logout", async (request, reply) => {
     auth.logout(request.authSession);
     clearSessionCookie(reply, dependencies.secureCookies ?? false);
@@ -393,11 +405,13 @@ export async function createApp(
     dependencies.store.getSystemRuntimeState(),
   );
 
-  app.put("/api/system/runtime", async (request) =>
-    dependencies.store.updateSystemRuntimeState(
+  app.put("/api/system/runtime", async (request) => {
+    const state = dependencies.store.updateSystemRuntimeState(
       SystemRuntimeUpdateSchema.parse(request.body),
-    ),
-  );
+    );
+    await dependencies.onSystemRuntimeChanged?.(state.enabled);
+    return state;
+  });
 
   app.get("/api/automation/features", async () =>
     dependencies.store.getAutomationFeatureSettings(),
@@ -1645,7 +1659,7 @@ function isPublicApi(method: string, rawUrl: string): boolean {
   const path = rawUrl.split("?", 1)[0] ?? rawUrl;
   return (
     (method === "GET" && ["/api/health", "/api/auth/status"].includes(path)) ||
-    (method === "POST" && ["/api/auth/setup", "/api/auth/login"].includes(path))
+    (method === "POST" && ["/api/auth/setup", "/api/auth/login", "/api/auth/recover"].includes(path))
   );
 }
 

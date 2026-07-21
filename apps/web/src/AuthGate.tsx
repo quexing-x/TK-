@@ -30,9 +30,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [username, setUsername] = useState("developer");
+  const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("本机开发者");
   const [password, setPassword] = useState("");
+  const [resetConfirmation, setResetConfirmation] = useState("");
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
 
   const refresh = async () => {
     const next = await api.authStatus();
@@ -68,6 +70,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setPassword("");
       setError(null);
       setStatus(next);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetLocalAccess = async () => {
+    try {
+      setBusy(true);
+      const next = await api.resetLocalAccess();
+      setStatus(next);
+      setUsername("");
+      setDisplayName("");
+      setPassword("");
+      setResetConfirmation("");
+      setRecoveryOpen(false);
+      setError(null);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -139,6 +159,36 @@ export function AuthGate({ children }: { children: ReactNode }) {
             {setup ? <KeyRound size={18} /> : <LogIn size={18} />}
             {busy ? "处理中…" : setup ? "创建并进入" : "登录"}
           </button>
+          {!setup && (
+            <div className="auth-recovery">
+              <button
+                className="text-button"
+                type="button"
+                onClick={() => setRecoveryOpen((open) => !open)}
+              >
+                忘记本机管理员密码？重置本机登录
+              </button>
+              {recoveryOpen && (
+                <div className="auth-recovery-confirmation">
+                  <p>将清除本机系统用户和会话，不会删除广告账户、规则或 Cookie。输入 RESET 确认。</p>
+                  <input
+                    aria-label="重置本机登录确认"
+                    value={resetConfirmation}
+                    onChange={(event) => setResetConfirmation(event.target.value)}
+                    placeholder="RESET"
+                  />
+                  <button
+                    className="danger-button"
+                    disabled={busy || resetConfirmation !== "RESET"}
+                    type="button"
+                    onClick={() => void resetLocalAccess()}
+                  >
+                    清除并重新创建管理员
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <footer>仅监听 127.0.0.1 · 会话与广告凭据均在本机保护</footer>
         </form>
       </main>

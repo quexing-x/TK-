@@ -135,6 +135,11 @@ export class AuthService {
     if (session) this.store.deleteAuthSession(session.tokenHash);
   }
 
+  resetLocalAccess(): number {
+    this.loginAttempts.clear();
+    return this.store.resetLocalUserAccess();
+  }
+
   async createUser(
     actor: LocalUserRecord,
     input: LocalUserCreateInput,

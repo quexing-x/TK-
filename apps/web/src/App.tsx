@@ -383,7 +383,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
           <span className="system-master-light" />
           <span>
             <strong>{bootstrap.systemRuntime.enabled ? "系统运行中" : "系统已暂停"}</strong>
-            <small>{bootstrap.systemRuntime.enabled ? "检测、定时与启停已启用" : "所有后台任务和写入已停止"}</small>
+            <small>{bootstrap.systemRuntime.enabled ? "后台程序、开机自启、检测、定时与启停已启用" : "后台程序与开机自启已关闭"}</small>
           </span>
           <span className={bootstrap.systemRuntime.enabled ? "master-switch checked" : "master-switch"}><i /></span>
         </button>
