@@ -146,7 +146,7 @@ describe("AutomationStore", () => {
     rmSync(directory, { recursive: true, force: true });
   }, 15_000);
 
-  it("migrates existing accounts to the safe manual-approval execution mode", () => {
+  it("migrates existing accounts to direct automatic execution", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-"));
     const databasePath = join(directory, "automation.db");
     const firstStore = new AutomationStore(databasePath);
@@ -162,11 +162,16 @@ describe("AutomationStore", () => {
         "DELETE FROM schema_migrations WHERE migration_key = 'safe-manual-approval-execution-v1'",
       )
       .run();
+    legacyDatabase
+      .prepare(
+        "DELETE FROM schema_migrations WHERE migration_key = 'direct-automation-default-v1'",
+      )
+      .run();
     legacyDatabase.close();
 
     const reopenedStore = new AutomationStore(databasePath);
     expect(reopenedStore.getAccount("demo-account")?.executionMode).toBe(
-      "manual-approval",
+      "automatic",
     );
     reopenedStore.close();
     rmSync(directory, { recursive: true, force: true });
@@ -242,7 +247,7 @@ describe("AutomationStore", () => {
     });
 
     expect(account.accountType).toBe("agency");
-    expect(account.executionMode).toBe("manual-approval");
+    expect(account.executionMode).toBe("automatic");
     expect(store.listGlobalThresholds()).toHaveLength(6);
     expect(store.getAutomationSwitches(account.id)).toMatchObject({
       manageCampaignStatus: true,
@@ -1627,23 +1632,16 @@ describe("AutomationStore", () => {
     }
   });
 
-  it("keeps low-risk automation off by default with no daily cap", () => {
+  it("keeps legacy low-risk policy data independent from direct automation", () => {
     expect(store.getLowRiskAutomationPolicy("demo-account")).toMatchObject({
       enabled: false,
       policyVersion: "disable-only-v1",
       dailyActionLimit: 0,
     });
-    expect(() => store.updateLowRiskAutomationPolicy("demo-account", {
-      enabled: true,
-      dailyActionLimit: 2,
-    })).toThrow("automatic");
-    store.setAccountExecutionMode("demo-account", "automatic", "test opt-in");
     expect(store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
       dailyActionLimit: 2,
     })).toMatchObject({ enabled: true, dailyActionLimit: 0 });
-    store.setAccountExecutionMode("demo-account", "manual-approval", "circuit opened");
-    expect(store.getLowRiskAutomationPolicy("demo-account").enabled).toBe(false);
   });
 
   it("atomically deduplicates automatic actions and enforces the daily limit across instances", () => {

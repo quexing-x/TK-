@@ -1067,13 +1067,6 @@ export async function createApp(
         if (!authorized) {
           return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
         }
-        if (health.status !== "ready") {
-          dependencies.store.setAccountExecutionMode(
-            accountId,
-            "manual-approval",
-            "cURL 导入后的连接检测未通过，已自动熔断写入。",
-          );
-        }
         return authorized;
       } catch (cause) {
         const authorized = dependencies.store.completeProviderHealthCheckIfCurrent(
@@ -1091,11 +1084,6 @@ export async function createApp(
         if (!authorized) {
           return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
         }
-        dependencies.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          "cURL 导入后的连接检测异常，已自动熔断写入。",
-        );
         return authorized;
       }
     },
@@ -1530,13 +1518,6 @@ export async function createApp(
         if (!authorized) {
           return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
         }
-        if (health.status !== "ready") {
-          dependencies.store.setAccountExecutionMode(
-            accountId,
-            "manual-approval",
-            "Provider 连接检测未通过，已自动熔断写入。",
-          );
-        }
         return authorized;
       } catch (cause) {
         const authorized = dependencies.store.completeProviderHealthCheckIfCurrent(
@@ -1554,11 +1535,6 @@ export async function createApp(
         if (!authorized) {
           return reply.status(409).send({ message: "接入参数或凭据已变更，请重新检测。" });
         }
-        dependencies.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          "Provider 连接检测异常，已自动熔断写入。",
-        );
         return authorized;
       }
     },
@@ -1599,11 +1575,6 @@ export async function createApp(
           "failed",
           `数据同步异常：${getSafeProviderError(cause)}`,
         );
-        dependencies.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          "Provider 数据同步失败，已自动熔断写入。",
-        );
         throw cause;
       }
       dependencies.store.saveReadOnlySync(
@@ -1612,13 +1583,6 @@ export async function createApp(
         output.entities,
         output.result,
       );
-      if (output.result.quality.status !== "healthy") {
-        dependencies.store.setAccountExecutionMode(
-          accountId,
-          "manual-approval",
-          `同步数据不完整：${output.result.warnings.join("；").slice(0, 500)}`,
-        );
-      }
       return output.result;
     },
   );

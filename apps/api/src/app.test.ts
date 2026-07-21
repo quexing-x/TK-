@@ -178,14 +178,14 @@ describe("local API", () => {
         accountType: "standard",
         enabled: false,
         providerKind: "cookie",
-        executionMode: "manual-approval",
+        executionMode: "automatic",
       },
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       enabled: false,
-      executionMode: "manual-approval",
+      executionMode: "automatic",
     });
 
     const run = await app.inject({
@@ -477,7 +477,7 @@ describe("local API", () => {
     expect(response.json()).toMatchObject({
       displayName: "第二账户",
       accountType: "agency",
-      executionMode: "manual-approval",
+      executionMode: "automatic",
     });
     expect(store.listAccounts()).toHaveLength(2);
   });
@@ -960,7 +960,7 @@ describe("local API", () => {
     expect(store.listLaunchPlanItems(planId)[0]?.status).toBe("pending");
   });
 
-  it("allows an explicitly requested launch when the account remains in manual-approval mode", async () => {
+  it("allows an explicitly requested launch when the account remains in automatic mode", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -972,7 +972,7 @@ describe("local API", () => {
       })),
     );
     const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
-    store.setAccountExecutionMode("demo-account", "manual-approval", "manual launch test");
+    store.setAccountExecutionMode("demo-account", "automatic", "manual launch test");
 
     const response = await app.inject({
       method: "POST",
@@ -1012,7 +1012,7 @@ describe("local API", () => {
       adId: "ad-created",
       errorMessage: null,
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
@@ -1099,7 +1099,7 @@ describe("local API", () => {
       status: "succeeded",
       syncWarning: expect.stringContaining("创建后未回读到"),
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
   it("keeps creation succeeded but warns and downgrades on non-healthy readback quality", async () => {
@@ -1146,7 +1146,7 @@ describe("local API", () => {
       status: "succeeded",
       syncWarning: expect.stringContaining("partial"),
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
   it("downgrades automatic mode when direct connection testing fails", async () => {
@@ -1170,7 +1170,7 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       authorizationStatus: "failed",
       capabilityVersion: "launch-test-v1",
@@ -1281,7 +1281,7 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(500);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
@@ -1316,7 +1316,7 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
   it("marks a provider success with incomplete IDs as unknown and never retries it", async () => {

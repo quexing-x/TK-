@@ -274,7 +274,6 @@ describe("AutomationService", () => {
       accountType: account.accountType,
       enabled: account.enabled,
       providerKind: account.providerKind,
-      executionMode: "automatic",
     });
     const initialSync = await provider.syncReadOnly();
     store.saveReadOnlySync(
@@ -317,7 +316,7 @@ describe("AutomationService", () => {
 
     await service.checkAccountConnection("demo-account");
 
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
@@ -327,7 +326,7 @@ describe("AutomationService", () => {
     const run = await service.runAccount("demo-account", "scheduler");
 
     expect(run.status).toBe("failed");
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       status: "failed",
       lastMessage: "Cookie 已失效或数据同步异常：sync unavailable",
@@ -342,7 +341,7 @@ describe("AutomationService", () => {
 
     expect(run.candidateCount).toBe(1);
     expect(provider.mutations).toHaveLength(0);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
       status: "preview",
       dataQualityStatus: "partial",
@@ -357,7 +356,7 @@ describe("AutomationService", () => {
 
     expect(run.candidateCount).toBe(0);
     expect(provider.mutations).toHaveLength(0);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
   it("rechecks stored quality at the write boundary after automatic mode is re-enabled", async () => {
@@ -387,7 +386,7 @@ describe("AutomationService", () => {
     });
 
     expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
     expect(store.listAdOperations("demo-account")[0]).toMatchObject({
       status: "unknown",
@@ -402,7 +401,6 @@ describe("AutomationService", () => {
       accountType: account.accountType,
       enabled: true,
       providerKind: account.providerKind,
-      executionMode: "manual-approval",
     });
 
     const result = await service.changeStatusManually("demo-account", {
@@ -610,13 +608,13 @@ describe("AutomationService", () => {
     expect(provider.mutations).toHaveLength(1);
   });
 
-  it("keeps rule matches as suggestions even for automatic accounts", async () => {
+  it("directly closes matched ad groups for automatic accounts", async () => {
     const run = await service.runAccount("demo-account", "manual");
 
-    expect(run).toMatchObject({ executionMode: "observe", actionCount: 0, successCount: 0, failureCount: 0 });
-    expect(provider.mutations).toEqual([]);
+    expect(run).toMatchObject({ executionMode: "automatic", actionCount: 1, successCount: 1, failureCount: 0 });
+    expect(provider.mutations).toEqual([{ entityType: "ad-group", externalId: "adgroup-1", action: "disable" }]);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
-      status: "preview",
+      status: "succeeded",
       dataQualityStatus: "healthy",
       ruleVersion: expect.any(String),
       metricSnapshot: expect.objectContaining({ spend: expect.any(Number) }),
@@ -624,10 +622,24 @@ describe("AutomationService", () => {
     });
   });
 
+  it("clears stale open decision reminders after an ad group is closed", async () => {
+    await service.runAccount("demo-account", "preview");
+    const stale = store.listAutomationDecisions("demo-account").find((item) => item.status === "preview")!;
+
+    await service.runAccount("demo-account", "manual");
+
+    expect(store.getAutomationDecision(stale.id)).toMatchObject({
+      status: "skipped",
+      errorMessage: "广告组已关闭，已清除过期决策提醒",
+    });
+    expect(store.listAutomationDecisions("demo-account").find((item) => item.id !== stale.id))
+      .toMatchObject({ status: "succeeded" });
+  });
+
   it("executes one approved suggestion once and persists the fixed approval snapshot", async () => {
     await service.runAccount("demo-account", "preview");
     const decision = store.listAutomationDecisions("demo-account").find((item) => item.status === "preview")!;
-    store.setAccountExecutionMode("demo-account", "manual-approval", "approval test");
+    store.setAccountExecutionMode("demo-account", "automatic", "approval test");
     provider.statusDelayMs = 20;
     const actor = { id: "approver-1", name: "审批员", kind: "user" as const };
 
@@ -682,11 +694,11 @@ describe("AutomationService", () => {
     expect(provider.mutations).toHaveLength(0);
   });
 
-  it("keeps scheduler rule matches read-only until low-risk automation is explicitly enabled", async () => {
+  it("directly closes matched ad groups from the scheduler", async () => {
     const run = await service.runAccount("demo-account", "scheduler");
 
-    expect(run).toMatchObject({ executionMode: "observe", actionCount: 0 });
-    expect(provider.mutations).toHaveLength(0);
+    expect(run).toMatchObject({ executionMode: "automatic", actionCount: 1, successCount: 1 });
+    expect(provider.mutations).toHaveLength(1);
     expect(store.getLowRiskAutomationPolicy("demo-account").enabled).toBe(false);
   });
 
@@ -785,7 +797,7 @@ describe("AutomationService", () => {
     expect(service.getLowRiskAutomationState("demo-account").todayUsage).toBe(0);
   });
 
-  it("rechecks the account rollout policy at the final Provider boundary", async () => {
+  it("does not let the removed rollout policy block direct automation", async () => {
     store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
       dailyActionLimit: 5,
@@ -800,13 +812,12 @@ describe("AutomationService", () => {
 
     const run = await service.runAccount("demo-account", "scheduler");
 
-    expect(run).toMatchObject({ actionCount: 1, successCount: 0, failureCount: 1 });
-    expect(provider.mutations).toHaveLength(0);
+    expect(run).toMatchObject({ actionCount: 1, successCount: 1, failureCount: 0 });
+    expect(provider.mutations).toHaveLength(1);
     expect(store.listAutomationDecisions("demo-account")).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          status: "failed",
-          errorMessage: expect.stringContaining("请求发送前"),
+          status: "succeeded",
         }),
       ]),
     );
@@ -844,7 +855,7 @@ describe("AutomationService", () => {
 
     expect(approval.status).toBe("failed");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(provider.mutations).toHaveLength(0);
   });
 
@@ -1037,13 +1048,13 @@ describe("AutomationService", () => {
     expect(store.getAutomationDecision(decision.id)?.status).toBe("succeeded");
   });
 
-  it("never calls the rule Provider write path even when it would fail", async () => {
+  it("records a direct automation write failure", async () => {
     provider.shouldFail = true;
 
     const run = await service.runAccount("demo-account", "manual");
 
-    expect(run.failureCount).toBe(0);
-    expect(provider.mutations).toEqual([]);
+    expect(run.failureCount).toBe(1);
+    expect(provider.mutations).toHaveLength(1);
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       status: "ready",
       lastMessage: "ready",
@@ -1062,7 +1073,7 @@ describe("AutomationService", () => {
       });
     }
 
-    expect(store.getAccount("demo-account")?.executionMode).toBe("manual-approval");
+    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
   it("does not evaluate campaigns older than 48 hours", async () => {
@@ -1081,7 +1092,6 @@ describe("AutomationService", () => {
       accountType: account.accountType,
       enabled: false,
       providerKind: account.providerKind,
-      executionMode: account.executionMode,
     });
 
     await expect(service.runAccount("demo-account", "manual")).rejects.toThrow(
@@ -1108,15 +1118,15 @@ describe("AutomationService", () => {
     expect(store.listPollCycles()).toHaveLength(0);
   });
 
-  it("keeps manual-approval accounts in suggestion mode without provider writes", async () => {
-    store.setAccountExecutionMode("demo-account", "manual-approval", "test");
+  it("keeps automatic accounts in direct execution mode", async () => {
+    store.setAccountExecutionMode("demo-account", "automatic", "test");
 
     const run = await service.runAccount("demo-account", "manual");
 
     expect(run.candidateCount).toBe(1);
-    expect(run.successCount).toBe(0);
-    expect(provider.mutations).toHaveLength(0);
-    expect(store.listAutomationDecisions("demo-account")[0]?.status).toBe("preview");
+    expect(run.successCount).toBe(1);
+    expect(provider.mutations).toHaveLength(1);
+    expect(store.listAutomationDecisions("demo-account")[0]?.status).toBe("succeeded");
   });
 
   it("does not turn a suggestion into a write when the master switch changes", async () => {
@@ -1126,11 +1136,11 @@ describe("AutomationService", () => {
 
     const run = await service.runAccount("demo-account", "manual");
 
-    expect(run.failureCount).toBe(0);
+    expect(run.failureCount).toBe(1);
     expect(provider.mutations).toHaveLength(0);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
-      status: "preview",
-      errorMessage: null,
+      status: "failed",
+      errorMessage: expect.stringContaining("软件总开关"),
     });
   });
 
@@ -1182,14 +1192,13 @@ describe("AutomationService", () => {
     });
   });
 
-  it("executes a user-created schedule while the account is in manual-approval mode", async () => {
+  it("executes a user-created schedule while the account is in automatic mode", async () => {
     const account = store.getAccount("demo-account")!;
     store.updateAccountSettings("demo-account", {
       displayName: account.displayName,
       accountType: account.accountType,
       enabled: true,
       providerKind: account.providerKind,
-      executionMode: "manual-approval",
     });
     const schedule = store.createOneTimeSchedule("demo-account", {
       externalId: "adgroup-1",
@@ -1281,7 +1290,7 @@ describe("AutomationService", () => {
     await running;
   });
 
-  it("keeps higher-priority suggestions before applying the per-run limit", async () => {
+  it("keeps higher-priority direct closures before applying the per-run limit", async () => {
     provider.scenario = "priority";
     store.updateGlobalAutomationSettings({
       pollingIntervalMinutes: 5,
@@ -1290,9 +1299,9 @@ describe("AutomationService", () => {
 
     await service.runAccount("demo-account", "manual");
 
-    expect(provider.mutations).toEqual([]);
+    expect(provider.mutations).toEqual([{ entityType: "ad-group", externalId: "adgroup-high-priority", action: "disable" }]);
     expect(store.listAutomationDecisions("demo-account")).toEqual(expect.arrayContaining([
-      expect.objectContaining({ externalId: "adgroup-high-priority", status: "preview" }),
+      expect.objectContaining({ externalId: "adgroup-high-priority", status: "succeeded" }),
       expect.objectContaining({ externalId: "adgroup-low-priority", status: "skipped" }),
     ]));
   });
@@ -1340,13 +1349,13 @@ describe("AutomationService", () => {
     expect(cycles).toHaveLength(1);
     expect(cycles[0]?.accounts[0]).toMatchObject({
       accountName: "演示广告账户",
-      status: "no-action",
+      status: "changed",
       enabledCount: 0,
-      disabledCount: 0,
+      disabledCount: 1,
     });
   });
 
-  it("suggests re-enabling a qualified closed ad group without writing", async () => {
+  it("keeps automatic recovery enable actions safely skipped", async () => {
     provider.scenario = "recovery";
     const scheduler = new AutomationScheduler(store, service);
     vi.useFakeTimers();
@@ -1359,7 +1368,7 @@ describe("AutomationService", () => {
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
       externalId: "adgroup-1",
       action: "enable",
-      status: "preview",
+      status: "skipped",
     });
     expect(store.listPollCycles()[0]?.accounts[0]).toMatchObject({
       status: "no-action",
@@ -1394,7 +1403,7 @@ describe("AutomationService", () => {
     const run = await service.runAccount("demo-account", "manual");
 
     expect(run.candidateCount).toBe(2);
-    expect(provider.mutations).toEqual([]);
+    expect(provider.mutations).toEqual([{ entityType: "ad-group", externalId: "adgroup-1", action: "disable" }]);
     expect(
       store
         .listAutomationDecisions("demo-account")

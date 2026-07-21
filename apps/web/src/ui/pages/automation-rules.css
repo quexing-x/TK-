@@ -282,7 +282,7 @@
 .automation-primary-grid {
   margin-top: 80px;
   display: grid;
-  grid-template-columns: minmax(360px, 0.82fr) minmax(560px, 1.18fr);
+  grid-template-columns: minmax(360px, 1fr) minmax(320px, 0.9fr);
   border-block: 1px solid var(--line);
 }
 
@@ -295,6 +295,39 @@
 
 .automation-flow-panel { padding-right: 32px; border-right: 1px solid var(--line); }
 .automation-decisions-panel { padding-left: 32px; }
+
+/* Direct automation has no approval queue. Historical decisions stay in the
+   audit table, while the obsolete queue cards are intentionally absent. */
+.automation-decisions-panel,
+.low-risk-panel { display: none; }
+.automation-flow-panel { padding-right: 0; border-right: 0; }
+
+.automation-primary-grid > .account-readiness-panel {
+  margin-top: 0;
+  padding: 24px 0 32px 32px;
+  border-block: 0;
+  border-left: 1px solid var(--line);
+}
+
+.automation-account-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
+  border-block: 1px solid var(--line);
+}
+
+.automation-account-status-grid > span {
+  min-height: 72px;
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.automation-account-status-grid > span + span { border-left: 1px solid var(--line); }
+.automation-account-status-grid .status { width: fit-content; font-size: 12px; }
 
 .automation-section-heading {
   min-height: 56px;
@@ -625,6 +658,7 @@
   .automation-primary-grid { grid-template-columns: 1fr; }
   .automation-flow-panel { padding-right: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .automation-decisions-panel { padding-left: 8px; }
+  .automation-primary-grid > .account-readiness-panel { padding: 24px 8px 32px; border-left: 0; }
   .automation-page > .automation-sync-panel { margin-top: 32px; }
   .automation-page > .automation-runs-panel { margin-top: 32px; }
   .automation-feature-row { grid-template-columns: 176px minmax(0, 1fr); }
