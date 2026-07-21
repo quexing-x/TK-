@@ -8,7 +8,7 @@ afterEach(() => {
 });
 
 describe("CookieAdsProvider", () => {
-  it("overrides a captured multi-day range with the account's current day", async () => {
+  it("overrides a captured range with the account's rolling 48-hour window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T02:30:00.000Z"));
     let sentBody = "";
@@ -29,7 +29,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(JSON.parse(sentBody)).toMatchObject({
-      date_range: { start_date: "2026-07-16", end_date: "2026-07-16" },
+      date_range: { start_date: "2026-07-14", end_date: "2026-07-16" },
     });
   });
 
@@ -94,7 +94,7 @@ describe("CookieAdsProvider", () => {
 
     expect(JSON.parse(sentBody)).toMatchObject({
       common_req: {
-        st: "2026-07-19",
+        st: "2026-07-17",
         et: "2026-07-19",
         metrics: expect.arrayContaining(["stat_cost", "time_attr_on_web_cart"]),
       },
@@ -171,33 +171,33 @@ describe("CookieAdsProvider", () => {
     expect(output.result.quality.paginationComplete).toBe(false);
   });
 
-  it("marks an interrupted Cookie pagination window as partial", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () =>
-      new Response(JSON.stringify({
+  it("loads every Cookie list page before declaring pagination complete", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as { page?: number };
+      const page = body.page ?? Number(new URL(url).searchParams.get("page") ?? 1);
+      const prefix = url.includes("adgroup/list") ? "g" : url.includes("campaign/list") ? "c" : "a";
+      return new Response(JSON.stringify({
         code: 0,
         data: {
           table: [{
-            campaign_id: "c1",
-            adgroup_id: "g1",
-            creative_id: "a1",
+            campaign_id: `c${page}`,
+            adgroup_id: `g${page}`,
+            creative_id: `a${page}`,
+            [`${prefix === "g" ? "adgroup" : prefix === "c" ? "campaign" : "ad"}_name`]: `${prefix}${page}`,
             spend: "1",
-            cpc: "0.5",
-            cost_per_conversion: "1",
-            conversion: "1",
-            onsite_on_web_cart: "1",
           }],
-          page_info: { page: 1, total_page: 2 },
+          page_info: { page, total_page: 2 },
         },
-      }), { status: 200, headers: { "content-type": "application/json" } }),
-    ));
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const output = await new CookieAdsProvider().syncReadOnly(cookieSyncContext());
 
-    expect(output.result.quality).toMatchObject({
-      status: "partial",
-      paginationComplete: false,
-      contractValid: true,
-    });
+    expect(output.result.quality.paginationComplete).toBe(true);
+    expect(output.result.counts).toMatchObject({ campaign: 2, "ad-group": 2, ad: 2 });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it("marks Cookie response contract drift invalid", async () => {
@@ -416,6 +416,42 @@ describe("CookieAdsProvider", () => {
         }),
       ]),
     );
+  });
+
+  it("keeps a single imported ad-group cURL fully usable by deriving the other read layers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const table = url.includes("campaign/list")
+        ? [{ campaign_id: "c1", campaign_name: "系列" }]
+        : url.includes("adgroup/list")
+          ? [{ campaign_id: "c1", adgroup_id: "g1", adgroup_name: "广告组", spend: "1" }]
+          : [{ campaign_id: "c1", adgroup_id: "g1", creative_id: "a1", ad_name: "广告", spend: "1" }];
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { table, pagination: { page: 1, page_count: 1 } },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+
+    const output = await new CookieAdsProvider().syncReadOnly({
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456",
+          method: "POST",
+          body: JSON.stringify({ start_date: "2026-07-01", end_date: "2026-07-07" }),
+          contentType: "application/json",
+        }],
+      },
+    });
+
+    expect(output.result.quality.status).toBe("healthy");
+    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 1 });
   });
 
   it("derives the final-ad read request from the only imported adgroup-list cURL", async () => {

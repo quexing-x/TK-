@@ -159,8 +159,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const payload = (await response.json().catch(() => null)) as {
       message?: string;
     } | null;
-    throw new Error(payload?.message ?? `请求失败 (${response.status})`);
+    const message = payload?.message ?? `请求失败 (${response.status})`;
+    if (typeof window !== "undefined" && !["GET", "HEAD", "OPTIONS"].includes(method)) window.dispatchEvent(new CustomEvent("tk-api-write", { detail: { ok: false, message } }));
+    throw new Error(message);
   }
+
+  if (typeof window !== "undefined" && !["GET", "HEAD", "OPTIONS"].includes(method)) window.dispatchEvent(new CustomEvent("tk-api-write", { detail: { ok: true, message: "操作已完成" } }));
 
   if (response.status === 204) {
     return undefined as T;

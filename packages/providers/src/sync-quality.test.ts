@@ -39,7 +39,7 @@ describe("sync data quality", () => {
     });
   });
 
-  it("marks missing CPA/CPC/conversion/cart metrics as partial", () => {
+  it("keeps available automation healthy when optional metrics are missing", () => {
     const quality = buildSyncDataQuality({
       entities: [{ entityType: "ad", externalId: "a1", payload: { metrics: { spend: "1" } } }],
       paginationComplete: true,
@@ -49,7 +49,8 @@ describe("sync data quality", () => {
       partialFailures: [],
     });
 
-    expect(quality.status).toBe("partial");
+    expect(quality.status).toBe("healthy");
+    expect(quality.requiredMetricsComplete).toBe(false);
     expect(quality.missingMetrics).toEqual(expect.arrayContaining([
       "cost_per_click",
       "cost_per_conversion",

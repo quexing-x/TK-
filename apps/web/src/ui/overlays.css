@@ -1,0 +1,21 @@
+.unified-overlay { z-index: 200; padding: 20px; }
+.unified-modal { width: min(520px, 100%); max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.unified-modal.is-danger { border-color: color-mix(in srgb, var(--danger, #c74d57) 55%, var(--line)); }
+.unified-modal .modal-heading-main { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.unified-modal .modal-heading-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 12px; color: var(--primary); background: color-mix(in srgb, var(--primary) 13%, transparent); }
+.unified-modal.is-danger .modal-heading-icon { color: var(--danger, #c74d57); background: color-mix(in srgb, var(--danger, #c74d57) 13%, transparent); }
+.dialog-body { padding: 22px 24px 6px; display: grid; gap: 15px; }
+.dialog-body p { margin: 0; color: var(--ink-soft); line-height: 1.65; font-size: 13px; }
+.dialog-body input { width: 100%; box-sizing: border-box; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-raised); color: var(--ink); font-size: 13px; transition: border-color .15s, box-shadow .15s; }
+.dialog-body input::placeholder { color: var(--ink-faint); }
+.dialog-body input:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent); }
+.toast-stack { position: fixed; top: 18px; right: 18px; z-index: 300; display: grid; gap: 9px; width: min(360px, calc(100vw - 36px)); }
+.app-toast { min-height: 46px; padding: 10px 12px; display: flex; align-items: center; gap: 9px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-raised); box-shadow: var(--ambient-shadow-hover); animation: toast-in .18s ease-out; }
+.app-toast.success svg { color: var(--success); }.app-toast.error svg { color: var(--danger, #c74d57); }.app-toast.info svg { color: var(--primary); }
+.app-toast span { flex: 1; font-size: 12px; line-height: 1.4; }.app-toast button { padding: 2px; color: var(--ink-faint); border: 0; background: transparent; }
+.command-palette-backdrop { position: fixed; inset: 0; z-index: 180; background: rgba(5, 8, 12, .42); backdrop-filter: blur(3px); }
+.command-palette { position: fixed; top: min(16vh, 140px); left: 50%; z-index: 181; width: min(580px, calc(100vw - 32px)); transform: translateX(-50%); }
+.command-palette-search { width: 100%; box-sizing: border-box; padding: 14px 16px; color: var(--ink); border: 0; border-bottom: 1px solid var(--line); background: transparent; font-size: 15px; outline: 0; }
+.command-menu button.is-selected { color: var(--primary); background: var(--surface-active); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 560px) { .auth-shell { padding: 16px; overflow-x: hidden; }.auth-card { width: 100%; max-width: 100%; padding: 22px; box-sizing: border-box; }.unified-overlay { padding: 12px; }.toast-stack { top: 10px; right: 10px; width: calc(100vw - 20px); } }

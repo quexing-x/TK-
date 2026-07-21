@@ -33,6 +33,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type {
@@ -81,12 +82,20 @@ import {
   type AnalysisPreset,
 } from "./analytics";
 import { syncQualityPresentation } from "./sync-quality-view";
-import { selectPendingAutomationDecisions } from "./automation-decision-view";
+import { selectActionableDecisionHistory, selectPendingAutomationDecisions } from "./automation-decision-view";
 import { nextUiTheme, resolveUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from "./ui-theme";
 import {
-  nextLocalRefreshAt,
   secondsUntilLocalRefresh,
 } from "./local-refresh";
+import {
+  ADS_MANAGEMENT_DEFAULT_LEVEL,
+  ADS_MANAGEMENT_DEFAULT_STATUS,
+  ADS_MANAGEMENT_PAGE_SIZE,
+  compareAdsManagementSpend,
+  filterAdsManagementEntities,
+  paginateAdsManagementItems,
+} from "./ads-management-view";
+import { CommandPalette, OverlayProvider, useOverlays } from "./ui/overlays";
 
 export type PageKey =
   | "overview"
@@ -224,6 +233,36 @@ export function canAccessNavigationItem(
   return true;
 }
 
+function CommandPaletteItems({
+  items, query, selectedIndex, onQueryChange, onSelectedIndexChange, onSelect,
+}: {
+  items: typeof navItems;
+  query: string;
+  selectedIndex: number;
+  onQueryChange: (value: string) => void;
+  onSelectedIndexChange: (value: number) => void;
+  onSelect: (item: typeof navItems[number]) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const visible = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return keyword ? items.filter((item) => `${item.label} ${item.description}`.toLowerCase().includes(keyword)) : items;
+  }, [items, query]);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => { onSelectedIndexChange(Math.min(selectedIndex, Math.max(visible.length - 1, 0))); }, [onSelectedIndexChange, selectedIndex, visible.length]);
+  return <>
+    <input aria-label="搜索命令" className="command-palette-search" placeholder="搜索页面…" ref={inputRef} value={query} onChange={(event) => { onQueryChange(event.target.value); onSelectedIndexChange(0); }} onKeyDown={(event) => {
+      if (event.key === "ArrowDown") { event.preventDefault(); onSelectedIndexChange(Math.min(selectedIndex + 1, visible.length - 1)); }
+      if (event.key === "ArrowUp") { event.preventDefault(); onSelectedIndexChange(Math.max(selectedIndex - 1, 0)); }
+      if (event.key === "Enter" && visible[selectedIndex]) { event.preventDefault(); onSelect(visible[selectedIndex]); }
+    }} />
+    {visible.length === 0 ? <p className="overview-empty">没有匹配的页面</p> : visible.map((item, index) => {
+      const Icon = item.icon;
+      return <button className={index === selectedIndex ? "is-selected" : undefined} key={item.key} type="button" role="menuitem" onMouseEnter={() => onSelectedIndexChange(index)} onClick={() => onSelect(item)}><Icon size={15} /><span>{item.label}</span><small>{item.description}</small></button>;
+    })}
+  </>;
+}
+
 export function App() {
   const [theme, setTheme] = useState<UiTheme>(() => {
     try {
@@ -243,9 +282,9 @@ export function App() {
   }, [theme]);
 
   return (
-    <AuthGate>
+    <OverlayProvider><AuthGate>
       <ConsoleApp theme={theme} onThemeToggle={() => setTheme((current) => nextUiTheme(current))} />
-    </AuthGate>
+    </AuthGate></OverlayProvider>
   );
 }
 
@@ -257,6 +296,8 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
   const [page, setPage] = useState<PageKey>(() => pageFromHash());
   const [error, setError] = useState<string | null>(null);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [commandIndex, setCommandIndex] = useState(0);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
 
   const loadBootstrap = useCallback(async () => {
@@ -292,12 +333,15 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
     const openCommand = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setCommandOpen(true);
+        setCommandOpen((open) => !open);
       }
+      if (event.key === "Escape") setCommandOpen(false);
     };
     window.addEventListener("keydown", openCommand);
     return () => window.removeEventListener("keydown", openCommand);
   }, []);
+
+  useEffect(() => { if (commandOpen) { setCommandQuery(""); setCommandIndex(0); } }, [commandOpen]);
 
   const navigateTo = useCallback((nextPage: PageKey) => {
     const nextHash = pageHash[nextPage];
@@ -436,12 +480,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             <button className="command-trigger" type="button" onClick={() => setCommandOpen((open) => !open)} aria-expanded={commandOpen}>
               <Search size={15} /><span>跳转账户、规则、任务…</span><kbd>Ctrl K</kbd>
             </button>
-            {commandOpen && <div className="command-menu" role="menu">
-              {navItems.filter((item) => item.key !== "overview" && canAccessNavigationItem(item.key, auth.status.permissions)).map((item) => {
-                const Icon = item.icon;
-                return <button key={item.key} type="button" role="menuitem" onClick={() => { navigateTo(item.key); setCommandOpen(false); }}><Icon size={15} /><span>{item.label}</span><small>{item.description}</small></button>;
-              })}
-            </div>}
+            {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)}><CommandPaletteItems query={commandQuery} selectedIndex={commandIndex} onQueryChange={setCommandQuery} onSelectedIndexChange={setCommandIndex} items={navItems.filter((item) => item.key !== "overview" && canAccessNavigationItem(item.key, auth.status.permissions))} onSelect={(item) => { navigateTo(item.key); setCommandOpen(false); }} /></CommandPalette>}
           </div>
           <span className={bootstrap.systemRuntime.enabled ? "runtime-chip active" : "runtime-chip paused"}>
             <i />{bootstrap.systemRuntime.enabled ? "稳定运行" : "已暂停"}
@@ -545,7 +584,13 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
                 onError={setError}
               />
             ) : account ? (
-              <AdsManagementPage account={account} capabilities={selectedCapabilities} onError={setError} />
+              <AdsManagementPage
+                account={account}
+                capabilities={selectedCapabilities}
+                key={account.id}
+                pollingIntervalMinutes={bootstrap.globalAutomationSettings.pollingIntervalMinutes}
+                onError={setError}
+              />
             ) : <EmptyState text="请选择一个账户。" />}
           </AccountScopedPage>
         ) : !account ? (
@@ -681,6 +726,7 @@ function UsersPage({
   onError: (message: string | null) => void;
 }) {
   const auth = useAuth();
+  const { confirm, prompt, toast } = useOverlays();
   const canManageAccounts = auth.status.permissions.includes("accounts:manage");
   const [editing, setEditing] = useState<AccountConfig | null>(null);
   const [form, setForm] = useState<AccountCreateInput>(defaultAccountEditorInput);
@@ -785,12 +831,13 @@ function UsersPage({
   const deleteAccount = async (account: AccountConfig) => {
     if (!canManageAccounts) return;
     const confirmation = `确认删除广告账户“${account.displayName}”吗？\n\n此操作不可撤销，将删除该账户的本地接入凭据、投放计划、操作记录及全部账户级数据。若它是多账户计划的来源，该共享计划也会删除；其他账户的凭据、规则和配置不会受影响。`;
-    if (!window.confirm(confirmation)) return;
+    if (!await confirm({ title: "删除广告账户", message: confirmation, confirmLabel: "删除账户", danger: true })) return;
     try {
       setSaving(true);
       await api.deleteAccount(account.id);
       await onChanged();
       onError(null);
+      toast("广告账户已删除");
     } catch (cause) {
       onError(getErrorMessage(cause));
     } finally {
@@ -915,25 +962,32 @@ function UsersPage({
 function AdsManagementPage({
   account,
   capabilities,
+  pollingIntervalMinutes,
   onError,
 }: {
   account: AccountConfig;
   capabilities: AccountProviderCapabilities | undefined;
+  pollingIntervalMinutes: number;
   onError: (message: string | null) => void;
 }) {
   const auth = useAuth();
+  const { confirm, prompt, toast } = useOverlays();
   const canOperateAds = auth.status.permissions.includes("ads:operate");
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
   const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
   const [schedules, setSchedules] = useState<ScheduledEntityActionRecord[]>([]);
+  const activeScheduleCount = schedules.filter((schedule) => schedule.status === "scheduled").length;
   const [query, setQuery] = useState("");
-  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>("all");
+  const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>(ADS_MANAGEMENT_DEFAULT_LEVEL);
+  const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
+  const [page, setPage] = useState(0);
   const [manualTakeovers, setManualTakeovers] = useState<IgnoredEntityRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
-  const [nextRefreshAt, setNextRefreshAt] = useState(() => nextLocalRefreshAt());
+  const [nextRefreshAt, setNextRefreshAt] = useState(() => Date.now());
+  const [remoteRefreshing, setRemoteRefreshing] = useState(false);
+  const remoteRefreshRunning = useRef(false);
   const [statusConfirming, setStatusConfirming] = useState<ManagedEntityRecord | null>(null);
   const [scheduling, setScheduling] = useState<ManagedEntityRecord | null>(null);
   const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
@@ -942,6 +996,7 @@ function AdsManagementPage({
   const [disableAt, setDisableAt] = useState("");
   const [enableAt, setEnableAt] = useState("");
   const canChangeStatus = hasProviderCapability(capabilities, "change-status");
+  const canRefreshRemote = hasProviderCapability(capabilities, "read-campaigns");
 
   const load = useCallback(async () => {
     try {
@@ -963,6 +1018,27 @@ function AdsManagementPage({
     }
   }, [account.id, onError]);
 
+  const refreshRemote = useCallback(async () => {
+    if (!canRefreshRemote) {
+      await load();
+      return;
+    }
+    if (remoteRefreshRunning.current) return;
+    remoteRefreshRunning.current = true;
+    setRemoteRefreshing(true);
+    try {
+      await api.syncReadOnly(account.id, account.providerKind);
+      await load();
+      onError(null);
+    } catch (cause) {
+      await load();
+      onError(getErrorMessage(cause));
+    } finally {
+      remoteRefreshRunning.current = false;
+      setRemoteRefreshing(false);
+    }
+  }, [account.id, account.providerKind, canRefreshRemote, load, onError]);
+
   useEffect(() => {
     setEntities(null);
     void load();
@@ -973,36 +1049,42 @@ function AdsManagementPage({
     let refreshTimer: number | null = null;
     const clockTimer = window.setInterval(() => setClock(Date.now()), 1_000);
 
-    const scheduleRefresh = (at: number) => {
-      refreshTimer = window.setTimeout(async () => {
-        setClock(Date.now());
-        await load();
-        if (stopped) return;
-        const next = nextLocalRefreshAt();
-        setNextRefreshAt(next);
-      }, Math.max(0, at - Date.now()));
+    const intervalMs = Math.max(60_000, pollingIntervalMinutes * 60_000);
+    const runAndSchedule = async () => {
+      await refreshRemote();
+      if (stopped) return;
+      const next = Date.now() + intervalMs;
+      setNextRefreshAt(next);
+      refreshTimer = window.setTimeout(() => void runAndSchedule(), intervalMs);
     };
-
-    scheduleRefresh(nextRefreshAt);
+    void runAndSchedule();
     return () => {
       stopped = true;
       window.clearInterval(clockTimer);
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
     };
-  }, [load, nextRefreshAt]);
+  }, [pollingIntervalMinutes, refreshRemote]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void load(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const filtered = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return (entities ?? []).filter((entity) => {
-      if (level !== "all" && entity.entityType !== level) return false;
-      if (statusFilter !== "all" && entity.status !== statusFilter) return false;
-      return (
-        !normalizedQuery ||
-        entity.name.toLowerCase().includes(normalizedQuery) ||
-        entity.externalId.toLowerCase().includes(normalizedQuery)
-      );
+    return filterAdsManagementEntities(entities ?? [], {
+      level,
+      status: statusFilter,
+      query,
     });
   }, [entities, level, query, statusFilter]);
+  const {
+    items: pagedEntities,
+    pageCount,
+    currentPage,
+  } = paginateAdsManagementItems(filtered, page);
+
+  useEffect(() => setPage(0), [level, query, statusFilter]);
+  useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
   const pendingStatusKeys = useMemo(() => new Set(
     operations
       .filter((operation) => operation.status === "pending" || operation.status === "running")
@@ -1035,7 +1117,7 @@ function AdsManagementPage({
       if (entity.ignored) {
         await api.unignoreEntity(account.id, entity.entityType, entity.externalId);
       } else {
-        const reason = window.prompt("请输入人工接管原因：", "人工接管，不参与自动化")?.trim();
+        const reason = (await prompt({ title: "人工接管", message: "请输入接管原因；该广告组将不再参与自动化。", defaultValue: "人工接管，不参与自动化", required: true, confirmLabel: "确认接管" }))?.trim();
         if (!reason) return;
         await api.ignoreEntity(
           account.id,
@@ -1067,7 +1149,7 @@ function AdsManagementPage({
 
   const restoreAllManualTakeovers = async () => {
     if (!canOperateAds || manualTakeovers.length === 0) return;
-    if (!window.confirm(`确认恢复 ${manualTakeovers.length} 个广告组的自动化？`)) return;
+    if (!await confirm({ title: "恢复自动化", message: `确认恢复 ${manualTakeovers.length} 个广告组的自动化？`, confirmLabel: "恢复" })) return;
     try {
       setBusy("restore-all-takeovers");
       await api.restoreAllManualTakeovers(account.id);
@@ -1122,6 +1204,9 @@ function AdsManagementPage({
 
   if (!entities) return <EmptyState text="正在读取广告对象…" loading />;
   const refreshSeconds = secondsUntilLocalRefresh(nextRefreshAt, clock);
+  const latestEntitySyncAt = entities.length > 0
+    ? Math.max(...entities.map((entity) => new Date(entity.syncedAt).getTime()))
+    : null;
   const entityNameByKey = new Map(entities.map((entity) => [`${entity.entityType}:${entity.externalId}`, entity.name]));
   const enabledCount = filtered.filter((entity) => entity.status === "enabled").length;
   const ignoredCount = filtered.filter((entity) => entity.ignored).length;
@@ -1130,11 +1215,11 @@ function AdsManagementPage({
   return (
     <section className="page-stack ads-page">
       <div className="ads-metric-rail" aria-label="广告管理摘要">
-        <article><small>当前对象</small><strong>{filtered.length}</strong><span>今日开启或有消耗</span></article>
+        <article><small>当前对象</small><strong>{filtered.length}</strong><span>最近 48 小时筛选结果</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>当前账户汇总</span></article>
+        <article><small>区间消耗</small><strong>{formatMetric(currentSpend)}</strong><span>最近 48 小时汇总</span></article>
         <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>定时任务</small><strong>{schedules.length}</strong><span>单次与过夜计划</span></article>
+        <article><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1143,7 +1228,7 @@ function AdsManagementPage({
           </Field>
           <Field label="状态">
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
-              <option value="all">全部状态</option>
+              <option value="all">全部状态（48 小时）</option>
               <option value="enabled">已开启</option>
               <option value="disabled">已关闭</option>
             </select>
@@ -1162,13 +1247,18 @@ function AdsManagementPage({
       <div className="panel table-panel">
         <div className="panel-heading">
           <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em></h2><p>人工接管的广告组不参与自动化决策</p></div></div>
-          <small className="inline-protection-note" title="仅刷新本地已同步数据，不会触发 TikTok 请求">下次本地更新：{refreshSeconds} 秒</small>
+          <small className="inline-protection-note">
+            {remoteRefreshing
+              ? "正在后台刷新平台数据…"
+              : `下次平台刷新：${refreshSeconds} 秒`}
+            {latestEntitySyncAt ? ` · 最近同步 ${new Date(latestEntitySyncAt).toLocaleTimeString()}` : ""}
+          </small>
         </div>
         <div className="table-wrap">
           <table>
             <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
             <tbody>
-              {filtered.length === 0 ? <tr><td colSpan={10}>暂无数据，请先在用户管理完成账户接入，或在自动化中心执行一次检测。</td></tr> : filtered.map((entity) => {
+              {filtered.length === 0 ? <tr><td colSpan={10}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
                 const statusPending = pendingStatusKeys.has(key);
                 return (
@@ -1194,6 +1284,7 @@ function AdsManagementPage({
             </tbody>
           </table>
         </div>
+        {filtered.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {filtered.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
 
       <div className="panel table-panel">
@@ -1206,7 +1297,7 @@ function AdsManagementPage({
       </div>
 
       <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{schedules.length}</em></h2><p>总开关关闭时不执行</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2><p>总开关关闭时不执行；已取消和已完成任务不计入计数。</p></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
 
@@ -1260,12 +1351,14 @@ function AllAccountsAdsView({
   onError: (message: string | null) => void;
 }) {
   const auth = useAuth();
+  const { prompt } = useOverlays();
   const canOperateAds = auth.status.permissions.includes("ads:operate");
   const [entitiesByAccount, setEntitiesByAccount] = useState<Array<{
     account: AccountConfig;
     entity: ManagedEntityRecord;
   }>>([]);
   const [page, setPage] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
   const [busy, setBusy] = useState<string | null>(null);
   const [statusConfirming, setStatusConfirming] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
 
@@ -1288,14 +1381,28 @@ function AllAccountsAdsView({
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const visible = useMemo(() => entitiesByAccount.filter(({ entity }) => (
-    entity.entityType === "ad-group" &&
-    (entity.status === "enabled" || (entity.metrics.spend ?? 0) > 0)
-  )), [entitiesByAccount]);
-  const pageCount = Math.max(1, Math.ceil(visible.length / 12));
-  const currentPage = Math.min(page, pageCount - 1);
-  const paged = visible.slice(currentPage * 12, currentPage * 12 + 12);
+  const visible = useMemo(() => {
+    const cutoff = Date.now() - 48 * 60 * 60_000;
+    return entitiesByAccount
+      .map((item, index) => ({ item, index }))
+      .filter(({ item: { entity } }) => (
+        entity.entityType === "ad-group"
+        && new Date(entity.syncedAt).getTime() >= cutoff
+        && (statusFilter === "all" || entity.status === statusFilter)
+      ))
+      .sort((left, right) => (
+        compareAdsManagementSpend(left.item.entity, right.item.entity)
+        || left.index - right.index
+      ))
+      .map(({ item }) => item);
+  }, [entitiesByAccount, statusFilter]);
+  const {
+    items: paged,
+    pageCount,
+    currentPage,
+  } = paginateAdsManagementItems(visible, page);
 
+  useEffect(() => setPage(0), [statusFilter]);
   useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
 
   const changeStatus = async (account: AccountConfig, entity: ManagedEntityRecord) => {
@@ -1320,7 +1427,7 @@ function AllAccountsAdsView({
       setBusy(`${account.id}:${entity.externalId}:takeover`);
       if (entity.ignored) await api.unignoreEntity(account.id, entity.entityType, entity.externalId);
       else {
-        const reason = window.prompt("请输入人工接管原因：", "人工接管，不参与自动化")?.trim();
+        const reason = (await prompt({ title: "人工接管", message: "请输入接管原因；该广告组将不再参与自动化。", defaultValue: "人工接管，不参与自动化", required: true, confirmLabel: "确认接管" }))?.trim();
         if (!reason) return;
         await api.ignoreEntity(account.id, entity.entityType, entity.externalId, reason);
       }
@@ -1336,12 +1443,19 @@ function AllAccountsAdsView({
     <section className="page-stack all-accounts-ads-page">
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户已同步的当日开启或有消耗广告组；可直接执行与独立账户页相同的启停和人工接管操作。</p></div></div>
-          <small className="inline-protection-note">每 30 秒更新本地数据</small>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最近 48 小时同步的广告组；可直接执行启停和人工接管。</p></div></div>
+          <div className="row-actions">
+            <select aria-label="广告组状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+              <option value="enabled">已开启</option>
+              <option value="disabled">已关闭</option>
+              <option value="all">全部状态（48 小时）</option>
+            </select>
+            <small className="inline-protection-note">每 30 秒更新展示</small>
+          </div>
         </div>
         <div className="table-wrap"><table>
           <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
-          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>暂无已同步的开启或有消耗广告组。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
+          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>最近 48 小时暂无符合当前状态的广告组。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
             <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
@@ -1349,7 +1463,7 @@ function AllAccountsAdsView({
             <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button></div></td>
           </tr>)}</tbody>
         </table></div>
-        {visible.length > 12 && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {visible.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
+        {visible.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {visible.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
       {statusConfirming && <div className="modal-backdrop" onMouseDown={() => setStatusConfirming(null)}><div className="modal confirmation-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="eyebrow">确认状态变更</span><h2>{statusConfirming.entity.status === "disabled" ? "开启" : "关闭"}广告组</h2></div><button type="button" onClick={() => setStatusConfirming(null)}><X size={20} /></button></div><p>将对“{statusConfirming.account.displayName} / {statusConfirming.entity.name}”发送启停请求。</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setStatusConfirming(null)}>取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[statusConfirming.account.id], "change-status")} type="button" onClick={() => { const target = statusConfirming; setStatusConfirming(null); void changeStatus(target.account, target.entity); }}>确认</button></div></div></div>}
     </section>
@@ -1367,6 +1481,7 @@ function AnalyticsPage({
   latestSync: ReadOnlySyncResult | null;
   onError: (message: string | null) => void;
 }) {
+  const { confirm, toast } = useOverlays();
   const today = formatDateInput(new Date());
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
@@ -1531,6 +1646,7 @@ function AutomationPage({
   overview: AccountAutomationOverview;
   onError: (message: string | null) => void;
 }) {
+  const { confirm, toast } = useOverlays();
   const [runs, setRuns] = useState<AutomationRunRecord[] | null>(null);
   const [decisions, setDecisions] = useState<
     AutomationDecisionRecord[] | null
@@ -1597,7 +1713,7 @@ function AutomationPage({
 
   const approve = async (decision: AutomationDecisionRecord) => {
     const action = decision.action === "enable" ? "开启" : "关闭";
-    if (!window.confirm(`确认执行一次性操作？\n账户：${account.displayName}\n对象：${decision.entityName}\n动作：${action}`)) return;
+    if (!await confirm({ title: "确认执行", message: `账户：${account.displayName}\n对象：${decision.entityName}\n动作：${action}`, confirmLabel: "确认执行", danger: true })) return;
     try {
       setBusy(`approve:${decision.id}`);
       const approval = await api.approveAutomationDecision(account.id, decision.id);
@@ -1620,7 +1736,7 @@ function AutomationPage({
   };
 
   const approveAll = async () => {
-    if (!window.confirm(`确认依次批准当前全部 ${pendingDecisions.length} 项决策？\n每项仍会独立执行连接、数据质量和对象状态校验。`)) return;
+    if (!await confirm({ title: "批量执行", message: `确认依次批准当前全部 ${pendingDecisions.length} 项决策？每项仍会独立执行连接、数据质量和对象状态校验。`, confirmLabel: "开始执行", danger: true })) return;
     let succeeded = 0;
     let unknown = 0;
     let failed = 0;
@@ -1681,6 +1797,7 @@ function AutomationPage({
   }
 
   const latest = runs[0];
+  const actionableDecisions = selectActionableDecisionHistory(decisions);
   const pendingDecisions: AutomationDecisionRecord[] = [];
   const pendingDecisionIds = new Set<string>();
   const approvalByDecision = new Map<string, AutomationApprovalRecord>();
@@ -1758,8 +1875,16 @@ function AutomationPage({
                 : "无需人工审批；广告组可在广告管理中单独接管。"}
           </p>
           <div className="automation-actions">
-            <button className="secondary-button" disabled={busy !== null || !canRunAutomation} onClick={() => void execute(true)} type="button">
-              <RefreshCcw size={16} /> {busy === "preview" ? "检测中…" : "检测预览"}
+            <button
+              className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
+              disabled={busy !== null || (!lowRiskState.policy.enabled && (
+                !canChangeStatus
+                || Boolean(lowRiskState.circuit?.openedAt)
+              ))}
+              onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled)}
+              type="button"
+            >
+              {busy === "low-risk-policy" ? "保存中…" : lowRiskState.policy.enabled ? "关闭低风险自动化" : "启用低风险自动化"}
             </button>
           </div>
         </section>
@@ -1815,7 +1940,6 @@ function AutomationPage({
             className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
             disabled={busy !== null || (!lowRiskState.policy.enabled && (
               !canChangeStatus
-              || account.executionMode !== "automatic"
               || Boolean(lowRiskState.circuit?.openedAt)
             ))}
             onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled)}
@@ -1825,7 +1949,6 @@ function AutomationPage({
           </button>
           {lowRiskState.circuit?.openedAt && <button className="secondary-button" disabled={busy !== null || lowRiskState.policy.enabled} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>}
         </div>
-        {account.executionMode !== "automatic" && <p className="retention-note">请先在用户管理中将账户执行模式明确设为“自动执行”；启用后仍只开放关闭规则。</p>}
         {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
       </section>
 
@@ -1857,7 +1980,7 @@ function AutomationPage({
           <table>
             <thead><tr><th>对象</th><th>层级</th><th>命中条件</th><th>动作</th><th>结果</th><th>时间</th></tr></thead>
             <tbody>
-              {decisions.length === 0 ? <tr><td colSpan={6}>暂无决策记录，请先执行“检测预览”。</td></tr> : decisions.map((decision) => {
+              {actionableDecisions.length === 0 ? <tr><td colSpan={6}>暂无实际动作、失败或状态变化记录。常规安全跳过仍会保留在本地审计中。</td></tr> : actionableDecisions.map((decision) => {
                 const approval = approvalByDecision.get(decision.id);
                 return (
                   <tr key={decision.id}>

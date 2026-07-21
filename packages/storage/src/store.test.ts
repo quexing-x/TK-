@@ -746,6 +746,34 @@ describe("AutomationStore", () => {
     });
   });
 
+  it("keeps healthy entities seen within the last 48 hours when a later page omits them", () => {
+    const firstAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "ad-group", externalId: "g1", payload: { adgroup_name: "组 1" } },
+    ], {
+      startedAt: firstAt,
+      finishedAt: firstAt,
+      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      warnings: [],
+      quality: healthySyncQuality(firstAt),
+    });
+    const secondAt = new Date().toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "ad-group", externalId: "g2", payload: { adgroup_name: "组 2" } },
+    ], {
+      startedAt: secondAt,
+      finishedAt: secondAt,
+      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      warnings: [],
+      quality: healthySyncQuality(secondAt),
+    });
+
+    expect(store.listManagedEntities("demo-account", "cookie").map((entity) => entity.externalId))
+      .toEqual(["g1", "g2"]);
+    expect(store.listCurrentManagedEntities("demo-account", "cookie").map((entity) => entity.externalId))
+      .toEqual(["g2"]);
+  });
+
   it("refuses to create a copy plan when the source ad has no stable campaign id", () => {
     store.saveReadOnlySync(
       "demo-account",

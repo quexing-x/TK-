@@ -1616,13 +1616,21 @@ export class AutomationStore {
             ? String(previousHealthy.finished_at)
             : null,
     };
-    const remove = this.db.prepare(
-      "DELETE FROM provider_entities WHERE account_id = ? AND provider_kind = ?",
-    );
     const insert = this.db.prepare(
       `INSERT INTO provider_entities (
-        account_id, provider_kind, entity_type, external_id, payload_json, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
+        account_id, provider_kind, entity_type, external_id, payload_json, synced_at, is_current
+      ) VALUES (?, ?, ?, ?, ?, ?, 1)
+      ON CONFLICT(account_id, provider_kind, entity_type, external_id)
+      DO UPDATE SET payload_json = excluded.payload_json,
+        synced_at = excluded.synced_at, is_current = 1`,
+    );
+    const clearCurrent = this.db.prepare(
+      `UPDATE provider_entities SET is_current = 0
+       WHERE account_id = ? AND provider_kind = ?`,
+    );
+    const removeExpired = this.db.prepare(
+      `DELETE FROM provider_entities
+       WHERE account_id = ? AND provider_kind = ? AND synced_at < ?`,
     );
     const insertSnapshot = this.db.prepare(
       `INSERT INTO entity_metric_snapshots (
@@ -1633,7 +1641,7 @@ export class AutomationStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (quality.status === "healthy") {
-        remove.run(accountId, kind);
+        clearCurrent.run(accountId, kind);
         for (const entity of entities) {
           insert.run(
             accountId,
@@ -1657,6 +1665,13 @@ export class AutomationStore {
             "healthy",
           );
         }
+        removeExpired.run(
+          accountId,
+          kind,
+          new Date(
+            new Date(result.finishedAt).getTime() - RULE_LOOKBACK_HOURS * 60 * 60_000,
+          ).toISOString(),
+        );
         this.db
           .prepare(
             "DELETE FROM entity_metric_snapshots WHERE account_id = ? AND captured_at < ?",
@@ -1772,6 +1787,24 @@ export class AutomationStore {
         syncedAt: String(row.synced_at),
       };
     });
+  }
+
+  listCurrentManagedEntities(
+    accountId: string,
+    kind: ProviderKind,
+  ): ManagedEntityRecord[] {
+    const currentIds = new Set(
+      (this.db
+        .prepare(
+          `SELECT entity_type, external_id FROM provider_entities
+           WHERE account_id = ? AND provider_kind = ? AND is_current = 1`,
+        )
+        .all(accountId, kind) as SqlRow[])
+        .map((row) => `${String(row.entity_type)}:${String(row.external_id)}`),
+    );
+    return this.listManagedEntities(accountId, kind).filter(
+      (entity) => currentIds.has(`${entity.entityType}:${entity.externalId}`),
+    );
   }
 
   listIgnoredEntities(
@@ -5195,6 +5228,7 @@ export class AutomationStore {
         external_id TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         synced_at TEXT NOT NULL,
+        is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
         PRIMARY KEY (account_id, provider_kind, entity_type, external_id)
       );
 
@@ -5613,6 +5647,11 @@ export class AutomationStore {
       "accounts",
       "account_type",
       "TEXT NOT NULL DEFAULT 'standard'",
+    );
+    this.ensureColumn(
+      "provider_entities",
+      "is_current",
+      "INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))",
     );
     this.ensureColumn(
       "provider_connections",

@@ -66,3 +66,11 @@ export function selectPendingAutomationDecisions({
       ));
     });
 }
+
+/** Keep the audit table actionable: routine safe skips remain stored, but do not
+ * bury executions and failures in the default view. */
+export function selectActionableDecisionHistory(decisions: AutomationDecisionRecord[]): AutomationDecisionRecord[] {
+  return [...decisions]
+    .filter((decision) => decision.status !== "skipped")
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}

@@ -90,16 +90,6 @@ export function ManualPage() {
         ))}
       </div>
 
-      <aside className="manual-page-nav panel" aria-label="本页导航">
-        <strong>本页导航</strong>
-        <nav>
-          {userGuide.sections.map((section, index) => (
-            <button key={section.id} onClick={() => scrollToSection(section.id)} type="button">
-              <span>{String(index + 1).padStart(2, "0")}</span>{section.title}
-            </button>
-          ))}
-        </nav>
-      </aside>
       </div>
     </section>
   );

@@ -572,6 +572,26 @@ textarea::placeholder { color: var(--ink-faint); }
   background: var(--surface);
 }
 
+/* Keep the schedule dialog on one shared content grid. */
+.schedule-modal .schedule-kind-tabs {
+  margin: 20px 24px 0;
+}
+
+.schedule-modal .form-grid {
+  align-items: start;
+  padding: 20px 24px 24px;
+}
+
+.schedule-modal .schedule-time-input {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
+.schedule-modal .provider-endpoint-note {
+  margin: 0 24px 20px;
+}
+
 /* Tables */
 .table-wrap { border-radius: 0 0 10px 10px; }
 
