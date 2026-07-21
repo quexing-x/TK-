@@ -141,9 +141,11 @@ export class CookieAdsProvider implements AdsProvider {
       );
       const request =
         captured ??
-        (entityType === "ad"
-          ? deriveFinalAdReadRequest(importedAdGroupRead)
-          : undefined) ??
+        (entityType === "campaign" && importedAdGroupRead
+          ? siblingListRequest(importedAdGroupRead, "campaign")
+          : entityType === "ad"
+            ? deriveFinalAdReadRequest(importedAdGroupRead)
+            : undefined) ??
         legacyRequest(legacyEndpoints[entityType]);
       if (!request) {
         warnings.push(`${entityType} 尚未导入只读请求。`);
@@ -156,18 +158,21 @@ export class CookieAdsProvider implements AdsProvider {
       // captured range. Some valid TikTok list requests do not expose a date
       // parameter at all; those must still be replayed with the platform's
       // request defaults rather than blocking the complete polling cycle.
-      const todayRequest = withTodayMetricWindow(
+      const windowedRequest = withRecentMetricWindow(
         request,
         context.timezone ?? "UTC",
         new Date(),
       );
-      if (!hasExplicitMetricWindow(todayRequest)) {
+      if (!hasExplicitMetricWindow(windowedRequest)) {
         coverageKnown = false;
-        partialFailures.push(`${entityType}:coverage-unknown`);
+        warnings.push(`${entityType} 请求未提供日期范围，已沿用 TikTok 默认数据范围。`);
       }
-      let payload: Record<string, unknown>;
+      let pages: Record<string, unknown>[];
+      let entityPaginationComplete = false;
       try {
-        payload = await requestCookieJson(todayRequest, credential);
+        const result = await requestAllCookieListPages(windowedRequest, credential);
+        pages = result.pages;
+        entityPaginationComplete = result.complete;
       } catch (cause) {
         if (!request.derived) throw cause;
         warnings.push(
@@ -176,12 +181,12 @@ export class CookieAdsProvider implements AdsProvider {
         partialFailures.push(`${entityType}:derived-request-failed`);
         continue;
       }
-      contractValid &&= hasRecognizedEntityList(payload, entityType);
-      paginationComplete &&= isCookiePaginationComplete(payload, todayRequest);
-      const extracted = extractEntities(payload, entityType);
+      contractValid &&= pages.every((payload) => hasRecognizedEntityList(payload, entityType));
+      paginationComplete &&= entityPaginationComplete;
+      const extracted = pages.flatMap((payload) => extractEntities(payload, entityType));
       entities.push(...extracted);
       if (entityType === "ad-group") {
-        entities.push(...extractEntities(payload, "campaign"));
+        entities.push(...pages.flatMap((payload) => extractEntities(payload, "campaign")));
       }
       if (extracted.length === 0) {
         emptyResponses.add(entityType);
@@ -196,7 +201,9 @@ export class CookieAdsProvider implements AdsProvider {
       }
     }
     const timezone = context.timezone ?? "UTC";
-    const date = formatDateInTimezone(new Date(), timezone);
+    const now = new Date();
+    const endDate = formatDateInTimezone(now, timezone);
+    const startDate = formatDateInTimezone(new Date(now.getTime() - 48 * 60 * 60_000), timezone);
     return {
       entities: uniqueEntities,
       result: {
@@ -210,8 +217,8 @@ export class CookieAdsProvider implements AdsProvider {
           contractValid,
           providerContractVersion: COOKIE_SYNC_CONTRACT_VERSION,
           coverage: {
-            startDate: coverageKnown ? date : "",
-            endDate: coverageKnown ? date : "",
+            startDate: coverageKnown ? startDate : "",
+            endDate: coverageKnown ? endDate : "",
             timezone,
           },
           partialFailures,
@@ -445,12 +452,13 @@ function hasNonEmptyOriginReference(
     || visit(profile.creativePayload);
 }
 
-function withTodayMetricWindow(
+function withRecentMetricWindow(
   request: CapturedCookieRequest,
   timezone: string,
   now: Date,
 ): CapturedCookieRequest {
-  const date = formatDateInTimezone(now, timezone);
+  const startDate = formatDateInTimezone(new Date(now.getTime() - 48 * 60 * 60_000), timezone);
+  const endDate = formatDateInTimezone(now, timezone);
   let changed = false;
   const url = new URL(request.url);
   const isStatisticsRequest = url.pathname.includes("/statistics/");
@@ -459,7 +467,7 @@ function withTodayMetricWindow(
     : ["start_date", "end_date", "startDate", "endDate"];
   for (const key of urlDateKeys) {
     if (!url.searchParams.has(key)) continue;
-    url.searchParams.set(key, date);
+    url.searchParams.set(key, isStartDateKey(key) ? startDate : endDate);
     changed = true;
   }
 
@@ -467,9 +475,9 @@ function withTodayMetricWindow(
   if (body && request.contentType?.toLowerCase().includes("json")) {
     try {
       const value = JSON.parse(body) as unknown;
-      changed = rewriteJsonDateWindow(value, date) || changed;
+      changed = rewriteJsonDateWindow(value, startDate, endDate) || changed;
       if (isStatisticsRequest) {
-        changed = rewriteStatisticsCommonRequest(value, date) || changed;
+        changed = rewriteStatisticsCommonRequest(value, startDate, endDate) || changed;
         changed = ensureStatisticsMetric(value, "time_attr_on_web_cart") || changed;
       }
       body = JSON.stringify(value);
@@ -509,23 +517,27 @@ function hasJsonDateKey(value: unknown, keys: string[]): boolean {
   );
 }
 
-function rewriteJsonDateWindow(value: unknown, date: string): boolean {
+function rewriteJsonDateWindow(value: unknown, startDate: string, endDate: string): boolean {
   if (Array.isArray(value)) {
     let changed = false;
-    for (const item of value) changed = rewriteJsonDateWindow(item, date) || changed;
+    for (const item of value) changed = rewriteJsonDateWindow(item, startDate, endDate) || changed;
     return changed;
   }
   if (!isRecord(value)) return false;
   let changed = false;
   for (const [key, item] of Object.entries(value)) {
     if (["start_date", "end_date", "startDate", "endDate"].includes(key)) {
-      value[key] = date;
+      value[key] = isStartDateKey(key) ? startDate : endDate;
       changed = true;
     } else if (isRecord(item) || Array.isArray(item)) {
-      changed = rewriteJsonDateWindow(item, date) || changed;
+      changed = rewriteJsonDateWindow(item, startDate, endDate) || changed;
     }
   }
   return changed;
+}
+
+function isStartDateKey(key: string): boolean {
+  return key === "start_date" || key === "startDate" || key === "st";
 }
 
 function formatDateInTimezone(date: Date, timezone: string): string {
@@ -575,12 +587,12 @@ async function createCookieDraftChain(
   }
 }
 
-function rewriteStatisticsCommonRequest(value: unknown, date: string): boolean {
+function rewriteStatisticsCommonRequest(value: unknown, startDate: string, endDate: string): boolean {
   if (!isRecord(value) || !isRecord(value.common_req)) return false;
   let changed = false;
   for (const key of ["st", "et"] as const) {
     if (!(key in value.common_req)) continue;
-    value.common_req[key] = date;
+    value.common_req[key] = key === "st" ? startDate : endDate;
     changed = true;
   }
   return changed;
@@ -2044,6 +2056,33 @@ function responsePageNumber(payload: Record<string, unknown>): number | null {
   const value = pageInfo.page ?? pageInfo.current_page ?? pageInfo.currentPage;
   const page = Number(value);
   return value !== undefined && Number.isInteger(page) ? page : null;
+}
+
+async function requestAllCookieListPages(
+  template: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+): Promise<{ pages: Record<string, unknown>[]; complete: boolean }> {
+  const requestedPage = readRequestedPage(template);
+  if (requestedPage !== null && requestedPage !== 1) {
+    return {
+      pages: [await requestCookieJson(template, credential)],
+      complete: false,
+    };
+  }
+  const pages: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const request = page === 1 ? template : withRequestedPage(template, page);
+    const payload = await requestCookieJson(request, credential);
+    const responsePage = responsePageNumber(payload);
+    if (responsePage !== null && responsePage !== page) {
+      pages.push(payload);
+      return { pages, complete: false };
+    }
+    pages.push(payload);
+    if (hasExplicitAdditionalPages(payload)) continue;
+    return { pages, complete: hasExplicitPaginationEnd(payload) };
+  }
+  return { pages, complete: false };
 }
 
 function isCookiePaginationComplete(

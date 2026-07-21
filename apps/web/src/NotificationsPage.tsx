@@ -22,6 +22,7 @@ import type {
 } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
+import { useOverlays } from "./ui/overlays";
 import "./ui/pages/notifications-manual.css";
 
 type EmailSettings = Extract<
@@ -65,6 +66,7 @@ export function NotificationsPage({
   onError: (message: string | null) => void;
 }) {
   const auth = useAuth();
+  const { confirm, toast } = useOverlays();
   const canManageRules = auth.status.permissions.includes("rules:manage");
   const [channels, setChannels] = useState<NotificationChannelRecord[]>([]);
   const [activeChannel, setActiveChannel] = useState<"email" | "wecom" | "feishu" | "history">("email");
@@ -135,6 +137,7 @@ export function NotificationsPage({
       await action();
       await load();
       setFeedback((current) => ({ ...current, [key]: successMessage }));
+      toast(successMessage);
       onError(null);
     } catch (cause) {
       const message = errorMessage(cause);
@@ -219,8 +222,8 @@ export function NotificationsPage({
       "测试消息发送成功，渠道已就绪。",
     );
 
-  const deleteCredential = (kind: NotificationChannelKind) => {
-    if (!window.confirm("确认删除该渠道的本机加密凭据吗？渠道参数会保留。")) return;
+  const deleteCredential = async (kind: NotificationChannelKind) => {
+    if (!await confirm({ title: "删除渠道凭据", message: "确认删除该渠道的本机加密凭据吗？渠道参数会保留。", confirmLabel: "删除凭据", danger: true })) return;
     void runAction(
       kind,
       async () => {
@@ -466,7 +469,7 @@ function HistoryTables({ deliveries, cycles }: { deliveries: NotificationDeliver
       <div className="panel table-panel">
         <div className="panel-heading"><div><span className="panel-icon"><Send size={18} /></span><div><h2>最近推送记录</h2><p>失败任务最多重试 3 次，不影响广告轮询。</p></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>创建时间</th><th>渠道</th><th>状态</th><th>尝试次数</th><th>结果</th></tr></thead><tbody>
-          {deliveries.length === 0 ? <tr><td colSpan={5}>尚无推送记录。</td></tr> : deliveries.slice(0, 20).map((delivery) => <tr key={delivery.id}><td>{formatTime(delivery.createdAt)}</td><td>{channelLabel(delivery.channelKind)}</td><td><span className={`status ${delivery.status === "sent" ? "active" : delivery.status === "failed" ? "danger" : "warning"}`}>{deliveryStatusLabel(delivery)}</span></td><td>{delivery.attemptCount}</td><td><small>{delivery.lastError ?? (delivery.sentAt ? `发送于 ${formatTime(delivery.sentAt)}` : "等待处理")}</small></td></tr>)}
+          {deliveries.length === 0 ? <tr><td colSpan={5}>尚无推送记录。若已配置渠道，说明近期轮询候选为 0、无需推送；推送失败会在此显示并标红。</td></tr> : deliveries.slice(0, 20).map((delivery) => <tr key={delivery.id}><td>{formatTime(delivery.createdAt)}</td><td>{channelLabel(delivery.channelKind)}</td><td><span className={`status ${delivery.status === "sent" ? "active" : delivery.status === "failed" ? "danger" : "warning"}`}>{deliveryStatusLabel(delivery)}</span></td><td>{delivery.attemptCount}</td><td><small>{delivery.lastError ?? (delivery.sentAt ? `发送于 ${formatTime(delivery.sentAt)}` : "等待处理")}</small></td></tr>)}
         </tbody></table></div>
       </div>
     </div>

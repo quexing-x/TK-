@@ -38,7 +38,7 @@ export function SystemUsersPage({ onError }: { onError: (message: string | null)
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState<LocalUserCreateInput>(emptyCreateForm);
   const [editForm, setEditForm] = useState<LocalUserUpdateInput | null>(null);
-  const [passwords, setPasswords] = useState({ currentPassword: "", newPassword: "" });
+  const [passwords, setPasswords] = useState({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
   const enabledDeveloperCount = users.filter((user) => user.enabled && user.role === "developer").length;
 
   const roleCounts = useMemo(() => Object.fromEntries(
@@ -114,9 +114,13 @@ export function SystemUsersPage({ onError }: { onError: (message: string | null)
 
   const changePassword = async (event: FormEvent) => {
     event.preventDefault();
+    if (passwords.newPassword !== passwords.confirmNewPassword) {
+      onError("两次输入的新密码不一致，请重新确认。");
+      return;
+    }
     try {
       setBusy(true);
-      await api.changePassword(passwords);
+      await api.changePassword({ currentPassword: passwords.currentPassword, newPassword: passwords.newPassword });
       auth.invalidate();
     } catch (cause) {
       onError(messageOf(cause));
@@ -224,7 +228,8 @@ export function SystemUsersPage({ onError }: { onError: (message: string | null)
         <form className="system-password-form" onSubmit={(event) => void changePassword(event)}>
           <label className="field"><span>当前密码</span><input required type="password" autoComplete="current-password" value={passwords.currentPassword} onChange={(event) => setPasswords({ ...passwords, currentPassword: event.target.value })} /></label>
           <label className="field"><span>新密码</span><input required type="password" minLength={12} autoComplete="new-password" value={passwords.newPassword} onChange={(event) => setPasswords({ ...passwords, newPassword: event.target.value })} /></label>
-          <button className="primary-button" disabled={busy} type="submit">修改密码</button>
+          <label className="field"><span>确认新密码</span><input required type="password" minLength={12} autoComplete="new-password" value={passwords.confirmNewPassword} onChange={(event) => setPasswords({ ...passwords, confirmNewPassword: event.target.value })} /></label>
+          <button className="primary-button" disabled={busy || passwords.newPassword !== passwords.confirmNewPassword} type="submit">修改密码</button>
         </form>
       </section>
     </main>

@@ -5,7 +5,7 @@ import type {
   AutomationDecisionRecord,
   ManagedEntityRecord,
 } from "@tk-auto/core";
-import { selectPendingAutomationDecisions } from "./automation-decision-view";
+import { selectActionableDecisionHistory, selectPendingAutomationDecisions } from "./automation-decision-view";
 
 const decision = (overrides: Partial<AutomationDecisionRecord> = {}): AutomationDecisionRecord => ({
   id: "decision-new",
@@ -110,5 +110,16 @@ describe("selectPendingAutomationDecisions", () => {
       decisions: [decision()],
       operations: [oldOperation, failedOperation],
     })).toHaveLength(1);
+  });
+});
+
+describe("selectActionableDecisionHistory", () => {
+  it("hides routine safe skips while keeping failed and executed records", () => {
+    const history = selectActionableDecisionHistory([
+      decision({ id: "skip", status: "skipped" }),
+      decision({ id: "failed", status: "failed" }),
+      decision({ id: "done", status: "succeeded" }),
+    ]);
+    expect(history.map((item) => item.id)).toEqual(["failed", "done"]);
   });
 });

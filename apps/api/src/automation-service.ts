@@ -868,7 +868,7 @@ export class AutomationService {
     let overnight = 0;
     let closing = 0;
 
-    for (const entity of this.store.listManagedEntities(accountId, account.providerKind)) {
+    for (const entity of this.store.listCurrentManagedEntities(accountId, account.providerKind)) {
       if (
         entity.entityType !== "ad-group" ||
         entity.status !== "enabled" ||

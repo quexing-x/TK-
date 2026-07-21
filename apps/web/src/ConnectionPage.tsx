@@ -23,6 +23,7 @@ import type {
 } from "@tk-auto/core";
 import { api, type CookieConnectionReadiness } from "./api";
 import { useAuth } from "./AuthGate";
+import { useOverlays } from "./ui/overlays";
 import {
   canSubmitCookieImport,
   describeCookieState,
@@ -81,6 +82,7 @@ export function ConnectionPage({
   onError: (message: string | null) => void;
 }) {
   const auth = useAuth();
+  const { confirm, toast } = useOverlays();
   const canManageAccounts = auth.status.permissions.includes("accounts:manage");
   const [providerKind, setProviderKind] = useState<ProviderKind>("cookie");
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
@@ -229,11 +231,12 @@ export function ConnectionPage({
   };
 
   const deleteCredential = async () => {
-    if (!window.confirm("确定删除本机加密凭据吗？接入参数会保留。")) return;
+    if (!await confirm({ title: "删除本机凭据", message: "确定删除本机加密凭据吗？接入参数会保留。", confirmLabel: "删除凭据", danger: true })) return;
     try {
       setBusy("delete");
       await api.deleteCredential(account.id, providerKind);
       await load();
+      toast("本机加密凭据已删除");
     } catch (cause) {
       onError(getErrorMessage(cause));
     } finally {

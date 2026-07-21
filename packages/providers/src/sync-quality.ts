@@ -33,7 +33,6 @@ export function buildSyncDataQuality(input: {
   const status = !input.contractValid
     ? "invalid"
     : input.paginationComplete &&
-        requiredMetricsComplete &&
         input.partialFailures.length === 0
       ? "healthy"
       : "partial";

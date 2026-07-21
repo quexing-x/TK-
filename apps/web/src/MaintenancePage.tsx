@@ -8,10 +8,12 @@ import type {
 } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
+import { useOverlays } from "./ui/overlays";
 import "./ui/pages/system-maintenance.css";
 
 export function MaintenancePage({ onError }: { onError: (message: string) => void }) {
   const auth = useAuth();
+  const { confirm, toast } = useOverlays();
   const canControlSystem = auth.status.permissions.includes("system:control");
   const [status, setStatus] = useState<MaintenanceStatus | null>(null);
   const [backups, setBackups] = useState<DatabaseBackupRecord[]>([]);
@@ -49,7 +51,7 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
     setNotice(null);
     try {
       await operation();
-      if (message) setNotice(message);
+      if (message) { setNotice(message); toast(message); }
       await reload();
     } catch (cause) {
       onError(errorMessage(cause));
@@ -126,9 +128,7 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
                 </div>
                 <div className="system-row-actions">
                   <button className="system-text-button" disabled={busy !== null} onClick={() => void run(`verify:${backup.id}`, () => api.verifyDatabaseBackup(backup.id))} type="button">重新校验</button>
-                  <button className="system-text-button" disabled={busy !== null || backup.status !== "verified"} onClick={() => {
-                    if (window.confirm(`确认将数据库恢复到 ${new Date(backup.createdAt).toLocaleString()}？请求保存后需要重启软件。`)) void run(`restore:${backup.id}`, () => api.requestDatabaseRestore(backup.id), "恢复请求已保存，请重启软件。");
-                  }} type="button"><ArchiveRestore size={13} /> 恢复</button>
+                  <button className="system-text-button" disabled={busy !== null || backup.status !== "verified"} onClick={() => void (async () => { if (await confirm({ title: "恢复数据库", message: `确认将数据库恢复到 ${new Date(backup.createdAt).toLocaleString()}？请求保存后需要重启软件。`, confirmLabel: "保存恢复请求", danger: true })) await run(`restore:${backup.id}`, () => api.requestDatabaseRestore(backup.id), "恢复请求已保存，请重启软件。"); })()} type="button"><ArchiveRestore size={13} /> 恢复</button>
                 </div>
               </div>
             ))}
@@ -146,9 +146,7 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
           <div className="update-actions">
             <button className="secondary-button" disabled={busy !== null || !status?.update.configured} onClick={() => void update(api.checkForUpdates)} type="button">检查更新</button>
             <button className="secondary-button" disabled={busy !== null || status?.update.state !== "available"} onClick={() => void update(api.downloadUpdate)} type="button">下载并验证</button>
-            <button className="primary-button" disabled={busy !== null || status?.update.state !== "downloaded"} onClick={() => {
-              if (window.confirm("安装前将自动创建并校验数据库备份。确认启动升级程序吗？")) void update(api.installUpdate);
-            }} type="button">备份并安装</button>
+            <button className="primary-button" disabled={busy !== null || status?.update.state !== "downloaded"} onClick={() => void (async () => { if (await confirm({ title: "启动升级", message: "安装前将自动创建并校验数据库备份。确认启动升级程序吗？", confirmLabel: "备份并安装", danger: true })) await update(api.installUpdate); })()} type="button">备份并安装</button>
           </div>
           <p className="system-footnote">升级包必须同时通过签名清单、SHA-256 与 Windows 代码签名校验。</p>
         </article>
