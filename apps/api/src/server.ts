@@ -9,12 +9,12 @@ const packageDirectory = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const databasePath =
   process.env.TK_AUTO_DB_PATH ??
   resolve(packageDirectory, "../../../data/tk-automation.db");
-const credentialDirectory = resolve(
-  packageDirectory,
-  "../../../data/credentials",
-);
+const credentialDirectory = process.env.TK_AUTO_CREDENTIAL_DIR
+  ? resolve(process.env.TK_AUTO_CREDENTIAL_DIR)
+  : resolve(packageDirectory, "../../../data/credentials");
 const host = process.env.TK_AUTO_HOST ?? "127.0.0.1";
 const port = Number(process.env.TK_AUTO_API_PORT ?? 3100);
+const secureCookies = process.env.TK_AUTO_SECURE_COOKIES === "true";
 
 const store = new AutomationStore(databasePath);
 store.seed();
@@ -22,7 +22,12 @@ const vault = new WindowsDpapiCredentialVault(credentialDirectory);
 const proxyConfig = resolveOutboundProxy();
 const proxyAgent = installOutboundProxy(proxyConfig);
 
-const app = await createApp({ store, vault, startScheduler: true });
+const app = await createApp({
+  store,
+  vault,
+  startScheduler: true,
+  secureCookies,
+});
 if (proxyConfig) {
   app.log.info(
     { source: proxyConfig.source },
