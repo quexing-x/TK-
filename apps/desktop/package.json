@@ -1,6 +1,6 @@
 {
   "name": "@tk-auto/desktop",
-  "version": "1.3.5",
+  "version": "1.3.7",
   "private": true,
   "description": "本地优先的 TikTok Ads 自动化管理工具",
   "author": "TK Ads Automation",
@@ -40,8 +40,10 @@
     },
     "files": [
       "dist/main.cjs",
-      "package.json"
+      "package.json",
+      "build/icon.ico"
     ],
+    "afterPack": "scripts/prepare-background-program.mjs",
     "extraResources": [
       {
         "from": "../web/dist",
@@ -67,11 +69,12 @@
       "oneClick": false,
       "perMachine": false,
       "allowElevation": true,
-      "allowToChangeInstallationDirectory": false,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "TK Ads Automation",
       "runAfterFinish": true,
+      "include": "build/installer.nsh",
       "deleteAppDataOnUninstall": false
     }
   }

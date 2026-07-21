@@ -2,13 +2,15 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.3.5
+## Windows 桌面版 1.3.7
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.3.5.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.3.7.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
-- 用户数据保存在 `%APPDATA%\TK Ads Automation\data`，与安装目录分离。
+- 用户数据保存在“文档\TK Ads Automation\data”，与安装目录分离。
+- 首次安装并打开客户端时，会启动名为“tk自动化后台程序”的无窗口后台调度器，并默认写入当前用户的开机自启。
+- 关闭客户端窗口会最小化到系统托盘并显示提醒；托盘菜单可完全退出客户端，后台程序继续运行。系统总开关关闭时会同时停止后台程序和开机自启。
 - 后续升级先关闭程序，再直接运行更高版本安装包；不要先卸载旧版本。
 - 固定 App ID `com.tkads.automation`，新版安装包覆盖程序文件并保留用户数据。
 - 当前安装包未配置商业代码签名证书，Windows 可能显示未知发布者提示。

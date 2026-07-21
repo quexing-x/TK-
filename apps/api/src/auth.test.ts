@@ -55,6 +55,30 @@ describe("local authentication and authorization", () => {
     expect(setup.headers["set-cookie"]).toContain("SameSite=Strict");
   });
 
+  it("requires confirmation before resetting local login access", async () => {
+    await setupDeveloper(app);
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/auth/recover",
+      payload: { confirmation: "NO" },
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(store.countLocalUsers()).toBe(1);
+
+    const reset = await app.inject({
+      method: "POST",
+      url: "/api/auth/recover",
+      payload: { confirmation: "RESET" },
+    });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json()).toMatchObject({
+      setupRequired: true,
+      authenticated: false,
+    });
+    expect(store.countLocalUsers()).toBe(0);
+  });
+
   it("enforces CSRF and role permissions without storing plaintext passwords", async () => {
     const developer = await setupDeveloper(app);
     const noCsrf = await app.inject({

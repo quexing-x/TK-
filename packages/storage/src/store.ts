@@ -1304,6 +1304,13 @@ export class AutomationStore {
       .run(now, now, userId);
   }
 
+  resetLocalUserAccess(): number {
+    const deletedUsers = this.countLocalUsers();
+    this.db.exec("DELETE FROM auth_sessions; DELETE FROM local_users;");
+    this.writeSystemAudit("local-user.access.reset", { deletedUsers });
+    return deletedUsers;
+  }
+
   createAuthSession(input: StoredAuthSession): void {
     this.cleanupExpiredAuthSessions();
     this.db
