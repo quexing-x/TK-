@@ -136,7 +136,6 @@ export function SystemUsersPage({ onError }: { onError: (message: string | null)
       <header className="system-page-header">
         <div>
           <span className="system-page-kicker">本机权限控制</span>
-          <h1>系统权限</h1>
           <p>管理本机账户、角色边界和登录凭据。所有权限仍由服务端校验。</p>
         </div>
         <div className="system-security-summary" aria-label="本机安全说明">

@@ -67,6 +67,7 @@ export function NotificationsPage({
   const auth = useAuth();
   const canManageRules = auth.status.permissions.includes("rules:manage");
   const [channels, setChannels] = useState<NotificationChannelRecord[]>([]);
+  const [activeChannel, setActiveChannel] = useState<"email" | "wecom" | "feishu" | "history">("email");
   const [deliveries, setDeliveries] = useState<NotificationDeliveryRecord[]>([]);
   const [cycles, setCycles] = useState<PollCycleRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -239,7 +240,6 @@ export function NotificationsPage({
       <header className="notification-page-heading">
         <div>
           <span className="eyebrow">系统通知中心</span>
-          <h1>消息推送</h1>
           <p>配置并验证自动化轮询结果的推送渠道。</p>
         </div>
         <button className="secondary-button" onClick={() => void load()} type="button">
@@ -254,16 +254,16 @@ export function NotificationsPage({
             <div><strong>推送配置</strong><span>3 个可用渠道</span></div>
           </div>
           <nav>
-            <button onClick={() => document.getElementById("notification-email")?.scrollIntoView({ behavior: "smooth", block: "start" })} type="button">
+            <button className={activeChannel === "email" ? "active" : ""} onClick={() => setActiveChannel("email")} type="button">
               <Mail size={16} /><span>邮箱 SMTP</span><StatusBadge status={channelMap.get("email")?.status ?? "not-configured"} />
             </button>
-            <button onClick={() => document.getElementById("notification-wecom")?.scrollIntoView({ behavior: "smooth", block: "start" })} type="button">
+            <button className={activeChannel === "wecom" ? "active" : ""} onClick={() => setActiveChannel("wecom")} type="button">
               <MessageSquareText size={16} /><span>企业微信</span><StatusBadge status={channelMap.get("wecom")?.status ?? "not-configured"} />
             </button>
-            <button onClick={() => document.getElementById("notification-feishu")?.scrollIntoView({ behavior: "smooth", block: "start" })} type="button">
+            <button className={activeChannel === "feishu" ? "active" : ""} onClick={() => setActiveChannel("feishu")} type="button">
               <Send size={16} /><span>飞书</span><StatusBadge status={channelMap.get("feishu")?.status ?? "not-configured"} />
             </button>
-            <button onClick={() => document.getElementById("notification-history")?.scrollIntoView({ behavior: "smooth", block: "start" })} type="button">
+            <button className={activeChannel === "history" ? "active" : ""} onClick={() => setActiveChannel("history")} type="button">
               <RefreshCcw size={16} /><span>推送记录</span>
             </button>
           </nav>
@@ -280,7 +280,7 @@ export function NotificationsPage({
           </div>
 
           <fieldset className="notification-channel-grid" disabled={!canManageRules} style={{ border: 0, margin: 0, minInlineSize: 0, padding: 0 }}>
-        <ChannelCard
+        {activeChannel === "email" && (<ChannelCard
           id="notification-email"
           channel={channelMap.get("email")}
           icon={<Mail size={21} />}
@@ -309,9 +309,9 @@ export function NotificationsPage({
             ]}
             title="邮箱接入教程"
           />
-        </ChannelCard>
+        </ChannelCard>)}
 
-        <ChannelCard
+        {activeChannel === "wecom" && (<ChannelCard
           id="notification-wecom"
           channel={channelMap.get("wecom")}
           icon={<MessageSquareText size={21} />}
@@ -335,9 +335,9 @@ export function NotificationsPage({
             ]}
             title="企业微信接入教程"
           />
-        </ChannelCard>
+        </ChannelCard>)}
 
-        <ChannelCard
+        {activeChannel === "feishu" && (<ChannelCard
           id="notification-feishu"
           channel={channelMap.get("feishu")}
           icon={<Send size={21} />}
@@ -362,10 +362,10 @@ export function NotificationsPage({
             ]}
             title="飞书接入教程"
           />
-        </ChannelCard>
+        </ChannelCard>)}
           </fieldset>
 
-          <div id="notification-history"><HistoryTables deliveries={deliveries} cycles={cycles} /></div>
+          {activeChannel === "history" && <div id="notification-history"><HistoryTables deliveries={deliveries} cycles={cycles} /></div>}
         </div>
       </div>
     </section>

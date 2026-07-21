@@ -396,7 +396,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
   };
 
   return <section className="page-stack launch-page">
-    <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>预设统一配置，表格只填系列、广告组、视频和产品 URL</h2><p>完整创建协议由当前账户会话提供；预算、出价、地区与创建时间等由广告预设统一覆盖。</p></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? "创建参数已就绪" : "创建参数待完善"}</span></div>
+    <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>批量创建广告</h2><p>预设统一覆盖预算、出价、地区与创建时间；表格只填系列、广告组、视频与产品 URL。</p></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? "创建参数已就绪" : "创建参数待完善"}</span></div>
 
     <nav aria-label="广告创建流程" className="launch-workflow-steps">
       <span className="active"><b>1</b><strong>选择方式</strong><small>确定创建范围</small></span>
@@ -408,7 +408,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     <div className="launch-workbench">
       <aside className="launch-mode-sidebar">
 
-    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2><p>先选业务目标，系统只展示当前操作所需的信息。</p></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
+    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
 
         <div className="launch-sidebar-summary">
           <span><small>已选账户</small><strong>{selectedAccountIds.length}</strong></span>

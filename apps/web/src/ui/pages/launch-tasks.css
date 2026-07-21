@@ -10,7 +10,7 @@
 /* Launch workspace */
 .launch-page {
   gap: 0;
-  padding-block: 80px 120px;
+  padding-block: 40px 64px;
 }
 
 .launch-page > .launch-hero {
@@ -91,7 +91,7 @@
   grid-template-columns: 264px minmax(0, 1fr);
   align-items: start;
   gap: 32px;
-  padding-top: 80px;
+  padding-top: 40px;
 }
 
 .launch-mode-sidebar {
@@ -183,8 +183,8 @@
   scroll-margin-top: 24px;
 }
 
-.launch-workspace > .launch-sheet-panel { margin-top: 48px; }
-.launch-workspace > .table-panel { margin-top: 80px; }
+.launch-workspace > .launch-sheet-panel { margin-top: 32px; }
+.launch-workspace > .table-panel { margin-top: 40px; }
 .launch-workspace > .table-panel .panel-heading { min-height: 72px; }
 .launch-workspace > .table-panel .table-wrap { max-height: 560px; overflow: auto; }
 .launch-workspace > .table-panel thead { position: sticky; top: 0; z-index: 1; }
@@ -195,7 +195,7 @@
 /* Task center workspace */
 .task-center-page {
   gap: 0;
-  padding-block: 80px 120px;
+  padding-block: 40px 64px;
 }
 
 .task-center-header {
@@ -261,7 +261,7 @@
   grid-template-columns: minmax(620px, 1.42fr) minmax(380px, 0.88fr);
   align-items: start;
   gap: 24px;
-  padding-top: 80px;
+  padding-top: 40px;
 }
 
 .task-workbench > .panel {

@@ -159,7 +159,7 @@ export function RulesPage({
       </header>
 
       <div className="rules-notice-stack">
-        <div className="alert warning-alert"><Gauge size={18} /><span>币种提醒：九条规则当前为全账户共用阈值。不同币种账户会以各自账户币种直接比较，金额阈值可能不具可比性；请先只对同币种账户开启自动化。</span></div>
+        <div className="alert warning-alert"><Gauge size={15} /><span>阈值为全账户共用；跨币种账户金额不可直接比较，建议只对同币种账户开启自动化。</span></div>
         {!canManageRules && <div className="alert warning-alert"><Gauge size={18} /><span>当前角色仅可查看规则配置；保存和启停需要 rules:manage 权限。</span></div>}
       </div>
 

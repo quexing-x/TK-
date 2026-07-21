@@ -118,7 +118,7 @@
 
 .automation-page > .automation-sync-panel {
   min-height: 264px;
-  margin-top: 56px;
+  margin-top: 32px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--module-radius);
@@ -167,7 +167,7 @@
 }
 
 .automation-page > .automation-runs-panel {
-  margin-top: 72px;
+  margin-top: 40px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--module-radius);
@@ -308,6 +308,7 @@
 .automation-section-heading h2 { margin: 0 0 4px; color: var(--ink); font-size: 15px; font-weight: 600; }
 .automation-section-heading p { margin: 0; color: var(--ink-faint); font-size: 9px; }
 .automation-count-badge { display: inline-grid; min-width: 22px; height: 22px; place-items: center; margin-left: 6px; color: var(--danger); border-radius: 50%; background: var(--danger-tint); font: 10px "IBM Plex Mono", Consolas, monospace; }
+.automation-approve-all { min-height: 32px; padding-inline: 14px; font-size: 9px; white-space: nowrap; }
 
 .automation-flow {
   position: relative;
@@ -495,8 +496,8 @@
 .rules-status-band dt { color: var(--ink-faint); font-size: 9px; }
 .rules-status-band dd { margin: 0; color: var(--ink); font-family: "IBM Plex Mono", Consolas, monospace; font-size: 11px; white-space: nowrap; }
 
-.rules-notice-stack { margin-top: 24px; display: grid; gap: 8px; }
-.rules-workspace .rules-notice-stack > .warning-alert { margin: 0; border-radius: var(--module-radius); }
+.rules-notice-stack { margin-top: 16px; display: grid; gap: 8px; }
+.rules-workspace .rules-notice-stack > .warning-alert { margin: 0; padding: 8px 12px; border-radius: var(--module-radius); font-size: 11px; line-height: 1.5; }
 
 .rules-runtime-section {
   margin-top: var(--ui-section-compact);
@@ -625,7 +626,7 @@
   .automation-flow-panel { padding-right: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .automation-decisions-panel { padding-left: 8px; }
   .automation-page > .automation-sync-panel { margin-top: 32px; }
-  .automation-page > .automation-runs-panel { margin-top: 56px; }
+  .automation-page > .automation-runs-panel { margin-top: 32px; }
   .automation-feature-row { grid-template-columns: 176px minmax(0, 1fr); }
   .automation-feature-row > p { grid-column: 2; }
   .rules-status-band { align-items: flex-start; flex-direction: column; gap: 24px; }

@@ -12,8 +12,16 @@ import {
   Zap,
 } from "lucide-react";
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import type { AccountConfig, AutomationDecisionRecord, SystemRuntimeState } from "@tk-auto/core";
+import type {
+  AccountConfig,
+  AdOperationRecord,
+  AutomationApprovalRecord,
+  AutomationDecisionRecord,
+  ManagedEntityRecord,
+  SystemRuntimeState,
+} from "@tk-auto/core";
 import { api, type BootstrapPayload } from "./api";
+import { selectPendingAutomationDecisions } from "./automation-decision-view";
 import { hasProviderCapability } from "./provider-capability-view";
 
 type OverviewDestination = "launch" | "ads" | "tasks" | "users";
@@ -32,14 +40,28 @@ export function OverviewPage({
   children?: ReactNode;
 }) {
   const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
+  const [approvals, setApprovals] = useState<AutomationApprovalRecord[]>([]);
+  const [entities, setEntities] = useState<Array<ManagedEntityRecord & { accountId: string }>>([]);
+  const [operations, setOperations] = useState<AdOperationRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadDecisions = useCallback(async () => {
     try {
       const results = await Promise.all(
-        accounts.map((account) => api.getAutomationDecisions(account.id).catch(() => [])),
+        accounts.map(async (account) => {
+          const [nextDecisions, nextApprovals, nextEntities, nextOperations] = await Promise.all([
+          api.getAutomationDecisions(account.id).catch(() => []),
+          api.getAutomationApprovals(account.id).catch(() => []),
+          api.getManagedEntities(account.id).catch(() => []),
+          api.getAdOperations(account.id).catch(() => []),
+          ]);
+          return { accountId: account.id, nextDecisions, nextApprovals, nextEntities, nextOperations };
+        }),
       );
-      setDecisions(results.flat().sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+      setDecisions(results.flatMap((result) => result.nextDecisions).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+      setApprovals(results.flatMap((result) => result.nextApprovals));
+      setEntities(results.flatMap((result) => result.nextEntities.map((entity) => ({ ...entity, accountId: result.accountId }))));
+      setOperations(results.flatMap((result) => result.nextOperations));
     } finally {
       setLoading(false);
     }
@@ -51,10 +73,13 @@ export function OverviewPage({
 
   const readyCount = connectionStates.filter((state) => state.connection?.status === "ready").length;
   const enabledCount = accounts.filter((account) => account.enabled).length;
-  const pending = useMemo(
-    () => decisions.filter((decision) => decision.status === "preview" || decision.status === "pending"),
-    [decisions],
-  );
+  const pending = useMemo(() => selectPendingAutomationDecisions({
+    decisions,
+    approvals,
+    entities,
+    operations,
+    statuses: ["preview", "pending"],
+  }), [approvals, decisions, entities, operations]);
   const stream = useMemo(() => decisions.slice(0, 5), [decisions]);
   const accountExceptions = useMemo(() => connectionStates.flatMap((state) => {
     const accountName = accounts.find((account) => account.id === state.accountId)?.displayName ?? "未命名账户";
@@ -66,7 +91,18 @@ export function OverviewPage({
     }
     return [];
   }), [accounts, connectionStates]);
-  const healthPercent = accounts.length ? Math.round((readyCount / accounts.length) * 100) : 0;
+  const accountHealth = useMemo(() => accounts.map((account) => {
+    const state = connectionStates.find((item) => item.accountId === account.id);
+    const disconnected = state?.connection?.status === "failed"
+      || (state ? ["expired", "revoked", "failed"].includes(state.capabilities.authorizationStatus) : false);
+    const ready = state?.connection?.status === "ready" && !!state && hasProviderCapability(state.capabilities, "change-status");
+    return { id: account.id, name: account.displayName, tone: disconnected ? "danger" : ready ? "healthy" : "warning" };
+  }), [accounts, connectionStates]);
+  const healthyAccountCount = accountHealth.filter((account) => account.tone === "healthy").length;
+  const warningAccountCount = accountHealth.filter((account) => account.tone === "warning").length;
+  const dangerAccountCount = accountHealth.filter((account) => account.tone === "danger").length;
+  const healthyEnd = accounts.length ? (healthyAccountCount / accounts.length) * 360 : 0;
+  const warningEnd = accounts.length ? ((healthyAccountCount + warningAccountCount) / accounts.length) * 360 : 0;
 
   return (
     <section className="overview-page">
@@ -109,16 +145,24 @@ export function OverviewPage({
             <button className="icon-text-link" type="button" onClick={() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" })}>查看详情 <ArrowRight size={14} /></button>
           </header>
           <div className="health-visual">
-            <div className="health-ring" style={{ "--health": `${healthPercent * 3.6}deg` } as CSSProperties}>
+            <div className="health-ring" style={{ "--healthy-end": `${healthyEnd}deg`, "--warning-end": `${warningEnd}deg` } as CSSProperties}>
               <div><strong>{accounts.length}</strong><span>总账户</span></div>
             </div>
             <div className="health-breakdown">
-              <span><i className="healthy" />健康<strong>{readyCount}</strong></span>
-              <span><i className="warning" />待完善<strong>{Math.max(accounts.length - readyCount, 0)}</strong></span>
-              <span><i className="danger" />异常<strong>{accountExceptions.length}</strong></span>
+              <span><i className="healthy" />健康<strong>{healthyAccountCount}</strong></span>
+              <span><i className="warning" />待完善<strong>{warningAccountCount}</strong></span>
+              <span><i className="danger" />异常<strong>{dangerAccountCount}</strong></span>
             </div>
           </div>
-          <div className="health-sparkline" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></div>
+          <div className="account-health-bars" aria-label="账户健康状态">
+            {accountHealth.length ? accountHealth.map((account) => (
+              <div className="account-health-row" key={account.id}>
+                <span title={account.name}>{account.name}</span>
+                <i><b className={account.tone} /></i>
+                <strong className={account.tone}>{account.tone === "healthy" ? "健康" : account.tone === "danger" ? "异常" : "待完善"}</strong>
+              </div>
+            )) : <p className="account-health-empty">尚未添加账户</p>}
+          </div>
         </article>
 
         <article className="overview-zone decision-zone">

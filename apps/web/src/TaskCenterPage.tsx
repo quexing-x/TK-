@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, CheckCircle2, RefreshCcw, RotateCcw, ShieldCheck, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCcw, RotateCcw, ShieldCheck, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AccountConfig,
@@ -160,7 +160,6 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
     </div>
 
     <div className="panel filter-panel task-filter-bar">
-      <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>统一任务中心</h2><p>查看创建和启停写入的执行状态、尝试记录、恢复入口与人工核验。</p></div></div><button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={15} /> 刷新</button></div>
       <div className="form-grid management-filters">
         <label className="field"><span>任务类型</span><select value={kind} onChange={(event) => setKind(event.target.value as "" | WriteTaskKind)}><option value="">全部任务</option><option value="launch">广告创建</option><option value="status">广告启停</option></select></label>
         <label className="field"><span>状态</span><select value={status} onChange={(event) => setStatus(event.target.value as "" | WriteTaskStatus)}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>

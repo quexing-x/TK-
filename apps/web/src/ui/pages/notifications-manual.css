@@ -10,7 +10,7 @@
 .notification-page-heading,
 .manual-page-heading {
   min-height: 80px;
-  margin-bottom: 48px;
+  margin-bottom: 24px;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -97,6 +97,12 @@
 .notification-workspace-nav nav button:hover {
   color: var(--primary);
   background: var(--primary-tint);
+}
+
+.notification-workspace-nav nav button.active {
+  color: var(--primary);
+  background: var(--primary-tint);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
 .notification-workspace-nav nav button .status {

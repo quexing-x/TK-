@@ -1,5 +1,5 @@
 .ads-page {
-  gap: 80px;
+  gap: 40px;
 }
 
 .ads-workspace-header,
@@ -8,15 +8,16 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 32px;
-  padding: 8px 0 32px;
+  padding: 4px 0 20px;
   border-bottom: 1px solid var(--line);
 }
 
 .ads-workspace-header h2,
 .analytics-workspace-header h2 {
-  margin: 8px 0 6px;
-  font-size: clamp(24px, 2vw, 34px);
-  letter-spacing: -.035em;
+  margin: 6px 0 4px;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -.02em;
 }
 
 .ads-workspace-header p,
@@ -36,8 +37,8 @@
 .ads-metric-rail {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  margin-top: -80px;
-  padding: 32px 0;
+  margin-top: 0;
+  padding: 24px 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -60,8 +61,8 @@
 }
 
 .ads-page > .filter-panel {
-  margin-top: -48px;
-  padding: 24px 0 32px;
+  margin-top: 0;
+  padding: 20px 0 28px;
 }
 
 .ads-page > .table-panel {
@@ -74,12 +75,12 @@
 }
 
 .ads-page > .table-panel + .table-panel {
-  padding-top: 80px;
+  padding-top: 40px;
   border-top: 1px solid var(--line);
 }
 
 .analytics-page {
-  gap: 80px;
+  gap: 40px;
 }
 
 .account-scope-bar:has(+ .analytics-page) {
@@ -89,7 +90,7 @@
 }
 
 .account-scope-bar + .analytics-page {
-  margin-top: -80px;
+  margin-top: 0;
 }
 
 .analytics-page > .filter-panel {
@@ -128,7 +129,7 @@
 
 .analytics-page > .summary-grid {
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  margin-top: -48px;
+  margin-top: 0;
 }
 
 .analytics-page > .summary-grid .summary-card {
@@ -147,7 +148,7 @@
 }
 
 .analytics-page > .table-panel {
-  padding-top: 80px;
+  padding-top: 40px;
   border-top: 1px solid var(--line);
 }
 

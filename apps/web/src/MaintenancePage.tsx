@@ -74,7 +74,6 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
       <header className="system-page-header">
         <div>
           <span className="system-page-kicker">系统可靠性</span>
-          <h1>运维中心</h1>
           <p>集中查看运行版本、升级安全、数据库备份恢复与审计轨迹。</p>
         </div>
         <button className="secondary-button" disabled={busy !== null} onClick={() => void reload()} type="button"><RefreshCw size={15} /> 刷新状态</button>

@@ -119,7 +119,7 @@
 .connection-identity-status.untested .connection-state-dot { background: var(--amber); }
 
 .connection-section {
-  padding: 80px 32px;
+  padding: 48px 32px;
   border-bottom: 1px solid var(--line);
 }
 

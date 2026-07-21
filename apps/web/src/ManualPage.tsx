@@ -18,7 +18,6 @@ export function ManualPage() {
       <header className="manual-page-heading">
         <div>
           <span className="eyebrow">TK Ads Automation</span>
-          <h1>操作手册</h1>
           <p>使用说明与接入指南</p>
         </div>
         <div className="manual-version"><BookOpen size={16} /><span>手册版本</span><strong>{userGuide.version}</strong></div>
