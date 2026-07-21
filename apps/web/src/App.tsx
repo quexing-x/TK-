@@ -1821,7 +1821,6 @@ function AutomationPage({
         <div>
           <span className="eyebrow">安全执行建议</span>
           <h2 id="automation-safety-title">自动关闭，异常即止</h2>
-          <p>后台轮询会直接执行已验证的关闭规则；每次写入前仍会检查连接、数据质量、广告状态和熔断保护。</p>
           {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
         <div className="automation-actions">
@@ -1852,7 +1851,7 @@ function AutomationPage({
       <div className="automation-primary-grid">
         <section className="automation-flow-panel">
           <div className="automation-section-heading">
-            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动化电路状态</h2><p>检测、评估、预设、待执行、执行与完成的真实运行链路。</p></div></div>
+            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动化电路状态</h2></div></div>
           </div>
           <ol className="automation-flow" aria-label="自动化执行流程">
             <li className={runs.length > 0 ? "complete" : "current"}><span><Check size={14} /></span><small>检测</small></li>
@@ -1952,7 +1951,6 @@ function AutomationPage({
             <span className="panel-icon"><Activity size={18} /></span>
             <div>
               <h2>最近运行</h2>
-              <p>每次完成的后台轮询都会保留记录；候选为 0 表示本轮正常完成且无需操作。</p>
             </div>
           </div>
           <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
