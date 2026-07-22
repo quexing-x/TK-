@@ -547,14 +547,35 @@ export class LaunchService {
     accountId: string;
     sourceCampaignId: string;
     sourceCampaignName: string;
+    sourceAdGroupId?: string | undefined;
     baseAdGroupName: string;
     count: number;
     dailyBudget: number;
     bid: number | null;
     launchImmediately: boolean;
     sameCampaign?: boolean | undefined;
-  }): Promise<Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string }>> {
+  }): Promise<Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string; raw?: unknown }>> {
     const sameCampaign = input.sameCampaign !== false;
+    // 同系列：走广告组级复制（ad_snap/copy）克隆进现有系列，不新建系列。
+    if (sameCampaign && input.sourceAdGroupId) {
+      const account = this.store.getAccount(input.accountId);
+      if (!account) throw new Error("账号不存在。");
+      const connection = this.store.getProviderConnection(input.accountId, account.providerKind);
+      if (!connection || connection.status !== "ready") throw new Error("账户未通过连接检测，已阻止复制。");
+      this.providers.requireAccountCapability(input.accountId, account.providerKind, connection, "copy-ads");
+      const context = await this.loadProviderContext(input.accountId, account.providerKind);
+      const names = Array.from(
+        { length: Math.max(1, Math.min(10, input.count)) },
+        (_unused, index) => `${input.baseAdGroupName}-${index + 1}`,
+      );
+      const result = await this.providers.copyAdGroupToExistingCampaign(account.providerKind, context, {
+        sourceAdGroupId: input.sourceAdGroupId,
+        existingCampaignId: input.sourceCampaignId,
+        names,
+        initialStatus: input.launchImmediately ? "enabled" : "disabled",
+      });
+      return [{ ok: result.ok, message: result.message }];
+    }
     const account = this.store.getAccount(input.accountId);
     if (!account) throw new Error("账号不存在。");
     const connection = this.store.getProviderConnection(input.accountId, account.providerKind);

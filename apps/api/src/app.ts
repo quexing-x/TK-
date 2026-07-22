@@ -610,6 +610,7 @@ export async function createApp(
     const input = z.object({
       sourceCampaignId: z.string().min(1),
       sourceCampaignName: z.string().min(1),
+      sourceAdGroupId: z.string().min(1).optional(),
       baseAdGroupName: z.string().min(1),
       count: z.number().int().min(1).max(10),
       dailyBudget: z.number().positive(),
