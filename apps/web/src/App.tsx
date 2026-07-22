@@ -1360,6 +1360,12 @@ function AllAccountsAdsView({
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
   const [busy, setBusy] = useState<string | null>(null);
   const [statusConfirming, setStatusConfirming] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
+  const [scheduling, setScheduling] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
+  const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
+  const [scheduledAction, setScheduledAction] = useState<"enable" | "disable">("disable");
+  const [runAt, setRunAt] = useState("");
+  const [disableAt, setDisableAt] = useState("");
+  const [enableAt, setEnableAt] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -1373,6 +1379,26 @@ function AllAccountsAdsView({
       onError(getErrorMessage(cause));
     }
   }, [accounts, onError]);
+
+  const saveSchedule = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!scheduling || !canOperateAds) return;
+    try {
+      setBusy(`${scheduling.entity.externalId}:schedule`);
+      if (scheduleKind === "once") {
+        await api.createOneTimeSchedule(scheduling.account.id, { externalId: scheduling.entity.externalId, action: scheduledAction, runAt: new Date(runAt).toISOString() });
+      } else {
+        await api.createOvernightSchedule(scheduling.account.id, { externalId: scheduling.entity.externalId, disableAt: new Date(disableAt).toISOString(), enableAt: new Date(enableAt).toISOString() });
+      }
+      setScheduling(null);
+      await load();
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -1459,12 +1485,22 @@ function AllAccountsAdsView({
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
             <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
-            <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button></div></td>
+            <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button>{hasProviderCapability(accountCapabilities[account.id], "change-status") && <button disabled={busy !== null || !canOperateAds} onClick={() => { const overnight = nextOvernightScheduleTimes(); setScheduling({ account, entity }); setScheduleKind("once"); setScheduledAction("disable"); setRunAt(nextLocalMidnightInputValue()); setDisableAt(localDateTimeInputValue(overnight.disableAt)); setEnableAt(localDateTimeInputValue(overnight.enableAt)); }} type="button">定时 / 过夜</button>}</div></td>
           </tr>)}</tbody>
         </table></div>
         {visible.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {visible.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
       {statusConfirming && <div className="modal-backdrop" onMouseDown={() => setStatusConfirming(null)}><div className="modal confirmation-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="eyebrow">确认状态变更</span><h2>{statusConfirming.entity.status === "disabled" ? "开启" : "关闭"}广告组</h2></div><button type="button" onClick={() => setStatusConfirming(null)}><X size={20} /></button></div><p>将对“{statusConfirming.account.displayName} / {statusConfirming.entity.name}”发送启停请求。</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setStatusConfirming(null)}>取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[statusConfirming.account.id], "change-status")} type="button" onClick={() => { const target = statusConfirming; setStatusConfirming(null); void changeStatus(target.account, target.entity); }}>确认</button></div></div></div>}
+      {scheduling && (
+        <div className="modal-backdrop" onMouseDown={() => setScheduling(null)}>
+          <form className="modal schedule-modal" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void saveSchedule(event)}>
+            <div className="modal-heading"><div><span className="eyebrow">广告组定时 · {scheduling.account.displayName}</span><h2>{scheduling.entity.name}</h2></div><button type="button" onClick={() => setScheduling(null)}><X size={20} /></button></div>
+            <div className="schedule-kind-tabs"><button className={scheduleKind === "once" ? "active" : ""} onClick={() => setScheduleKind("once")} type="button">单次定时</button><button className={scheduleKind === "overnight" ? "active" : ""} onClick={() => setScheduleKind("overnight")} type="button">每日过夜</button></div>
+            {scheduleKind === "once" ? <div className="form-grid"><Field label="执行动作"><select value={scheduledAction} onChange={(event) => setScheduledAction(event.target.value as typeof scheduledAction)}><option value="enable">开启</option><option value="disable">关闭</option></select></Field><Field label="执行时间"><div className="schedule-time-input"><input required type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} /><button type="button" className="secondary-button compact-button" onClick={() => setRunAt(nextLocalMidnightInputValue())}>当日 24:00</button></div></Field></div> : <div className="form-grid"><Field label="每日关闭时间（首次）"><input required type="datetime-local" value={disableAt} onChange={(event) => setDisableAt(event.target.value)} /></Field><Field label="每日开启时间（首次）"><input required type="datetime-local" value={enableAt} onChange={(event) => setEnableAt(event.target.value)} /></Field></div>}
+            <div className="modal-actions"><button className="secondary-button" onClick={() => setScheduling(null)} type="button">取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds} type="submit">保存任务</button></div>
+          </form>
+        </div>
+      )}
     </section>
   );
 }
