@@ -1128,8 +1128,9 @@ async function validateDraftChain(
     }), credential);
   const adData = isRecord(adCheck.data) ? adCheck.data : undefined;
   if (adData?.creative_success === false) {
-    const detail = JSON.stringify(adData).slice(0, 500);
-    throw new ConfirmedCreationFailureError(`TikTok 广告素材草稿检查失败：${detail}`);
+    const structure = checkInfo.map((info) => `组${info.ad_snap_id}含${info.creative_snap_ids.length}条广告`).join("、");
+    const detail = JSON.stringify(adData).slice(0, 400);
+    throw new ConfirmedCreationFailureError(`TikTok 广告素材草稿检查失败[本次发出结构：${structure}]：${detail}`);
   }
 }
 
@@ -1512,28 +1513,39 @@ function applyCopiedDraftForms(
   adForm.by_ad_sketch_id = initialized.adSketchId;
   drafts.adGroup.ad_sketch_form_data = adForm;
 
-  const creativeForm = cloneRecord(initialized.creativeForm);
   const creativeOverrideKeys = ["creative_name", "external_url", "open_url"];
   if (applyPresetOverrides) {
     creativeOverrideKeys.push(
       "identity_type", "identity_id", "call_to_action_id", "is_comment_disable", "is_share_disable",
     );
   }
-  for (const key of creativeOverrideKeys) {
-    if (requestedCreative[key] !== undefined) creativeForm[key] = requestedCreative[key];
-  }
-  const requestedImages = requestedCreative.image_list;
-  const images = creativeForm.image_list;
-  if (!Array.isArray(requestedImages) || !isRecord(requestedImages[0]) || !Array.isArray(images) || !isRecord(images[0])) {
-    throw new Error("TikTok 草稿初始化响应缺少视频素材结构。");
-  }
-  if (requestedImages[0].aweme_item_id !== "__COPY_SOURCE__") {
-    images[0].aweme_item_id = requestedImages[0].aweme_item_id;
-  }
-  creativeForm.origin_creative_id = existingCampaignId ? 0 : initialized.creativeForm.origin_creative_id;
-  creativeForm.creative_snap_id = initialized.creativeSnapId;
-  creativeForm.creative_sketch_id = initialized.creativeSketchId;
-  drafts.creative.asset_group_sketch_form_data_list = [creativeForm];
+  // One ad-group, several ads: the requested draft carries one asset per video
+  // code. Clone the template's creative form once per requested asset so every
+  // code becomes its own creative under the same ad-group. Only the first
+  // creative reuses the id pre-created by the template copy; the rest start
+  // blank and are saved as fresh creatives by the draft chain.
+  const requestedList = Array.isArray(requestedCreatives)
+    ? requestedCreatives.filter(isRecord)
+    : [];
+  const sourceList = requestedList.length > 0 ? requestedList : [requestedCreative];
+  drafts.creative.asset_group_sketch_form_data_list = sourceList.map((requested, index) => {
+    const creativeForm = cloneRecord(initialized.creativeForm);
+    for (const key of creativeOverrideKeys) {
+      if (requested[key] !== undefined) creativeForm[key] = requested[key];
+    }
+    const requestedImages = requested.image_list;
+    const images = creativeForm.image_list;
+    if (!Array.isArray(requestedImages) || !isRecord(requestedImages[0]) || !Array.isArray(images) || !isRecord(images[0])) {
+      throw new Error("TikTok 草稿初始化响应缺少视频素材结构。");
+    }
+    if (requestedImages[0].aweme_item_id !== "__COPY_SOURCE__") {
+      images[0].aweme_item_id = requestedImages[0].aweme_item_id;
+    }
+    creativeForm.origin_creative_id = existingCampaignId ? 0 : initialized.creativeForm.origin_creative_id;
+    creativeForm.creative_snap_id = index === 0 ? initialized.creativeSnapId : "";
+    creativeForm.creative_sketch_id = index === 0 ? initialized.creativeSketchId : "";
+    return creativeForm;
+  });
 }
 
 function applyManualAdSetup(adForm: Record<string, unknown>): void {
