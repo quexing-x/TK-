@@ -150,7 +150,12 @@ export async function createApp(
   launchWorker.start();
   const automation =
     dependencies.automation ??
-    new AutomationService(dependencies.store, dependencies.vault, providers);
+    new AutomationService(
+      dependencies.store,
+      dependencies.vault,
+      providers,
+      (input) => launchService.copyAdGroupWithinAccount(input),
+    );
   const notifications =
     dependencies.notifications ??
     new NotificationService(dependencies.store, dependencies.vault);
