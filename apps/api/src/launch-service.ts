@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
   getCreationTemplateReadiness,
+  defaultCreationPresetConfig,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
   type CreationPresetConfig,
+  type LaunchConfigurationRow,
   type LaunchCreationProgress,
   type WriteTaskActor,
 } from "@tk-auto/core";
@@ -536,6 +538,80 @@ export class LaunchService {
       credential: ProviderCredentialInputSchema.parse(JSON.parse(secret)),
       timezone: this.store.getAccount(accountId)?.timezone ?? "UTC",
     };
+  }
+
+  // 同账户广告组复制：以 templateCampaignId 冻结源系列，克隆源创意，
+  // 在同一账户/同系列创建 count 个广告组（自动命名，预算/出价可覆盖）。
+  // 不走跨账户 copy-preview 管线（那套需要源→目标素材映射，两级系列无本地视频码）。
+  async copyAdGroupWithinAccount(input: {
+    accountId: string;
+    sourceCampaignId: string;
+    sourceCampaignName: string;
+    baseAdGroupName: string;
+    count: number;
+    dailyBudget: number;
+    bid: number | null;
+    launchImmediately: boolean;
+    sameCampaign?: boolean | undefined;
+  }): Promise<Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string }>> {
+    const sameCampaign = input.sameCampaign !== false;
+    const account = this.store.getAccount(input.accountId);
+    if (!account) throw new Error("账号不存在。");
+    const connection = this.store.getProviderConnection(input.accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") {
+      throw new Error("账户未通过连接检测，已阻止复制。");
+    }
+    this.providers.requireAccountCapability(
+      input.accountId,
+      account.providerKind,
+      connection,
+      "copy-ads",
+    );
+    const context = await this.loadProviderContext(input.accountId, account.providerKind);
+    const basePreset = this.store.listLaunchPresets()[0];
+    const creationConfig: CreationPresetConfig = {
+      ...(basePreset?.creationConfig ?? defaultCreationPresetConfig),
+      templateCampaignId: input.sourceCampaignId,
+    };
+    const initialStatus: "enabled" | "disabled" = input.launchImmediately ? "enabled" : "disabled";
+    const results: Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string }> = [];
+    for (let index = 1; index <= Math.max(1, Math.min(10, input.count)); index += 1) {
+      const row: LaunchConfigurationRow = {
+        rowNumber: index + 1,
+        campaignName: sameCampaign
+          ? input.sourceCampaignName
+          : `${input.sourceCampaignName}-副本${index}`,
+        adGroupName: `${input.baseAdGroupName}-${index}`,
+        adName: `${input.baseAdGroupName}-${index}-广告`,
+        videoCode: "copy",
+        productUrl: "https://www.tiktok.com/",
+        region: basePreset?.region ?? "未设置",
+        dailyBudget: input.dailyBudget,
+        bid: input.bid,
+        startAt: null,
+        endAt: null,
+        initialStatus,
+      };
+      try {
+        const [created] = await this.providers.copy(account.providerKind, context, [{
+          row,
+          preset: creationConfig,
+          initialStatus,
+          templateCampaignId: input.sourceCampaignId,
+          // 同系列：挂到现有源系列下，不新建系列；否则新建一个唯一命名的系列。
+          ...(sameCampaign ? { batchCampaignId: input.sourceCampaignId } : {}),
+        }]);
+        results.push({
+          ok: Boolean(created?.ok),
+          ...(created?.adGroupId ? { adGroupId: created.adGroupId } : {}),
+          ...(created?.adId ? { adId: created.adId } : {}),
+          message: created?.message ?? (created?.ok ? "复制成功" : "Provider 未返回结果"),
+        });
+      } catch (cause) {
+        results.push({ ok: false, message: safeError(cause) });
+      }
+    }
+    return results;
   }
 }
 

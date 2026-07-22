@@ -359,12 +359,14 @@ export class CookieAdsProvider implements AdsProvider {
             credential,
             mutation,
             context.timezone ?? "UTC",
-            mutation.templateMode === "none" ? {
+            {
+              // copy 模式也需要该预留：带 batchCampaignId 时复用现有系列（同账户同系列），
+              // 不带时 campaignId 为空、按原逻辑新建系列（跨账户复制不受影响）。
               ...(reservations.campaignIds.get(campaignKey)
                 ? { campaignId: reservations.campaignIds.get(campaignKey)! }
                 : {}),
               adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
-            } : undefined,
+            },
           );
           results.push(result);
           if (mutation.templateMode === "none" && result.ok && result.campaignId) {
@@ -950,7 +952,12 @@ async function validateDraftChain(
         campaign_snap_id: ids.campaignSnapId,
       }), credential);
     const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
-    if (campaignData?.success === false) throw new ConfirmedCreationFailureError("TikTok 系列草稿检查失败。");
+    if (campaignData?.success === false) {
+      const reason = isRecord(campaignData.error_item) && typeof campaignData.error_item.message === "string"
+        ? campaignData.error_item.message
+        : "系列草稿检查未通过";
+      throw new ConfirmedCreationFailureError(`TikTok 系列草稿检查失败：${reason}`);
+    }
     fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
   }
   const checkInfo = ids.publishItems.map((item) => ({
@@ -1292,7 +1299,9 @@ function applyCopiedDraftForms(
   if (applyPresetOverrides) {
     applyManualAdSetup(adForm);
   }
-  adForm.origin_ad_id = existingCampaignId ? 0 : initialized.adForm.origin_ad_id;
+  // 复用现有系列时，非复制(创建)清空 origin_ad_id；但复制模式必须保留源广告的
+  // origin_ad_id，否则 CTA/创意克隆找不到原始草稿（code 1000505023）。
+  adForm.origin_ad_id = existingCampaignId && applyPresetOverrides ? 0 : initialized.adForm.origin_ad_id;
   adForm.ad_snap_id = initialized.adSnapId;
   adForm.ad_sketch_id = initialized.adSketchId;
   adForm.by_ad_sketch_id = initialized.adSketchId;

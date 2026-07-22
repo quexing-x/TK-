@@ -605,6 +605,26 @@ export async function createApp(
     }
   });
 
+  app.post("/api/accounts/:accountId/ad-groups/copy-same-account", async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    const input = z.object({
+      sourceCampaignId: z.string().min(1),
+      sourceCampaignName: z.string().min(1),
+      baseAdGroupName: z.string().min(1),
+      count: z.number().int().min(1).max(10),
+      dailyBudget: z.number().positive(),
+      bid: z.number().nonnegative().nullable(),
+      launchImmediately: z.boolean(),
+      sameCampaign: z.boolean().optional(),
+    }).parse(request.body);
+    try {
+      const results = await launchService.copyAdGroupWithinAccount({ accountId, ...input });
+      return reply.send({ results });
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   app.post("/api/launch-plans/:planId/execute", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
