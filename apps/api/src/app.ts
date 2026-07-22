@@ -150,7 +150,12 @@ export async function createApp(
   launchWorker.start();
   const automation =
     dependencies.automation ??
-    new AutomationService(dependencies.store, dependencies.vault, providers);
+    new AutomationService(
+      dependencies.store,
+      dependencies.vault,
+      providers,
+      (input) => launchService.copyAdGroupWithinAccount(input),
+    );
   const notifications =
     dependencies.notifications ??
     new NotificationService(dependencies.store, dependencies.vault);
@@ -600,6 +605,27 @@ export async function createApp(
           LaunchCopyPreviewInputSchema.parse(request.body),
         ),
       );
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.post("/api/accounts/:accountId/ad-groups/copy-same-account", async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    const input = z.object({
+      sourceCampaignId: z.string().min(1),
+      sourceCampaignName: z.string().min(1),
+      sourceAdGroupId: z.string().min(1).optional(),
+      baseAdGroupName: z.string().min(1),
+      count: z.number().int().min(1).max(10),
+      dailyBudget: z.number().positive(),
+      bid: z.number().nonnegative().nullable(),
+      launchImmediately: z.boolean(),
+      sameCampaign: z.boolean().optional(),
+    }).parse(request.body);
+    try {
+      const results = await launchService.copyAdGroupWithinAccount({ accountId, ...input });
+      return reply.send({ results });
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
     }

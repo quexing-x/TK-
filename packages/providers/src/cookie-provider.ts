@@ -359,12 +359,14 @@ export class CookieAdsProvider implements AdsProvider {
             credential,
             mutation,
             context.timezone ?? "UTC",
-            mutation.templateMode === "none" ? {
+            {
+              // copy 模式也需要该预留：带 batchCampaignId 时复用现有系列（同账户同系列），
+              // 不带时 campaignId 为空、按原逻辑新建系列（跨账户复制不受影响）。
               ...(reservations.campaignIds.get(campaignKey)
                 ? { campaignId: reservations.campaignIds.get(campaignKey)! }
                 : {}),
               adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
-            } : undefined,
+            },
           );
           results.push(result);
           if (mutation.templateMode === "none" && result.ok && result.campaignId) {
@@ -434,6 +436,133 @@ export class CookieAdsProvider implements AdsProvider {
       context,
       mutations.map((mutation) => ({ ...mutation, templateMode: "copy" })),
     );
+  }
+
+  // 广告组级复制进现有系列（同账户同系列）：直接调 TikTok ad_snap/copy，
+  // 用 copy_ad_id_to_existing_campaign 把源广告组连同创意克隆进指定现有系列。
+  async copyAdGroupToExistingCampaign(
+    context: ProviderContext,
+    input: {
+      sourceAdGroupId: string;
+      existingCampaignId: string;
+      names: string[];
+      initialStatus: "enabled" | "disabled";
+    },
+  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[] }> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      return { ok: false, message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。" };
+    }
+    const profile = credential.creationProfile;
+    const riskInfo = profile && isRecord(profile.publishPayload) && isRecord(profile.publishPayload.risk_info)
+      ? profile.publishPayload.risk_info
+      : {};
+    const dispatchState = { mutationDispatched: false };
+    try {
+      // 1) ad_snap/copy：把源广告组连同创意克隆进现有系列，返回草稿 snap/sketch。
+      const copied = await requestCreationStep(
+        "ad_snap/copy",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/copy/", {
+          with_sketch: true,
+          resp_with_detail: true,
+          with_creative: true,
+          is_batch_copy: true,
+          ad_params: [{ ad_id: input.sourceAdGroupId, name_list: input.names }],
+          copy_ad_id_to_existing_campaign: true,
+          is_manual_upgrade_to_splusplus: false,
+          converter_mode: 0,
+          existing_campaign_id: input.existingCampaignId,
+          risk_info: riskInfo,
+        }),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      const data = isRecord(copied.data) ? copied.data : undefined;
+      const allCopy = data && isRecord(data.all_copy_result) ? data.all_copy_result : undefined;
+      const list = allCopy && Array.isArray(allCopy.ad_and_creative_copy_result_list)
+        ? allCopy.ad_and_creative_copy_result_list.filter(isRecord)
+        : [];
+      if (list.length === 0) {
+        return { ok: false, message: "ad_snap/copy 未返回可发布的草稿。" };
+      }
+      // 2) 用复制响应拼 publishItems（结构不同于 campaign_snap/copy）。
+      const publishItems: DraftPublishItem[] = list.map((item) => {
+        const adSnap = isRecord(item.new_ad_snap_info_item) ? item.new_ad_snap_info_item : {};
+        const adSnapId = nonEmptyId(adSnap.ad_snap_id);
+        const adSketchId = nonEmptyId(item.new_ad_sketch_id);
+        const creatives = Array.isArray(item.new_creative_snap_info_item_list)
+          ? item.new_creative_snap_info_item_list.filter(isRecord)
+          : [];
+        const creativeSketchIds = Array.isArray(item.new_creative_sketch_ids)
+          ? item.new_creative_sketch_ids
+          : [];
+        if (!adSnapId || !adSketchId || creatives.length === 0 || creatives.length !== creativeSketchIds.length) {
+          throw new UnknownCreationStateError("复制草稿缺少完整的 snap/sketch 标识。");
+        }
+        return {
+          ad_id: "",
+          ad_snap_id: adSnapId,
+          ad_sketch_id: adSketchId,
+          need_publish: true as const,
+          creative_snap_info_list: creatives.map((creative, creativeIndex) => ({
+            creative_id: "",
+            creative_snap_id: nonEmptyId(creative.creative_snap_id) ?? "",
+            creative_sketch_id: nonEmptyId(creativeSketchIds[creativeIndex]) ?? "",
+            need_publish: true as const,
+          })),
+        };
+      });
+      // 2.5) 生成 CTA（程序化创意必需，否则发布报缺少行动引导/URL）。
+      const checkInfo = publishItems.map((item) => ({
+        ad_id: "",
+        ad_snap_id: item.ad_snap_id,
+        creative_snap_ids: item.creative_snap_info_list.map((creative) => creative.creative_snap_id),
+      }));
+      await requestCreationStep(
+        "snap/batch_create_cta_id",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
+          campaign_id: input.existingCampaignId,
+          campaign_snap_id: "",
+          ad_and_creative_snap_info_list: checkInfo,
+        }),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      // 3) 发布进现有系列（campaign_snap/sketch 置空，用 campaign_id）。
+      const publishPayload = profile
+        ? materializePublishProfile(profile.publishPayload, {
+            campaignId: input.existingCampaignId,
+            campaignSnapId: "",
+            campaignSketchId: "",
+            publishItems,
+            initialStatus: input.initialStatus,
+          })
+        : buildPublishInput({
+            campaignSnapId: input.existingCampaignId,
+            campaignSketchId: input.existingCampaignId,
+            adAndCreativeSnapInfoList: publishItems,
+          }, input.initialStatus);
+      publishPayload.campaign_id = input.existingCampaignId;
+      publishPayload.campaign_snap_id = "";
+      publishPayload.campaign_sketch_id = "";
+      const published = await requestCreationStep(
+        "create_by_snap",
+        () => creationRequest(sessionRequest, "async_creation/create_by_snap", publishPayload),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      await awaitCreationResult(sessionRequest, credential, published, input.existingCampaignId);
+      return {
+        ok: true,
+        message: `同系列复制已发布 ${publishItems.length} 个广告组`,
+        adGroupSnapIds: publishItems.map((item) => item.ad_snap_id),
+      };
+    } catch (cause) {
+      return { ok: false, message: cause instanceof Error ? cause.message : "同系列复制失败" };
+    }
   }
 }
 
@@ -950,7 +1079,12 @@ async function validateDraftChain(
         campaign_snap_id: ids.campaignSnapId,
       }), credential);
     const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
-    if (campaignData?.success === false) throw new ConfirmedCreationFailureError("TikTok 系列草稿检查失败。");
+    if (campaignData?.success === false) {
+      const reason = isRecord(campaignData.error_item) && typeof campaignData.error_item.message === "string"
+        ? campaignData.error_item.message
+        : "系列草稿检查未通过";
+      throw new ConfirmedCreationFailureError(`TikTok 系列草稿检查失败：${reason}`);
+    }
     fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
   }
   const checkInfo = ids.publishItems.map((item) => ({
@@ -998,7 +1132,7 @@ async function awaitCreationResult(
             "TikTok 返回部分创建成功、部分失败；为避免重复创建，必须人工核验后再处理。",
           );
         }
-        throw new ConfirmedCreationFailureError("TikTok 已明确报告广告组或创意创建失败，未生成正式广告。");
+        throw new ConfirmedCreationFailureError(`TikTok 已明确报告广告组或创意创建失败，未生成正式广告。detail=${JSON.stringify(data.result).slice(0, 300)}`);
       }
       return detail;
     }
@@ -1292,7 +1426,9 @@ function applyCopiedDraftForms(
   if (applyPresetOverrides) {
     applyManualAdSetup(adForm);
   }
-  adForm.origin_ad_id = existingCampaignId ? 0 : initialized.adForm.origin_ad_id;
+  // 复用现有系列时，非复制(创建)清空 origin_ad_id；但复制模式必须保留源广告的
+  // origin_ad_id，否则 CTA/创意克隆找不到原始草稿（code 1000505023）。
+  adForm.origin_ad_id = existingCampaignId && applyPresetOverrides ? 0 : initialized.adForm.origin_ad_id;
   adForm.ad_snap_id = initialized.adSnapId;
   adForm.ad_sketch_id = initialized.adSketchId;
   adForm.by_ad_sketch_id = initialized.adSketchId;
@@ -1904,17 +2040,29 @@ function extractEntities(
   }
   return list.flatMap((item) => {
     if (!isRecord(item)) return [];
+    // 列表统计接口把真实 id 放在 stat_data 内；两级系列（universal_type:1）顶层的
+    // creative_id 为 "0"，真实 ad_id 只在 stat_data.ad_id。优先取真实 ad_id，
+    // 并同时查顶层与 stat_data，避免把广告落成占位 "0"。
+    const statData = isRecord(item.stat_data) ? item.stat_data : {};
+    const lookup = (key: string): unknown => item[key] ?? statData[key];
     const idKeys: Record<SyncEntityType, string[]> = {
       campaign: ["campaign_id", "campaignId", "id"],
       "ad-group": ["adgroup_id", "ad_group_id", "adGroupId", "ad_id", "id"],
-      ad: ["creative_id", "creativeId", "ad_id", "adId", "id"],
+      ad: ["ad_id", "adId", "creative_id", "creativeId", "id"],
     };
-    const id = idKeys[entityType]
-      .map((key) => item[key])
-      .find(isStableExternalId);
-    return id === undefined
-      ? []
-      : [{ entityType, externalId: String(id), payload: item }];
+    const id = idKeys[entityType].map(lookup).find(isStableExternalId);
+    if (id === undefined) return [];
+    // 两级系列里广告即广告组：回填 campaign_id / adgroup_id 到 payload，
+    // 缺 adgroup_id 时用 ad_id 兜底，供父子关系解析与复制定位使用。
+    const payload = entityType === "ad"
+      ? {
+          ...item,
+          campaign_id: lookup("campaign_id") ?? item.campaign_id,
+          adgroup_id:
+            item.adgroup_id ?? item.ad_group_id ?? statData.adgroup_id ?? id,
+        }
+      : item;
+    return [{ entityType, externalId: String(id), payload }];
   });
 }
 

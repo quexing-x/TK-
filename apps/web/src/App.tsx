@@ -69,7 +69,6 @@ import { AuthGate, useAuth } from "./AuthGate";
 import { SystemUsersPage } from "./SystemUsersPage";
 import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
 import { LaunchPage } from "./LaunchPage";
-import { TaskCenterPage } from "./TaskCenterPage";
 import { MaintenancePage } from "./MaintenancePage";
 import { OverviewPage } from "./OverviewPage";
 import {
@@ -107,7 +106,6 @@ export type PageKey =
   | "rules"
   | "notifications"
   | "launch"
-  | "tasks"
   | "maintenance"
   | "system-users";
 
@@ -123,7 +121,6 @@ export const pageHash: Record<PageKey, string> = {
   rules: "#rules",
   notifications: "#notifications",
   launch: "#launch",
-  tasks: "#tasks",
   maintenance: "#maintenance",
   "system-users": "#system-users",
 };
@@ -571,8 +568,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             preferredAccountId={pageAccountId}
             onError={setError}
           />
-        ) : page === "tasks" ? (
-          <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={pageAccountId} onError={setError} />
         ) : page === "ads" ? (
           <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
             {selectedAccountId === "all" ? (
@@ -597,8 +592,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
           <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={pageAccountId} onSelect={selectAccount}>
-            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} onError={setError} />
-            <AutomationFeaturesPage onError={setError} />
+            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={bootstrap.accounts} connectionStates={bootstrap.accountConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} />
           </AccountScopedPage></section>
         ) : page === "analytics" ? (
           <>
@@ -613,7 +607,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
                   : <EmptyState text="请选择账户。" />;
               })()}
             </AccountScopedPage>
-            <TaskCenterPage accounts={bootstrap.accounts} preferredAccountId={pageAccountId} onError={setError} />
           </>
         ) : (
           <EmptyState text="页面不存在。" />
@@ -959,6 +952,39 @@ function UsersPage({
   );
 }
 
+function scrollToSection(id: string): void {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+type RuleValueMap = Record<string, Record<string, number>>;
+
+// 依据九条关闭规则的阈值，判断广告对象哪些指标已越线（用于标红）。
+// 仅纳入已启用规则；按转化量选择对应的零转化 / 有转化阈值。
+function metricBreaches(metrics: ManagedEntityRecord["metrics"], rules: RuleValueMap): { spend: boolean; cpa: boolean; carts: boolean; cpc: boolean } {
+  const conversions = metrics.conversions ?? 0;
+  const spend = metrics.spend ?? 0;
+  const carts = metrics.carts ?? 0;
+  const cpc = metrics.cost_per_click ?? 0;
+  const cpa = metrics.cost_per_conversion ?? 0;
+  const result = { spend: false, cpa: false, carts: false, cpc: false };
+  const over = (code: string, field: string, value: number) => {
+    const limit = rules[code]?.[field];
+    return typeof limit === "number" && value > limit;
+  };
+  if (conversions === 0) {
+    if (over("NO_CONV_SPEND_CLOSE", "spend", spend)) result.spend = true;
+    if (over("NO_CONV_CPC_CLOSE", "cpc", cpc)) result.cpc = true;
+  } else {
+    if (over("CV1_CPC_CLOSE", "cpc", cpc)) result.cpc = true;
+    if (over(conversions >= 2 ? "CV2_CPA_CLOSE" : "CV1_CPA_CLOSE", "cpa", cpa)) result.cpa = true;
+  }
+  const cartRule = rules.NO_CART_CLOSE;
+  if (cartRule && typeof cartRule.spend === "number" && spend >= cartRule.spend && carts <= (cartRule.carts ?? 0)) {
+    result.carts = true;
+  }
+  return result;
+}
+
 function AdsManagementPage({
   account,
   capabilities,
@@ -996,6 +1022,12 @@ function AdsManagementPage({
   const [disableAt, setDisableAt] = useState("");
   const [enableAt, setEnableAt] = useState("");
   const canChangeStatus = hasProviderCapability(capabilities, "change-status");
+  const [ruleValues, setRuleValues] = useState<RuleValueMap>({});
+  useEffect(() => {
+    void api.getRuleConfiguration()
+      .then((config) => setRuleValues(Object.fromEntries(config.rules.filter((rule) => rule.enabled).map((rule) => [rule.code, rule.values]))))
+      .catch(() => undefined);
+  }, []);
   const canRefreshRemote = hasProviderCapability(capabilities, "read-campaigns");
 
   const load = useCallback(async () => {
@@ -1071,11 +1103,13 @@ function AdsManagementPage({
   }, [load]);
 
   const filtered = useMemo(() => {
-    return filterAdsManagementEntities(entities ?? [], {
+    const list = filterAdsManagementEntities(entities ?? [], {
       level,
       status: statusFilter,
       query,
     });
+    // 人工接管的广告组始终置顶；其余保持既有排序（如消耗降序）。sort 稳定，不打乱同类相对顺序。
+    return [...list].sort((left, right) => Number(Boolean(right.ignored)) - Number(Boolean(left.ignored)));
   }, [entities, level, query, statusFilter]);
   const {
     items: pagedEntities,
@@ -1218,8 +1252,8 @@ function AdsManagementPage({
         <article><small>当前对象</small><strong>{filtered.length}</strong><span>最近 48 小时筛选结果</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
         <article><small>区间消耗</small><strong>{formatMetric(currentSpend)}</strong><span>最近 48 小时汇总</span></article>
-        <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
+        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
+        <article className="stat-jump" role="button" tabIndex={0} title="查看广告组定时任务" onClick={() => scrollToSection("schedule-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("schedule-section"); } }}><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1261,16 +1295,17 @@ function AdsManagementPage({
               {filtered.length === 0 ? <tr><td colSpan={10}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
                 const statusPending = pendingStatusKeys.has(key);
+                const breach = metricBreaches(entity.metrics, ruleValues);
                 return (
                   <tr key={key}>
                     <td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
                     <td>{entityTypeLabel(entity.entityType)}</td>
                     <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
-                    <td>{formatMetric(entity.metrics.spend)}</td>
-                    <td>{formatMetric(entity.metrics.cost_per_conversion)}</td>
-                    <td>{formatMetric(entity.metrics.carts)}</td>
+                    <td className={breach.spend ? "metric-breach" : undefined}>{formatMetric(entity.metrics.spend)}</td>
+                    <td className={breach.cpa ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
+                    <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
-                    <td>{formatMetric(entity.metrics.cost_per_click)}</td>
+                    <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
                     <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
                     <td><div className="row-actions">
                       {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}
@@ -1287,7 +1322,7 @@ function AdsManagementPage({
         {filtered.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {filtered.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
 
-      <div className="panel table-panel">
+      <div className="panel table-panel" id="manual-takeover-section">
         <div className="panel-heading">
           <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组 <em className="heading-count">{manualTakeovers.length}</em></h2></div></div>
         </div>
@@ -1296,7 +1331,7 @@ function AdsManagementPage({
         </tbody></table></div>
       </div>
 
-      <div className="panel table-panel">
+      <div className="panel table-panel" id="schedule-section">
         <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2><p>总开关关闭时不执行；已取消和已完成任务不计入计数。</p></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
@@ -1361,6 +1396,12 @@ function AllAccountsAdsView({
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
   const [busy, setBusy] = useState<string | null>(null);
   const [statusConfirming, setStatusConfirming] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
+  const [scheduling, setScheduling] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
+  const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
+  const [scheduledAction, setScheduledAction] = useState<"enable" | "disable">("disable");
+  const [runAt, setRunAt] = useState("");
+  const [disableAt, setDisableAt] = useState("");
+  const [enableAt, setEnableAt] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -1374,6 +1415,26 @@ function AllAccountsAdsView({
       onError(getErrorMessage(cause));
     }
   }, [accounts, onError]);
+
+  const saveSchedule = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!scheduling || !canOperateAds) return;
+    try {
+      setBusy(`${scheduling.entity.externalId}:schedule`);
+      if (scheduleKind === "once") {
+        await api.createOneTimeSchedule(scheduling.account.id, { externalId: scheduling.entity.externalId, action: scheduledAction, runAt: new Date(runAt).toISOString() });
+      } else {
+        await api.createOvernightSchedule(scheduling.account.id, { externalId: scheduling.entity.externalId, disableAt: new Date(disableAt).toISOString(), enableAt: new Date(enableAt).toISOString() });
+      }
+      setScheduling(null);
+      await load();
+      onError(null);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -1460,12 +1521,22 @@ function AllAccountsAdsView({
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
             <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
-            <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button></div></td>
+            <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button>{hasProviderCapability(accountCapabilities[account.id], "change-status") && <button disabled={busy !== null || !canOperateAds} onClick={() => { const overnight = nextOvernightScheduleTimes(); setScheduling({ account, entity }); setScheduleKind("once"); setScheduledAction("disable"); setRunAt(nextLocalMidnightInputValue()); setDisableAt(localDateTimeInputValue(overnight.disableAt)); setEnableAt(localDateTimeInputValue(overnight.enableAt)); }} type="button">定时 / 过夜</button>}</div></td>
           </tr>)}</tbody>
         </table></div>
         {visible.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {visible.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
       {statusConfirming && <div className="modal-backdrop" onMouseDown={() => setStatusConfirming(null)}><div className="modal confirmation-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="eyebrow">确认状态变更</span><h2>{statusConfirming.entity.status === "disabled" ? "开启" : "关闭"}广告组</h2></div><button type="button" onClick={() => setStatusConfirming(null)}><X size={20} /></button></div><p>将对“{statusConfirming.account.displayName} / {statusConfirming.entity.name}”发送启停请求。</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setStatusConfirming(null)}>取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[statusConfirming.account.id], "change-status")} type="button" onClick={() => { const target = statusConfirming; setStatusConfirming(null); void changeStatus(target.account, target.entity); }}>确认</button></div></div></div>}
+      {scheduling && (
+        <div className="modal-backdrop" onMouseDown={() => setScheduling(null)}>
+          <form className="modal schedule-modal" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void saveSchedule(event)}>
+            <div className="modal-heading"><div><span className="eyebrow">广告组定时 · {scheduling.account.displayName}</span><h2>{scheduling.entity.name}</h2></div><button type="button" onClick={() => setScheduling(null)}><X size={20} /></button></div>
+            <div className="schedule-kind-tabs"><button className={scheduleKind === "once" ? "active" : ""} onClick={() => setScheduleKind("once")} type="button">单次定时</button><button className={scheduleKind === "overnight" ? "active" : ""} onClick={() => setScheduleKind("overnight")} type="button">每日过夜</button></div>
+            {scheduleKind === "once" ? <div className="form-grid"><Field label="执行动作"><select value={scheduledAction} onChange={(event) => setScheduledAction(event.target.value as typeof scheduledAction)}><option value="enable">开启</option><option value="disable">关闭</option></select></Field><Field label="执行时间"><div className="schedule-time-input"><input required type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} /><button type="button" className="secondary-button compact-button" onClick={() => setRunAt(nextLocalMidnightInputValue())}>当日 24:00</button></div></Field></div> : <div className="form-grid"><Field label="每日关闭时间（首次）"><input required type="datetime-local" value={disableAt} onChange={(event) => setDisableAt(event.target.value)} /></Field><Field label="每日开启时间（首次）"><input required type="datetime-local" value={enableAt} onChange={(event) => setEnableAt(event.target.value)} /></Field></div>}
+            <div className="modal-actions"><button className="secondary-button" onClick={() => setScheduling(null)} type="button">取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds} type="submit">保存任务</button></div>
+          </form>
+        </div>
+      )}
     </section>
   );
 }
@@ -1540,9 +1611,9 @@ function AnalyticsPage({
         <p className="retention-note">本地快照保留 90 天；Cookie 接入不含广告层级分析。</p>
       </div>
       <div className="summary-grid">
-        <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
-        <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
-        <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(analysis.latestConversions)} tone="green" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
       </div>
@@ -1637,6 +1708,8 @@ function AutomationPage({
   capabilities,
   maxActionsPerRun,
   overview,
+  accounts,
+  connectionStates,
   onError,
 }: {
   account: AccountConfig;
@@ -1644,8 +1717,23 @@ function AutomationPage({
   capabilities: AccountProviderCapabilities | undefined;
   maxActionsPerRun: number;
   overview: AccountAutomationOverview;
+  accounts: AccountConfig[];
+  connectionStates: Array<{ accountId: string; connection: ProviderConnection | null }>;
   onError: (message: string | null) => void;
 }) {
+  const accessSummary = useMemo(() => {
+    const connectionByAccount = new Map(connectionStates.map((state) => [state.accountId, state.connection]));
+    let normal = 0;
+    let automation = 0;
+    const problems: Array<{ id: string; name: string; reason: string }> = [];
+    for (const item of accounts) {
+      const conn = connectionByAccount.get(item.id) ?? null;
+      if (conn?.status === "ready") normal += 1;
+      else problems.push({ id: item.id, name: item.displayName, reason: connectionStatusSummary(item, conn) });
+      if (item.enabled) automation += 1;
+    }
+    return { total: accounts.length, normal, automation, abnormal: problems.length, problems };
+  }, [accounts, connectionStates]);
   const { confirm, toast } = useOverlays();
   const [runs, setRuns] = useState<AutomationRunRecord[] | null>(null);
   const [decisions, setDecisions] = useState<
@@ -1827,7 +1915,6 @@ function AutomationPage({
         <div>
           <span className="eyebrow">安全执行建议</span>
           <h2 id="automation-safety-title">自动关闭，异常即止</h2>
-          <p>后台轮询会直接执行已验证的关闭规则；每次写入前仍会检查连接、数据质量、广告状态和熔断保护。</p>
           {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
         <div className="automation-actions">
@@ -1858,7 +1945,7 @@ function AutomationPage({
       <div className="automation-primary-grid">
         <section className="automation-flow-panel">
           <div className="automation-section-heading">
-            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动化电路状态</h2><p>检测、评估、预设、待执行、执行与完成的真实运行链路。</p></div></div>
+            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动化电路状态</h2></div></div>
           </div>
           <ol className="automation-flow" aria-label="自动化执行流程">
             <li className={runs.length > 0 ? "complete" : "current"}><span><Check size={14} /></span><small>检测</small></li>
@@ -1874,7 +1961,7 @@ function AutomationPage({
                 ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
                 : "无需人工审批；广告组可在广告管理中单独接管。"}
           </p>
-          <div className="automation-actions">
+          <div className="automation-actions automation-actions-center">
             <button
               className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
               disabled={busy !== null || (!lowRiskState.policy.enabled && (
@@ -1917,14 +2004,15 @@ function AutomationPage({
         </section>
 
         <section className="automation-readiness-panel account-readiness-panel">
-          <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2><p>仅显示当前账户的接入与自动化状态。</p></div></div></div>
+          <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2></div></div></div>
           <div className="automation-account-status-grid">
-            <span>接入状态 <strong className={connection?.status === "ready" ? "status active" : "status warning"}>{connection?.status === "ready" ? "已接入" : "未接入"}</strong></span>
-            <span>自动化 <strong className={account.enabled ? "status active" : "status warning"}>{account.enabled ? "已开启" : "已关闭"}</strong></span>
+            <span>正常接入 <strong className="status active">{accessSummary.normal}</strong></span>
+            <span>自动化 <strong className="status active">{accessSummary.automation}</strong></span>
+            <span>异常 <strong className={accessSummary.abnormal > 0 ? "status danger" : "status active"}>{accessSummary.abnormal}</strong></span>
           </div>
-          {connection?.status === "ready"
-            ? <p className="retention-note">当前账户已通过连接检测，可按全局规则自动执行。</p>
-            : <p className="retention-note">{connectionStatusSummary(account, connection)}</p>}
+          {accessSummary.problems.length === 0
+            ? <p className="retention-note">全部 {accessSummary.total} 个账户均已通过连接检测。</p>
+            : <ul className="automation-problem-list">{accessSummary.problems.map((problem) => <li key={problem.id}><strong>{problem.name}</strong><span>{problem.reason}</span></li>)}</ul>}
         </section>
       </div>
 
@@ -1952,13 +2040,14 @@ function AutomationPage({
         {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
       </section>
 
+      <AutomationFeaturesPage onError={onError} />
+
       <section className="automation-history-section">
         <div className="automation-section-heading">
           <div>
             <span className="panel-icon"><Activity size={18} /></span>
             <div>
               <h2>最近运行</h2>
-              <p>每次完成的后台轮询都会保留记录；候选为 0 表示本轮正常完成且无需操作。</p>
             </div>
           </div>
           <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
@@ -2306,10 +2395,16 @@ function formatDateInput(date: Date): string {
 function analyzeMetricBatches(batches: MetricBatchRecord[]) {
   const sorted = [...batches].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
   const latest = sorted[0];
+  const earliest = sorted[sorted.length - 1];
+  // 平台上报的 spend/clicks/conversions 为累计快照，直接取最新批次会导致
+  // "今天/七天"都显示同一累计值、时间窗口形同虚设。改为区间净增量：
+  // 窗口内最新累计 − 最早累计（高频同步下即为该区间的真实消耗/点击/转化）。
+  const windowValue = (field: "spend" | "clicks" | "conversions") =>
+    Math.max(0, (latest?.[field] ?? 0) - (earliest?.[field] ?? 0));
   return {
-    latestSpend: latest?.spend ?? 0,
-    latestClicks: latest?.clicks ?? 0,
-    latestConversions: latest?.conversions ?? 0,
+    latestSpend: windowValue("spend"),
+    latestClicks: windowValue("clicks"),
+    latestConversions: windowValue("conversions"),
     batches: sorted,
   };
 }
@@ -2378,9 +2473,9 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
         <p className="retention-note">本地快照保留 90 天；已按检测时间聚合全部账户。</p>
       </div>
       <div className="summary-grid">
-        <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
-        <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
-        <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(analysis.latestConversions)} tone="green" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
       </div>

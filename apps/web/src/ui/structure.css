@@ -1041,3 +1041,20 @@ td code { color: var(--ink-soft); background: var(--surface); }
   .overview-grid { grid-template-columns: 1fr; }
   .theme-toggle span, .global-automation-toggle > span:last-child { display: none; }
 }
+
+/* 筛选下拉美化（图1b）：统一去系统箭头 + 自定义 chevron + 悬停/聚焦态 */
+.account-scope-bar select,
+.field select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%237c899b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.account-scope-bar select:hover,
+.field select:hover { border-color: var(--primary, #4f70e3); }
+.account-scope-bar select:focus,
+.field select:focus { border-color: var(--primary, #4f70e3); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary, #4f70e3) 18%, transparent); }

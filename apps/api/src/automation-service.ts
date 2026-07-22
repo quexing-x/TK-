@@ -58,6 +58,18 @@ export class AutomationService {
     private readonly store: AutomationStore,
     private readonly vault: CredentialVault,
     private readonly providers: ProviderRegistry,
+    private readonly autoCopyRunner?: (input: {
+      accountId: string;
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      sourceAdGroupId?: string | undefined;
+      baseAdGroupName: string;
+      count: number;
+      dailyBudget: number;
+      bid: number | null;
+      launchImmediately: boolean;
+      sameCampaign?: boolean | undefined;
+    }) => Promise<unknown>,
   ) {
     this.statusTasks = new WriteTaskKernel({
       claim: (taskId, executorId, expectedStatus, actor) =>
@@ -366,6 +378,9 @@ export class AutomationService {
                 );
               }
               this.store.updateAutomationDecision(decision.id, "succeeded");
+              if (candidate.entity.entityType === "ad-group") {
+                void this.maybeAutoCopyAfterClose(accountId, candidate.entity, candidate.thresholdCode);
+              }
             } else if (result.failureKind === "unknown") {
               failureCount += 1;
               this.store.updateAutomationDecision(decision.id, "unknown", result.message);
@@ -900,6 +915,35 @@ export class AutomationService {
       closing += 1;
     }
     return { overnight, closing };
+  }
+
+  // 命中关闭规则并成功关闭后，按扩展配置自动复制 N 个广告组（同账户同系列）。
+  // 失败绝不能影响自动化主流程，全程 try/catch 吞掉。
+  private async maybeAutoCopyAfterClose(
+    accountId: string,
+    entity: { externalId: string; name: string; parentCampaignId: string | null; metrics: { budget: number | null } },
+    ruleCode: string,
+  ): Promise<void> {
+    try {
+      if (!this.autoCopyRunner || !entity.parentCampaignId) return;
+      const copy = this.store.getAutomationFeatureSettings().copy;
+      if (!copy.autoCopyEnabled) return;
+      if (copy.autoCopyTriggerRuleCode && copy.autoCopyTriggerRuleCode !== ruleCode) return;
+      await this.autoCopyRunner({
+        accountId,
+        sourceCampaignId: entity.parentCampaignId,
+        sourceCampaignName: entity.name,
+        sourceAdGroupId: entity.externalId,
+        baseAdGroupName: `${entity.name} 的副本`,
+        count: copy.autoCopyCount,
+        dailyBudget: copy.autoCopyBudget ?? entity.metrics.budget ?? 50,
+        bid: copy.autoCopyBid,
+        launchImmediately: copy.autoCopyLaunchImmediately,
+        sameCampaign: copy.autoCopySameCampaign,
+      });
+    } catch {
+      // 自动复制为尽力而为，任何失败都不影响自动化关闭。
+    }
   }
 
   private async changeStatus(
