@@ -768,7 +768,7 @@ async function runCookieDraftChain(
   const bootstrapTemplateCampaignId = !copyOnly && !credential.creationProfile
     ? nonEmptyId(mutation.preset.templateCampaignId)
     : undefined;
-  const resolvedRow = resolveTikTokPostRow(mutation);
+  const resolvedRow = await resolveTikTokPostRow(mutation, sessionRequest, credential);
   const preflightPayloads = await requestCompleteListPages(
     "adgroup/list",
     sessionRequest,
@@ -1164,15 +1164,26 @@ async function awaitCreationResult(
   throw new Error("TikTok 创建任务在 9 秒内未返回最终结果，请稍后在投放结果中重新检查。");
 }
 
-function resolveTikTokPostRow(
+/**
+ * Resolves each video code in the cell to a TikTok item (Post) id. A code may
+ * be resolved three ways, in priority order:
+ *  1. an explicit videoPostMappings entry (manual override / cache),
+ *  2. the account's own material library — a `#…` authorization code is looked
+ *     up live via material/tt_video/bulk/info, which returns its item_id,
+ *  3. left as-is when it is already a bare numeric id.
+ * The resolved item ids are re-joined so the draft builder can split them back
+ * into one creative per ad inside the ad-group.
+ */
+async function resolveTikTokPostRow(
   mutation: CreationMutation,
-): CreationMutation["row"] {
-  // The cell may hold several codes (= several ads in one ad-group). Resolve
-  // each code to its TikTok Post ID independently, then re-join so the draft
-  // builder splits the resolved Post IDs back into one creative per ad.
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+): Promise<CreationMutation["row"]> {
   const codes = splitVideoCodes(mutation.row.videoCode);
   const list = codes.length > 0 ? codes : [mutation.row.videoCode];
-  const resolved = list.map((code) => {
+  const manual = new Map<string, string>();
+  const needLibrary: string[] = [];
+  for (const code of list) {
     const matches = mutation.preset.videoPostMappings?.filter(
       (item) => item.videoCode === code,
     ) ?? [];
@@ -1180,16 +1191,51 @@ function resolveTikTokPostRow(
     if (postIds.length > 1) {
       throw new RetryableCreationError(`视频代码 ${code} 配置了多个 Post ID，请先统一映射。`);
     }
-    const mapping = matches[0];
-    if (mapping) return mapping.postId;
+    if (postIds[0]) manual.set(code, postIds[0]);
+    else if (code.startsWith("#")) needLibrary.push(code);
+  }
+  const library = needLibrary.length > 0
+    ? await resolveVideoCodesFromLibrary(sessionRequest, credential, needLibrary)
+    : new Map<string, string>();
+  const resolved = list.map((code) => {
+    const id = manual.get(code) ?? library.get(code);
+    if (id) return id;
     if (code.startsWith("#")) {
       throw new RetryableCreationError(
-        `视频代码 ${code} 尚未映射到 TikTok Post；请先在高级自定义中保存共享 Post ID。`,
+        `视频代码 ${code} 无法在素材库中解析到帖子；请确认该视频已授权到当前账户。`,
       );
     }
     return code;
   });
   return { ...mutation.row, videoCode: resolved.join(";") };
+}
+
+/** Looks up `#…` authorization codes in the account's material library and maps
+ * each to its TikTok item id (the value that goes into aweme_item_id). */
+async function resolveVideoCodesFromLibrary(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  codes: string[],
+): Promise<Map<string, string>> {
+  const uniqueCodes = [...new Set(codes)];
+  const response = await requestCreationStep(
+    "material/tt_video/bulk/info",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/material/tt_video/bulk/info/",
+      { video_code_list: uniqueCodes },
+    ),
+    credential,
+  );
+  const data = isRecord(response.data) ? response.data : {};
+  const videoMap = isRecord(data.tt_video_map) ? data.tt_video_map : {};
+  const out = new Map<string, string>();
+  for (const code of uniqueCodes) {
+    const entry = videoMap[code];
+    const itemId = isRecord(entry) ? nonEmptyId(entry.item_id) : undefined;
+    if (itemId) out.set(code, itemId);
+  }
+  return out;
 }
 
 function uniqueAdGroupName(

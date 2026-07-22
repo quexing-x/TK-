@@ -919,9 +919,17 @@ describe("CookieAdsProvider", () => {
     expect(result[0]).toMatchObject({ campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
   });
 
-  it("blocks an unmapped TikTok authorization code before dispatch", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+  it("blocks a code the material library cannot resolve, before any creation request", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      // The library returns no entry for the unknown code.
+      const body = url.includes("material/tt_video/bulk/info")
+        ? { data: { tt_video_map: {} }, code: 0 }
+        : { data: {}, code: 0 };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
     const mutation = creationTestMutation("none");
     mutation.row.videoCode = "#unmapped-code";
 
@@ -931,7 +939,42 @@ describe("CookieAdsProvider", () => {
     );
 
     expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The only network call is the library lookup — no creation was dispatched.
+    expect(requested.some((url) => url.includes("material/tt_video/bulk/info"))).toBe(true);
+    expect(requested.some((url) => url.includes("campaign_snap/save"))).toBe(false);
+  });
+
+  it("auto-resolves a #code from the material library and creates without a manual mapping", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      const body = url.includes("material/tt_video/bulk/info")
+        ? { data: { tt_video_map: { "#lib-code": { item_id: "9998887776665" } } }, code: 0 }
+        : url.includes("adgroup/list") || url.includes("campaign/list")
+        ? { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 }
+        : url.includes("campaign_snap/save")
+        ? { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 }
+        : url.includes("ad_snap/save")
+          ? { data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }, code: 0 }
+          : url.includes("creative_snap/save")
+            ? { data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }, code: 0 }
+            : { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    // The library-resolved item_id is what lands in the creative's aweme_item_id.
+    const creativeSave = requested.find((item) => item.url.includes("creative_snap/save"));
+    expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<{ image_list: Array<{ aweme_item_id: string }> }>)[0]!.image_list[0]!.aweme_item_id).toBe("9998887776665");
   });
 
   it("reuses the unique exact-name campaign instead of creating another campaign", async () => {
