@@ -1127,7 +1127,10 @@ async function validateDraftChain(
       risk_info: ids.riskInfo,
     }), credential);
   const adData = isRecord(adCheck.data) ? adCheck.data : undefined;
-  if (adData?.creative_success === false) throw new ConfirmedCreationFailureError("TikTok 广告素材草稿检查失败。");
+  if (adData?.creative_success === false) {
+    const detail = JSON.stringify(adData).slice(0, 500);
+    throw new ConfirmedCreationFailureError(`TikTok 广告素材草稿检查失败：${detail}`);
+  }
 }
 
 async function awaitCreationResult(
