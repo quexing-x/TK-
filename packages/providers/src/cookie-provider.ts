@@ -1904,17 +1904,29 @@ function extractEntities(
   }
   return list.flatMap((item) => {
     if (!isRecord(item)) return [];
+    // 列表统计接口把真实 id 放在 stat_data 内；两级系列（universal_type:1）顶层的
+    // creative_id 为 "0"，真实 ad_id 只在 stat_data.ad_id。优先取真实 ad_id，
+    // 并同时查顶层与 stat_data，避免把广告落成占位 "0"。
+    const statData = isRecord(item.stat_data) ? item.stat_data : {};
+    const lookup = (key: string): unknown => item[key] ?? statData[key];
     const idKeys: Record<SyncEntityType, string[]> = {
       campaign: ["campaign_id", "campaignId", "id"],
       "ad-group": ["adgroup_id", "ad_group_id", "adGroupId", "ad_id", "id"],
-      ad: ["creative_id", "creativeId", "ad_id", "adId", "id"],
+      ad: ["ad_id", "adId", "creative_id", "creativeId", "id"],
     };
-    const id = idKeys[entityType]
-      .map((key) => item[key])
-      .find(isStableExternalId);
-    return id === undefined
-      ? []
-      : [{ entityType, externalId: String(id), payload: item }];
+    const id = idKeys[entityType].map(lookup).find(isStableExternalId);
+    if (id === undefined) return [];
+    // 两级系列里广告即广告组：回填 campaign_id / adgroup_id 到 payload，
+    // 缺 adgroup_id 时用 ad_id 兜底，供父子关系解析与复制定位使用。
+    const payload = entityType === "ad"
+      ? {
+          ...item,
+          campaign_id: lookup("campaign_id") ?? item.campaign_id,
+          adgroup_id:
+            item.adgroup_id ?? item.ad_group_id ?? statData.adgroup_id ?? id,
+        }
+      : item;
+    return [{ entityType, externalId: String(id), payload }];
   });
 }
 
