@@ -956,6 +956,35 @@ function scrollToSection(id: string): void {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+type RuleValueMap = Record<string, Record<string, number>>;
+
+// 依据九条关闭规则的阈值，判断广告对象哪些指标已越线（用于标红）。
+// 仅纳入已启用规则；按转化量选择对应的零转化 / 有转化阈值。
+function metricBreaches(metrics: ManagedEntityRecord["metrics"], rules: RuleValueMap): { spend: boolean; cpa: boolean; carts: boolean; cpc: boolean } {
+  const conversions = metrics.conversions ?? 0;
+  const spend = metrics.spend ?? 0;
+  const carts = metrics.carts ?? 0;
+  const cpc = metrics.cost_per_click ?? 0;
+  const cpa = metrics.cost_per_conversion ?? 0;
+  const result = { spend: false, cpa: false, carts: false, cpc: false };
+  const over = (code: string, field: string, value: number) => {
+    const limit = rules[code]?.[field];
+    return typeof limit === "number" && value > limit;
+  };
+  if (conversions === 0) {
+    if (over("NO_CONV_SPEND_CLOSE", "spend", spend)) result.spend = true;
+    if (over("NO_CONV_CPC_CLOSE", "cpc", cpc)) result.cpc = true;
+  } else {
+    if (over("CV1_CPC_CLOSE", "cpc", cpc)) result.cpc = true;
+    if (over(conversions >= 2 ? "CV2_CPA_CLOSE" : "CV1_CPA_CLOSE", "cpa", cpa)) result.cpa = true;
+  }
+  const cartRule = rules.NO_CART_CLOSE;
+  if (cartRule && typeof cartRule.spend === "number" && spend >= cartRule.spend && carts <= (cartRule.carts ?? 0)) {
+    result.carts = true;
+  }
+  return result;
+}
+
 function AdsManagementPage({
   account,
   capabilities,
@@ -993,6 +1022,12 @@ function AdsManagementPage({
   const [disableAt, setDisableAt] = useState("");
   const [enableAt, setEnableAt] = useState("");
   const canChangeStatus = hasProviderCapability(capabilities, "change-status");
+  const [ruleValues, setRuleValues] = useState<RuleValueMap>({});
+  useEffect(() => {
+    void api.getRuleConfiguration()
+      .then((config) => setRuleValues(Object.fromEntries(config.rules.filter((rule) => rule.enabled).map((rule) => [rule.code, rule.values]))))
+      .catch(() => undefined);
+  }, []);
   const canRefreshRemote = hasProviderCapability(capabilities, "read-campaigns");
 
   const load = useCallback(async () => {
@@ -1260,16 +1295,17 @@ function AdsManagementPage({
               {filtered.length === 0 ? <tr><td colSpan={10}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
                 const statusPending = pendingStatusKeys.has(key);
+                const breach = metricBreaches(entity.metrics, ruleValues);
                 return (
                   <tr key={key}>
                     <td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
                     <td>{entityTypeLabel(entity.entityType)}</td>
                     <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
-                    <td>{formatMetric(entity.metrics.spend)}</td>
-                    <td>{formatMetric(entity.metrics.cost_per_conversion)}</td>
-                    <td>{formatMetric(entity.metrics.carts)}</td>
+                    <td className={breach.spend ? "metric-breach" : undefined}>{formatMetric(entity.metrics.spend)}</td>
+                    <td className={breach.cpa ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
+                    <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
-                    <td>{formatMetric(entity.metrics.cost_per_click)}</td>
+                    <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
                     <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
                     <td><div className="row-actions">
                       {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}

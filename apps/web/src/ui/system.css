@@ -1408,3 +1408,6 @@ td strong { color: var(--ink); }
 .automation-problem-list li span { font-size: 12px; color: var(--ink-soft); text-align: right; }
 
 .automation-actions-center { justify-content: center; }
+
+/* 广告对象指标越线标红（图2b） */
+.metric-breach { color: var(--danger, #c74d57); font-weight: 700; }
