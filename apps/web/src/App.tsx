@@ -593,7 +593,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         ) : page === "automation" ? (
           <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={pageAccountId} onSelect={selectAccount}>
             <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={bootstrap.accounts} connectionStates={bootstrap.accountConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} />
-            <AutomationFeaturesPage onError={setError} />
           </AccountScopedPage></section>
         ) : page === "analytics" ? (
           <>
@@ -1968,6 +1967,8 @@ function AutomationPage({
         </div>
         {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
       </section>
+
+      <AutomationFeaturesPage onError={onError} />
 
       <section className="automation-history-section">
         <div className="automation-section-heading">
