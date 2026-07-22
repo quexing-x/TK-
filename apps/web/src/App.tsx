@@ -1069,11 +1069,13 @@ function AdsManagementPage({
   }, [load]);
 
   const filtered = useMemo(() => {
-    return filterAdsManagementEntities(entities ?? [], {
+    const list = filterAdsManagementEntities(entities ?? [], {
       level,
       status: statusFilter,
       query,
     });
+    // 人工接管的广告组始终置顶；其余保持既有排序（如消耗降序）。sort 稳定，不打乱同类相对顺序。
+    return [...list].sort((left, right) => Number(Boolean(right.ignored)) - Number(Boolean(left.ignored)));
   }, [entities, level, query, statusFilter]);
   const {
     items: pagedEntities,
