@@ -743,6 +743,54 @@ describe("CookieAdsProvider", () => {
     ]));
   });
 
+  it("creates one ad-group with several ads from a multi-code cell", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let creativeSaves = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      const body = url.includes("adgroup/list") || url.includes("campaign/list")
+        ? { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 }
+        : url.includes("campaign_snap/save")
+        ? { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 }
+        : url.includes("ad_snap/save")
+          ? { data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }, code: 0 }
+          : url.includes("creative_snap/save")
+            ? (creativeSaves += 1, { data: { creative_snap_id: `creative-snap-${creativeSaves}`, creative_sketch_id: `creative-sketch-${creativeSaves}` }, code: 0 })
+            : { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+
+    const result = await new CookieAdsProvider().createFromPreset!({
+      accountId: "test-account", settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: { kind: "cookie", cookie: "sessionid=test-cookie", csrfHeaderName: "x-csrftoken", requestTemplates: [{ target: "ad-group", url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=123456&msToken=session", method: "POST", body: "{}", contentType: "application/json" }] },
+    }, [{
+      row: { rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "#codeA;#codeB", productUrl: "https://example.com", region: "US", dailyBudget: 100, bid: null, startAt: null, endAt: null, initialStatus: "enabled" },
+      preset: { objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0, pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null, identityType: 1, identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [1], smartTargeting: true, commentDisabled: false, shareDisabled: false, videoPostMappings: [{ advertiserId: "x", videoCode: "#codeA", postId: "1111" }, { advertiserId: "x", videoCode: "#codeB", postId: "2222" }] },
+      initialStatus: "enabled",
+      templateMode: "none",
+      operationId: "operation-1",
+      attemptId: "attempt-1",
+      correlationId: "correlation-1",
+    }]);
+
+    expect(result[0]).toMatchObject({ ok: true, campaignId: "campaign" });
+    // Two creative saves (one per code), one ad_snap, one create_by_snap.
+    expect(creativeSaves).toBe(2);
+    expect(requested.filter((item) => item.url.includes("ad_snap/save"))).toHaveLength(1);
+    // Each creative save carries its own resolved Post ID.
+    const creativeBodies = requested.filter((item) => item.url.includes("creative_snap/save"));
+    expect(creativeBodies.map((item) => ((item.body.asset_group_sketch_form_data_list as Array<{ image_list: Array<{ aweme_item_id: string }> }>)[0]!.image_list[0]!.aweme_item_id))).toEqual(["1111", "2222"]);
+    // The publish groups both creatives under one ad-group.
+    const publish = requested.find((item) => item.url.includes("create_by_snap"));
+    const adInfo = (publish?.body.ad_and_creative_snap_info_list as Array<{ ad_snap_id: string; creative_snap_info_list: Array<{ creative_snap_id: string }> }>);
+    expect(adInfo).toHaveLength(1);
+    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-1", "creative-snap-2"]);
+    // The CTA step registers both creatives under the single ad_snap.
+    const cta = requested.find((item) => item.url.includes("batch_create_cta_id"));
+    expect((cta?.body.ad_and_creative_snap_info_list as Array<{ creative_snap_ids: string[] }>)[0]!.creative_snap_ids).toEqual(["creative-snap-1", "creative-snap-2"]);
+  });
+
   it("classifies a dispatched status request network loss as unknown", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => {
       throw new TypeError("socket closed");

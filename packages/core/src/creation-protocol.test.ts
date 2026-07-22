@@ -110,4 +110,39 @@ describe("creation protocol", () => {
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ identity_type: 8, identity_id: "identity", call_to_action_id: "SHOP_NOW", is_comment_disable: 1, is_share_disable: 1 });
   });
 
+  it("expands a multi-code cell into one creative per code (buildDraftPayloads)", () => {
+    const payloads = buildDraftPayloads({
+      rowNumber: 2, campaignName: "系列", adGroupName: "组", adName: "260716:001",
+      videoCode: "codeA;codeB;codeC", productUrl: "https://example.com/p", region: "US",
+      dailyBudget: 100, bid: 2.5, startAt: null, endAt: null, initialStatus: "enabled",
+    }, {
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 1, optimizeGoal: 100, externalAction: 96, pixelId: null, identityType: 0,
+      identityId: null, callToActionId: "0", countryCodes: [1668284], placementIds: [3000],
+      smartTargeting: false, commentDisabled: false, shareDisabled: false,
+    });
+    const assets = payloads.creative.asset_group_sketch_form_data_list;
+    // Three ads in ONE ad-group, each its own code and a -NN suffixed name.
+    expect(assets.map((a) => [a.creative_name, (a.image_list as Array<{ aweme_item_id: string }>)[0]!.aweme_item_id])).toEqual([
+      ["260716:001-01", "codeA"],
+      ["260716:001-02", "codeB"],
+      ["260716:001-03", "codeC"],
+    ]);
+  });
+
+  it("expands a multi-code cell into one creative per code (buildProfileDraftPayloads)", () => {
+    const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: { campaign_name: "old" } },
+      adGroupPayload: { ad_sketch_form_data: { ad_name: "old", budget: "1" } },
+      creativePayload: { asset_group_sketch_form_data_list: [{ creative_name: "old", external_url: "https://old", image_list: [{ aweme_item_id: "old", identity_id: "kept" }] }] },
+      publishPayload: {},
+    }, { rowNumber: 2, campaignName: "系列", adGroupName: "组", adName: "260716:001", videoCode: "codeA;codeB", productUrl: "https://example.com/p", region: "US", dailyBudget: 25, bid: 2.5, startAt: null, endAt: null, initialStatus: "disabled" });
+    const assets = payloads.creative.asset_group_sketch_form_data_list as Array<Record<string, unknown>>;
+    expect(assets).toHaveLength(2);
+    expect(assets.map((a) => [a.creative_name, (a.image_list as Array<{ aweme_item_id: string; identity_id: string }>)[0]])).toEqual([
+      ["260716:001-01", { aweme_item_id: "codeA", identity_id: "kept" }],
+      ["260716:001-02", { aweme_item_id: "codeB", identity_id: "kept" }],
+    ]);
+  });
+
 });

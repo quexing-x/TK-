@@ -4,6 +4,7 @@ import {
   buildDraftPayloads,
   buildProfileDraftPayloads,
   buildPublishInput,
+  splitVideoCodes,
   deriveTikTokCreationRequest,
   normalizeProviderEntity,
   type CapturedCookieRequest,
@@ -881,36 +882,59 @@ async function runCookieDraftChain(
     phase: "adgroup_draft",
     evidence: { adGroupSnapId: adSnapId, adGroupSketchId: adSketchId },
   });
-  let creativeSnapIdFromAd = responseId(adGroup, "creative_snap_id");
-  let creativeSketchIdFromAd = responseId(adGroup, "creative_sketch_id");
+  const creativeSnapIdFromAd = initializedIds
+    ? initializedIds.creativeSnapId
+    : responseId(adGroup, "creative_snap_id");
+  const creativeSketchIdFromAd = initializedIds
+    ? initializedIds.creativeSketchId
+    : responseId(adGroup, "creative_sketch_id");
 
-  const creativeDraft: Record<string, unknown> = {
-    ...drafts.creative,
-    ad_snap_id: adSnapId,
-    ad_sketch_id: adSketchId,
-  };
-  const creativeAssets = creativeDraft.asset_group_sketch_form_data_list;
-  if (Array.isArray(creativeAssets) && isRecord(creativeAssets[0])) {
-    if (initializedIds) {
-      creativeSnapIdFromAd = initializedIds.creativeSnapId;
-      creativeSketchIdFromAd = initializedIds.creativeSketchId;
+  // One ad-group, several ads: the draft carries one asset per video code. Each
+  // asset is saved as its own creative and collected into a single ad_snap so
+  // they publish together as one ad-group with several ads. The first creative
+  // may reuse the id pre-created by ad_snap/save; the rest are fresh drafts.
+  const draftAssets = Array.isArray(drafts.creative.asset_group_sketch_form_data_list)
+    ? drafts.creative.asset_group_sketch_form_data_list.filter(isRecord)
+    : [];
+  const publishCreatives: Array<{
+    creative_id: string; creative_snap_id: string; creative_sketch_id: string; need_publish: true;
+  }> = [];
+  let lastCreativeResponse: Record<string, unknown> = {};
+  if (copyOnly && initializedIds) {
+    // Copy path derives its published creatives from the copied template.
+    publishCreatives.push(...initializedIds.publishItems[0]?.creative_snap_info_list ?? []);
+  } else {
+    for (let assetIndex = 0; assetIndex < Math.max(draftAssets.length, 1); assetIndex += 1) {
+      const asset = draftAssets[assetIndex] ?? {};
+      const asset0 = assetIndex === 0;
+      asset.creative_snap_id = asset0 ? creativeSnapIdFromAd ?? "" : "";
+      asset.creative_sketch_id = asset0 ? creativeSketchIdFromAd ?? "" : "";
+      const creativeDraft: Record<string, unknown> = {
+        ...drafts.creative,
+        ad_snap_id: adSnapId,
+        ad_sketch_id: adSketchId,
+        asset_group_sketch_form_data_list: [asset],
+      };
+      const creative = await requestCreationStep("creative_snap/save",
+        () => creationRequest(sessionRequest, "creative_snap/save", creativeDraft),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      lastCreativeResponse = creative;
+      const creativeSnapId = responseId(creative, "creative_snap_id")
+        ?? (asset0 ? creativeSnapIdFromAd : undefined)
+        ?? requiredResponseId(creativeDraft, "creative_snap_id");
+      const creativeSketchId = responseId(creative, "creative_sketch_id")
+        ?? (asset0 ? creativeSketchIdFromAd : undefined)
+        ?? requiredResponseId(creativeDraft, "creative_sketch_id");
+      publishCreatives.push({
+        creative_id: "", creative_snap_id: creativeSnapId,
+        creative_sketch_id: creativeSketchId, need_publish: true as const,
+      });
     }
-    creativeAssets[0].creative_snap_id = creativeSnapIdFromAd;
-    creativeAssets[0].creative_sketch_id = creativeSketchIdFromAd;
   }
-  const creative = copyOnly ? {} : await requestCreationStep("creative_snap/save",
-    () => creationRequest(sessionRequest, "creative_snap/save", creativeDraft),
-    credential,
-    { semantics: "mutation", dispatchState },
-  );
-  const creativeSnapId =
-    (copyOnly && initializedIds ? initializedIds.creativeSnapId : responseId(creative, "creative_snap_id")) ??
-    creativeSnapIdFromAd ??
-    requiredResponseId(creativeDraft, "creative_snap_id");
-  const creativeSketchId =
-    (copyOnly && initializedIds ? initializedIds.creativeSketchId : responseId(creative, "creative_sketch_id")) ??
-    creativeSketchIdFromAd ??
-    requiredResponseId(creativeDraft, "creative_sketch_id");
+  const creativeSnapId = publishCreatives[0]?.creative_snap_id ?? "";
+  const creativeSketchId = publishCreatives[0]?.creative_sketch_id ?? "";
   mutation.onProgress?.({
     phase: "creative_draft",
     evidence: { creativeSnapId, creativeSketchId },
@@ -920,10 +944,7 @@ async function runCookieDraftChain(
     ? initializedIds.publishItems
     : [{
         ad_id: "", ad_snap_id: adSnapId, ad_sketch_id: adSketchId,
-        creative_snap_info_list: [{
-          creative_id: "", creative_snap_id: creativeSnapId,
-          creative_sketch_id: creativeSketchId, need_publish: true as const,
-        }],
+        creative_snap_info_list: publishCreatives,
         need_publish: true as const,
       }];
   const publishPayload = credential.creationProfile
@@ -974,8 +995,8 @@ async function runCookieDraftChain(
       campaignSketchEcho: responseId(campaign, "campaign_sketch_id") === initializedIds?.campaignSketchId,
       adSnapEcho: responseId(adGroup, "ad_snap_id") === initializedIds?.adSnapId,
       adSketchEcho: responseId(adGroup, "ad_sketch_id") === initializedIds?.adSketchId,
-      creativeSnapEcho: responseId(creative, "creative_snap_id") === creativeSnapId,
-      creativeSketchEcho: responseId(creative, "creative_sketch_id") === creativeSketchId,
+      creativeSnapEcho: responseId(lastCreativeResponse, "creative_snap_id") === creativeSnapId,
+      creativeSketchEcho: responseId(lastCreativeResponse, "creative_sketch_id") === creativeSketchId,
     };
     throw new UnknownCreationStateError(`${detail}；草稿回显=${JSON.stringify(diagnostics)}`);
   }
@@ -1146,21 +1167,29 @@ async function awaitCreationResult(
 function resolveTikTokPostRow(
   mutation: CreationMutation,
 ): CreationMutation["row"] {
-  const matches = mutation.preset.videoPostMappings?.filter(
-    (item) => item.videoCode === mutation.row.videoCode,
-  ) ?? [];
-  const postIds = [...new Set(matches.map((item) => item.postId))];
-  if (postIds.length > 1) {
-    throw new RetryableCreationError("同一视频代码配置了多个 Post ID，请先统一映射。");
-  }
-  const mapping = matches[0];
-  if (mapping) return { ...mutation.row, videoCode: mapping.postId };
-  if (mutation.row.videoCode.startsWith("#")) {
-    throw new RetryableCreationError(
-      "该视频代码尚未映射到 TikTok Post；请先在高级自定义中保存共享 Post ID。",
-    );
-  }
-  return mutation.row;
+  // The cell may hold several codes (= several ads in one ad-group). Resolve
+  // each code to its TikTok Post ID independently, then re-join so the draft
+  // builder splits the resolved Post IDs back into one creative per ad.
+  const codes = splitVideoCodes(mutation.row.videoCode);
+  const list = codes.length > 0 ? codes : [mutation.row.videoCode];
+  const resolved = list.map((code) => {
+    const matches = mutation.preset.videoPostMappings?.filter(
+      (item) => item.videoCode === code,
+    ) ?? [];
+    const postIds = [...new Set(matches.map((item) => item.postId))];
+    if (postIds.length > 1) {
+      throw new RetryableCreationError(`视频代码 ${code} 配置了多个 Post ID，请先统一映射。`);
+    }
+    const mapping = matches[0];
+    if (mapping) return mapping.postId;
+    if (code.startsWith("#")) {
+      throw new RetryableCreationError(
+        `视频代码 ${code} 尚未映射到 TikTok Post；请先在高级自定义中保存共享 Post ID。`,
+      );
+    }
+    return code;
+  });
+  return { ...mutation.row, videoCode: resolved.join(";") };
 }
 
 function uniqueAdGroupName(
