@@ -1400,3 +1400,11 @@ td strong { color: var(--ink); }
 .stat-jump:hover { border-color: var(--primary); box-shadow: var(--ambient-shadow-hover); }
 .stat-jump:active { transform: translateY(1px); }
 .stat-jump:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* 自动化中心：异常账户列表（图6 全局接入状态） */
+.automation-problem-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.automation-problem-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 12px; border: 1px solid color-mix(in srgb, var(--danger, #c74d57) 30%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger, #c74d57) 7%, transparent); }
+.automation-problem-list li strong { font-size: 13px; }
+.automation-problem-list li span { font-size: 12px; color: var(--ink-soft); text-align: right; }
+
+.automation-actions-center { justify-content: center; }

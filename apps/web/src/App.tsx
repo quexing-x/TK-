@@ -592,7 +592,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
           <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={pageAccountId} onSelect={selectAccount}>
-            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} onError={setError} />
+            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={bootstrap.accounts} connectionStates={bootstrap.accountConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} />
             <AutomationFeaturesPage onError={setError} />
           </AccountScopedPage></section>
         ) : page === "analytics" ? (
@@ -1637,6 +1637,8 @@ function AutomationPage({
   capabilities,
   maxActionsPerRun,
   overview,
+  accounts,
+  connectionStates,
   onError,
 }: {
   account: AccountConfig;
@@ -1644,8 +1646,23 @@ function AutomationPage({
   capabilities: AccountProviderCapabilities | undefined;
   maxActionsPerRun: number;
   overview: AccountAutomationOverview;
+  accounts: AccountConfig[];
+  connectionStates: Array<{ accountId: string; connection: ProviderConnection | null }>;
   onError: (message: string | null) => void;
 }) {
+  const accessSummary = useMemo(() => {
+    const connectionByAccount = new Map(connectionStates.map((state) => [state.accountId, state.connection]));
+    let normal = 0;
+    let automation = 0;
+    const problems: Array<{ id: string; name: string; reason: string }> = [];
+    for (const item of accounts) {
+      const conn = connectionByAccount.get(item.id) ?? null;
+      if (conn?.status === "ready") normal += 1;
+      else problems.push({ id: item.id, name: item.displayName, reason: connectionStatusSummary(item, conn) });
+      if (item.enabled) automation += 1;
+    }
+    return { total: accounts.length, normal, automation, abnormal: problems.length, problems };
+  }, [accounts, connectionStates]);
   const { confirm, toast } = useOverlays();
   const [runs, setRuns] = useState<AutomationRunRecord[] | null>(null);
   const [decisions, setDecisions] = useState<
@@ -1873,7 +1890,7 @@ function AutomationPage({
                 ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
                 : "无需人工审批；广告组可在广告管理中单独接管。"}
           </p>
-          <div className="automation-actions">
+          <div className="automation-actions automation-actions-center">
             <button
               className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
               disabled={busy !== null || (!lowRiskState.policy.enabled && (
@@ -1916,14 +1933,15 @@ function AutomationPage({
         </section>
 
         <section className="automation-readiness-panel account-readiness-panel">
-          <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2><p>仅显示当前账户的接入与自动化状态。</p></div></div></div>
+          <div className="automation-section-heading"><div><span className="panel-icon"><PlugZap size={18} /></span><div><h2>账户接入状态</h2></div></div></div>
           <div className="automation-account-status-grid">
-            <span>接入状态 <strong className={connection?.status === "ready" ? "status active" : "status warning"}>{connection?.status === "ready" ? "已接入" : "未接入"}</strong></span>
-            <span>自动化 <strong className={account.enabled ? "status active" : "status warning"}>{account.enabled ? "已开启" : "已关闭"}</strong></span>
+            <span>正常接入 <strong className="status active">{accessSummary.normal}</strong></span>
+            <span>自动化 <strong className="status active">{accessSummary.automation}</strong></span>
+            <span>异常 <strong className={accessSummary.abnormal > 0 ? "status danger" : "status active"}>{accessSummary.abnormal}</strong></span>
           </div>
-          {connection?.status === "ready"
-            ? <p className="retention-note">当前账户已通过连接检测，可按全局规则自动执行。</p>
-            : <p className="retention-note">{connectionStatusSummary(account, connection)}</p>}
+          {accessSummary.problems.length === 0
+            ? <p className="retention-note">全部 {accessSummary.total} 个账户均已通过连接检测。</p>
+            : <ul className="automation-problem-list">{accessSummary.problems.map((problem) => <li key={problem.id}><strong>{problem.name}</strong><span>{problem.reason}</span></li>)}</ul>}
         </section>
       </div>
 
