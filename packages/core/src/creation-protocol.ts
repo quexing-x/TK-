@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { CapturedCookieRequest, CookieCreationProfile } from "./connection.js";
-import { splitVideoCodes, type CreationPresetConfig, type LaunchConfigurationRow } from "./launch.js";
+import type { CreationPresetConfig, LaunchConfigurationRow } from "./launch.js";
 
 /** Confirmed TikTok draft-to-publish sequence.  Values are deliberately
  * account-neutral; credentials and dynamic signatures never belong here. */
@@ -146,37 +146,20 @@ export function buildDraftPayloads(
       ad_snap_id: "",
       ad_sketch_id: "",
       with_sketch: true,
-      // One ad-group, several ads: each video code in the cell becomes its own
-      // creative (ad) under the same ad-group.
-      asset_group_sketch_form_data_list: creativeAdNames(row).map(({ name, videoCode }) => ({
-        creative_name: name,
+      asset_group_sketch_form_data_list: [{
+        creative_name: row.adName,
         creative_snap_id: "",
         creative_sketch_id: "",
         external_url: row.productUrl,
-        image_list: [{ aweme_item_id: videoCode }],
+        image_list: [{ aweme_item_id: row.videoCode }],
         identity_type: config.identityType,
         identity_id: config.identityId ?? "",
         call_to_action_id: config.callToActionId,
         is_comment_disable: config.commentDisabled ? 1 : 0,
         is_share_disable: config.shareDisabled ? 1 : 0,
-      })),
+      }],
     },
   };
-}
-
-/**
- * Expands a row's (possibly multi-code) video cell into one creative per code.
- * A single code keeps the row's automatic name verbatim; several codes get a
- * -01/-02 suffix so every ad inside the ad-group has a distinct name.
- */
-export function creativeAdNames(row: LaunchConfigurationRow): Array<{ name: string; videoCode: string }> {
-  const codes = splitVideoCodes(row.videoCode);
-  const list = codes.length > 0 ? codes : [row.videoCode];
-  if (list.length === 1) return [{ name: row.adName, videoCode: list[0]! }];
-  return list.map((videoCode, index) => ({
-    name: `${row.adName}-${String(index + 1).padStart(2, "0")}`,
-    videoCode,
-  }));
 }
 
 /** Applies only user-controlled fields to a locally encrypted, account-verified
@@ -202,24 +185,13 @@ export function buildProfileDraftPayloads(
   if (row.bid !== null) adForm.cpa_bid = String(row.bid);
   const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
   adForm.schedule_type = 1; adForm.start_time = startTime; adForm.end_time = endTime;
-  const template = list[0];
-  if (!isRecord(template) || !Array.isArray(template.image_list) || !isRecord(template.image_list[0])) throw new Error("本地创建模板缺少视频素材结构，请重新验证该账户的创建模板。");
-  // One ad-group, several ads: clone the template asset once per video code so
-  // every code becomes its own creative under the same ad-group.
-  const assets = creativeAdNames(row).map(({ name, videoCode }) => {
-    const asset = clone(template);
-    asset.creative_name = name;
-    asset.external_url = row.productUrl;
-    if (typeof asset.open_url === "string") asset.open_url = row.productUrl;
-    asset.creative_snap_id = ""; asset.creative_sketch_id = "";
-    const image = Array.isArray(asset.image_list) ? asset.image_list[0] : undefined;
-    if (isRecord(image)) image.aweme_item_id = videoCode;
-    if (customConfig && requiredCreationFields(customConfig).length === 0) {
-      applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig);
-    }
-    return asset;
-  });
-  creative.asset_group_sketch_form_data_list = assets;
+  const asset = list[0]; asset.creative_name = row.adName; asset.external_url = row.productUrl;
+  if (typeof asset.open_url === "string") asset.open_url = row.productUrl;
+  if (!Array.isArray(asset.image_list) || !isRecord(asset.image_list[0])) throw new Error("本地创建模板缺少视频素材结构，请重新验证该账户的创建模板。");
+  asset.image_list[0].aweme_item_id = row.videoCode;
+  if (customConfig && requiredCreationFields(customConfig).length === 0) {
+    applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig);
+  }
   return { campaign, adGroup, creative };
 }
 function applyCreationConfigOverrides(

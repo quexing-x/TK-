@@ -775,20 +775,20 @@ describe("CookieAdsProvider", () => {
     }]);
 
     expect(result[0]).toMatchObject({ ok: true, campaignId: "campaign" });
-    // Two creative saves (one per code), one ad_snap, one create_by_snap.
-    expect(creativeSaves).toBe(2);
+    // One ad-group, several ads = ONE creative whose image_list carries both
+    // videos (not two separate creatives).
+    expect(creativeSaves).toBe(1);
     expect(requested.filter((item) => item.url.includes("ad_snap/save"))).toHaveLength(1);
-    // Each creative save carries its own resolved Post ID.
-    const creativeBodies = requested.filter((item) => item.url.includes("creative_snap/save"));
-    expect(creativeBodies.map((item) => ((item.body.asset_group_sketch_form_data_list as Array<{ image_list: Array<{ aweme_item_id: string }> }>)[0]!.image_list[0]!.aweme_item_id))).toEqual(["1111", "2222"]);
-    // The publish groups both creatives under one ad-group.
+    const creativeBody = requested.find((item) => item.url.includes("creative_snap/save"));
+    const asset = (creativeBody?.body.asset_group_sketch_form_data_list as Array<{ image_list: Array<{ aweme_item_id: string }>; title_list: Array<{ aweme_item_id: string }> }>)[0]!;
+    expect(asset.image_list.map((image) => image.aweme_item_id)).toEqual(["1111", "2222"]);
+    expect(asset.title_list.map((title) => title.aweme_item_id)).toEqual(["1111", "2222"]);
+    // One ad_snap with one creative_snap in the publish; the two ads come from
+    // the two videos inside that creative's image_list.
     const publish = requested.find((item) => item.url.includes("create_by_snap"));
     const adInfo = (publish?.body.ad_and_creative_snap_info_list as Array<{ ad_snap_id: string; creative_snap_info_list: Array<{ creative_snap_id: string }> }>);
     expect(adInfo).toHaveLength(1);
-    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-1", "creative-snap-2"]);
-    // The CTA step registers both creatives under the single ad_snap.
-    const cta = requested.find((item) => item.url.includes("batch_create_cta_id"));
-    expect((cta?.body.ad_and_creative_snap_info_list as Array<{ creative_snap_ids: string[] }>)[0]!.creative_snap_ids).toEqual(["creative-snap-1", "creative-snap-2"]);
+    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-1"]);
   });
 
   it("classifies a dispatched status request network loss as unknown", async () => {
