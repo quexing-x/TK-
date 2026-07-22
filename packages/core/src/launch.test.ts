@@ -39,7 +39,7 @@ describe("parseLaunchSheetTable", () => {
     expect(result.errors.map((issue) => issue.field)).toContain("视频代码");
   });
 
-  it("splits several video codes in one cell into separately named ads", () => {
+  it("keeps several video codes in one cell as one ad-group of several ads", () => {
     const result = parseLaunchSheetTable(
       [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["夏季系列", "夏季广告组", "video-001； video-002;video-003", "https://example.com/product"]],
       preset,
@@ -48,10 +48,68 @@ describe("parseLaunchSheetTable", () => {
 
     expect(result.errors).toEqual([]);
     expect(result.warnings).toEqual([expect.objectContaining({ field: "视频代码" })]);
-    expect(result.rows.map((row) => [row.videoCode, row.adName])).toEqual([
-      ["video-001", "260716:001"],
-      ["video-002", "260716:002"],
-      ["video-003", "260716:003"],
+    // One row (one ad-group) whose cell holds all three codes; the create chain
+    // later splits it into three ads under the same ad-group.
+    expect(result.rows.map((row) => [row.videoCode, row.adGroupName, row.adName])).toEqual([
+      ["video-001;video-002;video-003", "夏季广告组", "260716:001"],
+    ]);
+  });
+
+  it("treats blank-campaign rows as extra ad-groups copying the block head's codes", () => {
+    const result = parseLaunchSheetTable(
+      [
+        ["推广系列名称", "广告组名称", "视频代码", "产品 URL"],
+        ["五代耳机_新", "五代耳机_新", "codeA;codeB", "https://muyyy.asia/a"],
+        ["", "五代耳机_新1", "", ""],
+        ["", "五代耳机_新2", "", ""],
+        ["六代耳机_新", "六代耳机_新", "codeC;codeD", "https://muyyy.asia/b"],
+        ["", "六代耳机_新1", "", ""],
+      ],
+      preset,
+      new Date("2026-07-16T09:00:00.000Z"),
+    );
+
+    expect(result.errors).toEqual([]);
+    // block 1: campaign 五代耳机_新 with 3 ad-groups, each carrying codeA+codeB
+    const block1 = result.rows.filter((row) => row.campaignName === "五代耳机_新");
+    expect(block1.map((row) => [row.adGroupName, row.videoCode, row.productUrl])).toEqual([
+      ["五代耳机_新", "codeA;codeB", "https://muyyy.asia/a"],
+      ["五代耳机_新1", "codeA;codeB", "https://muyyy.asia/a"],
+      ["五代耳机_新2", "codeA;codeB", "https://muyyy.asia/a"],
+    ]);
+    // block 2: separate campaign inherits its own head codes/url
+    const block2 = result.rows.filter((row) => row.campaignName === "六代耳机_新");
+    expect(block2.map((row) => [row.adGroupName, row.videoCode, row.productUrl])).toEqual([
+      ["六代耳机_新", "codeC;codeD", "https://muyyy.asia/b"],
+      ["六代耳机_新1", "codeC;codeD", "https://muyyy.asia/b"],
+    ]);
+  });
+
+  it("rejects a continuation row before any campaign head", () => {
+    const result = parseLaunchSheetTable(
+      [
+        ["推广系列名称", "广告组名称", "视频代码", "产品 URL"],
+        ["", "无头广告组", "", ""],
+      ],
+      preset,
+    );
+    expect(result.errors.map((issue) => issue.field)).toContain("推广系列名称");
+  });
+
+  it("lets a continuation row override the block head's codes when it fills them", () => {
+    const result = parseLaunchSheetTable(
+      [
+        ["推广系列名称", "广告组名称", "视频代码", "产品 URL"],
+        ["系列", "组1", "codeA", "https://example.com/a"],
+        ["", "组2", "codeB", ""],
+      ],
+      preset,
+      new Date("2026-07-16T09:00:00.000Z"),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.rows.map((row) => [row.adGroupName, row.videoCode, row.productUrl])).toEqual([
+      ["组1", "codeA", "https://example.com/a"],
+      ["组2", "codeB", "https://example.com/a"],
     ]);
   });
 
