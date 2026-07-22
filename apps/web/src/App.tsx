@@ -1611,9 +1611,9 @@ function AnalyticsPage({
         <p className="retention-note">本地快照保留 90 天；Cookie 接入不含广告层级分析。</p>
       </div>
       <div className="summary-grid">
-        <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
-        <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
-        <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(analysis.latestConversions)} tone="green" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
       </div>
@@ -2395,10 +2395,16 @@ function formatDateInput(date: Date): string {
 function analyzeMetricBatches(batches: MetricBatchRecord[]) {
   const sorted = [...batches].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
   const latest = sorted[0];
+  const earliest = sorted[sorted.length - 1];
+  // 平台上报的 spend/clicks/conversions 为累计快照，直接取最新批次会导致
+  // "今天/七天"都显示同一累计值、时间窗口形同虚设。改为区间净增量：
+  // 窗口内最新累计 − 最早累计（高频同步下即为该区间的真实消耗/点击/转化）。
+  const windowValue = (field: "spend" | "clicks" | "conversions") =>
+    Math.max(0, (latest?.[field] ?? 0) - (earliest?.[field] ?? 0));
   return {
-    latestSpend: latest?.spend ?? 0,
-    latestClicks: latest?.clicks ?? 0,
-    latestConversions: latest?.conversions ?? 0,
+    latestSpend: windowValue("spend"),
+    latestClicks: windowValue("clicks"),
+    latestConversions: windowValue("conversions"),
     batches: sorted,
   };
 }
@@ -2467,9 +2473,9 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
         <p className="retention-note">本地快照保留 90 天；已按检测时间聚合全部账户。</p>
       </div>
       <div className="summary-grid">
-        <SummaryCard icon={<Gauge size={20} />} label="当前消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
-        <SummaryCard icon={<Activity size={20} />} label="当前点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
-        <SummaryCard icon={<Check size={20} />} label="当前转化" value={formatMetric(analysis.latestConversions)} tone="green" />
+        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(analysis.latestConversions)} tone="green" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
         <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
       </div>
