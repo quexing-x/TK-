@@ -509,6 +509,24 @@ export const api = {
     ),
   getManagedEntities: (accountId: string) =>
     request<ManagedEntityRecord[]>(`/api/accounts/${accountId}/entities`),
+  batchExpandAdGroups: (input: {
+    sources: Array<{
+      accountId: string;
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      sourceAdGroupId: string;
+      sourceAdGroupName: string;
+    }>;
+    count: number;
+    dailyBudget: number;
+    bid: number | null;
+    launchImmediately: boolean;
+    sameCampaign: boolean;
+  }) =>
+    request<{ createdGroups: number; failed: Array<{ name: string; message: string }>; skipped: number }>(
+      "/api/ad-groups/batch-expand",
+      { method: "POST", body: JSON.stringify(input) },
+    ),
   getManualTakeovers: (accountId: string) =>
     request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),
   changeEntityStatus: (accountId: string, input: ManualStatusInput) =>

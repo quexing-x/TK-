@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createDefaultAutomationSwitches } from "@tk-auto/core";
+import { createDefaultAutomationSwitches, defaultAutomationFeatureSettings } from "@tk-auto/core";
 import { AutomationStore } from "./store.js";
 import { MigrationRunner } from "./migration-runner.js";
 import {
@@ -315,6 +315,33 @@ describe("AutomationStore", () => {
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
+  });
+
+  it("defaults missing fields when reading a legacy automation feature settings row", () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), "tk-legacy-")), "legacy.db");
+    const seedStore = new AutomationStore(dbPath);
+    seedStore.seed();
+    seedStore.close();
+
+    // Simulate a row written before appeal.enabled existed.
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("UPDATE automation_feature_settings SET settings_json = ? WHERE id = 1").run(
+      JSON.stringify({
+        appeal: { textTemplate: "旧模板", retryLimit: 1 },
+        copy: { namingTemplate: "{source_name}", startPaused: true, copyBudget: false },
+        deletion: { onlyDisabled: true, gracePeriodHours: 24 },
+      }),
+    );
+    raw.close();
+
+    const reopened = new AutomationStore(dbPath);
+    expect(() => reopened.getAutomationFeatureSettings()).not.toThrow();
+    const settings = reopened.getAutomationFeatureSettings();
+    expect(settings.appeal.enabled).toBe(defaultAutomationFeatureSettings.appeal.enabled);
+    expect(settings.appeal.textTemplate).toBe("旧模板");
+    expect(settings.copy.autoCopyEnabled).toBe(false);
+    reopened.close();
+    rmSync(dbPath, { force: true });
   });
 
   it("persists the global runtime, extension settings, and ad-group schedules", () => {

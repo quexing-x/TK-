@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
   getCreationTemplateReadiness,
@@ -633,6 +633,99 @@ export class LaunchService {
       }
     }
     return results;
+  }
+
+  // 一键扩组：批量选中的源广告组，每个各扩 count 个新组。
+  // 按账户串行、账户内逐源串行执行，复用 copyAdGroupWithinAccount。
+  // 幂等：相同 (账户+源组+扩组预设指纹) 已成功则跳过，不重复建组。
+  async batchExpandAdGroups(input: {
+    sources: Array<{
+      accountId: string;
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      sourceAdGroupId: string;
+      sourceAdGroupName: string;
+    }>;
+    count: number;
+    dailyBudget: number;
+    bid: number | null;
+    launchImmediately: boolean;
+    sameCampaign: boolean;
+  }): Promise<{
+    createdGroups: number;
+    failed: Array<{ name: string; message: string }>;
+    skipped: number;
+  }> {
+    const count = Math.max(1, Math.min(10, input.count));
+    const dateSuffix = new Date().toISOString().slice(5, 10).replace("-", "");
+    let createdGroups = 0;
+    let skipped = 0;
+    const failed: Array<{ name: string; message: string }> = [];
+
+    // 按账户分组，账户串行，账户内逐源串行，降低 Provider 频控风险。
+    const byAccount = new Map<string, typeof input.sources>();
+    for (const source of input.sources) {
+      const list = byAccount.get(source.accountId) ?? [];
+      list.push(source);
+      byAccount.set(source.accountId, list);
+    }
+
+    for (const [, sources] of byAccount) {
+      for (const source of sources) {
+        const baseAdGroupName = `${source.sourceAdGroupName}-${dateSuffix}`;
+        const taskKey = createHash("sha256").update(JSON.stringify({
+          accountId: source.accountId,
+          sourceAdGroupId: source.sourceAdGroupId,
+          baseAdGroupName,
+          count,
+          dailyBudget: input.dailyBudget,
+          bid: input.bid,
+          launchImmediately: input.launchImmediately,
+          sameCampaign: input.sameCampaign,
+        })).digest("hex");
+
+        const claim = this.store.claimAdGroupExpandTask(
+          taskKey,
+          source.accountId,
+          source.sourceAdGroupId,
+        );
+        if (claim !== "claimed") {
+          skipped += 1;
+          continue;
+        }
+
+        try {
+          const results = await this.copyAdGroupWithinAccount({
+            accountId: source.accountId,
+            sourceCampaignId: source.sourceCampaignId,
+            sourceCampaignName: source.sourceCampaignName,
+            sourceAdGroupId: source.sourceAdGroupId,
+            baseAdGroupName,
+            count,
+            dailyBudget: input.dailyBudget,
+            bid: input.bid,
+            launchImmediately: input.launchImmediately,
+            sameCampaign: input.sameCampaign,
+          });
+          const ok = results.length > 0 && results.every((result) => result.ok);
+          if (ok) {
+            createdGroups += count;
+            this.store.finishAdGroupExpandTask(taskKey, true);
+          } else {
+            this.store.finishAdGroupExpandTask(taskKey, false);
+            failed.push({
+              name: source.sourceAdGroupName,
+              message: results.find((result) => !result.ok)?.message ?? "创建失败",
+            });
+          }
+        } catch (cause) {
+          this.store.finishAdGroupExpandTask(taskKey, false);
+          failed.push({ name: source.sourceAdGroupName, message: safeError(cause) });
+        }
+      }
+    }
+
+    return { createdGroups, failed, skipped };
   }
 }
 

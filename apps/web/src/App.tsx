@@ -565,6 +565,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             accountCapabilities={Object.fromEntries(
               bootstrap.accountConnectionStates.map((state) => [state.accountId, state.capabilities]),
             )}
+            connectionStates={bootstrap.accountConnectionStates}
             preferredAccountId={pageAccountId}
             onError={setError}
           />
