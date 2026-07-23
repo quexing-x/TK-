@@ -1228,6 +1228,27 @@ describe("CookieAdsProvider", () => {
     });
   });
 
+  it("falls back to the account's own campaign when the preset template is missing (multi-account)", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    // The preset points at a template campaign that lives in a different account;
+    // this account only has "source-campaign" in its list.
+    mutation.preset = { ...mutation.preset, templateCampaignId: "campaign-from-another-account" } as typeof mutation.preset;
+
+    const result = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    expect(result[0]).toMatchObject({ ok: true });
+    // Bootstrap copies this account's own campaign instead of erroring on the
+    // missing preset template.
+    const copy = requested.find((item) => item.url.includes("campaign_snap/copy"));
+    expect(copy?.body).toMatchObject({ campaign_id: "source-campaign" });
+  });
+
   it("publishes every copied ad group when the source campaign contains multiple groups", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

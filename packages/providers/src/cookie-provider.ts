@@ -816,9 +816,19 @@ async function runCookieDraftChain(
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
     : buildDraftPayloads(creationRow, mutation.preset, timezone);
+  // From-scratch creation bootstraps from an existing campaign's structure. The
+  // preset's templateCampaignId lives in one account, so for every other target
+  // account fall back to one of that account's own campaigns — this lets a
+  // multi-account launch "just work" without per-account template setup.
+  const effectiveBootstrapId = copyOnly || !bootstrapTemplateCampaignId
+    ? bootstrapTemplateCampaignId
+    : campaignEntities.some((entity) => entity.externalId === bootstrapTemplateCampaignId)
+      ? bootstrapTemplateCampaignId
+      : pickFallbackTemplateCampaign(campaignEntities, mutation.preset.objectiveType)
+        ?? bootstrapTemplateCampaignId;
   const initializationTemplateCampaignId = copyOnly
     ? mutation.templateCampaignId
-    : remoteCampaignId ?? bootstrapTemplateCampaignId;
+    : remoteCampaignId ?? effectiveBootstrapId;
   const initializedIds = initializationTemplateCampaignId
     ? await initializeProfileDraftIds(
         sessionRequest,
@@ -1352,6 +1362,29 @@ function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unkn
     media_tag: 0,
     ...(video.identityId ? { identity_type: 2, identity_id: video.identityId } : {}),
   }));
+}
+
+/**
+ * Picks one of the account's own campaigns to bootstrap a from-scratch creation
+ * when the preset's template campaign does not exist in this account. Prefers a
+ * campaign matching the requested objective, then a disabled one (safe to copy),
+ * then any. Returns undefined when the account has no campaigns to copy from.
+ */
+function pickFallbackTemplateCampaign(
+  campaigns: ProviderEntity[],
+  objectiveType: number | null,
+): string | undefined {
+  if (campaigns.length === 0) return undefined;
+  const matchesObjective = (entity: ProviderEntity) =>
+    objectiveType != null && Number(entity.payload.objective_type) === objectiveType;
+  const isDisabled = (entity: ProviderEntity) =>
+    normalizeProviderEntity(entity).status === "disabled";
+  const ranked = [...campaigns].sort((a, b) => {
+    const score = (entity: ProviderEntity) =>
+      (matchesObjective(entity) ? 2 : 0) + (isDisabled(entity) ? 1 : 0);
+    return score(b) - score(a);
+  });
+  return ranked[0]?.externalId;
 }
 
 function uniqueAdGroupName(
