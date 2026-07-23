@@ -901,8 +901,26 @@ async function runCookieDraftChain(
     singleAsset.image_list = buildSparkImageList(resolvedVideos);
     singleAsset.title_list = resolvedVideos.map((video) => ({ title: "", aweme_item_id: video.itemId }));
     if (resolvedVideos.some((video) => video.identityId)) {
+      // Match TikTok's real from-scratch Spark creative_snap/save. Spark posts
+      // use a per-image (level-2) identity: the creative declares identity_type=2
+      // with an empty id, each image carries its own authorized creator, and
+      // ad_level2_identity_structure=1 tells the check to resolve the post via
+      // that per-image identity. The structural fields below (coming_source_type
+      // etc.) are what a fresh manual creative sends; without them the check
+      // fails with "无法获取 Spark Ads 帖子信息".
       singleAsset.identity_type = 2;
+      singleAsset.identity_id = "";
       singleAsset.item_source = 2;
+      singleAsset.ad_level2_identity_structure = 1;
+      singleAsset.coming_source_type = 6;
+      singleAsset.sketch_publish_source = 1;
+      singleAsset.creative_material_mode = 6;
+      singleAsset.struct_version = 1;
+      singleAsset.asset_group_id = "";
+      singleAsset.creative_assets_active_id = resolvedVideos[0]?.itemId ?? "";
+      // A fresh creative has no copy lineage; a template's origin id makes the
+      // check resolve the wrong post.
+      delete singleAsset.origin_creative_id;
     }
     singleAsset.creative_snap_id = creativeSnapIdFromAd ?? "";
     singleAsset.creative_sketch_id = creativeSketchIdFromAd ?? "";
@@ -932,6 +950,7 @@ async function runCookieDraftChain(
       ad_snap_id: adSnapId,
       ad_sketch_id: adSketchId,
       asset_group_sketch_form_data_list: [singleAsset],
+      ...(resolvedVideos.some((video) => video.identityId) ? { spc_upgrade_mode: 1 } : {}),
     };
     const creative = await requestCreationStep("creative_snap/save",
       () => creationRequest(sessionRequest, "creative_snap/save", creativeDraft),
@@ -1332,7 +1351,6 @@ function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unkn
     item_source: 2,
     media_tag: 0,
     ...(video.identityId ? { identity_type: 2, identity_id: video.identityId } : {}),
-    media_recall_source: 0,
   }));
 }
 
