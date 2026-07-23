@@ -522,8 +522,9 @@ export const api = {
     bid: number | null;
     launchImmediately: boolean;
     sameCampaign: boolean;
+    scheduledStartAt?: string | null;
   }) =>
-    request<{ createdGroups: number; failed: Array<{ name: string; message: string }>; skipped: number }>(
+    request<{ createdGroups: number; scheduled: number; failed: Array<{ name: string; message: string }>; skipped: number }>(
       "/api/ad-groups/batch-expand",
       { method: "POST", body: JSON.stringify(input) },
     ),
