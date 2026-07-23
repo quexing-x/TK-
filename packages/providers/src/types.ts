@@ -64,6 +64,7 @@ export interface CreationMutation {
   batchId?: string;
   batchCampaignId?: string;
   batchAdGroupNames?: string[];
+  onBeforeDispatch?: () => void;
   onProgress?: (progress: LaunchCreationProgress) => void;
 }
 
@@ -74,6 +75,9 @@ export interface CreationMutationResult extends CreationMutation {
   adId?: string;
   message: string;
   failureKind?: "retryable" | "unknown";
+  /** False when an earlier accepted mutation makes replaying the whole
+   * operation unsafe even though the final rejection is explicit. */
+  retrySafe?: boolean;
 }
 
 export class RetryableCreationError extends Error {
@@ -82,6 +86,10 @@ export class RetryableCreationError extends Error {
 
 export class ConfirmedCreationFailureError extends RetryableCreationError {
   override readonly name = "ConfirmedCreationFailureError";
+
+  constructor(message: string, readonly retrySafe = true) {
+    super(message);
+  }
 }
 
 export class UnknownCreationStateError extends Error {

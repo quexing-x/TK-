@@ -9,6 +9,7 @@ import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
+  UnknownCreationStateError,
   type AdsProvider,
   type CreationMutation,
   type CreationMutationResult,
@@ -61,6 +62,293 @@ describe("local API", () => {
       pollingIntervalMinutes: 5,
       maxActionsPerRun: 15,
     });
+  });
+
+  it("passes scheduled expansion to the provider as enabled native scheduling without a software enable task", async () => {
+    const scheduledStartAt = "2026-07-24T00:00:00.000Z";
+    const copyAdGroupToExistingCampaign = vi.fn(async () => ({ ok: true, message: "scheduled" }));
+    const provider = {
+      kind: "cookie",
+      displayName: "scheduled expansion provider",
+      capabilityVersion: "scheduled-expansion-v1",
+      capabilities: new Set(["copy-ads"]),
+      copyAdGroupToExistingCampaign,
+    } as unknown as AdsProvider & {
+      copyAdGroupToExistingCampaign: typeof copyAdGroupToExistingCampaign;
+    };
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie",
+      advertiserId: "1001",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie",
+      cookie: "sessionid=test-session",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "scheduled-expansion-v1",
+      capabilities: ["copy-ads"],
+    });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand",
+      payload: {
+        sources: [{
+          accountId: "demo-account",
+          sourceCampaignId: "campaign-1",
+          sourceCampaignName: "campaign",
+          sourceAdGroupId: "adgroup-1",
+          sourceAdGroupName: "adgroup",
+        }],
+        count: 2,
+        dailyBudget: 50,
+        bid: null,
+        launchImmediately: false,
+        sameCampaign: true,
+        scheduledStartAt,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ createdGroups: 2, scheduled: 2, failed: [] });
+    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        initialStatus: "enabled",
+        scheduledStartAt,
+        dailyBudget: 50,
+        bid: null,
+      }),
+    );
+    expect(store.listScheduledActions("demo-account")).toEqual([]);
+
+    const unsupported = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand",
+      payload: {
+        sources: [{
+          accountId: "demo-account",
+          sourceCampaignId: "campaign-1",
+          sourceCampaignName: "campaign",
+          sourceAdGroupId: "adgroup-2",
+          sourceAdGroupName: "adgroup 2",
+        }],
+        count: 1,
+        dailyBudget: 50,
+        bid: null,
+        launchImmediately: false,
+        sameCampaign: false,
+        scheduledStartAt,
+      },
+    });
+    expect(unsupported.statusCode).toBe(409);
+    expect(unsupported.json().message).toContain("定时扩组仅支持挂回原系列");
+    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not automatically retry an expansion whose provider result is unknown", async () => {
+    const copyAdGroupToExistingCampaign = vi.fn(async () => ({
+      ok: false,
+      message: "create_by_snap：请求已发出，但响应丢失",
+      failureKind: "unknown" as const,
+    }));
+    const provider = {
+      kind: "cookie",
+      displayName: "unknown expansion provider",
+      capabilityVersion: "scheduled-expansion-v1",
+      capabilities: new Set(["copy-ads"]),
+      copyAdGroupToExistingCampaign,
+    } as unknown as AdsProvider & {
+      copyAdGroupToExistingCampaign: typeof copyAdGroupToExistingCampaign;
+    };
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie",
+      advertiserId: "1001",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie",
+      cookie: "sessionid=test-session",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "scheduled-expansion-v1",
+      capabilities: ["copy-ads"],
+    });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+    const payload = {
+      sources: [{
+        accountId: "demo-account",
+        sourceCampaignId: "campaign-1",
+        sourceCampaignName: "campaign",
+        sourceAdGroupId: "adgroup-1",
+        sourceAdGroupName: "adgroup",
+      }],
+      count: 1,
+      dailyBudget: 50,
+      bid: 7,
+      launchImmediately: true,
+      sameCampaign: true,
+      scheduledStartAt: null,
+    };
+
+    const first = await app.inject({ method: "POST", url: "/api/ad-groups/batch-expand", payload });
+    const second = await app.inject({ method: "POST", url: "/api/ad-groups/batch-expand", payload });
+
+    expect(first.statusCode).toBe(200);
+    expect(first.json().failed[0].message).toContain("禁止自动重试");
+    expect(second.json()).toMatchObject({ createdGroups: 0, skipped: 0 });
+    expect(second.json().failed[0].message).toContain("待人工确认");
+    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the dispatch guard through the non-same-campaign copy path", async () => {
+    const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
+      mutations[0]?.onBeforeDispatch?.();
+      throw new UnknownCreationStateError("response lost after dispatch");
+    });
+    const provider = {
+      kind: "cookie",
+      displayName: "guarded expansion provider",
+      capabilityVersion: "guarded-expansion-v1",
+      capabilities: new Set(["copy-ads"]),
+      copy,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie",
+      advertiserId: "1001",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie",
+      cookie: "sessionid=test-session",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "guarded-expansion-v1",
+      capabilities: ["copy-ads"],
+    });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+    const payload = {
+      sources: [{
+        accountId: "demo-account",
+        sourceCampaignId: "campaign-1",
+        sourceCampaignName: "campaign",
+        sourceAdGroupId: "adgroup-guarded",
+        sourceAdGroupName: "adgroup guarded",
+      }],
+      count: 1,
+      dailyBudget: 50,
+      bid: 7,
+      launchImmediately: true,
+      sameCampaign: false,
+      scheduledStartAt: null,
+    };
+
+    const first = await app.inject({ method: "POST", url: "/api/ad-groups/batch-expand", payload });
+    const second = await app.inject({ method: "POST", url: "/api/ad-groups/batch-expand", payload });
+
+    expect(first.statusCode).toBe(200);
+    expect(first.json().failed[0].message).toContain("禁止自动重试");
+    expect(second.json().failed[0].message).toContain("待人工确认");
+    expect(copy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a non-same-campaign expansion after a partial success", async () => {
+    let copyCall = 0;
+    const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
+      const mutation = mutations[0]!;
+      mutation.onBeforeDispatch?.();
+      copyCall += 1;
+      return [{
+        ...mutation,
+        ok: copyCall === 1,
+        message: copyCall === 1 ? "created" : "explicit rejection",
+        ...(copyCall === 1
+          ? { campaignId: "campaign-created", adGroupId: "group-created", adId: "ad-created" }
+          : { failureKind: "retryable" as const, retrySafe: true }),
+      } satisfies CreationMutationResult];
+    });
+    const provider = {
+      kind: "cookie",
+      displayName: "partial expansion provider",
+      capabilityVersion: "partial-expansion-v1",
+      capabilities: new Set(["copy-ads"]),
+      copy,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie",
+      advertiserId: "1001",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie",
+      cookie: "sessionid=test-session",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "partial-expansion-v1",
+      capabilities: ["copy-ads"],
+    });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+    const payload = {
+      sources: [{
+        accountId: "demo-account",
+        sourceCampaignId: "campaign-1",
+        sourceCampaignName: "campaign",
+        sourceAdGroupId: "adgroup-partial",
+        sourceAdGroupName: "adgroup partial",
+      }],
+      count: 2,
+      dailyBudget: 50,
+      bid: 7,
+      launchImmediately: true,
+      sameCampaign: false,
+      scheduledStartAt: null,
+    };
+
+    const first = await app.inject({ method: "POST", url: "/api/ad-groups/batch-expand", payload });
+    const second = await app.inject({ method: "POST", url: "/api/ad-groups/batch-expand", payload });
+
+    expect(first.statusCode).toBe(200);
+    expect(first.json().failed[0].message).toContain("禁止自动重试");
+    expect(second.json().failed[0].message).toContain("待人工确认");
+    expect(copy).toHaveBeenCalledTimes(2);
   });
 
   it("creates a launch preset from the default launch-page form payload", async () => {
@@ -1362,6 +1650,35 @@ describe("local API", () => {
       status: "unknown",
       attemptCount: 1,
       errorMessage: "connection reset after request dispatch",
+    });
+  });
+
+  it("does not retry a provider rejection after an earlier creation step was accepted", async () => {
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: false,
+        failureKind: "retryable",
+        retrySafe: false,
+        message: "later TikTok step rejected",
+      })),
+    );
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const unknownItem = store.listLaunchPlanItems(planId)[0]!;
+    const retry = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/items/${unknownItem.itemId}/retry`,
+    });
+
+    expect(createFromPreset).toHaveBeenCalledTimes(1);
+    expect(retry.statusCode).toBe(409);
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
+      status: "unknown",
+      attemptCount: 1,
+      errorMessage: expect.stringContaining("禁止自动重试"),
     });
   });
 

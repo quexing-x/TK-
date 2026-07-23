@@ -9,6 +9,7 @@ import type {
 } from "@tk-auto/core";
 import { api } from "./api";
 import { hasProviderCapability } from "./provider-capability-view";
+import { useOverlays } from "./ui/overlays";
 
 type ConnectionState = {
   accountId: string;
@@ -40,6 +41,15 @@ function fmtDate(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
 
+// 次日 06:00（本地时区），返回 datetime-local 可用的 "YYYY-MM-DDTHH:mm"。
+function defaultNextDaySix(): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  date.setHours(6, 0, 0, 0);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function withinWindow(createdAt: string | null | undefined, filter: TimeFilter, now: number): boolean {
   if (filter === "all") return true;
   if (!createdAt) return false;
@@ -58,6 +68,7 @@ export function ExpandGroupsPanel({
   connectionStates: ConnectionState[];
   onError: (message: string | null) => void;
 }) {
+  const { confirm } = useOverlays();
   const [entitiesByAccount, setEntitiesByAccount] = useState<Record<string, ManagedEntityRecord[]>>({});
   const [loadingAccounts, setLoadingAccounts] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -68,7 +79,9 @@ export function ExpandGroupsPanel({
   const [count, setCount] = useState(1);
   const [dailyBudget, setDailyBudget] = useState(100);
   const [bidText, setBidText] = useState("");
-  const [launchImmediately, setLaunchImmediately] = useState(false);
+  const [timingMode, setTimingMode] = useState<"immediate" | "scheduled">("scheduled");
+  const [scheduledAt, setScheduledAt] = useState<string>(defaultNextDaySix);
+  const [visibleAccountIds, setVisibleAccountIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
@@ -103,18 +116,24 @@ export function ExpandGroupsPanel({
     }
   };
 
+  // 仅按需加载被选中展示的账户，避免多账户一次性铺满。
   useEffect(() => {
-    for (const state of eligibleStates) {
-      if (!(state.accountId in entitiesByAccount)) void loadAccount(state.accountId);
+    for (const accountId of visibleAccountIds) {
+      if (!(accountId in entitiesByAccount)) void loadAccount(accountId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eligibleStates]);
+  }, [visibleAccountIds]);
+
+  const visibleStates = useMemo(
+    () => eligibleStates.filter((state) => visibleAccountIds.includes(state.accountId)),
+    [eligibleStates, visibleAccountIds],
+  );
 
   // 每个账户：解析系列名映射 + 过滤后的广告组列表。
   const groups = useMemo(() => {
     const now = Date.now();
     const normalizedQuery = query.trim().toLowerCase();
-    return eligibleStates.map((state) => {
+    return visibleStates.map((state) => {
       const entities = entitiesByAccount[state.accountId] ?? [];
       const campaignNames = new Map(
         entities
@@ -143,7 +162,7 @@ export function ExpandGroupsPanel({
         adGroups,
       };
     });
-  }, [accountName, conversionFilter, eligibleStates, entitiesByAccount, query, statusFilter, timeFilter]);
+  }, [accountName, conversionFilter, visibleStates, entitiesByAccount, query, statusFilter, timeFilter]);
 
   const selectableKeys = useMemo(
     () => new Set(groups.flatMap((group) =>
@@ -193,6 +212,29 @@ export function ExpandGroupsPanel({
       onError("请先勾选至少一个广告组。");
       return;
     }
+    let scheduledStartAt: string | null = null;
+    if (timingMode === "scheduled") {
+      const when = new Date(scheduledAt);
+      if (Number.isNaN(when.getTime())) {
+        onError("请填写有效的定时投放时间。");
+        return;
+      }
+      if (when.getTime() <= Date.now()) {
+        onError("定时投放时间必须晚于当前时间。");
+        return;
+      }
+      scheduledStartAt = when.toISOString();
+    }
+    // 立即投放是不可逆的真实写入，二次确认避免误点。
+    if (timingMode === "immediate") {
+      const confirmed = await confirm({
+        title: "立即投放确认",
+        message: `将为 ${selectedValid.length} 个源组各创建 ${count} 个新组并【立即开始投放】（共 ${selectedValid.length * count} 个）。确认立即投放？`,
+        confirmLabel: "确认立即投放",
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
     setBusy(true);
     setFeedback(null);
     onError(null);
@@ -202,12 +244,16 @@ export function ExpandGroupsPanel({
         count,
         dailyBudget,
         bid,
-        launchImmediately,
+        launchImmediately: timingMode === "immediate",
         sameCampaign: true,
+        scheduledStartAt,
       });
       const lines: string[] = [];
       if (result.failed.length > 0) {
         for (const failure of result.failed) lines.push(`${failure.name} 失败：${failure.message}`);
+      }
+      if (scheduledStartAt && result.scheduled > 0) {
+        lines.push(`${result.scheduled} 个新组已设置 TikTok 原生定时投放：${new Date(scheduledStartAt).toLocaleString()}。`);
       }
       if (result.skipped > 0) lines.push(`${result.skipped} 个已扩过或进行中，已跳过。`);
       const created = result.createdGroups > 0;
@@ -231,7 +277,21 @@ export function ExpandGroupsPanel({
   const totalSelectable = selectableKeys.size;
 
   return <div className="panel expand-groups-panel">
-    <div className="panel-heading"><div><span className="panel-icon"><CopyPlus size={18} /></span><div><h2>一键扩组</h2><p>按账户勾选目标广告组，按预设为每个源组各复制 N 个新组（挂原系列、克隆源创意）。</p></div></div></div>
+    <div className="panel-heading"><div><span className="panel-icon"><CopyPlus size={18} /></span><div><h2>一键扩组</h2><p>先选账户，再勾选目标广告组，按预设为每个源组各复制 N 个新组（挂原系列、克隆源创意）。</p></div></div></div>
+
+    {eligibleStates.length > 0 && <div className="expand-account-picker">
+      <span className="expand-picker-label">账户</span>
+      <div className="expand-picker-chips">
+        {eligibleStates.map((state) => {
+          const active = visibleAccountIds.includes(state.accountId);
+          return <button className={active ? "expand-picker-chip active" : "expand-picker-chip"} key={state.accountId} onClick={() => setVisibleAccountIds((current) => active ? current.filter((id) => id !== state.accountId) : [...current, state.accountId])} type="button">{accountName.get(state.accountId) ?? state.accountId}</button>;
+        })}
+      </div>
+      <div className="expand-picker-actions">
+        <button className="secondary-button compact-button" disabled={visibleAccountIds.length === eligibleStates.length} onClick={() => setVisibleAccountIds(eligibleStates.map((state) => state.accountId))} type="button">全选</button>
+        <button className="secondary-button compact-button" disabled={visibleAccountIds.length === 0} onClick={() => setVisibleAccountIds([])} type="button">清空</button>
+      </div>
+    </div>}
 
     <div className="expand-toolbar">
       <label className="expand-filter"><span>时间范围</span><select value={timeFilter} onChange={(event) => setTimeFilter(event.target.value as TimeFilter)}><option value="all">全部</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select></label>
@@ -242,7 +302,10 @@ export function ExpandGroupsPanel({
 
     {excludedStates.length > 0 && <p className="expand-excluded-note"><Info size={14} /> <span>{excludedStates.length} 个账户不可扩组（未连接、无复制能力或同步非健康），已隐藏：{excludedStates.map((state) => accountName.get(state.accountId) ?? state.accountId).join("、")}。</span></p>}
 
-    {groups.length === 0 ? <div className="expand-empty"><Inbox size={30} /><strong>没有可扩组的账户</strong><span>请确认账户已接入、具备复制能力，并在“用户管理”完成一次健康的只读同步。</span></div> : <div className="expand-account-list">
+    {groups.length === 0 ? (eligibleStates.length === 0
+      ? <div className="expand-empty"><Inbox size={30} /><strong>没有可扩组的账户</strong><span>请确认账户已接入、具备复制能力，并在“用户管理”完成一次健康的只读同步。</span></div>
+      : <div className="expand-empty"><Inbox size={30} /><strong>请选择账户</strong><span>在上方选择一个或多个账户，查看其广告组后再勾选扩组。</span></div>
+    ) : <div className="expand-account-list">
       {groups.map((group) => {
         const groupKeys = group.adGroups.filter((entity) => entity.parentCampaignId).map((entity) => keyOf(group.accountId, entity.externalId));
         const selectedInGroup = groupKeys.filter((key) => selected.includes(key)).length;
@@ -290,7 +353,16 @@ export function ExpandGroupsPanel({
         <label className="field"><span>每个源组复制份数</span><input max={10} min={1} type="number" value={count} onChange={(event) => setCount(Math.max(1, Math.min(10, Number(event.target.value) || 1)))} /><small>1–10，命名为“原组名-投放日期-序号”。</small></label>
         <label className="field"><span>日预算</span><input min={1} type="number" value={dailyBudget} onChange={(event) => setDailyBudget(Number(event.target.value))} /><small>覆盖新组的日预算。</small></label>
         <label className="field"><span>出价</span><input placeholder="留空继承源组" value={bidText} onChange={(event) => setBidText(event.target.value)} /><small>留空则继承源组出价。</small></label>
-        <label className="expand-toggle"><input checked={launchImmediately} onChange={(event) => setLaunchImmediately(event.target.checked)} type="checkbox" /><span>创建后立即投放</span></label>
+      </div>
+      <div className="expand-timing">
+        <span className="expand-timing-label">投放时间</span>
+        <div className="expand-timing-modes">
+          <button className={timingMode === "immediate" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("immediate")} type="button">立即投放</button>
+          <button className={timingMode === "scheduled" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("scheduled")} type="button">定时投放</button>
+        </div>
+        {timingMode === "scheduled"
+          ? <label className="expand-timing-when"><input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新组将以开启状态发布，并由 TikTok 在设定时间开始投放。默认次日 06:00，可改。</small></label>
+          : <small className="expand-timing-hint">新组创建后立即开启投放。</small>}
       </div>
     </div>
 

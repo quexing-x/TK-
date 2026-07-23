@@ -646,6 +646,7 @@ export async function createApp(
       bid: z.number().nonnegative().nullable(),
       launchImmediately: z.boolean(),
       sameCampaign: z.boolean().default(true),
+      scheduledStartAt: z.string().datetime().nullable().default(null),
     }).parse(request.body);
     try {
       const result = await launchService.batchExpandAdGroups(input);

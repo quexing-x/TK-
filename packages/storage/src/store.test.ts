@@ -51,6 +51,63 @@ describe("AutomationStore", () => {
     });
   });
 
+  it("never reclaims an expansion task whose remote result is unknown, while confirmed failures remain retryable", () => {
+    expect(store.claimAdGroupExpandTask("unknown-task", "demo-account", "adgroup-1")).toBe("claimed");
+    store.finishAdGroupExpandTask("unknown-task", "unknown");
+    expect(store.claimAdGroupExpandTask("unknown-task", "demo-account", "adgroup-1")).toBe("unknown");
+
+    expect(store.claimAdGroupExpandTask("failed-task", "demo-account", "adgroup-2")).toBe("claimed");
+    store.finishAdGroupExpandTask("failed-task", "failed");
+    expect(store.claimAdGroupExpandTask("failed-task", "demo-account", "adgroup-2")).toBe("claimed");
+
+    expect(store.claimAdGroupExpandTask("crash-task", "demo-account", "adgroup-3")).toBe("claimed");
+    store.markAdGroupExpandTaskDispatching("crash-task");
+    expect(store.claimAdGroupExpandTask("crash-task", "demo-account", "adgroup-3")).toBe("unknown");
+  });
+
+  it("migrates the expansion uncertainty guard into an existing database", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-expand-migration-"));
+    const databasePath = join(directory, "automation.db");
+    store.close();
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      CREATE TABLE ad_group_expand_tasks (
+        task_key TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        source_ad_group_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded')),
+        claimed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO ad_group_expand_tasks (
+        task_key, account_id, source_ad_group_id, status, claimed_at, updated_at
+      ) VALUES (
+        'legacy-running-task', 'demo-account', 'adgroup-legacy', 'running',
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+      );
+    `);
+    legacy.close();
+
+    try {
+      store = new AutomationStore(databasePath);
+      expect(store.claimAdGroupExpandTask("legacy-running-task", "demo-account", "adgroup-legacy")).toBe("unknown");
+      expect(store.claimAdGroupExpandTask("legacy-crash-task", "demo-account", "adgroup-1")).toBe("claimed");
+      store.markAdGroupExpandTaskDispatching("legacy-crash-task");
+      expect(store.claimAdGroupExpandTask("legacy-crash-task", "demo-account", "adgroup-1")).toBe("unknown");
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+      store = new AutomationStore(":memory:");
+    } catch (cause) {
+      try {
+        store.close();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+        store = new AutomationStore(":memory:");
+      }
+      throw cause;
+    }
+  });
+
   it("updates only the global rule configuration", () => {
     const configuration = store.getRuleConfiguration();
     configuration.layers.campaign = true;
@@ -1118,6 +1175,100 @@ describe("AutomationStore", () => {
       .prepare("UPDATE multi_account_launch_plans SET launch_rows_json = ? WHERE id = ?")
       .run(JSON.stringify(legacyRows), first.id);
     expect(store.listMultiAccountLaunchPlans().find((plan) => plan.id === first.id)?.launchRows[0]?.region).toBe("未设置");
+  });
+
+  it("resolves a relative preset time per target account timezone when persisting launch items", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T09:15:00.000Z"));
+    try {
+      const preset = store.createLaunchPreset({
+        name: "次日早上",
+        region: "CN",
+        dailyBudget: 50,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        startAtRule: "tomorrow-morning",
+        initialStatus: "enabled",
+      });
+      const plan = store.createMultiAccountLaunchPlan({
+        mode: "single",
+        sourceAccountId: "demo-account",
+        sourceAdId: null,
+        targetAccountIds: ["demo-account"],
+        launchPresetId: preset.id,
+        launchRows: [launchItemRow(2)],
+      });
+
+      expect(store.listLaunchPlanItems(plan.id)[0]?.launchRow.startAt).toBe("2026-07-23T22:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("freezes and reuses each target account's reviewed relative launch time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T09:15:00.000Z"));
+    try {
+      const east = store.createAccount({
+        displayName: "东八区目标",
+        accountType: "standard",
+        enabled: true,
+        providerKind: "cookie",
+      });
+      const west = store.createAccount({
+        displayName: "纽约目标",
+        accountType: "standard",
+        enabled: true,
+        providerKind: "cookie",
+      });
+      const db = (store as unknown as {
+        db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } };
+      }).db;
+      db.prepare("UPDATE accounts SET timezone = ? WHERE id = ?").run("Asia/Taipei", east.id);
+      db.prepare("UPDATE accounts SET timezone = ? WHERE id = ?").run("America/New_York", west.id);
+      saveCopySource(store, "source-relative-preview", "source-video");
+      saveTargetAsset(store, east.id, "video-2");
+      saveTargetAsset(store, west.id, "video-2");
+      const preset = store.createLaunchPreset({
+        name: "每账户次日早上",
+        region: "US",
+        dailyBudget: 50,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        startAtRule: "tomorrow-morning",
+        initialStatus: "enabled",
+      });
+      const input = {
+        sourceAccountId: "demo-account",
+        sourceAdId: "source-relative-preview",
+        targetAccountIds: [east.id, west.id],
+        launchPresetId: preset.id,
+        launchRows: [launchItemRow(2)],
+      };
+
+      const preview = store.createLaunchCopyPreview(input);
+      const reviewedTimes = Object.fromEntries(
+        preview.items.map((item) => [item.accountId, item.launchRow.startAt]),
+      );
+      expect(reviewedTimes).toEqual({
+        [east.id]: "2026-07-23T22:00:00.000Z",
+        [west.id]: "2026-07-24T10:00:00.000Z",
+      });
+
+      const plan = store.createMultiAccountLaunchPlan({
+        ...input,
+        mode: "copy",
+        copyPreviewId: preview.id,
+      });
+      const persistedTimes = Object.fromEntries(
+        store.listLaunchPlanItems(plan.id).map((item) => [item.accountId, item.launchRow.startAt]),
+      );
+      expect(persistedTimes).toEqual(reviewedTimes);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("removes metric snapshots older than the 90-day retention window", () => {

@@ -87,6 +87,7 @@ import {
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
   automaticName,
+  resolveLaunchStartAt,
   defaultCreationPresetConfig,
   MultiAccountLaunchPlanInputSchema,
   MultiAccountLaunchPlanRecordSchema,
@@ -2637,15 +2638,19 @@ export class AutomationStore {
     taskKey: string,
     accountId: string,
     sourceAdGroupId: string,
-  ): "claimed" | "running" | "succeeded" {
+  ): "claimed" | "running" | "succeeded" | "unknown" {
     const now = new Date().toISOString();
     const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.db.prepare(
-        "SELECT status, claimed_at FROM ad_group_expand_tasks WHERE task_key = ?",
+        "SELECT status, claimed_at, uncertain FROM ad_group_expand_tasks WHERE task_key = ?",
       ).get(taskKey) as SqlRow | undefined;
       if (existing) {
+        if (Number(existing.uncertain ?? 0) === 1) {
+          this.db.exec("COMMIT");
+          return "unknown";
+        }
         if (String(existing.status) === "succeeded") {
           this.db.exec("COMMIT");
           return "succeeded";
@@ -2656,9 +2661,9 @@ export class AutomationStore {
         }
       }
       this.db.prepare(
-        `INSERT INTO ad_group_expand_tasks (task_key, account_id, source_ad_group_id, status, claimed_at, updated_at)
-         VALUES (?, ?, ?, 'running', ?, ?)
-         ON CONFLICT(task_key) DO UPDATE SET status = 'running', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at`,
+        `INSERT INTO ad_group_expand_tasks (task_key, account_id, source_ad_group_id, status, claimed_at, updated_at, uncertain)
+         VALUES (?, ?, ?, 'running', ?, ?, 0)
+         ON CONFLICT(task_key) DO UPDATE SET status = 'running', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at, uncertain = 0`,
       ).run(taskKey, accountId, sourceAdGroupId, now, now);
       this.db.exec("COMMIT");
       return "claimed";
@@ -2668,11 +2673,21 @@ export class AutomationStore {
     }
   }
 
-  // 成功则固化为 succeeded（后续相同任务永久跳过）；失败则删除锁，允许重试。
-  finishAdGroupExpandTask(taskKey: string, ok: boolean): void {
-    if (ok) {
+  // 成功永久跳过；明确失败允许重试；结果未知永久保留且禁止自动重试。
+  markAdGroupExpandTaskDispatching(taskKey: string): void {
+    this.db.prepare(
+      "UPDATE ad_group_expand_tasks SET uncertain = 1, updated_at = ? WHERE task_key = ? AND status = 'running'",
+    ).run(new Date().toISOString(), taskKey);
+  }
+
+  finishAdGroupExpandTask(taskKey: string, outcome: "succeeded" | "failed" | "unknown"): void {
+    if (outcome === "succeeded") {
       this.db.prepare(
-        "UPDATE ad_group_expand_tasks SET status = 'succeeded', updated_at = ? WHERE task_key = ?",
+        "UPDATE ad_group_expand_tasks SET status = 'succeeded', uncertain = 0, updated_at = ? WHERE task_key = ?",
+      ).run(new Date().toISOString(), taskKey);
+    } else if (outcome === "unknown") {
+      this.db.prepare(
+        "UPDATE ad_group_expand_tasks SET status = 'running', uncertain = 1, updated_at = ? WHERE task_key = ?",
       ).run(new Date().toISOString(), taskKey);
     } else {
       this.db.prepare("DELETE FROM ad_group_expand_tasks WHERE task_key = ?").run(taskKey);
@@ -3540,10 +3555,10 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT INTO launch_presets (
-          id, name, region, daily_budget, bid, start_at, end_at, initial_status, creation_config_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, name, region, daily_budget, bid, start_at, end_at, start_at_rule, initial_status, creation_config_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.initialStatus, JSON.stringify(preset.creationConfig), now, now);
+      .run(id, preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.startAtRule, preset.initialStatus, JSON.stringify(preset.creationConfig), now, now);
     return this.listLaunchPresets().find((item) => item.id === id) as LaunchPresetRecord;
   }
 
@@ -3555,10 +3570,10 @@ export class AutomationStore {
     const result = this.db
       .prepare(
         `UPDATE launch_presets SET
-          name = ?, region = ?, daily_budget = ?, bid = ?, start_at = ?, end_at = ?, initial_status = ?, creation_config_json = ?, updated_at = ?
+          name = ?, region = ?, daily_budget = ?, bid = ?, start_at = ?, end_at = ?, start_at_rule = ?, initial_status = ?, creation_config_json = ?, updated_at = ?
          WHERE id = ?`,
       )
-      .run(preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.initialStatus, JSON.stringify(preset.creationConfig), new Date().toISOString(), id);
+      .run(preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.startAtRule, preset.initialStatus, JSON.stringify(preset.creationConfig), new Date().toISOString(), id);
     if (result.changes === 0) throw new Error("广告预设不存在。");
     return this.listLaunchPresets().find((item) => item.id === id) as LaunchPresetRecord;
   }
@@ -3586,6 +3601,7 @@ export class AutomationStore {
       bid: preset.bid,
       startAt: preset.startAt,
       endAt: preset.endAt,
+      startAtRule: preset.startAtRule,
       initialStatus: preset.initialStatus,
       creationConfig: preset.creationConfig,
     };
@@ -3594,11 +3610,14 @@ export class AutomationStore {
       request.sourceAdId,
     );
     const now = new Date();
+    const existingPlans = this.listMultiAccountLaunchPlans(10_000);
+    const previewTimeZone = this.getAccount(targetAccountIds[0] ?? "")?.timezone ?? "UTC";
     const launchRows = applyPresetToLaunchRows(
       request.launchRows,
       preset,
-      this.listMultiAccountLaunchPlans(10_000),
+      existingPlans,
       now,
+      previewTimeZone,
     );
     const blockers: string[] = [];
     const warnings: string[] = [];
@@ -3624,7 +3643,14 @@ export class AutomationStore {
       if (!sync || sync.quality.status !== "healthy") {
         blockers.push(`目标账户“${account.displayName}”同步数据不是 healthy（当前：${sync?.quality.status ?? "none"}）。`);
       }
-      launchRows.forEach((row, itemIndex) => {
+      const accountLaunchRows = applyPresetToLaunchRows(
+        request.launchRows,
+        preset,
+        existingPlans,
+        now,
+        account.timezone,
+      );
+      accountLaunchRows.forEach((row, itemIndex) => {
         const targetAssetMapping = this.findVerifiedTargetAsset(
           accountId,
           account.providerKind,
@@ -3640,13 +3666,14 @@ export class AutomationStore {
         items.push({
           accountId,
           itemIndex,
+          launchRow: row,
           sourceSnapshot,
           targetAssetMapping,
           differences: copyDifferences(sourceSnapshot, row),
         });
       });
     }
-    if (launchRows.some((row) => row.initialStatus === "enabled")) {
+    if (items.some((item) => item.launchRow.initialStatus === "enabled")) {
       warnings.push("本次迁移包含创建后立即开启的广告；请在差异预览中再次核对预算和发布时间。");
     }
     const createdAt = now.toISOString();
@@ -3659,7 +3686,11 @@ export class AutomationStore {
       presetSnapshot,
       presetSnapshotHash: jsonHash(presetSnapshot),
       inputHash: copyPreviewInputHash({ ...request, targetAccountIds }),
-      launchRowsHash: jsonHash(launchRows),
+      launchRowsHash: jsonHash(items.map((item) => ({
+        accountId: item.accountId,
+        itemIndex: item.itemIndex,
+        launchRow: item.launchRow,
+      }))),
       launchRows,
       sourceSnapshot,
       items,
@@ -3867,6 +3898,7 @@ export class AutomationStore {
       bid: preset.bid,
       startAt: preset.startAt,
       endAt: preset.endAt,
+      startAtRule: preset.startAtRule,
       initialStatus: preset.initialStatus,
       creationConfig: preset.creationConfig,
     };
@@ -3877,6 +3909,7 @@ export class AutomationStore {
         preset,
         this.listMultiAccountLaunchPlans(10_000),
         new Date(now),
+        this.getAccount(targetAccountIds[0] ?? "")?.timezone ?? "UTC",
       );
     const taskCount = targetAccountIds.length * launchRows.length;
     const message =
@@ -3925,13 +3958,15 @@ export class AutomationStore {
       // target account's campaign_snap/copy endpoint.
       const templateMode = "none";
       for (const accountId of targetAccountIds) {
+        const accountTimeZone = this.getAccount(accountId)?.timezone ?? "UTC";
         launchRows.forEach((row, itemIndex) => {
           const itemId = randomUUID();
           const operationId = randomUUID();
           const correlationId = `${id}:${accountId}:${itemIndex}`;
-          const targetAssetMapping = preview?.items.find(
+          const previewItem = preview?.items.find(
             (item) => item.accountId === accountId && item.itemIndex === itemIndex,
-          )?.targetAssetMapping ?? null;
+          );
+          const targetAssetMapping = previewItem?.targetAssetMapping ?? null;
           if (preview && !targetAssetMapping) {
             throw new Error("复制迁移预览缺少目标账户素材映射。");
           }
@@ -3941,12 +3976,23 @@ export class AutomationStore {
             accountId,
             itemIndex,
           });
+          const itemLaunchRow = previewItem?.launchRow ?? (presetSnapshot.startAtRule === "absolute"
+            ? row
+            : {
+                ...row,
+                startAt: resolveLaunchStartAt(
+                  presetSnapshot.startAtRule,
+                  row.startAt,
+                  new Date(now),
+                  accountTimeZone,
+                ),
+              });
           insertItem.run(
             itemId,
             id,
             accountId,
             itemIndex,
-            JSON.stringify(row),
+            JSON.stringify(itemLaunchRow),
             templateMode,
             null,
             preview ? JSON.stringify(preview.sourceSnapshot) : null,
@@ -5525,7 +5571,8 @@ export class AutomationStore {
         source_ad_group_id TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('running', 'succeeded')),
         claimed_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1))
       );
 
       CREATE TABLE IF NOT EXISTS launch_plan_item_attempts (
@@ -5576,6 +5623,7 @@ export class AutomationStore {
         bid REAL,
         start_at TEXT,
         end_at TEXT,
+        start_at_rule TEXT NOT NULL DEFAULT 'absolute',
         initial_status TEXT NOT NULL CHECK (initial_status IN ('enabled', 'disabled')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -5859,6 +5907,24 @@ export class AutomationStore {
     this.ensureColumn("scheduled_entity_actions", "claimed_by", "TEXT");
     this.ensureColumn("scheduled_entity_actions", "claimed_at", "TEXT");
     this.ensureColumn("scheduled_entity_actions", "last_operation_id", "TEXT");
+    const expandTaskUncertainWasMissing = !(this.db
+      .prepare("PRAGMA table_info(ad_group_expand_tasks)")
+      .all() as SqlRow[])
+      .some((column) => column.name === "uncertain");
+    this.ensureColumn(
+      "ad_group_expand_tasks",
+      "uncertain",
+      "INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1))",
+    );
+    if (expandTaskUncertainWasMissing) {
+      // A legacy running row may have crossed the remote dispatch boundary
+      // before an older process exited. Its outcome cannot be proven locally;
+      // migrate it to the non-retryable uncertainty guard instead of allowing
+      // the stale-running lease to create a duplicate enabled ad group.
+      this.db.prepare(
+        "UPDATE ad_group_expand_tasks SET uncertain = 1 WHERE status = 'running'",
+      ).run();
+    }
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS ad_operations_claim ON ad_operations (status, claimed_at, created_at)",
     );
@@ -5931,6 +5997,11 @@ export class AutomationStore {
       "launch_presets",
       "creation_config_json",
       "TEXT NOT NULL DEFAULT '{}'",
+    );
+    this.ensureColumn(
+      "launch_presets",
+      "start_at_rule",
+      "TEXT NOT NULL DEFAULT 'absolute'",
     );
     this.ensureColumn(
       "multi_account_launch_plans",
@@ -6759,6 +6830,7 @@ function applyPresetToLaunchRows(
   preset: LaunchPresetRecord,
   existingPlans: MultiAccountLaunchPlanRecord[],
   now: Date,
+  timeZone: string,
 ) {
   const prefix = automaticName(now, 1).slice(0, 6);
   let nextSerial = 1;
@@ -6774,7 +6846,8 @@ function applyPresetToLaunchRows(
     region: preset.region,
     dailyBudget: preset.dailyBudget,
     bid: preset.bid,
-    startAt: preset.startAt,
+    // 相对规则（当天24:00 / 次日06:00）按服务器 now 重算，不冻结日期。
+    startAt: resolveLaunchStartAt(preset.startAtRule, preset.startAt, now, timeZone),
     endAt: preset.endAt,
     initialStatus: preset.initialStatus,
   }));
@@ -6789,6 +6862,7 @@ function mapLaunchPreset(row: SqlRow): LaunchPresetRecord {
     bid: row.bid === null ? null : Number(row.bid),
     startAt: row.start_at ?? null,
     endAt: row.end_at ?? null,
+    startAtRule: row.start_at_rule ?? "absolute",
     initialStatus: row.initial_status,
     creationConfig: row.creation_config_json
       ? JSON.parse(String(row.creation_config_json))

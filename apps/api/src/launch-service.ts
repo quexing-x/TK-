@@ -313,8 +313,12 @@ export class LaunchService {
       );
       if (!created?.ok) {
         const message = created?.message ?? "Provider 未返回创建结果。";
-        if (created?.failureKind === "unknown") {
-          throw new UnknownCreationStateError(message);
+        if (created?.failureKind === "unknown" || created?.retrySafe === false) {
+          throw new UnknownCreationStateError(
+            created?.retrySafe === false
+              ? `${message}；此前已有创建步骤被 TikTok 接受，禁止自动重试。`
+              : message,
+          );
         }
         throw new RetryableCreationError(message);
       }
@@ -554,7 +558,9 @@ export class LaunchService {
     bid: number | null;
     launchImmediately: boolean;
     sameCampaign?: boolean | undefined;
-  }): Promise<Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string; raw?: unknown }>> {
+    scheduledStartAt?: string | null;
+    onBeforeDispatch?: () => void;
+  }): Promise<Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string; failureKind?: "failed" | "unknown"; retrySafe?: boolean; raw?: unknown }>> {
     const sameCampaign = input.sameCampaign !== false;
     // 同系列：走广告组级复制（ad_snap/copy）克隆进现有系列，不新建系列。
     if (sameCampaign && input.sourceAdGroupId) {
@@ -572,9 +578,18 @@ export class LaunchService {
         sourceAdGroupId: input.sourceAdGroupId,
         existingCampaignId: input.sourceCampaignId,
         names,
-        initialStatus: input.launchImmediately ? "enabled" : "disabled",
+        initialStatus: input.scheduledStartAt || input.launchImmediately ? "enabled" : "disabled",
+        scheduledStartAt: input.scheduledStartAt ?? null,
+        dailyBudget: input.dailyBudget,
+        bid: input.bid,
+        ...(input.onBeforeDispatch ? { onBeforeDispatch: input.onBeforeDispatch } : {}),
       });
-      return [{ ok: result.ok, message: result.message }];
+      return [{
+        ok: result.ok,
+        message: result.message,
+        ...(result.failureKind ? { failureKind: result.failureKind } : {}),
+        ...(result.retrySafe !== undefined ? { retrySafe: result.retrySafe } : {}),
+      }];
     }
     const account = this.store.getAccount(input.accountId);
     if (!account) throw new Error("账号不存在。");
@@ -595,7 +610,7 @@ export class LaunchService {
       templateCampaignId: input.sourceCampaignId,
     };
     const initialStatus: "enabled" | "disabled" = input.launchImmediately ? "enabled" : "disabled";
-    const results: Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string }> = [];
+    const results: Array<{ ok: boolean; adGroupId?: string; adId?: string; message: string; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> = [];
     for (let index = 1; index <= Math.max(1, Math.min(10, input.count)); index += 1) {
       const row: LaunchConfigurationRow = {
         rowNumber: index + 1,
@@ -619,6 +634,7 @@ export class LaunchService {
           preset: creationConfig,
           initialStatus,
           templateCampaignId: input.sourceCampaignId,
+          ...(input.onBeforeDispatch ? { onBeforeDispatch: input.onBeforeDispatch } : {}),
           // 同系列：挂到现有源系列下，不新建系列；否则新建一个唯一命名的系列。
           ...(sameCampaign ? { batchCampaignId: input.sourceCampaignId } : {}),
         }]);
@@ -627,9 +643,19 @@ export class LaunchService {
           ...(created?.adGroupId ? { adGroupId: created.adGroupId } : {}),
           ...(created?.adId ? { adId: created.adId } : {}),
           message: created?.message ?? (created?.ok ? "复制成功" : "Provider 未返回结果"),
+          ...(!created?.ok
+            ? {
+                failureKind: created?.failureKind === "unknown" ? "unknown" as const : "failed" as const,
+                retrySafe: created?.retrySafe ?? created?.failureKind !== "unknown",
+              }
+            : {}),
         });
       } catch (cause) {
-        results.push({ ok: false, message: safeError(cause) });
+        results.push({
+          ok: false,
+          message: safeError(cause),
+          ...(cause instanceof UnknownCreationStateError ? { failureKind: "unknown" as const } : {}),
+        });
       }
     }
     return results;
@@ -651,14 +677,24 @@ export class LaunchService {
     bid: number | null;
     launchImmediately: boolean;
     sameCampaign: boolean;
+    // 定时投放时间（ISO）。Provider 在发布前写入并回读 TikTok 原生排期。
+    scheduledStartAt?: string | null;
   }): Promise<{
     createdGroups: number;
+    scheduled: number;
     failed: Array<{ name: string; message: string }>;
     skipped: number;
   }> {
     const count = Math.max(1, Math.min(10, input.count));
     const dateSuffix = new Date().toISOString().slice(5, 10).replace("-", "");
+    const scheduledStartAt = input.scheduledStartAt ?? null;
+    if (scheduledStartAt && !input.sameCampaign) {
+      throw new RetryableCreationError("定时扩组仅支持挂回原系列；已在发送任何创建请求前阻止执行。");
+    }
+    // 原生定时投放：新组以 enabled 发布，但 Provider 必须在发布前写入并回读 TikTok 排期。
+    const launchImmediately = scheduledStartAt ? true : input.launchImmediately;
     let createdGroups = 0;
+    let scheduled = 0;
     let skipped = 0;
     const failed: Array<{ name: string; message: string }> = [];
 
@@ -680,7 +716,8 @@ export class LaunchService {
           count,
           dailyBudget: input.dailyBudget,
           bid: input.bid,
-          launchImmediately: input.launchImmediately,
+          launchImmediately,
+          scheduledStartAt,
           sameCampaign: input.sameCampaign,
         })).digest("hex");
 
@@ -690,7 +727,14 @@ export class LaunchService {
           source.sourceAdGroupId,
         );
         if (claim !== "claimed") {
-          skipped += 1;
+          if (claim === "unknown") {
+            failed.push({
+              name: source.sourceAdGroupName,
+              message: "上次扩组结果待人工确认，已禁止自动重试。",
+            });
+          } else {
+            skipped += 1;
+          }
           continue;
         }
 
@@ -704,29 +748,45 @@ export class LaunchService {
             count,
             dailyBudget: input.dailyBudget,
             bid: input.bid,
-            launchImmediately: input.launchImmediately,
+            launchImmediately,
             sameCampaign: input.sameCampaign,
+            scheduledStartAt,
+            onBeforeDispatch: () => this.store.markAdGroupExpandTaskDispatching(taskKey),
           });
           const ok = results.length > 0 && results.every((result) => result.ok);
           if (ok) {
             createdGroups += count;
-            this.store.finishAdGroupExpandTask(taskKey, true);
+            this.store.finishAdGroupExpandTask(taskKey, "succeeded");
+            if (scheduledStartAt) {
+              scheduled += count;
+            }
           } else {
-            this.store.finishAdGroupExpandTask(taskKey, false);
+            const partialSuccess = results.some((result) => result.ok)
+              && results.some((result) => !result.ok);
+            const unknown = partialSuccess || results.some(
+              (result) => result.failureKind === "unknown" || result.retrySafe === false,
+            );
+            this.store.finishAdGroupExpandTask(taskKey, unknown ? "unknown" : "failed");
             failed.push({
               name: source.sourceAdGroupName,
-              message: results.find((result) => !result.ok)?.message ?? "创建失败",
+              message: `${results.find((result) => !result.ok)?.message ?? "创建失败"}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
             });
           }
         } catch (cause) {
-          this.store.finishAdGroupExpandTask(taskKey, false);
-          failed.push({ name: source.sourceAdGroupName, message: safeError(cause) });
+          const unknown = cause instanceof UnknownCreationStateError;
+          this.store.finishAdGroupExpandTask(taskKey, unknown ? "unknown" : "failed");
+          failed.push({
+            name: source.sourceAdGroupName,
+            message: `${safeError(cause)}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
+          });
         }
       }
+
     }
 
-    return { createdGroups, failed, skipped };
+    return { createdGroups, scheduled, failed, skipped };
   }
+
 }
 
 function safeError(cause: unknown): string {

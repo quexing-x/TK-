@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, LaunchCopyPreviewInputSchema, parseLaunchSheetTable } from "./launch.js";
+import { automaticName, LaunchCopyPreviewInputSchema, parseLaunchSheetTable, resolveLaunchStartAt } from "./launch.js";
+
+describe("resolveLaunchStartAt", () => {
+  const now = new Date("2026-07-23T09:15:00.000Z");
+
+  it("keeps an absolute time unchanged", () => {
+    expect(resolveLaunchStartAt("absolute", "2026-07-21T22:00:00.000Z", now)).toBe("2026-07-21T22:00:00.000Z");
+    expect(resolveLaunchStartAt("absolute", null, now)).toBeNull();
+    expect(resolveLaunchStartAt(undefined, "2026-07-21T22:00:00.000Z", now)).toBe("2026-07-21T22:00:00.000Z");
+  });
+
+  it("recomputes relative rules in the account timezone instead of the server timezone", () => {
+    const tonight = resolveLaunchStartAt("tonight", "2026-01-01T00:00:00.000Z", now, "Asia/Taipei");
+    const morning = resolveLaunchStartAt("tomorrow-morning", null, now, "Asia/Taipei");
+    // At 17:15 in Taipei on July 23, the next local midnight/morning are
+    // July 24 00:00 and 06:00 (UTC+8), independent of the test machine zone.
+    expect(tonight).toBe("2026-07-23T16:00:00.000Z");
+    expect(morning).toBe("2026-07-23T22:00:00.000Z");
+  });
+});
 
 const preset = {
   name: "测试预设",
