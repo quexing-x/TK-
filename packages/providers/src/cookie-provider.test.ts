@@ -8,7 +8,7 @@ afterEach(() => {
 });
 
 describe("CookieAdsProvider", () => {
-  it("overrides a captured range with the account's rolling 48-hour window", async () => {
+  it("overrides a captured range with the account's current local date", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T02:30:00.000Z"));
     let sentBody = "";
@@ -29,7 +29,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(JSON.parse(sentBody)).toMatchObject({
-      date_range: { start_date: "2026-07-14", end_date: "2026-07-16" },
+      date_range: { start_date: "2026-07-16", end_date: "2026-07-16" },
     });
   });
 
@@ -94,7 +94,7 @@ describe("CookieAdsProvider", () => {
 
     expect(JSON.parse(sentBody)).toMatchObject({
       common_req: {
-        st: "2026-07-17",
+        st: "2026-07-19",
         et: "2026-07-19",
         metrics: expect.arrayContaining(["stat_cost", "time_attr_on_web_cart"]),
       },

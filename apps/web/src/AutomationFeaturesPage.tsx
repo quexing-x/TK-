@@ -61,6 +61,7 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
           <article className="automation-feature-row">
             <header><span><FileWarning size={18} /></span><div><strong>自动申诉</strong><small>配置已完成，执行器待接入</small></div></header>
             <div className="automation-feature-fields appeal-fields">
+              <div className="automation-checks"><label className="check-row"><input checked={settings.appeal.enabled} onChange={(event) => setSettings({ ...settings, appeal: { ...settings.appeal, enabled: event.target.checked } })} type="checkbox" /> 自动申诉</label></div>
               <label className="field"><span>申诉文本模板</span><textarea rows={4} value={settings.appeal.textTemplate} onChange={(event) => setSettings({ ...settings, appeal: { ...settings.appeal, textTemplate: event.target.value } })} /></label>
               <label className="field"><span>失败重试次数</span><input min={0} max={3} type="number" value={settings.appeal.retryLimit} onChange={(event) => setSettings({ ...settings, appeal: { ...settings.appeal, retryLimit: Number(event.target.value) } })} /></label>
             </div>

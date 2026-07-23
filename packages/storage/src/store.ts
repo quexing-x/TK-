@@ -2208,6 +2208,15 @@ export class AutomationStore {
     });
   }
 
+  hasAppealForEntity(accountId: string, externalId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM ad_operations WHERE account_id = ? AND external_id = ? AND action = 'appeal' AND status IN ('pending','running','succeeded','unknown') LIMIT 1`).get(accountId, externalId));
+  }
+
+  completeAppeal(id: string, status: "succeeded" | "failed" | "unknown", message: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE ad_operations SET status = ?, message = ?, updated_at = ?, completed_at = ? WHERE id = ?").run(status, message, now, now, id);
+  }
+
   createOneTimeSchedule(
     accountId: string,
     input: OneTimeScheduleInput,

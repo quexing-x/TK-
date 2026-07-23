@@ -32,6 +32,7 @@ class FakeProvider implements AdsProvider {
   failNextSync = false;
   afterSync: (() => void | Promise<void>) | null = null;
   campaignCreatedAt = new Date().toISOString();
+  scheduledStartAt = "2026-07-19T00:00:00.000Z";
   scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   syncCount = 0;
@@ -69,6 +70,7 @@ class FakeProvider implements AdsProvider {
         ad_name: "测试广告组",
         ad_primary_status: this.adGroupStatus,
         create_time: this.campaignCreatedAt,
+        start_time: this.scheduledStartAt,
         row_data: {
           campaign_id: "campaign-1",
           stat_cost: "20",
@@ -161,6 +163,7 @@ class FakeProvider implements AdsProvider {
           ad_name: "高优先级广告组",
           ad_primary_status: this.priorityHighStatus,
           create_time: this.campaignCreatedAt,
+          start_time: this.scheduledStartAt,
           row_data: {
             campaign_id: "campaign-1",
             stat_cost: "5",
@@ -1190,6 +1193,18 @@ describe("AutomationService", () => {
       overnight: 0,
       closing: 0,
     });
+  });
+
+  it("does not close an enabled ad group scheduled to start the next day", async () => {
+    provider.scheduledStartAt = "2026-07-21T00:00:00.000Z";
+    const refreshed = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", refreshed.entities, refreshed.result);
+
+    expect(service.enrollNightlyAdGroups("demo-account", "2026-07-20T15:45:00.000Z")).toEqual({
+      overnight: 0,
+      closing: 0,
+    });
+    expect(store.listScheduledActions("demo-account")).toEqual([]);
   });
 
   it("executes a user-created schedule while the account is in automatic mode", async () => {

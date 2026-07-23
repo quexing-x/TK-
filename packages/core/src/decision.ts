@@ -126,6 +126,10 @@ export interface ManagedEntitySnapshot {
   entityType: SyncEntityType;
   externalId: string;
   name: string;
+  /** Provider creation time, normalized to ISO-8601 when it is available. */
+  createdAt?: string | null;
+  /** Planned delivery start time, normalized to ISO-8601 when it is available. */
+  scheduledStartAt?: string | null;
   status: EntityOperationalStatus;
   parentCampaignId: string | null;
   parentAdGroupId: string | null;
@@ -249,6 +253,14 @@ export function normalizeProviderEntity(
     entityType: entity.entityType,
     externalId: entity.externalId,
     name: firstString(source, nameKeys[entity.entityType]) ?? entity.externalId,
+    createdAt: firstTimestamp(source, ["create_time", "created_at", "createTime"]),
+    scheduledStartAt: firstTimestamp(source, [
+      "start_time",
+      "start_at",
+      "startTime",
+      "schedule_start_time",
+      "scheduleStartTime",
+    ]),
     status: normalizeStatus(entity.entityType, source),
     parentCampaignId: firstString(source, ["campaign_id", "campaignId"]),
     parentAdGroupId: firstString(source, [
@@ -372,6 +384,20 @@ function firstString(
     const value = source[key];
     if (typeof value === "string" && value.trim()) return value.trim();
     if (typeof value === "number") return String(value);
+  }
+  return null;
+}
+
+function firstTimestamp(source: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = source[key];
+    const timestamp = typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())
+        ? Number(value)
+        : Date.parse(typeof value === "string" ? value : "");
+    if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
+    return new Date(timestamp < 10_000_000_000 ? timestamp * 1_000 : timestamp).toISOString();
   }
   return null;
 }

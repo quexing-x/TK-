@@ -1215,9 +1215,9 @@ function AdsManagementPage({
   return (
     <section className="page-stack ads-page">
       <div className="ads-metric-rail" aria-label="广告管理摘要">
-        <article><small>当前对象</small><strong>{filtered.length}</strong><span>最近 48 小时筛选结果</span></article>
+        <article><small>当前对象</small><strong>{filtered.length}</strong><span>创建于最近 48 小时</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>区间消耗</small><strong>{formatMetric(currentSpend)}</strong><span>最近 48 小时汇总</span></article>
+        <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>账户时区当天汇总</span></article>
         <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
         <article><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
       </div>
@@ -1231,6 +1231,11 @@ function AdsManagementPage({
               <option value="all">全部状态（48 小时）</option>
               <option value="enabled">已开启</option>
               <option value="disabled">已关闭</option>
+            </select>
+          </Field>
+          <Field label="消耗日期">
+            <select value="today" disabled aria-label="消耗日期">
+              <option value="today">今天（账户时区）</option>
             </select>
           </Field>
           <Field label="层级">

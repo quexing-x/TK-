@@ -45,9 +45,10 @@ const capabilities = new Set<ProviderCapability>([
   "change-status",
   "create-campaigns",
   "copy-ads",
+  "appeal-ads",
 ]);
 
-const COOKIE_SYNC_CONTRACT_VERSION = "cookie-statistics-v4-2026-07";
+const COOKIE_SYNC_CONTRACT_VERSION = "cookie-statistics-v5-2026-07";
 
 type ParsedCookieCredential = ReturnType<
   typeof CookieCredentialInputSchema.parse
@@ -92,6 +93,7 @@ export class CookieAdsProvider implements AdsProvider {
           ] as const
         : []),
       ...(hasCompleteStatusTemplates ? ["change-status"] as const : []),
+      ...(templates.some((item) => item.target === "appeal") ? ["appeal-ads"] as const : []),
     ]);
   }
 
@@ -113,6 +115,23 @@ export class CookieAdsProvider implements AdsProvider {
       status: "ready",
       message: `Cookie 会话验证成功（${request.method} 只读请求）。`,
     };
+  }
+
+  async appeal(context: ProviderContext, mutations: import("./types.js").AppealMutation[]) {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const template = credential.requestTemplates?.find((item) => item.target === "appeal" && !item.derived);
+    if (!template?.body) throw new RetryableCreationError("尚未导入广告申诉 cURL 模板。");
+    const templateBody = template.body;
+    return Promise.all(mutations.map(async (mutation) => {
+      const body = JSON.parse(templateBody) as Record<string, unknown>;
+      body.ad_id = mutation.externalId;
+      body.creative_id = mutation.creativeId;
+      body.appeal_reason = mutation.reason;
+      const payload = await requestCookieJson({ ...template, body: JSON.stringify(body) }, credential);
+      const data = isRecord(payload.data) ? payload.data : {};
+      const ok = payload.code === 0 && data.appeal_success === true;
+      return { ...mutation, ok, message: ok ? "申诉提交成功" : "申诉提交未获成功确认" };
+    }));
   }
 
   async syncReadOnly(context: ProviderContext): Promise<ProviderSyncOutput> {
@@ -158,7 +177,7 @@ export class CookieAdsProvider implements AdsProvider {
       // captured range. Some valid TikTok list requests do not expose a date
       // parameter at all; those must still be replayed with the platform's
       // request defaults rather than blocking the complete polling cycle.
-      const windowedRequest = withRecentMetricWindow(
+      const windowedRequest = withTodayMetricWindow(
         request,
         context.timezone ?? "UTC",
         new Date(),
@@ -203,7 +222,7 @@ export class CookieAdsProvider implements AdsProvider {
     const timezone = context.timezone ?? "UTC";
     const now = new Date();
     const endDate = formatDateInTimezone(now, timezone);
-    const startDate = formatDateInTimezone(new Date(now.getTime() - 48 * 60 * 60_000), timezone);
+    const startDate = formatDateInTimezone(now, timezone);
     return {
       entities: uniqueEntities,
       result: {
@@ -452,12 +471,12 @@ function hasNonEmptyOriginReference(
     || visit(profile.creativePayload);
 }
 
-function withRecentMetricWindow(
+function withTodayMetricWindow(
   request: CapturedCookieRequest,
   timezone: string,
   now: Date,
 ): CapturedCookieRequest {
-  const startDate = formatDateInTimezone(new Date(now.getTime() - 48 * 60 * 60_000), timezone);
+  const startDate = formatDateInTimezone(now, timezone);
   const endDate = formatDateInTimezone(now, timezone);
   let changed = false;
   const url = new URL(request.url);

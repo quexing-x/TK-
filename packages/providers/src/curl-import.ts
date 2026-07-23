@@ -36,7 +36,8 @@ export interface TikTokCurlImportResult {
       | "ad"
       | "campaign-status"
       | "ad-group-status"
-      | "ad-status";
+      | "ad-status"
+      | "appeal";
   };
 }
 
@@ -415,8 +416,10 @@ function classifyRequestTarget(
   | "ad"
   | "campaign-status"
   | "ad-group-status"
-  | "ad-status" {
+  | "ad-status"
+  | "appeal" {
   const normalized = pathname.toLowerCase();
+  if (normalized.includes("appeal_creative")) return "appeal";
   const isStatus = normalized.includes("status") || normalized.includes("update");
   if (isStatus && normalized.includes("adgroup")) return "ad-group-status";
   if (isStatus && normalized.includes("campaign")) return "campaign-status";
