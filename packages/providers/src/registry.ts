@@ -179,6 +179,33 @@ export class ProviderRegistry {
     return provider.copy(context, mutations);
   }
 
+  async copyAdGroupToExistingCampaign(
+    kind: ProviderKind,
+    context: ProviderContext,
+    input: {
+      sourceAdGroupId: string;
+      existingCampaignId: string;
+      names: string[];
+      initialStatus: "enabled" | "disabled";
+    },
+  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[] }> {
+    const provider = this.get(kind) as unknown as {
+      copyAdGroupToExistingCampaign?: (
+        context: ProviderContext,
+        input: {
+          sourceAdGroupId: string;
+          existingCampaignId: string;
+          names: string[];
+          initialStatus: "enabled" | "disabled";
+        },
+      ) => Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[] }>;
+    };
+    if (!provider.copyAdGroupToExistingCampaign) {
+      throw new RetryableCreationError("当前接入不支持广告组级复制。");
+    }
+    return provider.copyAdGroupToExistingCampaign(context, input);
+  }
+
   async createFromPreset(
     kind: ProviderKind,
     context: ProviderContext,

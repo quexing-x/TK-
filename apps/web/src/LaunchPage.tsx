@@ -240,7 +240,12 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     }
     void api.getManagedEntities(sourceAccountId)
       .then((entities) => {
-        const ads = entities.filter((entity) => entity.entityType === "ad" && !entity.ignored);
+        const ads = entities.filter((entity) =>
+          entity.entityType === "ad"
+          && !entity.ignored
+          && Boolean(entity.externalId)
+          && entity.externalId !== "0"
+          && Boolean(entity.name?.trim()));
         setSourceAds(ads);
         setSourceAdId((current) => ads.some((ad) => ad.externalId === current) ? current : "");
       })

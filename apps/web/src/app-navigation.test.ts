@@ -13,7 +13,6 @@ describe("application navigation contract", () => {
       rules: "#rules",
       notifications: "#notifications",
       launch: "#launch",
-      tasks: "#tasks",
       maintenance: "#maintenance",
       "system-users": "#system-users",
     });
