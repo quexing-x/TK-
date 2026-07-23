@@ -36,7 +36,8 @@ export interface TikTokCurlImportResult {
       | "ad"
       | "campaign-status"
       | "ad-group-status"
-      | "ad-status";
+      | "ad-status"
+      | "appeal";
   };
 }
 
@@ -115,7 +116,7 @@ export function parseTikTokReadCurl(
 
 export function parseTikTokCurl(
   command: string,
-  expectedKind?: "read" | "status",
+  expectedKind?: "read" | "status" | "appeal",
 ): TikTokCurlImportResult {
   if (!command.trim()) {
     throw new TikTokCurlImportError("请粘贴从 Chrome 复制的 cURL 命令。");
@@ -247,6 +248,7 @@ export function parseTikTokCurl(
       "第 2 段只接受真实启停请求，请复制 /ad/update_status/? 对应的 POST cURL。",
     );
   }
+  if (expectedKind === "appeal" && target !== "appeal") throw new TikTokCurlImportError("请复制 appeal_creative 的 POST cURL。");
   const contentType = headers.get("content-type")?.value;
   const userAgent = headers.get("user-agent")?.value;
   const capturedHeaders = Object.fromEntries(
@@ -415,8 +417,10 @@ function classifyRequestTarget(
   | "ad"
   | "campaign-status"
   | "ad-group-status"
-  | "ad-status" {
+  | "ad-status"
+  | "appeal" {
   const normalized = pathname.toLowerCase();
+  if (normalized.includes("appeal_creative")) return "appeal";
   const isStatus = normalized.includes("status") || normalized.includes("update");
   if (isStatus && normalized.includes("adgroup")) return "ad-group-status";
   if (isStatus && normalized.includes("campaign")) return "campaign-status";

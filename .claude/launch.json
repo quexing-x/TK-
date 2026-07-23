@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tk-api",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@tk-auto/api", "dev"],
+      "port": 3100
+    },
+    {
+      "name": "tk-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@tk-auto/web", "dev"],
+      "port": 5173
+    }
+  ]
+}

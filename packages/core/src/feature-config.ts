@@ -4,6 +4,7 @@ const PlaceholderTemplateSchema = z.string().trim().min(1).max(4000);
 
 export const AutomationFeatureSettingsInputSchema = z.object({
   appeal: z.object({
+    enabled: z.boolean(),
     textTemplate: PlaceholderTemplateSchema,
     retryLimit: z.number().int().min(0).max(3),
   }),
@@ -40,9 +41,9 @@ export type AutomationFeatureSettings = z.infer<
 
 export const defaultAutomationFeatureSettings: AutomationFeatureSettingsInput = {
   appeal: {
-    textTemplate:
-      "广告 {ad_name}（{ad_id}）符合平台政策，素材和落地页均为真实业务内容。请结合拒绝原因 {reject_reason} 重新审核，谢谢。",
-    retryLimit: 1,
+    enabled: true,
+    textTemplate: "我认为我的视频没有违规。",
+    retryLimit: 0,
   },
   copy: {
     namingTemplate: "{source_name}-{account_name}-{date}",

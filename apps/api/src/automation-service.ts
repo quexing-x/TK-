@@ -117,6 +117,32 @@ export class AutomationService {
     return this.getLowRiskAutomationState(accountId);
   }
 
+  async runScheduledAppeals(accountId: string, asOf = new Date()): Promise<void> {
+    const account = this.store.getAccount(accountId);
+    if (!account || !account.enabled || !this.store.getAutomationFeatureSettings().appeal.enabled) return;
+    const local = timePartsInTimeZone(asOf, account.timezone);
+    if (local.minute !== 0 || (local.hour !== 1 && local.hour !== 12)) return;
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") return;
+    const context = await this.loadContext(accountId, account.providerKind, account.timezone);
+    const provider = this.providers.get(account.providerKind);
+    if (!provider.appeal || !provider.resolveCapabilities?.(context).has("appeal-ads")) return;
+    const reason = this.store.getAutomationFeatureSettings().appeal.textTemplate;
+    for (const entity of this.store.listCurrentProviderEntities(accountId, account.providerKind)) {
+      if (entity.entityType !== "ad" || this.store.hasAppealForEntity(accountId, entity.externalId)) continue;
+      const payload = entity.payload as Record<string, unknown>;
+      const status = String(payload.creative_status ?? "");
+      if (status !== "creative_offline_audit") continue;
+      const creativeId = String(payload.creative_id ?? "");
+      if (!creativeId) continue;
+      const task = this.store.queueAppeal(accountId, account.providerKind, entity.externalId, reason, "automation");
+      try {
+        const [result] = await provider.appeal(context, [{ externalId: entity.externalId, creativeId, reason }]);
+        this.store.completeAppeal(task.id, result?.ok ? "succeeded" : "failed", result?.message ?? "申诉未获确认");
+      } catch (cause) { this.store.completeAppeal(task.id, "unknown", safeMessage(cause)); }
+    }
+  }
+
   async runAccount(
     accountId: string,
     trigger: AutomationTrigger,
@@ -887,7 +913,8 @@ export class AutomationService {
       if (
         entity.entityType !== "ad-group" ||
         entity.status !== "enabled" ||
-        entity.ignored
+        entity.ignored ||
+        !hasStartedBy(entity.scheduledStartAt, now)
       ) continue;
 
       if ((entity.metrics.conversions ?? 0) > 0) {
@@ -1420,6 +1447,12 @@ function buildRulePredicate(
   };
 }
 
+function hasStartedBy(scheduledStartAt: string | null | undefined, now: Date): boolean {
+  if (!scheduledStartAt) return false;
+  const timestamp = new Date(scheduledStartAt).getTime();
+  return Number.isFinite(timestamp) && timestamp <= now.getTime();
+}
+
 export class AutomationScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -1465,6 +1498,7 @@ export class AutomationScheduler {
           connection.status === "ready"
         ) {
           this.service.enrollNightlyAdGroups(account.id);
+          await this.service.runScheduledAppeals(account.id);
           await this.service.runDueScheduledActions(account.id);
         }
       }

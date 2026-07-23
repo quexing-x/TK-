@@ -37,6 +37,7 @@ import {
   StatusManualVerificationInputSchema,
   WriteTaskStatusSchema,
   AuditLogFilterSchema,
+  filterEntitiesToRecentWindow,
   type AppPermission,
   type ProviderKind,
   type WriteTaskActor,
@@ -88,7 +89,7 @@ const ProviderParamsSchema = AccountParamsSchema.extend({
 });
 const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
-  step: z.enum(["read", "status"]).optional(),
+  step: z.enum(["read", "status", "appeal"]).optional(),
 });
 const EntityParamsSchema = AccountParamsSchema.extend({
   entityType: SyncEntityTypeSchema,
@@ -1603,13 +1604,24 @@ export async function createApp(
         );
         throw cause;
       }
-      dependencies.store.saveReadOnlySync(
-        accountId,
-        providerKind,
+      const recent = filterEntitiesToRecentWindow(
         output.entities,
-        output.result,
+        new Date(),
+        dependencies.store.getRuleConfiguration().lookbackHours,
       );
-      return output.result;
+      const filteredResult = {
+        ...output.result,
+        counts: {
+          campaign: recent.entities.filter((entity) => entity.entityType === "campaign").length,
+          "ad-group": recent.entities.filter((entity) => entity.entityType === "ad-group").length,
+          ad: recent.entities.filter((entity) => entity.entityType === "ad").length,
+        },
+        warnings: recent.excludedCount > 0
+          ? [...output.result.warnings, `已排除 ${recent.excludedCount} 个不属于最近 ${dependencies.store.getRuleConfiguration().lookbackHours} 小时广告组窗口的对象。`]
+          : output.result.warnings,
+      };
+      dependencies.store.saveReadOnlySync(accountId, providerKind, recent.entities, filteredResult);
+      return filteredResult;
     },
   );
 

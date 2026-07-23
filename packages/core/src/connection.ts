@@ -107,6 +107,7 @@ export const CapturedCookieRequestSchema = z.object({
     "campaign-status",
     "ad-group-status",
     "ad-status",
+    "appeal",
   ]),
   action: z.enum(["enable", "disable"]).optional(),
   url: TikTokHttpsUrlSchema,

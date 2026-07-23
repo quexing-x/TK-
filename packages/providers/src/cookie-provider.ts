@@ -4,6 +4,7 @@ import {
   buildDraftPayloads,
   buildProfileDraftPayloads,
   buildPublishInput,
+  splitVideoCodes,
   deriveTikTokCreationRequest,
   normalizeProviderEntity,
   type CapturedCookieRequest,
@@ -45,9 +46,10 @@ const capabilities = new Set<ProviderCapability>([
   "change-status",
   "create-campaigns",
   "copy-ads",
+  "appeal-ads",
 ]);
 
-const COOKIE_SYNC_CONTRACT_VERSION = "cookie-statistics-v4-2026-07";
+const COOKIE_SYNC_CONTRACT_VERSION = "cookie-statistics-v5-2026-07";
 
 type ParsedCookieCredential = ReturnType<
   typeof CookieCredentialInputSchema.parse
@@ -92,6 +94,7 @@ export class CookieAdsProvider implements AdsProvider {
           ] as const
         : []),
       ...(hasCompleteStatusTemplates ? ["change-status"] as const : []),
+      ...(templates.some((item) => item.target === "appeal") ? ["appeal-ads"] as const : []),
     ]);
   }
 
@@ -113,6 +116,23 @@ export class CookieAdsProvider implements AdsProvider {
       status: "ready",
       message: `Cookie 会话验证成功（${request.method} 只读请求）。`,
     };
+  }
+
+  async appeal(context: ProviderContext, mutations: import("./types.js").AppealMutation[]) {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const template = credential.requestTemplates?.find((item) => item.target === "appeal" && !item.derived);
+    if (!template?.body) throw new RetryableCreationError("尚未导入广告申诉 cURL 模板。");
+    const templateBody = template.body;
+    return Promise.all(mutations.map(async (mutation) => {
+      const body = JSON.parse(templateBody) as Record<string, unknown>;
+      body.ad_id = mutation.externalId;
+      body.creative_id = mutation.creativeId;
+      body.appeal_reason = mutation.reason;
+      const payload = await requestCookieJson({ ...template, body: JSON.stringify(body) }, credential);
+      const data = isRecord(payload.data) ? payload.data : {};
+      const ok = payload.code === 0 && data.appeal_success === true;
+      return { ...mutation, ok, message: ok ? "申诉提交成功" : "申诉提交未获成功确认" };
+    }));
   }
 
   async syncReadOnly(context: ProviderContext): Promise<ProviderSyncOutput> {
@@ -158,7 +178,7 @@ export class CookieAdsProvider implements AdsProvider {
       // captured range. Some valid TikTok list requests do not expose a date
       // parameter at all; those must still be replayed with the platform's
       // request defaults rather than blocking the complete polling cycle.
-      const windowedRequest = withRecentMetricWindow(
+      const windowedRequest = withTodayMetricWindow(
         request,
         context.timezone ?? "UTC",
         new Date(),
@@ -203,7 +223,7 @@ export class CookieAdsProvider implements AdsProvider {
     const timezone = context.timezone ?? "UTC";
     const now = new Date();
     const endDate = formatDateInTimezone(now, timezone);
-    const startDate = formatDateInTimezone(new Date(now.getTime() - 48 * 60 * 60_000), timezone);
+    const startDate = formatDateInTimezone(now, timezone);
     return {
       entities: uniqueEntities,
       result: {
@@ -581,12 +601,12 @@ function hasNonEmptyOriginReference(
     || visit(profile.creativePayload);
 }
 
-function withRecentMetricWindow(
+function withTodayMetricWindow(
   request: CapturedCookieRequest,
   timezone: string,
   now: Date,
 ): CapturedCookieRequest {
-  const startDate = formatDateInTimezone(new Date(now.getTime() - 48 * 60 * 60_000), timezone);
+  const startDate = formatDateInTimezone(now, timezone);
   const endDate = formatDateInTimezone(now, timezone);
   let changed = false;
   const url = new URL(request.url);
@@ -767,7 +787,7 @@ async function runCookieDraftChain(
   const bootstrapTemplateCampaignId = !copyOnly && !credential.creationProfile
     ? nonEmptyId(mutation.preset.templateCampaignId)
     : undefined;
-  const resolvedRow = resolveTikTokPostRow(mutation);
+  const { row: resolvedRow, videos: resolvedVideos } = await resolveTikTokVideos(mutation, sessionRequest, credential);
   const preflightPayloads = await requestCompleteListPages(
     "adgroup/list",
     sessionRequest,
@@ -815,9 +835,19 @@ async function runCookieDraftChain(
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
     : buildDraftPayloads(creationRow, mutation.preset, timezone);
+  // From-scratch creation bootstraps from an existing campaign's structure. The
+  // preset's templateCampaignId lives in one account, so for every other target
+  // account fall back to one of that account's own campaigns — this lets a
+  // multi-account launch "just work" without per-account template setup.
+  const effectiveBootstrapId = copyOnly || !bootstrapTemplateCampaignId
+    ? bootstrapTemplateCampaignId
+    : campaignEntities.some((entity) => entity.externalId === bootstrapTemplateCampaignId)
+      ? bootstrapTemplateCampaignId
+      : pickFallbackTemplateCampaign(campaignEntities, mutation.preset.objectiveType)
+        ?? bootstrapTemplateCampaignId;
   const initializationTemplateCampaignId = copyOnly
     ? mutation.templateCampaignId
-    : remoteCampaignId ?? bootstrapTemplateCampaignId;
+    : remoteCampaignId ?? effectiveBootstrapId;
   const initializedIds = initializationTemplateCampaignId
     ? await initializeProfileDraftIds(
         sessionRequest,
@@ -881,36 +911,89 @@ async function runCookieDraftChain(
     phase: "adgroup_draft",
     evidence: { adGroupSnapId: adSnapId, adGroupSketchId: adSketchId },
   });
-  let creativeSnapIdFromAd = responseId(adGroup, "creative_snap_id");
-  let creativeSketchIdFromAd = responseId(adGroup, "creative_sketch_id");
+  const creativeSnapIdFromAd = initializedIds
+    ? initializedIds.creativeSnapId
+    : responseId(adGroup, "creative_snap_id");
+  const creativeSketchIdFromAd = initializedIds
+    ? initializedIds.creativeSketchId
+    : responseId(adGroup, "creative_sketch_id");
 
-  const creativeDraft: Record<string, unknown> = {
-    ...drafts.creative,
-    ad_snap_id: adSnapId,
-    ad_sketch_id: adSketchId,
-  };
-  const creativeAssets = creativeDraft.asset_group_sketch_form_data_list;
-  if (Array.isArray(creativeAssets) && isRecord(creativeAssets[0])) {
-    if (initializedIds) {
-      creativeSnapIdFromAd = initializedIds.creativeSnapId;
-      creativeSketchIdFromAd = initializedIds.creativeSketchId;
+  // One ad-group, several ads = ONE creative whose image_list carries every
+  // video, each bound to its authorized creator identity. This mirrors TikTok's
+  // real SPC multi-ad creative_snap/save (N videos in one image_list, not N
+  // separate creatives).
+  const creativeAssets = drafts.creative.asset_group_sketch_form_data_list;
+  const singleAsset = Array.isArray(creativeAssets) && isRecord(creativeAssets[0])
+    ? creativeAssets[0]
+    : {};
+  if (!copyOnly) {
+    singleAsset.image_list = buildSparkImageList(resolvedVideos);
+    singleAsset.title_list = resolvedVideos.map((video) => ({ title: "", aweme_item_id: video.itemId }));
+    if (resolvedVideos.some((video) => video.identityId)) {
+      // Match TikTok's real from-scratch Spark creative_snap/save. Spark posts
+      // use a per-image (level-2) identity: the creative declares identity_type=2
+      // with an empty id, each image carries its own authorized creator, and
+      // ad_level2_identity_structure=1 tells the check to resolve the post via
+      // that per-image identity. The structural fields below (coming_source_type
+      // etc.) are what a fresh manual creative sends; without them the check
+      // fails with "无法获取 Spark Ads 帖子信息".
+      singleAsset.identity_type = 2;
+      singleAsset.identity_id = "";
+      singleAsset.item_source = 2;
+      singleAsset.ad_level2_identity_structure = 1;
+      singleAsset.coming_source_type = 6;
+      singleAsset.sketch_publish_source = 1;
+      singleAsset.creative_material_mode = 6;
+      singleAsset.struct_version = 1;
+      singleAsset.asset_group_id = "";
+      singleAsset.creative_assets_active_id = resolvedVideos[0]?.itemId ?? "";
+      // A fresh creative has no copy lineage; a template's origin id makes the
+      // check resolve the wrong post.
+      delete singleAsset.origin_creative_id;
     }
-    creativeAssets[0].creative_snap_id = creativeSnapIdFromAd;
-    creativeAssets[0].creative_sketch_id = creativeSketchIdFromAd;
+    singleAsset.creative_snap_id = creativeSnapIdFromAd ?? "";
+    singleAsset.creative_sketch_id = creativeSketchIdFromAd ?? "";
   }
-  const creative = copyOnly ? {} : await requestCreationStep("creative_snap/save",
-    () => creationRequest(sessionRequest, "creative_snap/save", creativeDraft),
-    credential,
-    { semantics: "mutation", dispatchState },
-  );
-  const creativeSnapId =
-    (copyOnly && initializedIds ? initializedIds.creativeSnapId : responseId(creative, "creative_snap_id")) ??
-    creativeSnapIdFromAd ??
-    requiredResponseId(creativeDraft, "creative_snap_id");
-  const creativeSketchId =
-    (copyOnly && initializedIds ? initializedIds.creativeSketchId : responseId(creative, "creative_sketch_id")) ??
-    creativeSketchIdFromAd ??
-    requiredResponseId(creativeDraft, "creative_sketch_id");
+  let creativeSnapId: string;
+  let creativeSketchId: string;
+  let lastCreativeResponse: Record<string, unknown> = {};
+  if (copyOnly && initializedIds) {
+    creativeSnapId = initializedIds.creativeSnapId;
+    creativeSketchId = initializedIds.creativeSketchId;
+  } else {
+    // Spark posts must be registered by their video material id before the
+    // creative can reference them, otherwise TikTok cannot fetch the post.
+    const sparkVids = resolvedVideos
+      .filter((video) => video.identityId && video.vid)
+      .map((video) => video.vid!);
+    if (sparkVids.length > 0) {
+      const countryList = [...new Set(
+        mutation.preset.countryCodes
+          .map((id) => TIKTOK_LOCATION_TO_ISO[id])
+          .filter((code): code is string => Boolean(code)),
+      )];
+      await runSparkCreativeFixTask(sessionRequest, credential, sparkVids, countryList);
+    }
+    const creativeDraft: Record<string, unknown> = {
+      ...drafts.creative,
+      ad_snap_id: adSnapId,
+      ad_sketch_id: adSketchId,
+      asset_group_sketch_form_data_list: [singleAsset],
+      ...(resolvedVideos.some((video) => video.identityId) ? { spc_upgrade_mode: 1 } : {}),
+    };
+    const creative = await requestCreationStep("creative_snap/save",
+      () => creationRequest(sessionRequest, "creative_snap/save", creativeDraft),
+      credential,
+      { semantics: "mutation", dispatchState },
+    );
+    lastCreativeResponse = creative;
+    creativeSnapId = responseId(creative, "creative_snap_id")
+      ?? creativeSnapIdFromAd
+      ?? requiredResponseId(creativeDraft, "creative_snap_id");
+    creativeSketchId = responseId(creative, "creative_sketch_id")
+      ?? creativeSketchIdFromAd
+      ?? requiredResponseId(creativeDraft, "creative_sketch_id");
+  }
   mutation.onProgress?.({
     phase: "creative_draft",
     evidence: { creativeSnapId, creativeSketchId },
@@ -974,8 +1057,8 @@ async function runCookieDraftChain(
       campaignSketchEcho: responseId(campaign, "campaign_sketch_id") === initializedIds?.campaignSketchId,
       adSnapEcho: responseId(adGroup, "ad_snap_id") === initializedIds?.adSnapId,
       adSketchEcho: responseId(adGroup, "ad_sketch_id") === initializedIds?.adSketchId,
-      creativeSnapEcho: responseId(creative, "creative_snap_id") === creativeSnapId,
-      creativeSketchEcho: responseId(creative, "creative_sketch_id") === creativeSketchId,
+      creativeSnapEcho: responseId(lastCreativeResponse, "creative_snap_id") === creativeSnapId,
+      creativeSketchEcho: responseId(lastCreativeResponse, "creative_sketch_id") === creativeSketchId,
     };
     throw new UnknownCreationStateError(`${detail}；草稿回显=${JSON.stringify(diagnostics)}`);
   }
@@ -1106,7 +1189,11 @@ async function validateDraftChain(
       risk_info: ids.riskInfo,
     }), credential);
   const adData = isRecord(adCheck.data) ? adCheck.data : undefined;
-  if (adData?.creative_success === false) throw new ConfirmedCreationFailureError("TikTok 广告素材草稿检查失败。");
+  if (adData?.creative_success === false) {
+    const structure = checkInfo.map((info) => `组${info.ad_snap_id}含${info.creative_snap_ids.length}条广告`).join("、");
+    const detail = JSON.stringify(adData).slice(0, 400);
+    throw new ConfirmedCreationFailureError(`TikTok 广告素材草稿检查失败[本次发出结构：${structure}]：${detail}`);
+  }
 }
 
 async function awaitCreationResult(
@@ -1143,24 +1230,180 @@ async function awaitCreationResult(
   throw new Error("TikTok 创建任务在 9 秒内未返回最终结果，请稍后在投放结果中重新检查。");
 }
 
-function resolveTikTokPostRow(
+/**
+ * Resolves each video code in the cell to a TikTok item (Post) id. A code may
+ * be resolved three ways, in priority order:
+ *  1. an explicit videoPostMappings entry (manual override / cache),
+ *  2. the account's own material library — a `#…` authorization code is looked
+ *     up live via material/tt_video/bulk/info, which returns its item_id,
+ *  3. left as-is when it is already a bare numeric id.
+ * The resolved item ids are re-joined so the draft builder can split them back
+ * into one creative per ad inside the ad-group.
+ */
+interface ResolvedVideo {
+  /** TikTok item id that goes into aweme_item_id. */
+  itemId: string;
+  /** Authorized creator identity (core_user_id from the material library); the
+   * ad uses it as identity_type=2 / identity_id for a Spark post. */
+  identityId?: string;
+  /** Underlying video material id (video_info.vid); a Spark post must be
+   * registered by vid via spark/creative_fix_task before the creative saves. */
+  vid?: string;
+}
+
+/**
+ * Resolves every video code in the cell to its TikTok item, in order. A `#…`
+ * authorization code is looked up live in the account's material library
+ * (material/tt_video/bulk/info), which returns both the item id and the
+ * authorized creator identity. A videoPostMappings entry overrides the lookup;
+ * a bare numeric id is used as-is. Returns the resolved videos plus a row whose
+ * videoCode is the joined item ids (kept for downstream naming/placeholders).
+ */
+async function resolveTikTokVideos(
   mutation: CreationMutation,
-): CreationMutation["row"] {
-  const matches = mutation.preset.videoPostMappings?.filter(
-    (item) => item.videoCode === mutation.row.videoCode,
-  ) ?? [];
-  const postIds = [...new Set(matches.map((item) => item.postId))];
-  if (postIds.length > 1) {
-    throw new RetryableCreationError("同一视频代码配置了多个 Post ID，请先统一映射。");
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+): Promise<{ row: CreationMutation["row"]; videos: ResolvedVideo[] }> {
+  const codes = splitVideoCodes(mutation.row.videoCode);
+  const list = codes.length > 0 ? codes : [mutation.row.videoCode];
+  const manual = new Map<string, string>();
+  const needLibrary: string[] = [];
+  for (const code of list) {
+    const matches = mutation.preset.videoPostMappings?.filter(
+      (item) => item.videoCode === code,
+    ) ?? [];
+    const postIds = [...new Set(matches.map((item) => item.postId))];
+    if (postIds.length > 1) {
+      throw new RetryableCreationError(`视频代码 ${code} 配置了多个 Post ID，请先统一映射。`);
+    }
+    if (postIds[0]) manual.set(code, postIds[0]);
+    else if (code.startsWith("#")) needLibrary.push(code);
   }
-  const mapping = matches[0];
-  if (mapping) return { ...mutation.row, videoCode: mapping.postId };
-  if (mutation.row.videoCode.startsWith("#")) {
-    throw new RetryableCreationError(
-      "该视频代码尚未映射到 TikTok Post；请先在高级自定义中保存共享 Post ID。",
-    );
+  const library = needLibrary.length > 0
+    ? await resolveVideoCodesFromLibrary(sessionRequest, credential, needLibrary)
+    : new Map<string, ResolvedVideo>();
+  const videos = list.map((code) => {
+    const manualId = manual.get(code);
+    if (manualId) return { itemId: manualId } satisfies ResolvedVideo;
+    const fromLibrary = library.get(code);
+    if (fromLibrary) return fromLibrary;
+    if (code.startsWith("#")) {
+      throw new RetryableCreationError(
+        `视频代码 ${code} 无法在素材库中解析到帖子；请确认该视频已授权到当前账户。`,
+      );
+    }
+    return { itemId: code } satisfies ResolvedVideo;
+  });
+  return {
+    row: { ...mutation.row, videoCode: videos.map((video) => video.itemId).join(";") },
+    videos,
+  };
+}
+
+/** Looks up `#…` authorization codes in the account's material library and maps
+ * each to its item id and authorized creator identity (core_user_id). */
+async function resolveVideoCodesFromLibrary(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  codes: string[],
+): Promise<Map<string, ResolvedVideo>> {
+  const uniqueCodes = [...new Set(codes)];
+  const response = await requestCreationStep(
+    "material/tt_video/bulk/info",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/material/tt_video/bulk/info/",
+      { video_code_list: uniqueCodes },
+    ),
+    credential,
+  );
+  const data = isRecord(response.data) ? response.data : {};
+  const videoMap = isRecord(data.tt_video_map) ? data.tt_video_map : {};
+  const out = new Map<string, ResolvedVideo>();
+  for (const code of uniqueCodes) {
+    const entry = videoMap[code];
+    if (!isRecord(entry)) continue;
+    const itemId = nonEmptyId(entry.item_id);
+    if (!itemId) continue;
+    const identityId = nonEmptyId(entry.core_user_id);
+    const videoInfo = isRecord(entry.video_info) ? entry.video_info : {};
+    const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(videoInfo.video_id);
+    out.set(code, {
+      itemId,
+      ...(identityId ? { identityId } : {}),
+      ...(vid ? { vid } : {}),
+    });
   }
-  return mutation.row;
+  return out;
+}
+
+/**
+ * Registers Spark (authorized) posts by their video material id before the
+ * creative is saved. Without this, creative_snap rejects the aweme_item_id with
+ * "无法获取 Spark Ads 帖子信息". Best-effort: a failure here is not fatal on its
+ * own — the creative save will surface any real problem.
+ */
+async function runSparkCreativeFixTask(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  vids: string[],
+  countryList: string[],
+): Promise<void> {
+  const uniqueVids = [...new Set(vids)];
+  if (uniqueVids.length === 0) return;
+  await requestCreationStep(
+    "spark/creative_fix_task/save",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/spark/creative_fix_task/save/",
+      { creative_fix_vid_list: uniqueVids, country_list: countryList },
+    ),
+    credential,
+  );
+}
+
+/** Maps TikTok location ids used by the ad targeting to the ISO country codes
+ * the Spark fix task expects. Falls back to nothing when a code is unknown. */
+const TIKTOK_LOCATION_TO_ISO: Record<number, string> = {
+  1668284: "TW", // 台湾
+  6252001: "US",
+  1814991: "CN",
+};
+
+/** Builds the multi-ad image_list for a Spark creative: one entry per resolved
+ * video, each bound to the authorized creator identity. This is how one ad-group
+ * carries several ads — N videos in one creative's image_list, not N creatives. */
+function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unknown>> {
+  return videos.map((video) => ({
+    image_mode: 15,
+    aweme_item_id: video.itemId,
+    item_source: 2,
+    media_tag: 0,
+    ...(video.identityId ? { identity_type: 2, identity_id: video.identityId } : {}),
+  }));
+}
+
+/**
+ * Picks one of the account's own campaigns to bootstrap a from-scratch creation
+ * when the preset's template campaign does not exist in this account. Prefers a
+ * campaign matching the requested objective, then a disabled one (safe to copy),
+ * then any. Returns undefined when the account has no campaigns to copy from.
+ */
+function pickFallbackTemplateCampaign(
+  campaigns: ProviderEntity[],
+  objectiveType: number | null,
+): string | undefined {
+  if (campaigns.length === 0) return undefined;
+  const matchesObjective = (entity: ProviderEntity) =>
+    objectiveType != null && Number(entity.payload.objective_type) === objectiveType;
+  const isDisabled = (entity: ProviderEntity) =>
+    normalizeProviderEntity(entity).status === "disabled";
+  const ranked = [...campaigns].sort((a, b) => {
+    const score = (entity: ProviderEntity) =>
+      (matchesObjective(entity) ? 2 : 0) + (isDisabled(entity) ? 1 : 0);
+    return score(b) - score(a);
+  });
+  return ranked[0]?.externalId;
 }
 
 function uniqueAdGroupName(
@@ -1434,13 +1677,16 @@ function applyCopiedDraftForms(
   adForm.by_ad_sketch_id = initialized.adSketchId;
   drafts.adGroup.ad_sketch_form_data = adForm;
 
-  const creativeForm = cloneRecord(initialized.creativeForm);
   const creativeOverrideKeys = ["creative_name", "external_url", "open_url"];
   if (applyPresetOverrides) {
     creativeOverrideKeys.push(
       "identity_type", "identity_id", "call_to_action_id", "is_comment_disable", "is_share_disable",
     );
   }
+  // A single creative form cloned from the template copy. The draft chain then
+  // overwrites its image_list with every resolved video (one ad-group, several
+  // ads), so we only need one form here.
+  const creativeForm = cloneRecord(initialized.creativeForm);
   for (const key of creativeOverrideKeys) {
     if (requestedCreative[key] !== undefined) creativeForm[key] = requestedCreative[key];
   }

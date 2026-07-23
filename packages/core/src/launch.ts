@@ -322,53 +322,77 @@ export function parseLaunchSheetTable(
   const headerMap = mapHeaders(table[0] ?? [], errors);
   const rows: LaunchConfigurationRow[] = [];
   let serial = 1;
+  let adCount = 0;
+  // A block starts on a row that fills 推广系列名称. Rows below it that leave
+  // 系列名称 blank belong to the same campaign — each such row is another
+  // ad-group. A blank 视频代码/产品 URL on a continuation row means "same as the
+  // block head", i.e. an exact copy of the first ad-group's ads. This lets a
+  // sheet express: one campaign → several ad-groups → each ad-group the same
+  // set of video codes (= ads), without repeating the codes on every line.
+  let block: { campaignName: string; videoCode: string; productUrl: string } | null = null;
   for (let index = 1; index < table.length; index += 1) {
     const source = table[index] ?? [];
     if (source.every(isBlank)) continue;
     const rowNumber = index + 1;
-    const campaignName = asText(source[headerMap.get("campaignName") ?? -1]);
+    let campaignName = asText(source[headerMap.get("campaignName") ?? -1]);
     const adGroupName = asText(source[headerMap.get("adGroupName") ?? -1]);
-    const videoCode = asText(source[headerMap.get("videoCode") ?? -1]);
-    const productUrl = asText(source[headerMap.get("productUrl") ?? -1]);
+    let videoCode = asText(source[headerMap.get("videoCode") ?? -1]);
+    let productUrl = asText(source[headerMap.get("productUrl") ?? -1]);
+    if (campaignName) {
+      // New block head: its own 系列/代码/URL become the defaults inherited by
+      // the continuation rows below until the next filled 系列名称.
+      block = { campaignName, videoCode, productUrl };
+    } else if (block) {
+      // Continuation row: inherit the campaign, and fall back to the block
+      // head's video codes / URL when this row leaves them blank.
+      campaignName = block.campaignName;
+      if (!videoCode) videoCode = block.videoCode;
+      if (!productUrl) productUrl = block.productUrl;
+    }
     if (!campaignName) addError(errors, rowNumber, "推广系列名称", "请填写推广系列名称。");
     if (!adGroupName) addError(errors, rowNumber, "广告组名称", "请填写广告组名称。");
     if (!videoCode) addError(errors, rowNumber, "视频代码", "请填写视频代码。");
     if (!isUrl(productUrl)) addError(errors, rowNumber, "产品 URL", "请填写有效的 http 或 https 产品 URL。");
     if (errors.some((issue) => issue.rowNumber === rowNumber)) continue;
+    // One sheet row = one ad-group. Several video codes in the cell become
+    // several ads *inside* that one ad-group; the codes stay joined here and
+    // are split into per-ad creatives when the ad-group is created. This is the
+    // "一个广告组多条广告" shape — do NOT split into separate ad-groups.
     const videoCodes = splitVideoCodes(videoCode);
-    for (const code of videoCodes) {
-      const name = automaticName(now, serial);
-      serial += 1;
-      rows.push(LaunchConfigurationRowSchema.parse({
-        rowNumber,
-        campaignName,
-        videoCode: code,
-        productUrl,
-        adGroupName,
-        adName: name,
-        region: preset.region,
-        dailyBudget: preset.dailyBudget,
-        bid: preset.bid,
-        startAt: preset.startAt,
-        endAt: preset.endAt,
-        initialStatus: preset.initialStatus,
-      }));
-    }
+    adCount += videoCodes.length;
+    const name = automaticName(now, serial);
+    serial += 1;
+    rows.push(LaunchConfigurationRowSchema.parse({
+      rowNumber,
+      campaignName,
+      videoCode: videoCodes.join(";"),
+      productUrl,
+      adGroupName,
+      adName: name,
+      region: preset.region,
+      dailyBudget: preset.dailyBudget,
+      bid: preset.bid,
+      startAt: preset.startAt,
+      endAt: preset.endAt,
+      initialStatus: preset.initialStatus,
+    }));
     if (videoCodes.length > 1) {
-      warnings.push({ rowNumber, field: "视频代码", message: `已拆分为 ${videoCodes.length} 条广告创建任务。` });
+      warnings.push({ rowNumber, field: "视频代码", message: `该广告组将创建 ${videoCodes.length} 条广告。` });
     }
   }
   if (rows.length === 0 && errors.length === 0) {
     errors.push({ rowNumber: 2, field: "数据", message: "没有可导入的任务行。" });
   }
-  if (rows.length > 500) {
-    errors.push({ rowNumber: 1, field: "文件", message: "单次最多导入 500 条任务。" });
+  // The 500 cap counts ads (a multi-code ad-group counts as several ads), not
+  // ad-group rows, matching the template's stated safety limit.
+  if (adCount > 500) {
+    errors.push({ rowNumber: 1, field: "文件", message: "单次最多创建 500 条广告。" });
   }
   return LaunchSheetImportResultSchema.parse({ rows: rows.slice(0, 500), errors, warnings });
 }
 
 /** A cell can contain several account-local video codes separated by ;、； or a new line. */
-function splitVideoCodes(value: string): string[] {
+export function splitVideoCodes(value: string): string[] {
   return [...new Set(value.split(/[;；\r\n]+/).map((item) => item.trim()).filter(Boolean))];
 }
 

@@ -2194,6 +2194,7 @@ export class AutomationStore {
     kind: ProviderKind,
     externalId: string,
     reason: string,
+    source: "manual" | "automation" = "manual",
   ): AdOperationRecord {
     return this.recordAdOperation({
       accountId,
@@ -2202,10 +2203,38 @@ export class AutomationStore {
       externalId,
       entityName: this.findEntityName(accountId, kind, "ad", externalId),
       action: "appeal",
-      source: "manual",
+      source,
       status: "pending",
       message: reason,
     });
+  }
+
+  listCurrentProviderEntities(
+    accountId: string,
+    kind: ProviderKind,
+  ): ProviderEntity[] {
+    const rows = this.db
+      .prepare(
+        `SELECT entity_type, external_id, payload_json
+         FROM provider_entities
+         WHERE account_id = ? AND provider_kind = ? AND is_current = 1
+         ORDER BY entity_type, external_id`,
+      )
+      .all(accountId, kind) as SqlRow[];
+    return rows.map((row) => ({
+      entityType: row.entity_type as ProviderEntity["entityType"],
+      externalId: String(row.external_id),
+      payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
+    }));
+  }
+
+  hasAppealForEntity(accountId: string, externalId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM ad_operations WHERE account_id = ? AND external_id = ? AND action = 'appeal' AND status IN ('pending','running','succeeded','failed','unknown') LIMIT 1`).get(accountId, externalId));
+  }
+
+  completeAppeal(id: string, status: "succeeded" | "failed" | "unknown", message: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE ad_operations SET status = ?, message = ?, updated_at = ?, completed_at = ? WHERE id = ?").run(status, message, now, now, id);
   }
 
   createOneTimeSchedule(

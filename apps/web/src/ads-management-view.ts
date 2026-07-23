@@ -42,7 +42,8 @@ export function filterAdsManagementEntities(
   return entities
     .map((entity, index) => ({ entity, index }))
     .filter(({ entity }) => {
-      if (new Date(entity.syncedAt).getTime() < cutoff) return false;
+      const createdAt = entity.createdAt ? new Date(entity.createdAt).getTime() : Number.NaN;
+      if (!Number.isFinite(createdAt) || createdAt < cutoff) return false;
       if (input.level !== "all" && entity.entityType !== input.level) return false;
       if (input.status !== "all" && entity.status !== input.status) return false;
       return !normalizedQuery

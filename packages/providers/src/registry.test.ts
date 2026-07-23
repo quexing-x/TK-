@@ -116,7 +116,7 @@ describe("ProviderRegistry", () => {
     expect(profile.capabilities).toEqual(expect.arrayContaining([
       { capability: "create-campaigns", available: true, reason: "当前账户可用。" },
       { capability: "copy-ads", available: true, reason: "当前账户可用。" },
-      { capability: "appeal-ads", available: false, reason: "当前 Provider 未实现此能力。" },
+      { capability: "appeal-ads", available: true, reason: "当前账户可用。" },
     ]));
 
     const stale = registry.describeAccount("account-1", "cookie", {
