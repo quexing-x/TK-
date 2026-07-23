@@ -1789,6 +1789,54 @@ describe("CookieAdsProvider", () => {
     expect(requests.filter((request) => request.path.includes("/snap/detail/"))).toHaveLength(2);
   });
 
+  it("inherits the source 系列预算(CBO) instead of overriding the ad-group budget", async () => {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const path = new URL(url).pathname;
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requests.push({ path, body });
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        // CBO 源：草稿预算继承自系列(30)，与请求的组预算(50)不同。
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+          ad_name: "copied group",
+          budget: "30",
+          spc_upgrade_mode: 1,
+        } } } });
+      }
+      if (url.includes("ad_snap/save")) return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      if (url.includes("async_creation/detail")) return jsonResponse({ code: 0, data: { status: 1, result: {
+        campaign_id: "campaign",
+        ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: { 0: { creative_items: { 0: { id: "creative" } } } } } },
+      } } });
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+      dailyBudget: 50,
+      sourceCampaignBudgetOptimized: true,
+    });
+
+    // 组预算未被覆盖、也未因回读不等而失败：新组沿用系列预算(30)。
+    expect(result).toMatchObject({ ok: true });
+    const save = requests.find((request) => request.path.includes("/ad_snap/save/"));
+    expect((save?.body.ad_sketch_form_data as Record<string, unknown>).budget).toBe("30");
+  });
+
   it("does not publish when TikTok native scheduling cannot be verified", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-23T00:00:00.000Z"));

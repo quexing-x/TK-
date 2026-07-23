@@ -473,6 +473,8 @@ export class CookieAdsProvider implements AdsProvider {
       scheduledStartAt?: string | null;
       dailyBudget?: number;
       bid?: number | null;
+      // 源系列为系列预算(CBO)：跳过组预算覆盖，新组继承系列预算。
+      sourceCampaignBudgetOptimized?: boolean;
       onBeforeDispatch?: () => void;
     },
   ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
@@ -586,6 +588,7 @@ export class CookieAdsProvider implements AdsProvider {
           riskInfo,
           ...(input.dailyBudget !== undefined ? { dailyBudget: input.dailyBudget } : {}),
           ...(input.bid !== undefined ? { bid: input.bid } : {}),
+          ...(input.sourceCampaignBudgetOptimized ? { skipBudgetOverride: true } : {}),
         });
       if (simpleCopyResult) {
         publishItems = await materializeSimpleCopyCreativeDrafts({
@@ -923,7 +926,12 @@ async function applyCopiedAdGroupOverrides(input: {
   riskInfo: Record<string, unknown>;
   dailyBudget?: number;
   bid?: number | null;
+  // 源系列为系列预算(CBO)时，广告组不能设与系列不同的预算（否则真机报
+  // budget_auto_adjust_initial_budget_not_equal_campaign_budget）。此时跳过组预算覆盖，
+  // 让新组继承系列预算。ABO 源不传该标志，行为与既有创建完全一致。
+  skipBudgetOverride?: boolean;
 }): Promise<void> {
+  const overrideBudget = input.dailyBudget !== undefined && !input.skipBudgetOverride;
   const adSnapIds = input.publishItems.map((item) => item.ad_snap_id);
   const startTime = input.scheduledStart
     ? formatProviderDateTime(input.scheduledStart, input.timezone)
@@ -943,13 +951,24 @@ async function applyCopiedAdGroupOverrides(input: {
       );
     }
     const form = cloneRecord(sourceForm);
-    if (
-      nonEmptyId(form.ad_snap_id) !== publishItem.ad_snap_id
-      || nonEmptyId(form.ad_sketch_id) !== publishItem.ad_sketch_id
-    ) {
-      throw new UnknownCreationStateError("TikTok 草稿详情的 snap/sketch 映射不一致，已停止发布。");
+    // snap/detail is keyed by ad_snap_id, so `form` is authoritative for this
+    // copied draft. TikTok can echo a different (or empty) ad_sketch_id here
+    // than ad_snap/copy returned, and may omit ad_snap_id entirely — so only
+    // reject a present-but-conflicting ad_snap_id. Adopt the detail's sketch id
+    // (when provided) into the publish item so the ad_snap/save below and the
+    // downstream create_by_snap publish reference the exact same draft; if the
+    // detail omits it, keep the copy's id on the form we save.
+    const formSnapId = nonEmptyId(form.ad_snap_id);
+    if (formSnapId && formSnapId !== publishItem.ad_snap_id) {
+      throw new UnknownCreationStateError("TikTok 草稿详情的广告组标识不一致，已停止发布。");
     }
-    if (input.dailyBudget !== undefined) {
+    const formSketchId = nonEmptyId(form.ad_sketch_id);
+    if (formSketchId) {
+      publishItem.ad_sketch_id = formSketchId;
+    } else {
+      form.ad_sketch_id = publishItem.ad_sketch_id;
+    }
+    if (overrideBudget) {
       form.budget = String(input.dailyBudget);
     }
     if (input.bid !== undefined && input.bid !== null) {
@@ -992,7 +1011,7 @@ async function applyCopiedAdGroupOverrides(input: {
     if (!verified) {
       throw new UnknownCreationStateError("TikTok 广告组草稿修改未能回读确认，已停止发布。");
     }
-    if (input.dailyBudget !== undefined && String(verified.budget) !== String(input.dailyBudget)) {
+    if (overrideBudget && String(verified.budget) !== String(input.dailyBudget)) {
       throw new UnknownCreationStateError("TikTok 日预算未能回读确认，已停止发布。");
     }
     if (input.bid !== undefined && input.bid !== null && String(verified.cpa_bid) !== String(input.bid)) {
