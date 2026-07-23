@@ -13,11 +13,13 @@ const entity = (
   status: ManagedEntityRecord["status"],
   syncedAt: string,
   spend: number | null = null,
+  createdAt = syncedAt,
 ): ManagedEntityRecord => ({
   entityType: "ad-group",
   externalId,
   name: externalId,
   status,
+  createdAt,
   parentCampaignId: null,
   parentAdGroupId: null,
   metrics: {
@@ -42,12 +44,12 @@ describe("ads management view", () => {
     expect(ADS_MANAGEMENT_PAGE_SIZE).toBe(15);
   });
 
-  it("shows every status seen in the last 48 hours when all statuses are selected", () => {
+  it("shows only entities created in the last 48 hours when all statuses are selected", () => {
     const now = new Date("2026-07-21T12:00:00.000Z");
     const result = filterAdsManagementEntities([
       entity("enabled", "enabled", "2026-07-21T11:00:00.000Z"),
-      entity("disabled", "disabled", "2026-07-20T11:00:00.000Z"),
-      entity("expired", "disabled", "2026-07-19T11:59:59.000Z"),
+      entity("disabled", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-20T11:00:00.000Z"),
+      entity("expired", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-19T11:59:59.000Z"),
     ], { level: "ad-group", status: "all", query: "", now });
 
     expect(result.map((item) => item.externalId)).toEqual(["enabled", "disabled"]);

@@ -8,7 +8,43 @@ afterEach(() => {
 });
 
 describe("CookieAdsProvider", () => {
-  it("overrides a captured range with the account's rolling 48-hour window", async () => {
+  it("replays the imported appeal template with the target ad, creative, and reason", async () => {
+    let sentBody = "";
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sentBody = String(init?.body ?? "");
+      return new Response(JSON.stringify({ code: 0, data: { appeal_success: true } }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }));
+
+    const results = await new CookieAdsProvider().appeal({
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "appeal",
+          url: "https://ads.tiktok.com/api/v4/i18n/creation/audit/appeal_creative/?aadvid=123456",
+          method: "POST",
+          body: JSON.stringify({ ad_id: "old-ad", creative_id: "old-creative", appeal_reason: "old", appeal_reason_type: 1, attachment_list: [] }),
+          contentType: "application/json",
+        }],
+      },
+    }, [{ externalId: "ad-1", creativeId: "creative-1", reason: "我认为我的视频没有违规。" }]);
+
+    expect(JSON.parse(sentBody)).toMatchObject({
+      ad_id: "ad-1",
+      creative_id: "creative-1",
+      appeal_reason: "我认为我的视频没有违规。",
+      appeal_reason_type: 1,
+    });
+    expect(results).toEqual([expect.objectContaining({ ok: true })]);
+  });
+
+  it("overrides a captured range with the account's current local date", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T02:30:00.000Z"));
     let sentBody = "";
@@ -29,7 +65,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(JSON.parse(sentBody)).toMatchObject({
-      date_range: { start_date: "2026-07-14", end_date: "2026-07-16" },
+      date_range: { start_date: "2026-07-16", end_date: "2026-07-16" },
     });
   });
 
@@ -94,7 +130,7 @@ describe("CookieAdsProvider", () => {
 
     expect(JSON.parse(sentBody)).toMatchObject({
       common_req: {
-        st: "2026-07-17",
+        st: "2026-07-19",
         et: "2026-07-19",
         metrics: expect.arrayContaining(["stat_cost", "time_attr_on_web_cart"]),
       },

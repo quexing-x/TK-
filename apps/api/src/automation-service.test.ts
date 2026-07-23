@@ -4,6 +4,7 @@ import type { SyncDataQualityStatus } from "@tk-auto/core";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
+  type AppealMutation,
   type AdsProvider,
   type StatusMutation,
 } from "@tk-auto/providers";
@@ -18,8 +19,9 @@ class FakeProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Fake Cookie";
   readonly capabilityVersion = "fake-cookie-v1";
-  readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status"] as const);
+  readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status", "appeal-ads"] as const);
   readonly mutations: StatusMutation[] = [];
+  readonly appeals: AppealMutation[] = [];
   shouldFail = false;
   statusFailureKind: "retryable" | "unknown" | null = null;
   throwStatusError = false;
@@ -32,7 +34,8 @@ class FakeProvider implements AdsProvider {
   failNextSync = false;
   afterSync: (() => void | Promise<void>) | null = null;
   campaignCreatedAt = new Date().toISOString();
-  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" = "default";
+  scheduledStartAt = "2026-07-19T00:00:00.000Z";
+  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   syncCount = 0;
 
@@ -69,6 +72,7 @@ class FakeProvider implements AdsProvider {
         ad_name: "测试广告组",
         ad_primary_status: this.adGroupStatus,
         create_time: this.campaignCreatedAt,
+        start_time: this.scheduledStartAt,
         row_data: {
           campaign_id: "campaign-1",
           stat_cost: "20",
@@ -144,6 +148,17 @@ class FakeProvider implements AdsProvider {
         },
       });
     }
+    if (this.scenario === "appeal") {
+      entities.push({
+        entityType: "ad",
+        externalId: "ad-appeal-1",
+        payload: {
+          ad_id: "ad-appeal-1",
+          creative_id: "creative-appeal-1",
+          creative_status: "creative_offline_audit",
+        },
+      });
+    }
     if (this.scenario === "priority") {
       defaultGroup.externalId = "adgroup-low-priority";
       defaultGroup.payload.row_data = {
@@ -161,6 +176,7 @@ class FakeProvider implements AdsProvider {
           ad_name: "高优先级广告组",
           ad_primary_status: this.priorityHighStatus,
           create_time: this.campaignCreatedAt,
+          start_time: this.scheduledStartAt,
           row_data: {
             campaign_id: "campaign-1",
             stat_cost: "5",
@@ -226,6 +242,15 @@ class FakeProvider implements AdsProvider {
       }),
       message: this.shouldFail || this.statusFailureKind ? "rejected" : "accepted",
     }));
+  }
+
+  resolveCapabilities() {
+    return this.capabilities;
+  }
+
+  async appeal(_context: unknown, mutations: AppealMutation[]) {
+    this.appeals.push(...mutations);
+    return mutations.map((mutation) => ({ ...mutation, ok: true, message: "appealed" }));
   }
 }
 
@@ -1190,6 +1215,37 @@ describe("AutomationService", () => {
       overnight: 0,
       closing: 0,
     });
+  });
+
+  it("submits only offline-audit creatives at 01:00 or 12:00 and never repeats them", async () => {
+    provider.scenario = "appeal";
+    const synced = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", synced.entities, synced.result);
+
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-20T17:00:00.000Z"));
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-20T17:00:30.000Z"));
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-21T04:00:00.000Z"));
+
+    expect(provider.appeals).toEqual([{
+      externalId: "ad-appeal-1",
+      creativeId: "creative-appeal-1",
+      reason: "我认为我的视频没有违规。",
+    }]);
+    expect(store.listAdOperations("demo-account")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "appeal", source: "automation", status: "succeeded" }),
+    ]));
+  });
+
+  it("does not close an enabled ad group scheduled to start the next day", async () => {
+    provider.scheduledStartAt = "2026-07-21T00:00:00.000Z";
+    const refreshed = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", refreshed.entities, refreshed.result);
+
+    expect(service.enrollNightlyAdGroups("demo-account", "2026-07-20T15:45:00.000Z")).toEqual({
+      overnight: 0,
+      closing: 0,
+    });
+    expect(store.listScheduledActions("demo-account")).toEqual([]);
   });
 
   it("executes a user-created schedule while the account is in automatic mode", async () => {

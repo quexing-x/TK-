@@ -93,6 +93,7 @@ export function ConnectionPage({
   const [accessToken, setAccessToken] = useState("");
   const [readCurlCommand, setReadCurlCommand] = useState("");
   const [statusCurlCommand, setStatusCurlCommand] = useState("");
+  const [appealCurlCommand, setAppealCurlCommand] = useState("");
   const [copiedFilter, setCopiedFilter] = useState<string | null>(null);
   const [importFeedback, setImportFeedback] = useState<{
     message: string;
@@ -188,6 +189,10 @@ export function ConnectionPage({
     } finally {
       setBusy(null);
     }
+  };
+
+  const importAppealCurl = async () => {
+    try { setBusy("appeal-import"); const result = await api.importCookieCurl(account.id, appealCurlCommand, "appeal"); setConnections((current) => replaceProviderConnection(current, result)); setAppealCurlCommand(""); await load(); toast("申诉 cURL 已加密保存。", "success"); } catch (cause) { onError(getErrorMessage(cause)); } finally { setBusy(null); }
   };
 
   const saveApiSettings = async (event: FormEvent) => {
@@ -309,6 +314,8 @@ export function ConnectionPage({
                   <p>程序只提取并加密保存必要字段，不显示 Cookie、Token 或完整请求内容。</p>
                 </div>
               </div>
+
+              <div className="curl-import-actions"><textarea aria-label="申诉 cURL" className="curl-input" onChange={(event) => setAppealCurlCommand(event.target.value)} placeholder="粘贴 /appeal_creative/ 的完整 POST cURL" rows={4} spellCheck={false} value={appealCurlCommand} /><button className="secondary-button" disabled={!appealCurlCommand || busy !== null} onClick={() => void importAppealCurl()} type="button">导入申诉 cURL</button></div>
 
               <div className="cookie-import-steps">
                 <CurlStep

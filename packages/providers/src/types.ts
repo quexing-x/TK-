@@ -133,6 +133,7 @@ export interface TemplateCopyProvider extends ProviderContract {
 
 export interface AppealMutation {
   externalId: string;
+  creativeId: string;
   reason: string;
 }
 
