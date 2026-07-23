@@ -112,19 +112,20 @@ export class AutomationService {
     if (local.minute !== 0 || (local.hour !== 1 && local.hour !== 12)) return;
     const connection = this.store.getProviderConnection(accountId, account.providerKind);
     if (!connection || connection.status !== "ready") return;
-    const provider = this.providers.get(account.providerKind);
-    if (!provider.appeal || !provider.resolveCapabilities?.(await this.loadContext(accountId, account.providerKind, account.timezone)).has("appeal-ads")) return;
     const context = await this.loadContext(accountId, account.providerKind, account.timezone);
-    for (const entity of this.store.listProviderEntities(accountId, account.providerKind)) {
+    const provider = this.providers.get(account.providerKind);
+    if (!provider.appeal || !provider.resolveCapabilities?.(context).has("appeal-ads")) return;
+    const reason = this.store.getAutomationFeatureSettings().appeal.textTemplate;
+    for (const entity of this.store.listCurrentProviderEntities(accountId, account.providerKind)) {
       if (entity.entityType !== "ad" || this.store.hasAppealForEntity(accountId, entity.externalId)) continue;
       const payload = entity.payload as Record<string, unknown>;
       const status = String(payload.creative_status ?? "");
       if (status !== "creative_offline_audit") continue;
       const creativeId = String(payload.creative_id ?? "");
       if (!creativeId) continue;
-      const task = this.store.queueAppeal(accountId, account.providerKind, entity.externalId, this.store.getAutomationFeatureSettings().appeal.textTemplate);
+      const task = this.store.queueAppeal(accountId, account.providerKind, entity.externalId, reason, "automation");
       try {
-        const [result] = await provider.appeal(context, [{ externalId: entity.externalId, creativeId, reason: this.store.getAutomationFeatureSettings().appeal.textTemplate }]);
+        const [result] = await provider.appeal(context, [{ externalId: entity.externalId, creativeId, reason }]);
         this.store.completeAppeal(task.id, result?.ok ? "succeeded" : "failed", result?.message ?? "申诉未获确认");
       } catch (cause) { this.store.completeAppeal(task.id, "unknown", safeMessage(cause)); }
     }
