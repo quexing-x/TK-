@@ -94,7 +94,10 @@ export class CookieAdsProvider implements AdsProvider {
           ] as const
         : []),
       ...(hasCompleteStatusTemplates ? ["change-status"] as const : []),
-      ...(templates.some((item) => item.target === "appeal") ? ["appeal-ads"] as const : []),
+      // The appeal endpoint and body shape are shared. Authorization and
+      // advertiser-specific query parameters still come from this account's
+      // imported list session, so no per-account appeal cURL is required.
+      ...(hasListSession ? ["appeal-ads"] as const : []),
     ]);
   }
 
@@ -119,16 +122,21 @@ export class CookieAdsProvider implements AdsProvider {
   }
 
   async appeal(context: ProviderContext, mutations: import("./types.js").AppealMutation[]) {
+    const settings = CookieConnectionSettingsSchema.parse(context.settings);
     const credential = CookieCredentialInputSchema.parse(context.credential);
-    const template = credential.requestTemplates?.find((item) => item.target === "appeal" && !item.derived);
-    if (!template?.body) throw new RetryableCreationError("尚未导入广告申诉 cURL 模板。");
-    const templateBody = template.body;
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      throw new RetryableCreationError("尚未导入广告组列表 cURL，无法建立当前账户的申诉会话。");
+    }
     return Promise.all(mutations.map(async (mutation) => {
-      const body = JSON.parse(templateBody) as Record<string, unknown>;
-      body.ad_id = mutation.externalId;
-      body.creative_id = mutation.creativeId;
-      body.appeal_reason = mutation.reason;
-      const payload = await requestCookieJson({ ...template, body: JSON.stringify(body) }, credential);
+      const request = buildReusableAppealRequest(
+        sessionRequest,
+        settings.advertiserId,
+        mutation,
+      );
+      const payload = await requestCookieJson(request, credential);
       const data = isRecord(payload.data) ? payload.data : {};
       const ok = payload.code === 0 && data.appeal_success === true;
       return { ...mutation, ok, message: ok ? "申诉提交成功" : "申诉提交未获成功确认" };
@@ -2815,6 +2823,31 @@ function legacyRequest(url: string): CapturedCookieRequest | undefined {
   return url
     ? { target: "health", url, method: "GET" }
     : undefined;
+}
+
+function buildReusableAppealRequest(
+  sessionRequest: CapturedCookieRequest,
+  advertiserId: string,
+  mutation: import("./types.js").AppealMutation,
+): CapturedCookieRequest {
+  const url = new URL(sessionRequest.url);
+  url.pathname = "/api/v4/i18n/creation/audit/appeal_creative/";
+  url.searchParams.set("aadvid", advertiserId);
+  return {
+    target: "appeal",
+    url: url.toString(),
+    method: "POST",
+    contentType: "application/json",
+    headers: sessionRequest.headers,
+    derived: true,
+    body: JSON.stringify({
+      ad_id: mutation.externalId,
+      creative_id: mutation.creativeId,
+      appeal_reason: mutation.reason,
+      appeal_reason_type: 1,
+      attachment_list: [],
+    }),
+  };
 }
 
 function deriveFinalAdReadRequest(

@@ -8,40 +8,97 @@ afterEach(() => {
 });
 
 describe("CookieAdsProvider", () => {
-  it("replays the imported appeal template with the target ad, creative, and reason", async () => {
-    let sentBody = "";
-    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      sentBody = String(init?.body ?? "");
+  it("derives the reusable appeal request from the account session without an account appeal import", async () => {
+    const sentRequests: Array<{ url: string; body: string; headers: Record<string, string> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      sentRequests.push({
+        url: String(input),
+        body: String(init?.body ?? ""),
+        headers: init?.headers as Record<string, string>,
+      });
       return new Response(JSON.stringify({ code: 0, data: { appeal_success: true } }), {
         status: 200, headers: { "content-type": "application/json" },
       });
     }));
 
-    const results = await new CookieAdsProvider().appeal({
+    const provider = new CookieAdsProvider();
+    const context: ProviderContext = {
       accountId: "test-account",
       timezone: "Asia/Taipei",
-      settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
       credential: {
         kind: "cookie",
         cookie: "sessionid=test-cookie",
+        csrfToken: "test-csrf",
         csrfHeaderName: "x-csrftoken",
         requestTemplates: [{
-          target: "appeal",
-          url: "https://ads.tiktok.com/api/v4/i18n/creation/audit/appeal_creative/?aadvid=123456",
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=654321&msToken=session-query",
           method: "POST",
-          body: JSON.stringify({ ad_id: "old-ad", creative_id: "old-creative", appeal_reason: "old", appeal_reason_type: 1, attachment_list: [] }),
+          body: "{}",
           contentType: "application/json",
+          derived: false,
         }],
       },
-    }, [{ externalId: "ad-1", creativeId: "creative-1", reason: "我认为我的视频没有违规。" }]);
+    };
 
-    expect(JSON.parse(sentBody)).toMatchObject({
+    expect(provider.resolveCapabilities(context)).toContain("appeal-ads");
+    const results = await provider.appeal(context, [{
+      externalId: "ad-1",
+      creativeId: "creative-1",
+      reason: "我认为我的视频没有违规。",
+    }]);
+    const secondResults = await provider.appeal({
+      accountId: "second-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "777888", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=second-cookie",
+        csrfToken: "second-csrf",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=777888&msToken=second-query",
+          method: "POST",
+          body: "{}",
+          contentType: "application/json",
+          derived: false,
+        }],
+      },
+    }, [{
+      externalId: "ad-2",
+      creativeId: "creative-2",
+      reason: "第二个账户的申诉。",
+    }]);
+
+    const url = new URL(sentRequests[0]!.url);
+    expect(url.pathname).toBe("/api/v4/i18n/creation/audit/appeal_creative/");
+    expect(url.searchParams.get("aadvid")).toBe("654321");
+    expect(sentRequests[0]!.headers).toMatchObject({
+      cookie: "sessionid=test-cookie",
+      "x-csrftoken": "test-csrf",
+    });
+    expect(JSON.parse(sentRequests[0]!.body)).toEqual({
       ad_id: "ad-1",
       creative_id: "creative-1",
       appeal_reason: "我认为我的视频没有违规。",
       appeal_reason_type: 1,
+      attachment_list: [],
+    });
+    const secondUrl = new URL(sentRequests[1]!.url);
+    expect(secondUrl.searchParams.get("aadvid")).toBe("777888");
+    expect(sentRequests[1]!.headers).toMatchObject({
+      cookie: "sessionid=second-cookie",
+      "x-csrftoken": "second-csrf",
+    });
+    expect(JSON.parse(sentRequests[1]!.body)).toMatchObject({
+      ad_id: "ad-2",
+      creative_id: "creative-2",
+      appeal_reason: "第二个账户的申诉。",
     });
     expect(results).toEqual([expect.objectContaining({ ok: true })]);
+    expect(secondResults).toEqual([expect.objectContaining({ ok: true })]);
   });
 
   it("overrides a captured range with the account's current local date", async () => {
