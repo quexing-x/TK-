@@ -431,7 +431,7 @@ export const api = {
   importCookieCurl: (
     accountId: string,
     command: string,
-    step?: "read" | "status",
+    step?: "read" | "status" | "appeal",
   ) =>
     request<ProviderConnection>(
       `/api/accounts/${accountId}/connections/cookie/import-curl`,

@@ -89,7 +89,7 @@ const ProviderParamsSchema = AccountParamsSchema.extend({
 });
 const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
-  step: z.enum(["read", "status"]).optional(),
+  step: z.enum(["read", "status", "appeal"]).optional(),
 });
 const EntityParamsSchema = AccountParamsSchema.extend({
   entityType: SyncEntityTypeSchema,
