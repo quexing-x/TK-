@@ -142,6 +142,8 @@ export function ExpandGroupsPanel({
       );
       const adGroups = entities
         .filter((entity) => entity.entityType === "ad-group" && !entity.ignored)
+        // 系列预算(CBO)广告组不能设与系列不同的组预算，扩组必然与 CBO 冲突，直接排除出名单。
+        .filter((entity) => !entity.campaignBudgetOptimized)
         .filter((entity) => withinWindow(entity.createdAt, timeFilter, now))
         .filter((entity) => {
           const conversions = entity.metrics.conversions ?? 0;
@@ -153,7 +155,12 @@ export function ExpandGroupsPanel({
         .filter((entity) => !normalizedQuery
           || entity.name.toLowerCase().includes(normalizedQuery)
           || entity.externalId.toLowerCase().includes(normalizedQuery))
-        .sort((left, right) => (right.metrics.spend ?? 0) - (left.metrics.spend ?? 0));
+        // 按创建时间由近到远（最新在上）。
+        .sort((left, right) => {
+          const leftAt = left.createdAt ? new Date(left.createdAt).getTime() : 0;
+          const rightAt = right.createdAt ? new Date(right.createdAt).getTime() : 0;
+          return rightAt - leftAt;
+        });
       return {
         accountId: state.accountId,
         displayName: accountName.get(state.accountId) ?? state.accountId,
@@ -163,6 +170,15 @@ export function ExpandGroupsPanel({
       };
     });
   }, [accountName, conversionFilter, visibleStates, entitiesByAccount, query, statusFilter, timeFilter]);
+
+  // 因系列预算(CBO)被排除的广告组数量，用于向用户解释名单为何变短。
+  const cboHiddenCount = useMemo(
+    () => visibleStates.reduce((total, state) => total
+      + (entitiesByAccount[state.accountId] ?? []).filter(
+        (entity) => entity.entityType === "ad-group" && !entity.ignored && entity.campaignBudgetOptimized,
+      ).length, 0),
+    [visibleStates, entitiesByAccount],
+  );
 
   const selectableKeys = useMemo(
     () => new Set(groups.flatMap((group) =>
@@ -301,6 +317,8 @@ export function ExpandGroupsPanel({
     </div>
 
     {excludedStates.length > 0 && <p className="expand-excluded-note"><Info size={14} /> <span>{excludedStates.length} 个账户不可扩组（未连接、无复制能力或同步非健康），已隐藏：{excludedStates.map((state) => accountName.get(state.accountId) ?? state.accountId).join("、")}。</span></p>}
+
+    {cboHiddenCount > 0 && <p className="expand-excluded-note"><Info size={14} /> <span>{cboHiddenCount} 个系列预算(CBO)广告组不支持扩组（组预算须与系列一致），已从名单中排除。</span></p>}
 
     {groups.length === 0 ? (eligibleStates.length === 0
       ? <div className="expand-empty"><Inbox size={30} /><strong>没有可扩组的账户</strong><span>请确认账户已接入、具备复制能力，并在“用户管理”完成一次健康的只读同步。</span></div>

@@ -72,6 +72,8 @@ describe("selectPendingAutomationDecisions", () => {
       status: "disabled",
       parentCampaignId: null,
       parentAdGroupId: null,
+      campaignBudget: null,
+      campaignBudgetOptimized: false,
       metrics: decision().metricSnapshot,
       ignored: false,
       syncedAt: "2026-07-21T10:01:00.000Z",

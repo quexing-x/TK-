@@ -1456,6 +1456,8 @@ function hasStartedBy(scheduledStartAt: string | null | undefined, now: Date): b
 export class AutomationScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
+  // 记录每个账户上次跨天检查的本地日期，用于「凌晨 0:00 自动关闭低风险自动化」。
+  private lowRiskResetDates = new Map<string, string>();
 
   constructor(
     private readonly store: AutomationStore,
@@ -1475,10 +1477,38 @@ export class AutomationScheduler {
     this.timer = null;
   }
 
+  // 每账户按其本地时区跨过 0:00 后，自动关闭已开启的低风险自动化，避免忘记关。
+  // 首次观察某账户只记录当天，不触发关闭，防止软件重启时误关当天刚开启的策略。
+  private resetLowRiskAutomationAtMidnight(): void {
+    for (const account of this.store.listAccounts()) {
+      const today = dateKeyInTimeZone(new Date(), account.timezone);
+      const last = this.lowRiskResetDates.get(account.id);
+      if (last === undefined) {
+        this.lowRiskResetDates.set(account.id, today);
+        continue;
+      }
+      if (last === today) continue;
+      this.lowRiskResetDates.set(account.id, today);
+      const policy = this.store.getLowRiskAutomationPolicy(account.id);
+      if (policy.enabled) {
+        this.store.updateLowRiskAutomationPolicy(account.id, {
+          enabled: false,
+          dailyActionLimit: policy.dailyActionLimit,
+        });
+      }
+    }
+  }
+
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      // 跨天关闭低风险自动化：即使总开关关闭也要执行，确保 0:00 一定关掉。
+      try {
+        this.resetLowRiskAutomationAtMidnight();
+      } catch {
+        // 关闭低风险自动化是尽力而为，绝不阻塞轮询主流程。
+      }
       if (!this.store.getSystemRuntimeState().enabled) return;
       try {
         await this.notifications?.flushPending();

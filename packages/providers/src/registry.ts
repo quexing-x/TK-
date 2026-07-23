@@ -190,6 +190,7 @@ export class ProviderRegistry {
       scheduledStartAt?: string | null;
       dailyBudget?: number;
       bid?: number | null;
+      sourceCampaignBudgetOptimized?: boolean;
       onBeforeDispatch?: () => void;
     },
   ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
@@ -204,6 +205,7 @@ export class ProviderRegistry {
           scheduledStartAt?: string | null;
           dailyBudget?: number;
           bid?: number | null;
+          sourceCampaignBudgetOptimized?: boolean;
           onBeforeDispatch?: () => void;
         },
       ) => Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }>;

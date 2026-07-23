@@ -574,6 +574,13 @@ export class LaunchService {
         { length: Math.max(1, Math.min(10, input.count)) },
         (_unused, index) => `${input.baseAdGroupName}-${index + 1}`,
       );
+      // 源系列为系列预算(CBO)时，广告组不能设与系列不同的预算——跳过组预算覆盖，
+      // 让新组继承系列预算，避免真机 budget_auto_adjust_initial_budget_not_equal_campaign_budget。
+      const sourceCampaignBudgetOptimized = this.store
+        .listCurrentManagedEntities(input.accountId, account.providerKind)
+        .some((entity) => entity.entityType === "ad-group"
+          && entity.externalId === input.sourceAdGroupId
+          && entity.campaignBudgetOptimized);
       const result = await this.providers.copyAdGroupToExistingCampaign(account.providerKind, context, {
         sourceAdGroupId: input.sourceAdGroupId,
         existingCampaignId: input.sourceCampaignId,
@@ -582,6 +589,7 @@ export class LaunchService {
         scheduledStartAt: input.scheduledStartAt ?? null,
         dailyBudget: input.dailyBudget,
         bid: input.bid,
+        ...(sourceCampaignBudgetOptimized ? { sourceCampaignBudgetOptimized: true } : {}),
         ...(input.onBeforeDispatch ? { onBeforeDispatch: input.onBeforeDispatch } : {}),
       });
       return [{
@@ -686,8 +694,11 @@ export class LaunchService {
     skipped: number;
   }> {
     const count = Math.max(1, Math.min(10, input.count));
-    const dateSuffix = new Date().toISOString().slice(5, 10).replace("-", "");
     const scheduledStartAt = input.scheduledStartAt ?? null;
+    // 命名后缀按【投放日期】：定时投放取排期当天，立即投放取当天；用本地日期，
+    // 与用户在界面选的投放时间一致（而非创建时间）。
+    const deliveryDate = scheduledStartAt ? new Date(scheduledStartAt) : new Date();
+    const dateSuffix = `${String(deliveryDate.getMonth() + 1).padStart(2, "0")}${String(deliveryDate.getDate()).padStart(2, "0")}`;
     if (scheduledStartAt && !input.sameCampaign) {
       throw new RetryableCreationError("定时扩组仅支持挂回原系列；已在发送任何创建请求前阻止执行。");
     }

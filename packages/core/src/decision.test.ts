@@ -139,3 +139,40 @@ describe("evaluateAutomation", () => {
     expect(result.skipped[0]?.reason).toContain("状态管理能力");
   });
 });
+
+describe("normalizeProviderEntity — 系列预算(CBO) 识别", () => {
+  const adGroup = (payload: Record<string, unknown>): ProviderEntity => ({
+    entityType: "ad-group",
+    externalId: "adgroup-1",
+    payload,
+  });
+
+  it("组预算(ABO)：campaign_budget_mode 为 -1，不视为 CBO", () => {
+    const snapshot = normalizeProviderEntity(adGroup({
+      campaign_budget_mode: "-1",
+      campaign_budget: "0.00",
+      budget_mode: 3,
+      ad_budget: "50.00",
+    }));
+    expect(snapshot.campaignBudgetOptimized).toBe(false);
+    expect(snapshot.campaignBudget).toBe(0);
+  });
+
+  it("系列预算(CBO)：campaign_budget_mode 非 -1 或 campaign_budget>0 视为 CBO", () => {
+    expect(normalizeProviderEntity(adGroup({
+      campaign_budget_mode: "2",
+      campaign_budget: "0.00",
+    })).campaignBudgetOptimized).toBe(true);
+
+    const withBudget = normalizeProviderEntity(adGroup({
+      campaign_budget_mode: "-1",
+      campaign_budget: "200.00",
+    }));
+    expect(withBudget.campaignBudgetOptimized).toBe(true);
+    expect(withBudget.campaignBudget).toBe(200);
+  });
+
+  it("缺少系列预算字段时保守判为非 CBO", () => {
+    expect(normalizeProviderEntity(adGroup({ ad_budget: "50.00" })).campaignBudgetOptimized).toBe(false);
+  });
+});

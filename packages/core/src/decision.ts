@@ -133,6 +133,10 @@ export interface ManagedEntitySnapshot {
   status: EntityOperationalStatus;
   parentCampaignId: string | null;
   parentAdGroupId: string | null;
+  /** Owning campaign's budget (系列预算); 0 when the campaign holds no budget. */
+  campaignBudget: number | null;
+  /** True when the owning campaign runs 系列预算优化 (CBO); such ad groups cannot carry their own budget. */
+  campaignBudgetOptimized: boolean;
   metrics: NormalizedMetrics;
 }
 
@@ -249,6 +253,9 @@ export function normalizeProviderEntity(
     : {};
   const source = { ...entity.payload, ...rowData, ...reportMetrics };
 
+  const campaignBudget = firstNumber(source, ["campaign_budget"]);
+  const campaignBudgetMode = firstNumber(source, ["campaign_budget_mode"]);
+
   return {
     entityType: entity.entityType,
     externalId: entity.externalId,
@@ -268,6 +275,12 @@ export function normalizeProviderEntity(
       "ad_group_id",
       "adGroupId",
     ]),
+    // 系列预算(CBO)：campaign_budget_mode 非 -1（无系列预算）或 campaign_budget>0 即为 CBO。
+    // 该字段在广告组行上即携带其所属系列的预算信息，无需回查系列实体。
+    campaignBudget,
+    campaignBudgetOptimized:
+      (campaignBudgetMode !== null && campaignBudgetMode > 0)
+      || (campaignBudget !== null && campaignBudget > 0),
     metrics: {
       cost_per_conversion: firstNumber(source, [
         "time_attr_conversion_cost",

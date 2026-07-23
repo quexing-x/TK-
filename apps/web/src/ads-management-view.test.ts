@@ -22,6 +22,8 @@ const entity = (
   createdAt,
   parentCampaignId: null,
   parentAdGroupId: null,
+  campaignBudget: null,
+  campaignBudgetOptimized: false,
   metrics: {
     spend,
     cost_per_click: null,

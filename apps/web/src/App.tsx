@@ -1000,6 +1000,14 @@ function AdsManagementPage({
   const auth = useAuth();
   const { confirm, prompt, toast } = useOverlays();
   const canOperateAds = auth.status.permissions.includes("ads:operate");
+  const [lowRiskOn, setLowRiskOn] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void api.getLowRiskAutomation(account.id)
+      .then((state) => { if (!cancelled) setLowRiskOn(state.policy.enabled); })
+      .catch(() => { if (!cancelled) setLowRiskOn(false); });
+    return () => { cancelled = true; };
+  }, [account.id]);
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
   const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
@@ -1286,7 +1294,7 @@ function AdsManagementPage({
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em></h2><p>人工接管的广告组不参与自动化决策</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em>{lowRiskOn && <span className="low-risk-reminder" title="该账户已开启低风险自动化：仅自动关闭，开启需人工批准；每日 0:00 自动关闭本开关。">⚠ 低风险自动化已开启</span>}</h2><p>人工接管的广告组不参与自动化决策</p></div></div>
           <small className="inline-protection-note">
             {remoteRefreshing
               ? "正在后台刷新平台数据…"
