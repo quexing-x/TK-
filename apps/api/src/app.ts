@@ -632,6 +632,29 @@ export async function createApp(
     }
   });
 
+  app.post("/api/ad-groups/batch-expand", async (request, reply) => {
+    const input = z.object({
+      sources: z.array(z.object({
+        accountId: z.string().min(1),
+        sourceCampaignId: z.string().min(1),
+        sourceCampaignName: z.string().min(1),
+        sourceAdGroupId: z.string().min(1),
+        sourceAdGroupName: z.string().min(1),
+      })).min(1).max(200),
+      count: z.number().int().min(1).max(10),
+      dailyBudget: z.number().positive(),
+      bid: z.number().nonnegative().nullable(),
+      launchImmediately: z.boolean(),
+      sameCampaign: z.boolean().default(true),
+    }).parse(request.body);
+    try {
+      const result = await launchService.batchExpandAdGroups(input);
+      return reply.send(result);
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   app.post("/api/launch-plans/:planId/execute", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
@@ -1714,6 +1737,7 @@ export function requiredPermission(
     return "ads:operate";
   }
   if (path.includes("/manual-takeovers")) return "ads:operate";
+  if (path.startsWith("/api/ad-groups")) return "ads:operate";
   if (path.startsWith("/api/launch-plans") || path.startsWith("/api/launch-presets")) return "launch:manage";
   if (path.startsWith("/api/accounts")) return "accounts:manage";
   return method === "DELETE" ? "system:control" : null;

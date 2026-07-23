@@ -1167,10 +1167,17 @@ export class AutomationStore {
     const row = this.db
       .prepare("SELECT * FROM automation_feature_settings WHERE id = 1")
       .get() as SqlRow;
-    return AutomationFeatureSettingsSchema.parse({
-      ...JSON.parse(String(row.settings_json)),
+    const stored = JSON.parse(String(row.settings_json)) as Record<string, unknown>;
+    // Legacy rows can predate later-added required fields (e.g. appeal.enabled).
+    // Merge each section over the defaults so old configs stay parseable instead
+    // of throwing and crashing the caller (the scheduler ticks through here).
+    const merged = {
+      appeal: { ...defaultAutomationFeatureSettings.appeal, ...(stored.appeal as object ?? {}) },
+      copy: { ...defaultAutomationFeatureSettings.copy, ...(stored.copy as object ?? {}) },
+      deletion: { ...defaultAutomationFeatureSettings.deletion, ...(stored.deletion as object ?? {}) },
       updatedAt: row.updated_at,
-    });
+    };
+    return AutomationFeatureSettingsSchema.parse(merged);
   }
 
   updateAutomationFeatureSettings(
@@ -2621,6 +2628,55 @@ export class AutomationStore {
       `UPDATE launch_creation_locks SET owner_id = NULL, claimed_at = ?
        WHERE plan_id = ? AND account_id = ? AND campaign_name = ? AND owner_id = ?`,
     ).run(new Date().toISOString(), planId, accountId, campaignName, ownerId);
+  }
+
+  // 一键扩组幂等锁：以 taskKey（账户+源组+扩组预设指纹）去重。
+  // 返回 "claimed" 表示可执行；"succeeded" 表示相同任务已成功、应跳过；
+  // "running" 表示相同任务正在进行（未过期），应跳过以免重复建组。
+  claimAdGroupExpandTask(
+    taskKey: string,
+    accountId: string,
+    sourceAdGroupId: string,
+  ): "claimed" | "running" | "succeeded" {
+    const now = new Date().toISOString();
+    const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.prepare(
+        "SELECT status, claimed_at FROM ad_group_expand_tasks WHERE task_key = ?",
+      ).get(taskKey) as SqlRow | undefined;
+      if (existing) {
+        if (String(existing.status) === "succeeded") {
+          this.db.exec("COMMIT");
+          return "succeeded";
+        }
+        if (String(existing.claimed_at) > staleBefore) {
+          this.db.exec("COMMIT");
+          return "running";
+        }
+      }
+      this.db.prepare(
+        `INSERT INTO ad_group_expand_tasks (task_key, account_id, source_ad_group_id, status, claimed_at, updated_at)
+         VALUES (?, ?, ?, 'running', ?, ?)
+         ON CONFLICT(task_key) DO UPDATE SET status = 'running', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at`,
+      ).run(taskKey, accountId, sourceAdGroupId, now, now);
+      this.db.exec("COMMIT");
+      return "claimed";
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // 成功则固化为 succeeded（后续相同任务永久跳过）；失败则删除锁，允许重试。
+  finishAdGroupExpandTask(taskKey: string, ok: boolean): void {
+    if (ok) {
+      this.db.prepare(
+        "UPDATE ad_group_expand_tasks SET status = 'succeeded', updated_at = ? WHERE task_key = ?",
+      ).run(new Date().toISOString(), taskKey);
+    } else {
+      this.db.prepare("DELETE FROM ad_group_expand_tasks WHERE task_key = ?").run(taskKey);
+    }
   }
 
   renewLaunchCreationScope(
@@ -5461,6 +5517,15 @@ export class AutomationStore {
         ad_group_names_json TEXT NOT NULL DEFAULT '[]',
         uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
         PRIMARY KEY (plan_id, account_id, campaign_name)
+      );
+
+      CREATE TABLE IF NOT EXISTS ad_group_expand_tasks (
+        task_key TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        source_ad_group_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded')),
+        claimed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS launch_plan_item_attempts (

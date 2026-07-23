@@ -6,8 +6,16 @@ import { useAuth } from "./AuthGate";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
 import { canUseCopySource, canUseLaunchTarget } from "./provider-capability-view";
 import { createLaunchProgressPoller } from "./launch-progress-polling";
+import { ExpandGroupsPanel } from "./ExpandGroupsPanel";
+import type { ReadOnlySyncResult } from "@tk-auto/core";
 
-type LaunchMode = "single" | "multi" | "copy";
+type LaunchMode = "single" | "multi" | "copy" | "expand";
+type ConnectionState = {
+  accountId: string;
+  connection: ProviderConnection | null;
+  latestSync: ReadOnlySyncResult | null;
+  capabilities: AccountProviderCapabilities;
+};
 type LaunchDispatchMode = "queue" | "immediate";
 type LaunchFeedback = {
   tone: "success" | "warning" | "danger";
@@ -56,7 +64,7 @@ const freshPreset = (): LaunchPresetInput => ({
   creationConfig: defaultCreationPresetConfig,
 });
 
-export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; preferredAccountId: string; onError: (message: string | null) => void }) {
+export function LaunchPage({ accounts, accountCapabilities, connectionStates, preferredAccountId, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; connectionStates: ConnectionState[]; preferredAccountId: string; onError: (message: string | null) => void }) {
   const auth = useAuth();
   const [launchMode, setLaunchMode] = useState<LaunchMode>("single");
   const [dispatchMode, setDispatchMode] = useState<LaunchDispatchMode>("queue");
@@ -342,6 +350,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     try {
       setBusy(true);
       setExecutionFeedback(null);
+      if (launchMode === "expand") return;
       const plan = await api.createLaunchPlan({
         mode: launchMode,
         sourceAccountId: launchMode === "copy" ? sourceAccountId : selectedAccountIds[0] ?? sourceAccountId,
@@ -413,7 +422,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
     <div className="launch-workbench">
       <aside className="launch-mode-sidebar">
 
-    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
+    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建'],['expand','一键扩组','按账户勾选广告组，为每个源组各复制 N 个新组']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
 
         <div className="launch-sidebar-summary">
           <span><small>已选账户</small><strong>{selectedAccountIds.length}</strong></span>
@@ -423,6 +432,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
       </aside>
 
       <main className="launch-workspace">
+        {launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onError={onError} /> : <>
 
     <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
@@ -485,6 +495,7 @@ export function LaunchPage({ accounts, accountCapabilities, preferredAccountId, 
 
     <div className="panel table-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>后台执行时会自动刷新逐项状态和当前阶段。</p></div></div></div><div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>{plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => { const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0); const failed = plan.executionResults.reduce((total, item) => total + item.failedCount, 0); const unknown = plan.executionResults.reduce((total, item) => total + item.unknownCount, 0); const items = planItems[plan.id] ?? []; const failedItems = items.filter((item) => item.status === "failed"); const unknownItems = items.filter((item) => item.status === "unknown"); return <tr key={plan.id}><td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.launchRows.length} 条 × {plan.targetAccountIds.length} 个账户</td><td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : ["failed", "unknown"].includes(item.status) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adName} · {launchItemStatusLabel(item.status)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td><td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">成功 {created} · 失败 {failed} · 待核验 {unknown}</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{item.accountId}：{detail.text}</small> : null; })}</td><td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重试 {item.launchRow.adName}</button>)}{unknownItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => setVerificationTarget({ planId: plan.id, item })} type="button">人工核验 {item.launchRow.adName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td></tr>; })}</tbody></table></div></div>
 
+        </>}
       </main>
     </div>
 
