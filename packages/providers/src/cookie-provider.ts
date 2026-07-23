@@ -405,6 +405,9 @@ export class CookieAdsProvider implements AdsProvider {
             failureKind: cause instanceof UnknownCreationStateError
               ? "unknown"
               : "retryable",
+            retrySafe: cause instanceof ConfirmedCreationFailureError
+              ? cause.retrySafe
+              : !(cause instanceof UnknownCreationStateError),
             message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
           });
         }
@@ -467,8 +470,12 @@ export class CookieAdsProvider implements AdsProvider {
       existingCampaignId: string;
       names: string[];
       initialStatus: "enabled" | "disabled";
+      scheduledStartAt?: string | null;
+      dailyBudget?: number;
+      bid?: number | null;
+      onBeforeDispatch?: () => void;
     },
-  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[] }> {
+  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
     const sessionRequest = credential.requestTemplates?.find(
       (item) => item.target === "ad-group" && !item.derived,
@@ -480,7 +487,15 @@ export class CookieAdsProvider implements AdsProvider {
     const riskInfo = profile && isRecord(profile.publishPayload) && isRecord(profile.publishPayload.risk_info)
       ? profile.publishPayload.risk_info
       : {};
-    const dispatchState = { mutationDispatched: false };
+    const dispatchState: CreationDispatchState = {
+      mutationDispatched: false,
+      acceptedMutationCount: 0,
+      ...(input.onBeforeDispatch ? { onBeforeMutationDispatch: input.onBeforeDispatch } : {}),
+    };
+    const scheduledStart = input.scheduledStartAt
+      ? parseNativeScheduleStart(input.scheduledStartAt)
+      : null;
+    let copyAccepted = false;
     try {
       // 1) ad_snap/copy：把源广告组连同创意克隆进现有系列，返回草稿 snap/sketch。
       const copied = await requestCreationStep(
@@ -500,16 +515,37 @@ export class CookieAdsProvider implements AdsProvider {
         credential,
         { semantics: "mutation", dispatchState },
       );
+      // A structured code:0 response proves TikTok accepted the copy step. Any
+      // later failure leaves remote draft state behind, so rerunning the whole
+      // expansion could create duplicates even when the later step was a
+      // structured rejection or a local payload error.
+      copyAccepted = true;
       const data = isRecord(copied.data) ? copied.data : undefined;
       const allCopy = data && isRecord(data.all_copy_result) ? data.all_copy_result : undefined;
-      const list = allCopy && Array.isArray(allCopy.ad_and_creative_copy_result_list)
+      let list = allCopy && Array.isArray(allCopy.ad_and_creative_copy_result_list)
         ? allCopy.ad_and_creative_copy_result_list.filter(isRecord)
         : [];
+      const simpleAdSnapId = data ? nonEmptyId(data.ad_snap_id) : undefined;
+      const simpleAdSketchId = data ? nonEmptyId(data.ad_sketch_id) : undefined;
+      const simpleCopyResult = list.length === 0 && Boolean(simpleAdSnapId && simpleAdSketchId);
+      if (simpleCopyResult) {
+        list = [{
+          new_ad_snap_info_item: { ad_snap_id: simpleAdSnapId },
+          new_ad_sketch_id: simpleAdSketchId,
+          new_creative_snap_info_item_list: [],
+          new_creative_sketch_ids: [],
+        }];
+      }
       if (list.length === 0) {
-        return { ok: false, message: "ad_snap/copy 未返回可发布的草稿。" };
+        throw new UnknownCreationStateError("ad_snap/copy 未返回可识别的草稿标识。");
+      }
+      if (list.length !== input.names.length) {
+        throw new UnknownCreationStateError(
+          `ad_snap/copy 仅返回 ${list.length}/${input.names.length} 个广告组草稿，已停止发布。`,
+        );
       }
       // 2) 用复制响应拼 publishItems（结构不同于 campaign_snap/copy）。
-      const publishItems: DraftPublishItem[] = list.map((item) => {
+      let publishItems: DraftPublishItem[] = list.map((item) => {
         const adSnap = isRecord(item.new_ad_snap_info_item) ? item.new_ad_snap_info_item : {};
         const adSnapId = nonEmptyId(adSnap.ad_snap_id);
         const adSketchId = nonEmptyId(item.new_ad_sketch_id);
@@ -519,22 +555,52 @@ export class CookieAdsProvider implements AdsProvider {
         const creativeSketchIds = Array.isArray(item.new_creative_sketch_ids)
           ? item.new_creative_sketch_ids
           : [];
-        if (!adSnapId || !adSketchId || creatives.length === 0 || creatives.length !== creativeSketchIds.length) {
+        if (!adSnapId || !adSketchId || creatives.length !== creativeSketchIds.length) {
           throw new UnknownCreationStateError("复制草稿缺少完整的 snap/sketch 标识。");
+        }
+        const creativeSnapInfoList = creatives.map((creative, creativeIndex) => ({
+          creative_id: "",
+          creative_snap_id: nonEmptyId(creative.creative_snap_id) ?? "",
+          creative_sketch_id: nonEmptyId(creativeSketchIds[creativeIndex]) ?? "",
+          need_publish: true as const,
+        }));
+        if (creativeSnapInfoList.some((creative) => !creative.creative_snap_id || !creative.creative_sketch_id)) {
+          throw new UnknownCreationStateError("复制草稿包含空的创意 snap/sketch 标识，已停止发布。");
         }
         return {
           ad_id: "",
           ad_snap_id: adSnapId,
           ad_sketch_id: adSketchId,
           need_publish: true as const,
-          creative_snap_info_list: creatives.map((creative, creativeIndex) => ({
-            creative_id: "",
-            creative_snap_id: nonEmptyId(creative.creative_snap_id) ?? "",
-            creative_sketch_id: nonEmptyId(creativeSketchIds[creativeIndex]) ?? "",
-            need_publish: true as const,
-          })),
+          creative_snap_info_list: creativeSnapInfoList,
         };
       });
+      await applyCopiedAdGroupOverrides({
+          sessionRequest,
+          credential,
+          dispatchState,
+          campaignId: input.existingCampaignId,
+          publishItems,
+          scheduledStart,
+          timezone: context.timezone ?? "UTC",
+          riskInfo,
+          ...(input.dailyBudget !== undefined ? { dailyBudget: input.dailyBudget } : {}),
+          ...(input.bid !== undefined ? { bid: input.bid } : {}),
+        });
+      if (simpleCopyResult) {
+        publishItems = await materializeSimpleCopyCreativeDrafts({
+          sessionRequest,
+          credential,
+          dispatchState,
+          publishItems,
+          riskInfo,
+        });
+      }
+      if (publishItems.some((item) => item.creative_snap_info_list.length === 0)) {
+        throw new UnknownCreationStateError(
+          `ad_snap/copy 仅返回广告组草稿，未返回可发布的创意草稿标识；${scheduledStart ? "排期" : "广告组设置"}已保存，但已停止发布且禁止自动重试。`,
+        );
+      }
       // 2.5) 生成 CTA（程序化创意必需，否则发布报缺少行动引导/URL）。
       const checkInfo = publishItems.map((item) => ({
         ad_id: "",
@@ -558,32 +624,430 @@ export class CookieAdsProvider implements AdsProvider {
             campaignSnapId: "",
             campaignSketchId: "",
             publishItems,
-            initialStatus: input.initialStatus,
+            initialStatus: scheduledStart ? "enabled" : input.initialStatus,
           })
         : buildPublishInput({
             campaignSnapId: input.existingCampaignId,
             campaignSketchId: input.existingCampaignId,
             adAndCreativeSnapInfoList: publishItems,
-          }, input.initialStatus);
+          }, scheduledStart ? "enabled" : input.initialStatus);
       publishPayload.campaign_id = input.existingCampaignId;
       publishPayload.campaign_snap_id = "";
       publishPayload.campaign_sketch_id = "";
+      if (scheduledStart && scheduledStart.getTime() <= Date.now()) {
+        throw new UnknownCreationStateError("TikTok 原生排期在发布前已到期；草稿已创建，已停止发布并禁止自动重试。");
+      }
       const published = await requestCreationStep(
         "create_by_snap",
         () => creationRequest(sessionRequest, "async_creation/create_by_snap", publishPayload),
         credential,
         { semantics: "mutation", dispatchState },
       );
-      await awaitCreationResult(sessionRequest, credential, published, input.existingCampaignId);
+      const completed = await awaitCreationResult(sessionRequest, credential, published, input.existingCampaignId);
+      const completedCounts = completedCreationCounts(completed);
+      const expectedCreativeCount = publishItems.reduce(
+        (total, item) => total + item.creative_snap_info_list.length,
+        0,
+      );
+      const expectedCreativeCountsByAdGroup = publishItems
+        .map((item) => item.creative_snap_info_list.length)
+        .sort((left, right) => left - right);
+      const completedCreativeCountsByAdGroup = [...completedCounts.creativeCountsByAdGroup]
+        .sort((left, right) => left - right);
+      if (
+        completedCounts.adGroupCount !== publishItems.length
+        || completedCounts.creativeCount !== expectedCreativeCount
+        || completedCreativeCountsByAdGroup.length !== expectedCreativeCountsByAdGroup.length
+        || completedCreativeCountsByAdGroup.some(
+          (count, index) => count !== expectedCreativeCountsByAdGroup[index],
+        )
+      ) {
+        throw new UnknownCreationStateError(
+          `TikTok 创建终态不完整：广告组 ${completedCounts.adGroupCount}/${publishItems.length}，广告 ${completedCounts.creativeCount}/${expectedCreativeCount}，每组广告 ${completedCreativeCountsByAdGroup.join(",") || "无"}（预期 ${expectedCreativeCountsByAdGroup.join(",") || "无"}）；禁止自动重试。`,
+        );
+      }
       return {
         ok: true,
         message: `同系列复制已发布 ${publishItems.length} 个广告组`,
         adGroupSnapIds: publishItems.map((item) => item.ad_snap_id),
       };
     } catch (cause) {
-      return { ok: false, message: cause instanceof Error ? cause.message : "同系列复制失败" };
+      return {
+        ok: false,
+        message: cause instanceof Error ? cause.message : "同系列复制失败",
+        failureKind: cause instanceof ConfirmedCreationFailureError
+          ? "failed"
+          : cause instanceof UnknownCreationStateError || copyAccepted
+            ? "unknown"
+            : "failed",
+        retrySafe: cause instanceof ConfirmedCreationFailureError
+          ? cause.retrySafe && dispatchState.acceptedMutationCount === 0
+          : !copyAccepted,
+      };
     }
   }
+}
+
+async function materializeSimpleCopyCreativeDrafts(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  publishItems: DraftPublishItem[];
+  riskInfo: Record<string, unknown>;
+}): Promise<DraftPublishItem[]> {
+  const rows = await listAllCreativeSketchRows(input);
+
+  const result: DraftPublishItem[] = [];
+  for (const publishItem of input.publishItems) {
+    const creativeSketchIds = [...new Set(rows
+      .filter((row) => nonEmptyId(row.ad_sketch_id) === publishItem.ad_sketch_id)
+      .map((row) => nonEmptyId(row.creative_sketch_id))
+      .filter((id): id is string => Boolean(id)))];
+    if (creativeSketchIds.length === 0) {
+      throw new UnknownCreationStateError(
+        `TikTok 已复制广告组草稿 ${publishItem.ad_sketch_id}，但未能定位其创意草稿；禁止自动重试。`,
+      );
+    }
+
+    const detail = await requestCreationStep(
+      "creative_sketch/detail",
+      () => creationPathGetRequest(
+        input.sessionRequest,
+        "/mi/api/v4/i18n/creation/creative_sketch/detail/",
+        { creative_sketch_ids: creativeSketchIds.join(",") },
+      ),
+      input.credential,
+      { semantics: "preflight-read", dispatchState: input.dispatchState },
+    );
+    const detailData = isRecord(detail.data) ? detail.data : undefined;
+    const detailMap = detailData && isRecord(detailData.creative_sketch_info_map)
+      ? detailData.creative_sketch_info_map
+      : undefined;
+    const forms = creativeSketchIds.map((creativeSketchId) => {
+      const info = detailMap && isRecord(detailMap[creativeSketchId])
+        ? detailMap[creativeSketchId]
+        : undefined;
+      const rawForm = info && isRecord(info.asset_group_sketch_form_data)
+        ? info.asset_group_sketch_form_data
+        : undefined;
+      if (!rawForm) {
+        throw new UnknownCreationStateError(
+          `TikTok 创意草稿详情缺少 ${creativeSketchId}，已停止发布。`,
+        );
+      }
+      return {
+        ...cloneRecord(rawForm),
+        creative_snap_id: "",
+        creative_sketch_id: creativeSketchId,
+      };
+    });
+
+    const saved = await requestCreationStep(
+      "creative_snap/save",
+      () => creationRequest(input.sessionRequest, "creative_snap/save", {
+        asset_group_sketch_form_data_list: forms,
+        spc_upgrade_mode: 1,
+        with_sketch: true,
+        ad_snap_id: publishItem.ad_snap_id,
+        ad_sketch_id: publishItem.ad_sketch_id,
+        risk_info: input.riskInfo,
+      }),
+      input.credential,
+      { semantics: "mutation", dispatchState: input.dispatchState },
+    );
+    const savedData = isRecord(saved.data) ? saved.data : undefined;
+    const creativeSnapIds = savedData && Array.isArray(savedData.creative_snap_ids)
+      ? savedData.creative_snap_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+      : [];
+    const savedSketchIds = savedData && Array.isArray(savedData.creative_sketch_ids)
+      ? savedData.creative_sketch_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+      : [];
+    if (
+      creativeSnapIds.length !== creativeSketchIds.length
+      || savedSketchIds.length !== creativeSketchIds.length
+    ) {
+      throw new UnknownCreationStateError(
+        "creative_snap/save 未返回完整的 creative_snap_ids / creative_sketch_ids，已停止发布。",
+      );
+    }
+    result.push({
+      ...publishItem,
+      creative_snap_info_list: creativeSnapIds.map((creativeSnapId, index) => ({
+        creative_id: "",
+        creative_snap_id: creativeSnapId,
+        creative_sketch_id: savedSketchIds[index]!,
+        need_publish: true as const,
+      })),
+    });
+  }
+  return result;
+}
+
+async function listAllCreativeSketchRows(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+}): Promise<Record<string, unknown>[]> {
+  const limit = 100;
+  const maxPages = 100;
+  const rows: Record<string, unknown>[] = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const sketchList = await requestCreationStep(
+      "statistics/sketch/creative/list",
+      () => creationPathRequest(
+        input.sessionRequest,
+        "/api/v4/i18n/statistics/sketch/creative/list/",
+        {
+          query_list: [],
+          page,
+          limit,
+          sort_order: 1,
+          sort_stat: "modify_time",
+          filters: [],
+        },
+      ),
+      input.credential,
+      { semantics: "preflight-read", dispatchState: input.dispatchState },
+    );
+    const listData = isRecord(sketchList.data) ? sketchList.data : undefined;
+    const pageRows = listData && Array.isArray(listData.table)
+      ? listData.table.filter(isRecord)
+      : [];
+    rows.push(...pageRows);
+    if (!hasNextCreativeSketchPage(listData, page, pageRows.length, limit, rows.length)) {
+      return rows;
+    }
+  }
+  throw new UnknownCreationStateError(
+    `TikTok 创意草稿列表超过 ${maxPages} 页，无法确认已获取全部复制结果；已停止发布。`,
+  );
+}
+
+function hasNextCreativeSketchPage(
+  data: Record<string, unknown> | undefined,
+  page: number,
+  rowCount: number,
+  limit: number,
+  accumulatedRowCount: number,
+): boolean {
+  if (!data) {
+    throw new UnknownCreationStateError("创意草稿列表缺少分页数据，无法确认结果完整；已停止发布。");
+  }
+  const pagination = isRecord(data.pagination) ? data.pagination : undefined;
+  const pageInfo = isRecord(data.page_info) ? data.page_info : undefined;
+  const paginationPageCount = pagination ? Number(pagination.page_count) : Number.NaN;
+  const pageInfoPageCount = pageInfo ? Number(pageInfo.total_page) : Number.NaN;
+  const paginationPage = pagination ? Number(pagination.page) : Number.NaN;
+  const pageInfoPage = pageInfo ? Number(pageInfo.page) : Number.NaN;
+  if (
+    pagination
+    && pageInfo
+    && (
+      paginationPageCount !== pageInfoPageCount
+      || paginationPage !== pageInfoPage
+    )
+  ) {
+    throw new UnknownCreationStateError("创意草稿列表的 pagination/page_info 互相矛盾；已停止发布。");
+  }
+  const pageCount = pagination ? paginationPageCount : pageInfoPageCount;
+  const responsePage = pagination ? paginationPage : pageInfoPage;
+  if (!Number.isInteger(pageCount) || pageCount < 1 || !Number.isInteger(responsePage) || responsePage !== page) {
+    throw new UnknownCreationStateError("创意草稿列表分页元数据缺失或不一致；已停止发布。");
+  }
+  const responseLimit = pagination ? Number(pagination.limit) : limit;
+  if (!Number.isInteger(responseLimit) || responseLimit < 1 || rowCount > responseLimit || page > pageCount) {
+    throw new UnknownCreationStateError("创意草稿列表返回的分页范围无效；已停止发布。");
+  }
+  const hasNext = page < pageCount;
+  const hasMoreFlags = [data.has_more, pageInfo?.has_more]
+    .filter((value): value is boolean => typeof value === "boolean");
+  if (hasMoreFlags.some((value) => value !== hasNext)) {
+    throw new UnknownCreationStateError("创意草稿列表的分页标记互相矛盾；已停止发布。");
+  }
+  const paginationTotalCount = pagination ? Number(pagination.total_count) : Number.NaN;
+  const pageInfoTotalCount = pageInfo ? Number(pageInfo.total_count) : Number.NaN;
+  if (
+    Number.isFinite(paginationTotalCount)
+    && Number.isFinite(pageInfoTotalCount)
+    && paginationTotalCount !== pageInfoTotalCount
+  ) {
+    throw new UnknownCreationStateError("创意草稿列表的分页总数互相矛盾；已停止发布。");
+  }
+  const totalCount = Number.isFinite(paginationTotalCount)
+    ? paginationTotalCount
+    : pageInfoTotalCount;
+  if (!Number.isInteger(totalCount) || totalCount < 0) {
+    throw new UnknownCreationStateError("创意草稿列表缺少可验证的 total_count；已停止发布。");
+  }
+  // TikTok's real creative list response can omit has_more. In that shape the
+  // complete pagination tuple is the authoritative, count-backed equivalent.
+  const hasCountBackedPagination = Boolean(
+    pagination
+    && Number.isInteger(paginationPage)
+    && Number.isInteger(paginationPageCount)
+    && Number.isInteger(responseLimit)
+    && Number.isInteger(paginationTotalCount),
+  );
+  if (hasMoreFlags.length === 0 && !hasCountBackedPagination) {
+    throw new UnknownCreationStateError("创意草稿列表缺少 has_more 或完整计数型分页证据；已停止发布。");
+  }
+  if (
+    pageCount !== Math.max(1, Math.ceil(totalCount / responseLimit))
+    || accumulatedRowCount > totalCount
+    || (!hasNext && accumulatedRowCount !== totalCount)
+  ) {
+    throw new UnknownCreationStateError("创意草稿列表条数与分页总数不一致；已停止发布。");
+  }
+  return hasNext;
+}
+
+function parseNativeScheduleStart(value: string): Date {
+  const result = new Date(value);
+  if (!Number.isFinite(result.getTime())) {
+    throw new RetryableCreationError("定时投放时间无效，已阻止复制发布。");
+  }
+  if (result.getTime() <= Date.now()) {
+    throw new RetryableCreationError("定时投放时间必须晚于当前时间，已阻止复制发布。");
+  }
+  return result;
+}
+
+async function applyCopiedAdGroupOverrides(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  campaignId: string;
+  publishItems: DraftPublishItem[];
+  scheduledStart: Date | null;
+  timezone: string;
+  riskInfo: Record<string, unknown>;
+  dailyBudget?: number;
+  bid?: number | null;
+}): Promise<void> {
+  const adSnapIds = input.publishItems.map((item) => item.ad_snap_id);
+  const startTime = input.scheduledStart
+    ? formatProviderDateTime(input.scheduledStart, input.timezone)
+    : null;
+  const forms = await readAdSnapForms(
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    adSnapIds,
+  );
+
+  for (const publishItem of input.publishItems) {
+    const sourceForm = forms.get(publishItem.ad_snap_id);
+    if (!sourceForm) {
+      throw new UnknownCreationStateError(
+        `TikTok 草稿详情缺少广告组 ${publishItem.ad_snap_id}，已停止发布。`,
+      );
+    }
+    const form = cloneRecord(sourceForm);
+    if (
+      nonEmptyId(form.ad_snap_id) !== publishItem.ad_snap_id
+      || nonEmptyId(form.ad_sketch_id) !== publishItem.ad_sketch_id
+    ) {
+      throw new UnknownCreationStateError("TikTok 草稿详情的 snap/sketch 映射不一致，已停止发布。");
+    }
+    if (input.dailyBudget !== undefined) {
+      form.budget = String(input.dailyBudget);
+    }
+    if (input.bid !== undefined && input.bid !== null) {
+      form.cpa_bid = String(input.bid);
+    }
+    if (input.scheduledStart && startTime) {
+      form.schedule_type = 1;
+      form.start_time = startTime;
+      const existingEndTime = typeof form.end_time === "string" ? form.end_time.trim() : "";
+      if (!existingEndTime || existingEndTime <= startTime) {
+        const end = new Date(input.scheduledStart);
+        end.setUTCFullYear(end.getUTCFullYear() + 10);
+        form.end_time = formatProviderDateTime(end, input.timezone);
+      }
+    }
+
+    await requestCreationStep(
+      "ad_snap/save",
+      () => creationPathRequest(input.sessionRequest, "/api/v4/i18n/creation/ad_snap/save/", {
+        ad_sketch_form_data: form,
+        spc_upgrade_mode: typeof form.spc_upgrade_mode === "number" ? form.spc_upgrade_mode : 1,
+        with_sketch: true,
+        is_skip_check_fields: false,
+        campaign_id: input.campaignId,
+        risk_info: input.riskInfo,
+      }),
+      input.credential,
+      { semantics: "mutation", dispatchState: input.dispatchState },
+    );
+  }
+
+  const verifiedForms = await readAdSnapForms(
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    adSnapIds,
+  );
+  for (const adSnapId of adSnapIds) {
+    const verified = verifiedForms.get(adSnapId);
+    if (!verified) {
+      throw new UnknownCreationStateError("TikTok 广告组草稿修改未能回读确认，已停止发布。");
+    }
+    if (input.dailyBudget !== undefined && String(verified.budget) !== String(input.dailyBudget)) {
+      throw new UnknownCreationStateError("TikTok 日预算未能回读确认，已停止发布。");
+    }
+    if (input.bid !== undefined && input.bid !== null && String(verified.cpa_bid) !== String(input.bid)) {
+      throw new UnknownCreationStateError("TikTok 出价未能回读确认，已停止发布。");
+    }
+    if (startTime && (Number(verified.schedule_type) !== 1 || verified.start_time !== startTime)) {
+      throw new UnknownCreationStateError("TikTok 原生排期未能回读确认，已停止发布。");
+    }
+  }
+}
+
+async function readAdSnapForms(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  dispatchState: CreationDispatchState,
+  adSnapIds: string[],
+): Promise<Map<string, Record<string, unknown>>> {
+  const detail = await requestCreationStep(
+    "snap/detail",
+    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/detail/", {
+      ad_snap_ids: adSnapIds,
+    }),
+    credential,
+    { semantics: "preflight-read", dispatchState },
+  );
+  const data = isRecord(detail.data) ? detail.data : undefined;
+  const rawMap = data && isRecord(data.ad_snap_map) ? data.ad_snap_map : undefined;
+  if (!rawMap) {
+    throw new UnknownCreationStateError("TikTok 草稿详情未返回 ad_snap_map，已停止发布。");
+  }
+  return new Map(
+    Object.entries(rawMap)
+      .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1]))
+      .map(([adSnapId, form]) => [adSnapId, form]),
+  );
+}
+
+function formatProviderDateTime(value: Date, timezone: string): string {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(value);
+  } catch {
+    throw new RetryableCreationError("账户时区无效，无法生成 TikTok 原生排期。");
+  }
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}:${fields.second}`;
 }
 
 function hasNonEmptyOriginReference(
@@ -709,7 +1173,13 @@ async function createCookieDraftChain(
   timezone: string,
   batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
 ): Promise<CreationMutationResult> {
-  const dispatchState = { mutationDispatched: false };
+  const dispatchState: CreationDispatchState = {
+    mutationDispatched: false,
+    acceptedMutationCount: 0,
+    ...(mutation.onBeforeDispatch
+      ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
+      : {}),
+  };
   try {
     return await runCookieDraftChain(
       sessionRequest,
@@ -721,7 +1191,12 @@ async function createCookieDraftChain(
       batchReservation,
     );
   } catch (cause) {
-    if (cause instanceof ConfirmedCreationFailureError || cause instanceof UnknownCreationStateError) {
+    if (cause instanceof ConfirmedCreationFailureError) {
+      throw dispatchState.acceptedMutationCount > 0
+        ? new ConfirmedCreationFailureError(cause.message, false)
+        : cause;
+    }
+    if (cause instanceof UnknownCreationStateError) {
       throw cause;
     }
     const detail = cause instanceof Error ? cause.message : "创建链发生未知错误。";
@@ -1227,7 +1702,7 @@ async function awaitCreationResult(
       throw new ConfirmedCreationFailureError("TikTok 已明确报告创建失败，未生成正式广告。");
     }
   }
-  throw new Error("TikTok 创建任务在 9 秒内未返回最终结果，请稍后在投放结果中重新检查。");
+  throw new UnknownCreationStateError("TikTok 创建任务在 9 秒内未返回最终结果；请求可能已被受理，禁止自动重试，请人工核验。");
 }
 
 /**
@@ -1449,9 +1924,49 @@ function hasAnyPublishedCreationId(
     const groups = isRecord(ad.asset_group_result)
       ? Object.values(ad.asset_group_result)
       : Array.isArray(ad.asset_group_result) ? ad.asset_group_result : [];
-    return groups.some((group) => isRecord(group) && Array.isArray(group.creative_items)
-      && group.creative_items.some((creative) => isRecord(creative) && nonEmptyId(creative.id)));
+    return groups.some((group) => {
+      if (!isRecord(group)) return false;
+      const creatives = Array.isArray(group.creative_items)
+        ? group.creative_items
+        : isRecord(group.creative_items) ? Object.values(group.creative_items) : [];
+      return creatives.some((creative) => isRecord(creative) && nonEmptyId(creative.id));
+    });
   });
+}
+
+function completedCreationCounts(payload: Record<string, unknown>): {
+  adGroupCount: number;
+  creativeCount: number;
+  creativeCountsByAdGroup: number[];
+} {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const result = isRecord(data.result) ? data.result : data;
+  const ads = isRecord(result.ad_and_creative)
+    ? Object.values(result.ad_and_creative)
+    : Array.isArray(result.ad_and_creative) ? result.ad_and_creative : [];
+  let adGroupCount = 0;
+  let creativeCount = 0;
+  const creativeCountsByAdGroup: number[] = [];
+  for (const ad of ads) {
+    if (!isRecord(ad) || !nonEmptyId(ad.ad_id)) continue;
+    adGroupCount += 1;
+    const groups = isRecord(ad.asset_group_result)
+      ? Object.values(ad.asset_group_result)
+      : Array.isArray(ad.asset_group_result) ? ad.asset_group_result : [];
+    let adCreativeCount = 0;
+    for (const group of groups) {
+      if (!isRecord(group)) continue;
+      const creatives = Array.isArray(group.creative_items)
+        ? group.creative_items
+        : isRecord(group.creative_items) ? Object.values(group.creative_items) : [];
+      adCreativeCount += creatives.filter(
+        (creative) => isRecord(creative) && Boolean(nonEmptyId(creative.id)),
+      ).length;
+    }
+    creativeCount += adCreativeCount;
+    creativeCountsByAdGroup.push(adCreativeCount);
+  }
+  return { adGroupCount, creativeCount, creativeCountsByAdGroup };
 }
 
 function creationResultIds(payload: Record<string, unknown>): { campaignId?: string; adGroupId?: string; adId?: string } {
@@ -1467,7 +1982,9 @@ function creationResultIds(payload: Record<string, unknown>): { campaignId?: str
   const groupsValue = firstAd?.asset_group_result;
   const groups = Array.isArray(groupsValue) ? groupsValue : isRecord(groupsValue) ? Object.values(groupsValue) : [];
   const firstGroup = isRecord(groups[0]) ? groups[0] : undefined;
-  const creatives = Array.isArray(firstGroup?.creative_items) ? firstGroup.creative_items : [];
+  const creatives = Array.isArray(firstGroup?.creative_items)
+    ? firstGroup.creative_items
+    : isRecord(firstGroup?.creative_items) ? Object.values(firstGroup.creative_items) : [];
   const firstCreative = isRecord(creatives[0]) ? creatives[0] : undefined;
   const adId = (firstCreative ? nonEmptyId(firstCreative.id) : undefined)
     ?? nonEmptyId(data.creative_id);
@@ -1785,6 +2302,8 @@ function materializePublishProfile(
 
 interface CreationDispatchState {
   mutationDispatched: boolean;
+  acceptedMutationCount: number;
+  onBeforeMutationDispatch?: () => void;
 }
 
 interface CreationRequestBoundary {
@@ -1836,7 +2355,7 @@ async function requestCreationStep(
 function withCreationStep<T extends Error>(cause: T, step: string): T {
   const message = `${step}：${cause.message}`;
   if (cause instanceof ConfirmedCreationFailureError) {
-    return new ConfirmedCreationFailureError(message) as T;
+    return new ConfirmedCreationFailureError(message, cause.retrySafe) as unknown as T;
   }
   if (cause instanceof UnknownCreationStateError) {
     return new UnknownCreationStateError(message) as T;
@@ -1874,6 +2393,16 @@ async function requestDispatchedCreationJson(
 
   let pending: Promise<Response>;
   try {
+    if (
+      boundary.semantics === "mutation"
+      && boundary.dispatchState
+      && !boundary.dispatchState.mutationDispatched
+    ) {
+      // Persist the idempotency guard at the narrowest safe boundary: request
+      // construction and credential checks already succeeded, but fetch has
+      // not yet been invoked. If this callback fails, no remote request is sent.
+      boundary.dispatchState.onBeforeMutationDispatch?.();
+    }
     // A synchronous exception proves fetch did not accept the request.
     pending = fetch(request.url, requestInit);
     if (boundary.semantics === "mutation" && boundary.dispatchState) {
@@ -1937,6 +2466,9 @@ async function requestDispatchedCreationJson(
       boundary,
     );
   }
+  if (boundary.semantics === "mutation" && boundary.dispatchState) {
+    boundary.dispatchState.acceptedMutationCount += 1;
+  }
   return payload;
 }
 
@@ -1982,6 +2514,22 @@ function creationPathRequest(
     method: "POST",
     body: JSON.stringify(body),
     contentType: "application/json",
+    ...(sessionRequest.headers ? { headers: sessionRequest.headers } : {}),
+  };
+}
+
+function creationPathGetRequest(
+  sessionRequest: CapturedCookieRequest,
+  pathname: string,
+  query: Record<string, string>,
+): CapturedCookieRequest {
+  const url = new URL(sessionRequest.url);
+  url.pathname = pathname;
+  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+  return {
+    target: "health",
+    url: url.toString(),
+    method: "GET",
     ...(sessionRequest.headers ? { headers: sessionRequest.headers } : {}),
   };
 }

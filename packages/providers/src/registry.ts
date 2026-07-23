@@ -187,8 +187,12 @@ export class ProviderRegistry {
       existingCampaignId: string;
       names: string[];
       initialStatus: "enabled" | "disabled";
+      scheduledStartAt?: string | null;
+      dailyBudget?: number;
+      bid?: number | null;
+      onBeforeDispatch?: () => void;
     },
-  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[] }> {
+  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
     const provider = this.get(kind) as unknown as {
       copyAdGroupToExistingCampaign?: (
         context: ProviderContext,
@@ -197,8 +201,12 @@ export class ProviderRegistry {
           existingCampaignId: string;
           names: string[];
           initialStatus: "enabled" | "disabled";
+          scheduledStartAt?: string | null;
+          dailyBudget?: number;
+          bid?: number | null;
+          onBeforeDispatch?: () => void;
         },
-      ) => Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[] }>;
+      ) => Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }>;
     };
     if (!provider.copyAdGroupToExistingCampaign) {
       throw new RetryableCreationError("当前接入不支持广告组级复制。");

@@ -1716,6 +1716,527 @@ describe("CookieAdsProvider", () => {
     },
   );
 
+  it("writes and verifies TikTok native scheduling before publishing copied ad groups as enabled", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T00:00:00.000Z"));
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let detailReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const path = new URL(url).pathname;
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requests.push({ path, body });
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        detailReads += 1;
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+          ad_name: "copied group",
+          schedule_type: detailReads === 1 ? 0 : 1,
+          start_time: detailReads === 1 ? "2026-07-23 08:00:00" : "2026-07-24 06:00:00",
+          end_time: "2036-07-24 06:00:00",
+          budget: detailReads === 1 ? "20" : "50",
+          cpa_bid: detailReads === 1 ? "3" : "7",
+          spc_upgrade_mode: 1,
+        } } } });
+      }
+      if (url.includes("ad_snap/save")) return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      if (url.includes("batch_create_cta_id")) return jsonResponse({ code: 0, data: { cta_id_map: {} } });
+      if (url.includes("async_creation/detail")) return jsonResponse({ code: 0, data: { status: 1, result: {
+        campaign_id: "campaign",
+        ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: { 0: { creative_items: { 0: { id: "creative" } } } } } },
+      } } });
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+
+    const context = creationTestContext(false);
+    context.timezone = "Asia/Taipei";
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(context, {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "enabled",
+      scheduledStartAt: "2026-07-23T22:00:00.000Z",
+      dailyBudget: 50,
+      bid: 7,
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    const save = requests.find((request) => request.path.includes("/ad_snap/save/"));
+    expect(save?.body).toMatchObject({
+      campaign_id: "campaign",
+      with_sketch: true,
+      is_skip_check_fields: false,
+      ad_sketch_form_data: {
+        ad_snap_id: "ad-snap",
+        ad_sketch_id: "ad-sketch",
+        schedule_type: 1,
+        start_time: "2026-07-24 06:00:00",
+        budget: "50",
+        cpa_bid: "7",
+      },
+    });
+    const publish = requests.find((request) => request.path.includes("/async_creation/create_by_snap/"));
+    expect(publish?.body).toMatchObject({ is_status_disabled: false });
+    expect(requests.filter((request) => request.path.includes("/snap/detail/"))).toHaveLength(2);
+  });
+
+  it("does not publish when TikTok native scheduling cannot be verified", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T00:00:00.000Z"));
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requestedPaths.push(new URL(url).pathname);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+          schedule_type: 0,
+          start_time: "2026-07-23 08:00:00",
+          end_time: "2036-07-24 06:00:00",
+        } } } });
+      }
+      return jsonResponse({ code: 0, data: {} });
+    }));
+
+    const context = creationTestContext(false);
+    context.timezone = "Asia/Taipei";
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(context, {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "enabled",
+      scheduledStartAt: "2026-07-23T22:00:00.000Z",
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.message).toContain("原生排期未能回读确认");
+    expect(requestedPaths.some((path) => path.includes("/async_creation/create_by_snap/"))).toBe(false);
+  });
+
+  it("completes the real simple ad copy response with count-backed pagination, creative detail, and plural save ids", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T00:00:00.000Z"));
+    const requestedPaths: string[] = [];
+    const creativeListPages: number[] = [];
+    let savedCreativeCount = 0;
+    let detailReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requestedPaths.push(new URL(url).pathname);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      }
+      if (url.includes("statistics/sketch/creative/list")) {
+        const page = Number(JSON.parse(String(init?.body)).page);
+        creativeListPages.push(page);
+        return jsonResponse({ code: 0, data: {
+          table: [{
+            ad_sketch_id: "ad-sketch",
+            creative_sketch_id: `creative-sketch-${page}`,
+          }],
+          pagination: { page, page_count: 2, limit: 1, total_count: 2 },
+        } });
+      }
+      if (url.includes("creative_sketch/detail")) {
+        return jsonResponse({ code: 0, data: { creative_sketch_info_map: {
+          "creative-sketch-1": { asset_group_sketch_form_data: {
+            creative_sketch_id: "creative-sketch-1",
+            creative_name: "copied creative 1",
+            image_list: [{ aweme_item_id: "post-1" }],
+          } },
+          "creative-sketch-2": { asset_group_sketch_form_data: {
+            creative_sketch_id: "creative-sketch-2",
+            creative_name: "copied creative 2",
+            image_list: [{ aweme_item_id: "post-2" }],
+          } },
+        } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        detailReads += 1;
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+          schedule_type: detailReads === 1 ? 0 : 1,
+          start_time: detailReads === 1 ? "2026-07-23 08:00:00" : "2026-07-24 06:00:00",
+          end_time: "2036-07-24 06:00:00",
+          budget: "50",
+          cpa_bid: "7",
+        } } } });
+      }
+      if (url.includes("ad_snap/save")) {
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      }
+      if (url.includes("creative_snap/save")) {
+        savedCreativeCount = JSON.parse(String(init?.body)).asset_group_sketch_form_data_list.length;
+        return jsonResponse({ code: 0, data: {
+          creative_snap_ids: ["creative-snap-1", "creative-snap-2"],
+          creative_sketch_ids: ["creative-sketch-1", "creative-sketch-2"],
+        } });
+      }
+      if (url.includes("batch_create_cta_id")) return jsonResponse({ code: 0, data: {} });
+      if (url.includes("async_creation/detail")) return jsonResponse({ code: 0, data: { status: 1, result: {
+        campaign_id: "campaign",
+        ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: { 0: { creative_items: {
+          0: { id: "creative-1" },
+          1: { id: "creative-2" },
+        } } } } },
+      } } });
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+
+    const context = creationTestContext(false);
+    context.timezone = "Asia/Taipei";
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(context, {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "enabled",
+      scheduledStartAt: "2026-07-23T22:00:00.000Z",
+      dailyBudget: 50,
+      bid: 7,
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(creativeListPages).toEqual([1, 2]);
+    expect(savedCreativeCount).toBe(2);
+    expect(requestedPaths.filter((path) => path.includes("/snap/detail/"))).toHaveLength(2);
+    expect(requestedPaths.some((path) => path.includes("/ad_snap/save/"))).toBe(true);
+    expect(requestedPaths.some((path) => path.includes("/creative_sketch/detail/"))).toBe(true);
+    expect(requestedPaths.some((path) => path.includes("/creative_snap/save/"))).toBe(true);
+    expect(requestedPaths.some((path) => path.includes("/async_creation/create_by_snap/"))).toBe(true);
+  });
+
+  it("keeps a simple copy unknown when its creative sketch cannot be located", async () => {
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requestedPaths.push(new URL(url).pathname);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+        } } } });
+      }
+      if (url.includes("ad_snap/save")) return jsonResponse({ code: 0, data: {} });
+      if (url.includes("statistics/sketch/creative/list")) {
+        return jsonResponse({
+          code: 0,
+          data: { table: [], pagination: { page: 1, page_count: 1, limit: 100, total_count: 0 } },
+        });
+      }
+      return jsonResponse({ code: 0, data: {} });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result.message).toContain("未能定位其创意草稿");
+    expect(requestedPaths.some((path) => path.includes("/async_creation/create_by_snap/"))).toBe(false);
+  });
+
+  it("stops a simple copy when creative list pagination metadata is contradictory", async () => {
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requestedPaths.push(new URL(url).pathname);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+        } } } });
+      }
+      if (url.includes("ad_snap/save")) return jsonResponse({ code: 0, data: {} });
+      if (url.includes("statistics/sketch/creative/list")) {
+        return jsonResponse({ code: 0, data: {
+          table: [{ ad_sketch_id: "ad-sketch", creative_sketch_id: "creative-sketch" }],
+          pagination: { page: 1, page_count: 2, limit: 1, total_count: 2 },
+          page_info: { page: 1, total_page: 2, total_count: 2, has_more: false },
+        } });
+      }
+      return jsonResponse({ code: 0, data: {} });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result.message).toContain("分页标记互相矛盾");
+    expect(requestedPaths.some((path) => path.includes("/async_creation/create_by_snap/"))).toBe(false);
+  });
+
+  it("treats a partial ad copy result as unknown instead of reporting the requested count as created", async () => {
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requestedPaths.push(new URL(url).pathname);
+      return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+        new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+        new_ad_sketch_id: "ad-sketch",
+        new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+        new_creative_sketch_ids: ["creative-sketch"],
+      }] } } });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group 1", "copied group 2"],
+      initialStatus: "disabled",
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result.message).toContain("1/2");
+    expect(requestedPaths.some((path) => path.includes("/async_creation/create_by_snap/"))).toBe(false);
+  });
+
+  it("preserves a dispatched ad copy transport loss as unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("connection reset");
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+  });
+
+  it("keeps a later structured TikTok rejection retryable after the copy draft was accepted", async () => {
+    const onBeforeDispatch = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      return jsonResponse({ code: 40001, msg: "draft detail rejected" });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+      onBeforeDispatch,
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "failed", retrySafe: false });
+    expect(onBeforeDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an explicit copy rejection retryable and does not mark local validation as dispatched", async () => {
+    const rejectedDispatch = vi.fn();
+    const fetchMock = vi.fn(async () => jsonResponse({ code: 40001, msg: "copy rejected" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new CookieAdsProvider();
+
+    const rejected = await provider.copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+      onBeforeDispatch: rejectedDispatch,
+    });
+    expect(rejected).toMatchObject({ ok: false, failureKind: "failed", retrySafe: true });
+    expect(rejectedDispatch).toHaveBeenCalledTimes(1);
+
+    const invalidDispatch = vi.fn();
+    await expect(provider.copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "enabled",
+      scheduledStartAt: "not-a-date",
+      onBeforeDispatch: invalidDispatch,
+    })).rejects.toThrow("定时投放时间无效");
+    expect(invalidDispatch).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats an accepted copy publish that never reaches a terminal result as unknown", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+          budget: "50",
+          cpa_bid: "7",
+        } } } });
+      }
+      if (url.includes("ad_snap/save") || url.includes("batch_create_cta_id")) {
+        return jsonResponse({ code: 0, data: {} });
+      }
+      if (url.includes("async_creation/detail")) {
+        return jsonResponse({ code: 0, data: { status: 0 } });
+      }
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+
+    const pending = new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "enabled",
+      dailyBudget: 50,
+      bid: 7,
+    });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result.message).toContain("禁止自动重试");
+  });
+
+  it("treats an incomplete terminal copy result as unknown instead of reporting success", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap",
+          ad_sketch_id: "ad-sketch",
+          budget: "50",
+          cpa_bid: "7",
+        } } } });
+      }
+      if (url.includes("ad_snap/save") || url.includes("batch_create_cta_id")) {
+        return jsonResponse({ code: 0, data: {} });
+      }
+      if (url.includes("async_creation/detail")) {
+        return jsonResponse({ code: 0, data: { status: 1, result: {
+          campaign_id: "campaign",
+          ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: {} } },
+        } } });
+      }
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "enabled",
+      dailyBudget: 50,
+      bid: 7,
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result.message).toContain("广告 0/1");
+    expect(result.message).toContain("禁止自动重试");
+  });
+
+  it("rejects a terminal result that concentrates all creatives in only one copied ad group", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [
+          {
+            new_ad_snap_info_item: { ad_snap_id: "ad-snap-1" },
+            new_ad_sketch_id: "ad-sketch-1",
+            new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap-1" }],
+            new_creative_sketch_ids: ["creative-sketch-1"],
+          },
+          {
+            new_ad_snap_info_item: { ad_snap_id: "ad-snap-2" },
+            new_ad_sketch_id: "ad-sketch-2",
+            new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap-2" }],
+            new_creative_sketch_ids: ["creative-sketch-2"],
+          },
+        ] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: {
+          "ad-snap-1": { ad_snap_id: "ad-snap-1", ad_sketch_id: "ad-sketch-1", budget: "50" },
+          "ad-snap-2": { ad_snap_id: "ad-snap-2", ad_sketch_id: "ad-sketch-2", budget: "50" },
+        } } });
+      }
+      if (url.includes("ad_snap/save") || url.includes("batch_create_cta_id")) {
+        return jsonResponse({ code: 0, data: {} });
+      }
+      if (url.includes("async_creation/detail")) {
+        return jsonResponse({ code: 0, data: { status: 1, result: {
+          campaign_id: "campaign",
+          ad_and_creative: {
+            0: { ad_id: "adgroup-1", asset_group_result: { 0: { creative_items: {
+              0: { id: "creative-1" },
+              1: { id: "creative-2" },
+            } } } },
+            1: { ad_id: "adgroup-2", asset_group_result: { 0: { creative_items: {} } } },
+          },
+        } } });
+      }
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group 1", "copied group 2"],
+      initialStatus: "enabled",
+      dailyBudget: 50,
+    });
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result.message).toContain("每组广告 0,2（预期 1,1）");
+  });
+
   it("redacts token-like values and URLs from provider errors", async () => {
     const secret = "abcdefghijklmnopqrstuvwxyz123456";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
