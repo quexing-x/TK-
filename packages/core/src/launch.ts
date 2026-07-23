@@ -84,6 +84,7 @@ export type LaunchCopyDifference = z.infer<typeof LaunchCopyDifferenceSchema>;
 export const LaunchCopyPreviewItemSchema = z.object({
   accountId: z.string().min(1),
   itemIndex: z.number().int().nonnegative(),
+  launchRow: z.lazy(() => LaunchConfigurationRowSchema),
   sourceSnapshot: LaunchSourceSnapshotSchema,
   targetAssetMapping: LaunchTargetAssetMappingSchema,
   differences: z.array(LaunchCopyDifferenceSchema),
@@ -141,6 +142,9 @@ export const LaunchPresetInputSchema = z.object({
   bid: z.number().nonnegative().max(100_000_000).nullable(),
   startAt: z.string().datetime().nullable(),
   endAt: z.string().datetime().nullable(),
+  // 创建时间规则：absolute 用固定 startAt；tonight/tomorrow-morning 为相对规则，
+  // 每次使用预设时按当时时间重算，不冻结日期。
+  startAtRule: z.enum(["absolute", "tonight", "tomorrow-morning"]).default("absolute"),
   initialStatus: LaunchInitialStatusSchema,
   creationConfig: CreationPresetConfigSchema.default({}),
 });
@@ -309,10 +313,92 @@ type LaunchSheetColumnKey = (typeof launchSheetColumns)[number]["key"];
  * Parses the two fields that need manual spreadsheet input. Budget, bid and
  * timing are deliberately applied afterwards from the selected preset.
  */
+/**
+ * 把预设的创建时间规则解析成具体时间。相对规则（当天24:00 / 次日06:00）按传入
+ * 的 now 重算，因此保存的预设不会冻结日期，每次使用都随当前时间变动。
+ */
+export function resolveLaunchStartAt(
+  startAtRule: "absolute" | "tonight" | "tomorrow-morning" | undefined,
+  absoluteStartAt: string | null,
+  now = new Date(),
+  timeZone?: string,
+): string | null {
+  if (!startAtRule || startAtRule === "absolute") return absoluteStartAt;
+  if (timeZone) {
+    const nowParts = dateTimePartsInZone(now, timeZone);
+    const targetHour = startAtRule === "tonight" ? 0 : 6;
+    const targetWallClock = Date.UTC(
+      nowParts.year,
+      nowParts.month - 1,
+      nowParts.day + 1,
+      targetHour,
+      0,
+      0,
+    );
+    // Convert the target wall-clock value in the account timezone to an
+    // instant. Repeating once also handles a DST offset change at midnight.
+    let candidate = targetWallClock;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const actual = dateTimePartsInZone(new Date(candidate), timeZone);
+      const actualWallClock = Date.UTC(
+        actual.year,
+        actual.month - 1,
+        actual.day,
+        actual.hour,
+        actual.minute,
+        actual.second,
+      );
+      candidate += targetWallClock - actualWallClock;
+    }
+    return new Date(candidate).toISOString();
+  }
+  const date = new Date(now);
+  date.setSeconds(0, 0);
+  date.setDate(date.getDate() + 1);
+  date.setHours(startAtRule === "tonight" ? 0 : 6, 0, 0, 0);
+  return date.toISOString();
+}
+
+function dateTimePartsInZone(value: Date, timeZone: string): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(value);
+  const partValue = (type: Intl.DateTimeFormatPartTypes): number => {
+    const value = Number(parts.find((part) => part.type === type)?.value);
+    if (!Number.isInteger(value)) {
+      throw new Error(`无法按账户时区解析 ${type}。`);
+    }
+    return value;
+  };
+  return {
+    year: partValue("year"),
+    month: partValue("month"),
+    day: partValue("day"),
+    hour: partValue("hour"),
+    minute: partValue("minute"),
+    second: partValue("second"),
+  };
+}
+
 export function parseLaunchSheetTable(
   table: unknown[][],
   preset: LaunchPresetInput,
   now = new Date(),
+  timeZone?: string,
 ): LaunchSheetImportResult {
   const errors: LaunchSheetIssue[] = [];
   const warnings: LaunchSheetIssue[] = [];
@@ -372,7 +458,7 @@ export function parseLaunchSheetTable(
       region: preset.region,
       dailyBudget: preset.dailyBudget,
       bid: preset.bid,
-      startAt: preset.startAt,
+      startAt: resolveLaunchStartAt(preset.startAtRule, preset.startAt ?? null, now, timeZone),
       endAt: preset.endAt,
       initialStatus: preset.initialStatus,
     }));
