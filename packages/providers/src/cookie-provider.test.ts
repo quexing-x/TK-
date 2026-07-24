@@ -1397,7 +1397,11 @@ describe("CookieAdsProvider", () => {
     expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
   });
 
-  it("does not save a creative when any HAR music validation item fails", async () => {
+  it.each([
+    ["returns a failed item", "failed-item"],
+    ["rejects the advisory request", "rejected-request"],
+    ["cannot complete the advisory request", "request-error"],
+  ])("continues the successful HAR flow when music validation %s", async (_label, musicOutcome) => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -1413,7 +1417,17 @@ describe("CookieAdsProvider", () => {
         return jsonResponse({ code: 0, data: { identity_id_map: { "#lib-code": "spark-identity" } } });
       }
       if (url.includes("spark/validate_promote_music")) {
+        if (musicOutcome === "request-error") throw new TypeError("music validation unavailable");
+        if (musicOutcome === "rejected-request") {
+          return jsonResponse({ code: 40001, msg: "music validation rejected" });
+        }
         return jsonResponse({ code: 0, data: { music_info_map: { "9998887776665": { status: 1 } } } });
+      }
+      if (url.includes("spark/creative_fix_task/save")) {
+        return jsonResponse({ code: 0, data: { task_map: { "spark-video": "spark-task" } } });
+      }
+      if (url.includes("spark/creative_fix_task/info")) {
+        return jsonResponse({ code: 0, data: { task_info_map: { "spark-task": { task_status: 2 } } } });
       }
       return jsonResponse(successfulCreationPayload(url));
     }));
@@ -1423,13 +1437,56 @@ describe("CookieAdsProvider", () => {
 
     const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
 
-    expect(result).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
     expect(requested.some((url) => url.includes("validate_promote_music"))).toBe(true);
-    expect(requested.some((url) => url.includes("creative_fix_task"))).toBe(false);
-    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
+    expect(requested.some((url) => url.includes("creative_fix_task"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("async_creation/create_by_snap"))).toBe(true);
   });
 
-  it("does not create CTA or publish when the final ad report fails", async () => {
+  it.each([
+    ["creative automation option", "/api/v4/i18n/creation/creative/creative_automation_option/"],
+    ["Spark fix task save", "/api/v4/i18n/creation/spark/creative_fix_task/save/"],
+    ["ROI validation", "/api/v4/i18n/creation/roi2/auction_batch_item_roi2_validate/"],
+    ["Spark fix task status", "/api/v4/i18n/creation/spark/creative_fix_task/info/"],
+  ])("publishes when the advisory %s request is rejected", async (_label, rejectedPath) => {
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const pathname = new URL(url).pathname;
+      requestedPaths.push(pathname);
+      if (url.includes("material/tt_video/bulk/info")) {
+        return jsonResponse({ code: 0, data: { tt_video_map: { "#lib-code": {
+          item_id: "9998887776665",
+          core_user_id: "spark-identity",
+          video_info: { vid: "spark-video" },
+        } } } });
+      }
+      if (url.includes("material/tt_video/bulk/authorize")) {
+        return jsonResponse({ code: 0, data: { identity_id_map: { "#lib-code": "spark-identity" } } });
+      }
+      if (pathname === rejectedPath) return jsonResponse({ code: 40001, msg: "advisory rejected" });
+      if (url.includes("spark/creative_fix_task/save")) {
+        return jsonResponse({ code: 0, data: { task_map: { "spark-video": "spark-task" } } });
+      }
+      if (url.includes("spark/creative_fix_task/info")) {
+        return jsonResponse({ code: 0, data: { task_info_map: { "spark-task": { task_status: 2 } } } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
+    expect(requestedPaths).toContain(rejectedPath);
+    expect(requestedPaths).toContain("/api/v4/i18n/creation/creative_snap/save/");
+    expect(requestedPaths).toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
+  });
+
+  it("publishes when the advisory final ad report is red", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -1448,38 +1505,39 @@ describe("CookieAdsProvider", () => {
       [creationTestMutation("none")],
     );
 
-    expect(result).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
     expect(requested.some((url) => url.includes("ad_creative_snap/check"))).toBe(true);
-    expect(requested.some((url) => url.includes("batch_create_cta_id"))).toBe(false);
-    expect(requested.some((url) => url.includes("create_by_snap"))).toBe(false);
+    expect(requested.some((url) => url.includes("batch_create_cta_id"))).toBe(true);
+    expect(requested.some((url) => url.includes("create_by_snap"))).toBe(true);
   });
 
   it.each([
     {
       label: "campaign check",
       pathname: "/api/v4/i18n/creation/campaign_snap/check/",
-      response: { code: 0, data: {} },
-      forbiddenPath: "/api/v4/i18n/creation/ad_snap/save/",
+      response: { code: 0, data: { success: false } },
     },
     {
       label: "ad-group check",
       pathname: "/api/v4/i18n/creation/ad_snap/bulk_check/",
-      response: { code: 0, data: { ad_snap_check_report_map: {} } },
-      forbiddenPath: "/api/v4/i18n/creation/creative_snap/save/",
+      response: { code: 0, data: { ad_snap_check_report_map: { "ad-snap": { success: false } } } },
     },
     {
       label: "campaign and ad-group consistency check",
       pathname: "/api/v4/i18n/creation/snap/cbo_consistency_check/",
-      response: { code: 0, data: {} },
-      forbiddenPath: "/api/v4/i18n/creation/ad_creative_snap/check/",
+      response: { code: 0, data: { is_all_success: false } },
     },
     {
       label: "final ad and creative check",
       pathname: "/api/v4/i18n/creation/ad_creative_snap/check/",
       response: { code: 0, data: { creative_success: true, ad_snap_check_report_map: {} } },
-      forbiddenPath: "/api/v4/i18n/creation/snap/batch_create_cta_id/",
     },
-  ])("stops when the HAR $label response does not explicitly confirm success", async ({ pathname, response, forbiddenPath }) => {
+    {
+      label: "CTA helper",
+      pathname: "/api/v4/i18n/creation/snap/batch_create_cta_id/",
+      response: { code: 40001, msg: "advisory rejected" },
+    },
+  ])("continues when the HAR $label response is red or incomplete", async ({ pathname, response }) => {
     const requestedPaths: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -1493,10 +1551,9 @@ describe("CookieAdsProvider", () => {
       [creationTestMutation("none")],
     );
 
-    expect(result).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
     expect(requestedPaths).toContain(pathname);
-    expect(requestedPaths).not.toContain(forbiddenPath);
-    expect(requestedPaths).not.toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
+    expect(requestedPaths).toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
   });
 
   it("reuses the unique exact-name campaign instead of creating another campaign", async () => {

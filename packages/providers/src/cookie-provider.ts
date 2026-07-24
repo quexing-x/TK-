@@ -1476,23 +1476,14 @@ async function runCookieDraftChain(
   }
   let checkedFakeCampaignId = "";
   if (!copyOnly && !existingCampaignId) {
-    const campaignCheck = await requestCreationStep(
+    const campaignCheck = await requestAdvisoryCreationStep(
       "campaign_snap/check",
       () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
         campaign_snap_id: campaignSnapId,
       }),
       credential,
     );
-    const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : {};
-    if (campaignData.success === false) {
-      const reason = isRecord(campaignData.error_item) && typeof campaignData.error_item.message === "string"
-        ? campaignData.error_item.message
-        : "系列草稿检查未通过";
-      throw new ConfirmedCreationFailureError(`TikTok 系列草稿检查失败：${reason}`);
-    }
-    if (campaignData.success !== true) {
-      throw new UnknownCreationStateError("TikTok 系列草稿检查未返回明确成功结果；已停止后续创建，请人工核验草稿状态。");
-    }
+    const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : {};
     checkedFakeCampaignId = nonEmptyId(campaignData.fake_campaign_id) ?? campaignSketchId;
   }
 
@@ -1533,7 +1524,7 @@ async function runCookieDraftChain(
   // stale page information. Reused campaigns continue to the later joint HAR
   // validations, which cover the ad-group and creatives before publish.
   if (!copyOnly && !existingCampaignId) {
-    const adBulkCheck = await requestCreationStep(
+    await requestAdvisoryCreationStep(
       "ad_snap/bulk_check",
       () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/bulk_check/", {
         ad_snap_ids: [adSnapId],
@@ -1541,14 +1532,6 @@ async function runCookieDraftChain(
       }),
       credential,
     );
-    const adBulkData = isRecord(adBulkCheck.data) ? adBulkCheck.data : {};
-    const adBulkReport = findAdSnapCheckReport(adBulkData, adSnapId);
-    if (adBulkReport?.success === false) {
-      throw new ConfirmedCreationFailureError("TikTok 广告组草稿检查未通过，已停止创建创意。");
-    }
-    if (adBulkReport?.success !== true) {
-      throw new UnknownCreationStateError("TikTok 广告组草稿检查未返回目标广告组的明确成功结果；已停止创建创意，请人工核验草稿状态。");
-    }
   }
   const creativeSnapIdFromAd = initializedIds
     ? initializedIds.creativeSnapId
@@ -1668,7 +1651,7 @@ async function runCookieDraftChain(
     publishPayload.campaign_snap_id = "";
     publishPayload.campaign_sketch_id = "";
   }
-  await validateDraftChain(sessionRequest, credential, {
+  await runAdvisoryDraftSequence(sessionRequest, credential, {
     ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
     ...(checkedFakeCampaignId ? { fakeCampaignId: checkedFakeCampaignId } : {}),
     riskInfo: credential.creationProfile && isRecord(credential.creationProfile.publishPayload.risk_info)
@@ -1778,19 +1761,7 @@ function safeFailureFields(value: Record<string, unknown>, prefix = ""): Record<
   return output;
 }
 
-function findAdSnapCheckReport(
-  data: Record<string, unknown>,
-  adSnapId: string,
-): Record<string, unknown> | undefined {
-  const reportMap = isRecord(data.ad_snap_check_report_map) ? data.ad_snap_check_report_map : {};
-  const direct = reportMap[adSnapId];
-  if (isRecord(direct)) return direct;
-  return Object.values(reportMap).filter(isRecord).find(
-    (report) => nonEmptyId(report.ad_snap_id) === adSnapId,
-  );
-}
-
-async function validateDraftChain(
+async function runAdvisoryDraftSequence(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   ids: {
@@ -1805,35 +1776,19 @@ async function validateDraftChain(
   const adSnapIds = ids.publishItems.map((item) => item.ad_snap_id);
   let fakeCampaignId = ids.fakeCampaignId ?? "";
   if (!ids.campaignId) {
-    const consistency = await requestCreationStep("snap/cbo_consistency_check",
+    await requestAdvisoryCreationStep("snap/cbo_consistency_check",
       () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/cbo_consistency_check/", {
         campaign_snap_id: ids.campaignSnapId,
         adgroup_snap_ids: adSnapIds,
         ad_snap_ids: adSnapIds,
         is_budget_split_test: false,
       }), credential);
-    const consistencyData = isRecord(consistency.data) ? consistency.data : {};
-    if (consistencyData.is_all_success === false) {
-      throw new ConfirmedCreationFailureError("TikTok 系列与广告组草稿一致性检查失败。");
-    }
-    if (consistencyData.is_all_success !== true) {
-      throw new UnknownCreationStateError("TikTok 系列与广告组草稿一致性检查未返回明确成功结果；已停止发布，请人工核验草稿状态。");
-    }
     if (!fakeCampaignId) {
-      const campaignCheck = await requestCreationStep("campaign_snap/check",
+      const campaignCheck = await requestAdvisoryCreationStep("campaign_snap/check",
         () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
           campaign_snap_id: ids.campaignSnapId,
         }), credential);
-      const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
-      if (campaignData?.success === false) {
-        const reason = isRecord(campaignData.error_item) && typeof campaignData.error_item.message === "string"
-          ? campaignData.error_item.message
-          : "系列草稿检查未通过";
-        throw new ConfirmedCreationFailureError(`TikTok 系列草稿检查失败：${reason}`);
-      }
-      if (campaignData?.success !== true) {
-        throw new UnknownCreationStateError("TikTok 系列草稿检查未返回明确成功结果；已停止发布，请人工核验草稿状态。");
-      }
+      const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
       fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
     }
   }
@@ -1842,24 +1797,14 @@ async function validateDraftChain(
     ad_snap_id: item.ad_snap_id,
     creative_snap_ids: item.creative_snap_info_list.map((creative) => creative.creative_snap_id),
   }));
-  const adCheck = await requestCreationStep("ad_creative_snap/check",
+  await requestAdvisoryCreationStep("ad_creative_snap/check",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_creative_snap/check/", {
       campaign_id: ids.campaignId ?? "",
       fake_campaign_id: fakeCampaignId,
       ad_creative_snap_check_info: checkInfo,
       risk_info: ids.riskInfo,
     }), credential);
-  const adData = isRecord(adCheck.data) ? adCheck.data : undefined;
-  const finalAdReports = checkInfo.map((info) => findAdSnapCheckReport(adData ?? {}, info.ad_snap_id));
-  if (adData?.creative_success === false || finalAdReports.some((report) => report?.success === false)) {
-    const structure = checkInfo.map((info) => `组${info.ad_snap_id}含${info.creative_snap_ids.length}条广告`).join("、");
-    const detail = JSON.stringify(adData).slice(0, 400);
-    throw new ConfirmedCreationFailureError(`TikTok 广告素材草稿检查失败[本次发出结构：${structure}]：${detail}`);
-  }
-  if (adData?.creative_success !== true || finalAdReports.some((report) => report?.success !== true)) {
-    throw new UnknownCreationStateError("TikTok 广告素材联合检查未返回所有目标对象的明确成功结果；已停止发布，请人工核验草稿状态。");
-  }
-  await requestCreationStep("snap/batch_create_cta_id",
+  await requestAdvisoryCreationStep("snap/batch_create_cta_id",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
       campaign_id: ids.campaignId ?? "",
       campaign_snap_id: ids.campaignSnapId,
@@ -2063,7 +2008,7 @@ async function prepareSparkPosts(
     identity_id: video.identityId,
     identity_type: 2,
   }));
-  const music = await requestCreationStep(
+  await requestAdvisoryCreationStep(
     "spark/validate_promote_music",
     () => creationPathRequest(
       sessionRequest,
@@ -2077,17 +2022,8 @@ async function prepareSparkPosts(
     ),
     credential,
   );
-  const musicData = isRecord(music.data) ? music.data : {};
-  const musicInfoMap = isRecord(musicData.music_info_map) ? musicData.music_info_map : {};
-  const musicStatuses = sparkVideos.map((video) => {
-    const item = musicInfoMap[video.itemId];
-    return isRecord(item) && typeof item.status === "number" ? item.status : null;
-  });
-  if (musicStatuses.some((status) => status !== 0)) {
-    throw new ConfirmedCreationFailureError("TikTok Spark 帖子音乐校验未通过，已停止创建创意。");
-  }
 
-  await requestCreationStep(
+  await requestAdvisoryCreationStep(
     "creative/creative_automation_option",
     () => creationPathRequest(
       sessionRequest,
@@ -2104,7 +2040,7 @@ async function prepareSparkPosts(
       .filter((code): code is string => Boolean(code)),
   )];
   if (uniqueVids.length === 0) return;
-  const saved = await requestCreationStep(
+  const saved = await requestAdvisoryCreationStep(
     "spark/creative_fix_task/save",
     () => creationPathRequest(
       sessionRequest,
@@ -2113,14 +2049,10 @@ async function prepareSparkPosts(
     ),
     credential,
   );
-  const savedData = isRecord(saved.data) ? saved.data : {};
+  const savedData = saved && isRecord(saved.data) ? saved.data : {};
   const taskMap = isRecord(savedData.task_map) ? savedData.task_map : {};
   const taskIds = [...new Set(uniqueVids.map((vid) => nonEmptyId(taskMap[vid])).filter((id): id is string => Boolean(id)))];
-  if (taskIds.length !== uniqueVids.length) {
-    throw new UnknownCreationStateError("TikTok Spark 修复任务已提交，但返回的任务映射不完整；请人工核验后再处理。");
-  }
-
-  await requestCreationStep(
+  await requestAdvisoryCreationStep(
     "roi2/auction_batch_item_roi2_validate",
     () => creationPathRequest(
       sessionRequest,
@@ -2139,10 +2071,11 @@ async function prepareSparkPosts(
     ),
     credential,
   );
+  if (taskIds.length !== uniqueVids.length) return;
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-    const info = await requestCreationStep(
+    const info = await requestAdvisoryCreationStep(
       "spark/creative_fix_task/info",
       () => creationPathRequest(
         sessionRequest,
@@ -2152,6 +2085,7 @@ async function prepareSparkPosts(
       credential,
       { semantics: "result-query" },
     );
+    if (!info) return;
     const infoData = isRecord(info.data) ? info.data : {};
     const infoMap = isRecord(infoData.task_info_map) ? infoData.task_info_map : {};
     const statuses = taskIds.map((taskId) => {
@@ -2160,7 +2094,6 @@ async function prepareSparkPosts(
     });
     if (statuses.every((status) => status === 2)) return;
   }
-  throw new UnknownCreationStateError("TikTok Spark 修复任务未在限定时间内完成；为避免重复操作，请人工核验后再处理。");
 }
 
 /** Maps TikTok location ids used by the ad targeting to the ISO country codes
@@ -3394,6 +3327,22 @@ function siblingListRequest(
     `/${segment}/list`,
   );
   return { ...template, target, derived: true, url: url.toString() };
+}
+
+/** Runs a browser-side helper/check call in the captured HAR order without
+ * turning its page-level result into an ad-creation outcome. The authoritative
+ * result comes from draft saves and async_creation/create_by_snap + detail. */
+async function requestAdvisoryCreationStep(
+  step: string,
+  createRequest: () => CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  boundary: CreationRequestBoundary = {},
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    return await requestCreationStep(step, createRequest, credential, boundary);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Campaign existence is independent from ad/report rows. The imported
