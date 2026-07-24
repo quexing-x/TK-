@@ -12,6 +12,12 @@ export const TikTokCreationSteps = [
 ] as const;
 export type TikTokCreationStep = (typeof TikTokCreationSteps)[number];
 
+/** Provider-owned source markers used by TikTok for a fresh draft publish. */
+export const TikTokCreationPublishSource = {
+  coming_source_type: 6,
+  sketch_publish_source: 1,
+} as const;
+
 /**
  * A creation request has a different path from the two onboarding requests,
  * but belongs to the same authenticated advertiser session.  This deliberately
@@ -62,7 +68,7 @@ export function buildPublishInput(
   initialStatus: "enabled" | "disabled",
 ) {
   const value = DisabledPublishInputSchema.parse(input);
-  return { campaign_id: "", campaign_snap_id: value.campaignSnapId, campaign_sketch_id: value.campaignSketchId, ad_and_creative_snap_info_list: value.adAndCreativeSnapInfoList, is_status_disabled: initialStatus === "disabled", is_partial_publish: false };
+  return { campaign_id: "", campaign_snap_id: value.campaignSnapId, campaign_sketch_id: value.campaignSketchId, ad_and_creative_snap_info_list: value.adAndCreativeSnapInfoList, ...TikTokCreationPublishSource, is_status_disabled: initialStatus === "disabled", is_partial_publish: false };
 }
 
 export class CreationPresetIncompleteError extends Error {
@@ -124,6 +130,7 @@ export function buildDraftPayloads(
       with_sketch: true,
       is_skip_check_fields: false,
       ad_sketch_form_data: {
+        origin_ad_id: 0,
         ad_name: row.adGroupName,
         ad_snap_id: "",
         ad_sketch_id: "",
@@ -181,12 +188,23 @@ export function buildProfileDraftPayloads(
   if (!Array.isArray(list) || !isRecord(list[0])) throw new Error("本地创建模板缺少广告素材结构，请重新验证该账户的创建模板。");
   campaignForm.campaign_name = row.campaignName;
   campaignForm.campaign_id = ""; campaignForm.campaign_snap_id = ""; campaignForm.campaign_sketch_id = "";
+  delete campaignForm.origin_campaign_id;
   adForm.ad_name = row.adGroupName; adForm.budget = String(row.dailyBudget);
+  adForm.origin_ad_id = 0;
+  adForm.ad_snap_id = "";
+  adForm.ad_sketch_id = "";
+  adForm.by_ad_sketch_id = "";
   if (row.bid !== null) adForm.cpa_bid = String(row.bid);
   const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
   adForm.schedule_type = 1; adForm.start_time = startTime; adForm.end_time = endTime;
   const asset = list[0]; asset.creative_name = row.adName; asset.external_url = row.productUrl;
-  if (typeof asset.open_url === "string") asset.open_url = row.productUrl;
+  asset.creative_snap_id = "";
+  asset.creative_sketch_id = "";
+  delete asset.origin_creative_id;
+  // `open_url` is TikTok's separate direct-link feature, not the ordinary
+  // landing page. The verified HAR keeps it empty with `is_open_url = 0`.
+  // Writing the landing page here makes TikTok enable an incomplete direct
+  // link and reject ad_creative_snap/check.
   if (!Array.isArray(asset.image_list) || !isRecord(asset.image_list[0])) throw new Error("本地创建模板缺少视频素材结构，请重新验证该账户的创建模板。");
   asset.image_list[0].aweme_item_id = row.videoCode;
   if (customConfig && requiredCreationFields(customConfig).length === 0) {
@@ -213,7 +231,17 @@ function applyCreationConfigOverrides(
   if (config.placementIds.length > 0) adForm.platform = [...config.placementIds];
   asset.identity_type = config.identityType;
   asset.identity_id = config.identityId;
-  asset.call_to_action_id = config.callToActionId;
+  if (asset.need_create_cta_id === true) {
+    const ctaAssets = asset.call_to_action_asset_list;
+    if (!Array.isArray(ctaAssets) || ctaAssets.length < 1 || ctaAssets.length > 3) {
+      throw new Error("已验证的程序化创意模板必须包含 1 到 3 个行动引导文案。");
+    }
+    // Programmatic CTA uses the verified asset list. A static preset id such
+    // as "0" makes TikTok ignore that list during ad_creative_snap/check.
+    asset.call_to_action_id = "";
+  } else {
+    asset.call_to_action_id = config.callToActionId;
+  }
   asset.is_comment_disable = config.commentDisabled ? 1 : 0;
   asset.is_share_disable = config.shareDisabled ? 1 : 0;
 }

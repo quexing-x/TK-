@@ -774,6 +774,8 @@ describe("AutomationService", () => {
 
     expect(run.candidateCount).toBe(0);
     expect(provider.mutations).toHaveLength(0);
+    expect(store.listCurrentManagedEntities("demo-account", "cookie").map((entity) => entity.externalId))
+      .toEqual(expect.arrayContaining(["campaign-1", "adgroup-1"]));
   });
 
   it("does not run when the account automation switch is off", async () => {

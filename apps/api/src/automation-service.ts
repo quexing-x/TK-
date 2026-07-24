@@ -543,26 +543,11 @@ export class AutomationService {
         new Date(),
         ruleConfiguration.lookbackHours,
       );
-      const filteredResult = {
-        ...output.result,
-        counts: {
-          campaign: recent.entities.filter((item) => item.entityType === "campaign").length,
-          "ad-group": recent.entities.filter((item) => item.entityType === "ad-group").length,
-          ad: recent.entities.filter((item) => item.entityType === "ad").length,
-        },
-        warnings:
-          recent.excludedCount > 0
-            ? [
-                ...output.result.warnings,
-                `已排除 ${recent.excludedCount} 个不属于最近 ${ruleConfiguration.lookbackHours} 小时广告组窗口的对象。`,
-              ]
-            : output.result.warnings,
-      };
       this.store.saveReadOnlySync(
         accountId,
         account.providerKind,
-        recent.entities,
-        filteredResult,
+        output.entities,
+        output.result,
       );
 
       const evaluation = evaluateRuleConfiguration(

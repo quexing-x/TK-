@@ -910,13 +910,25 @@ describe("local API", () => {
       const url = String(input);
       const cookie = new Headers(init?.headers).get("cookie");
       if (cookie) cookies.push(cookie);
-      const data = url.includes("campaign_snap/save")
-        ? { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }
-        : url.includes("ad_snap/save")
-          ? { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }
-          : url.includes("creative_snap/save")
-            ? { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }
-            : url.includes("create_by_snap")
+       const data = url.includes("campaign_snap/save")
+         ? { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }
+        : url.includes("campaign_snap/check")
+          ? { success: true, fake_campaign_id: "campaign-sketch" }
+         : url.includes("ad_snap/save")
+           ? { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }
+          : url.includes("ad_snap/bulk_check")
+            ? { ad_snap_check_report_map: { "ad-snap": { success: true, ad_snap_id: "ad-snap", fake_ad_id: "ad-sketch" } } }
+           : url.includes("creative_snap/save")
+             ? { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }
+            : url.includes("ad_creative_snap/check")
+              ? { creative_success: true, ad_snap_check_report_map: { "ad-snap": { success: true, ad_snap_id: "ad-snap", fake_ad_id: "ad-sketch" } } }
+            : url.includes("creative_snap/check")
+              ? { success: true }
+            : url.includes("cbo_consistency_check")
+              ? { is_all_success: true }
+            : url.includes("batch_create_cta_id")
+              ? { cta_id_map: {} }
+             : url.includes("create_by_snap")
               ? { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "ad" }
               : { list: [], pagination: { page: 1, page_count: 1 } };
       return new Response(JSON.stringify({ code: 0, data }), { status: 200, headers: { "content-type": "application/json" } });

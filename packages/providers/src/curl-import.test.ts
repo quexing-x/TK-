@@ -37,6 +37,18 @@ describe("parseTikTokCurl", () => {
         }),
       ]),
     );
+    const campaignTemplate = imported.credential.requestTemplates?.find(
+      (item) => item.target === "campaign",
+    );
+    expect(JSON.parse(campaignTemplate?.body ?? "{}")).toMatchObject({
+      common_req: {
+        dimensions: ["campaign_id"],
+        filters: [
+          { field: "campaign_status", in_field_values: ["delete"], filter_type: 10 },
+          { field: "campaign_system_origin", in_field_values: ["100000"], filter_type: 0 },
+        ],
+      },
+    });
     expect(imported.credential.cookie).toBe(
       "sessionid=authorized-test-cookie",
     );
