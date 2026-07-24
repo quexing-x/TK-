@@ -245,7 +245,7 @@ describe("web API client", () => {
         policy: {
           accountId: "account-1",
           enabled: true,
-          policyVersion: "disable-only-v1",
+          policyVersion: "enable-disable-v2",
           dailyActionLimit: 3,
           updatedAt: "2026-07-18T00:00:00.000Z",
         },

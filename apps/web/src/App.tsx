@@ -1294,7 +1294,7 @@ function AdsManagementPage({
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em>{lowRiskOn && <span className="low-risk-reminder" title="该账户已开启低风险自动化：仅自动关闭，开启需人工批准；每日 0:00 自动关闭本开关。">⚠ 低风险自动化已开启</span>}</h2><p>人工接管的广告组不参与自动化决策</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em>{lowRiskOn && <span className="low-risk-reminder" title="该账户已开启低风险自动化：按已验证规则自动启停；每日 0:00 自动关闭本开关。">⚠ 低风险自动化已开启</span>}</h2><p>人工接管的广告组不参与自动化决策</p></div></div>
           <small className="inline-protection-note">
             {remoteRefreshing
               ? "正在后台刷新平台数据…"
@@ -1800,7 +1800,7 @@ function AutomationPage({
         setRunFeedback(
           preview
             ? `检测完成：生成 ${result.candidateCount} 项规则建议，未修改广告。`
-            : `自动执行完成：命中 ${result.candidateCount} 项，成功关闭 ${result.successCount} 项，失败 ${result.failureCount} 项。`,
+            : `自动执行完成：命中 ${result.candidateCount} 项，成功执行 ${result.successCount} 项，失败 ${result.failureCount} 项。`,
         );
       }
       await load();
@@ -1920,7 +1920,7 @@ function AutomationPage({
         <dl className="automation-status-metrics">
           <div><dt>账户自动化</dt><dd>{account.enabled ? "已开启" : "已关闭"}</dd></div>
           <div><dt>最近候选</dt><dd>{latest?.candidateCount ?? 0} 项</dd></div>
-          <div><dt>本轮自动关闭</dt><dd>{latest?.successCount ?? 0} 项</dd></div>
+          <div><dt>本轮自动启停</dt><dd>{latest?.successCount ?? 0} 项</dd></div>
           <div><dt>单轮操作上限</dt><dd>{maxActionsPerRun} 项</dd></div>
         </dl>
       </header>
@@ -1928,7 +1928,7 @@ function AutomationPage({
       <section className="automation-safety-panel" aria-labelledby="automation-safety-title">
         <div>
           <span className="eyebrow">安全执行建议</span>
-          <h2 id="automation-safety-title">自动关闭，异常即止</h2>
+          <h2 id="automation-safety-title">自动启停，异常即止</h2>
           {!canRunAutomation && <p className="error-text">{connectionMessage}</p>}
         </div>
         <div className="automation-actions">
@@ -1947,7 +1947,7 @@ function AutomationPage({
             disabled={busy !== null || !account.enabled || !canRunAutomation}
             onClick={() => void execute(false)}
             type="button"
-            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则立即执行自动关闭" : "请先在用户管理中开启账户自动化"}
+            title={!canRunAutomation ? connectionMessage : account.enabled ? "按规则立即执行自动启停" : "请先在用户管理中开启账户自动化"}
           >
             <Play size={17} />
             {busy === "run" ? "执行中…" : "立即执行"}
@@ -2031,10 +2031,10 @@ function AutomationPage({
       </div>
 
       <section className="automation-policy-panel low-risk-panel">
-        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动关闭</h2><p>默认关闭；只允许关闭，不允许自动开启。每日限额由数据库原子控制，多实例不会重复领取同一建议。</p></div></div></div>
+        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动启停</h2><p>默认关闭；开启后仅执行已验证的开启与关闭规则。数据库原子防重，多实例不会重复领取同一建议。</p></div></div></div>
         <div className="sync-count-grid">
           <span>策略 <strong>{lowRiskState.policy.enabled ? "已启用" : "已关闭"}</strong></span>
-          <span>今日自动关闭 <strong>{lowRiskState.todayUsage} 次（不限量）</strong></span>
+          <span>今日自动启停 <strong>{lowRiskState.todayUsage} 次（不限量）</strong></span>
           <span>熔断 <strong>{lowRiskState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
         </div>
         <div className="automation-actions">
@@ -2366,6 +2366,7 @@ function operationActionLabel(action: AdOperationRecord["action"]): string {
     ignore: "加入忽略",
     unignore: "取消忽略",
     appeal: "申诉",
+    delete: "删除广告组",
   }[action];
 }
 
