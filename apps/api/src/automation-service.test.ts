@@ -6,6 +6,7 @@ import {
   ProviderRegistry,
   type AppealMutation,
   type AdsProvider,
+  type DeleteAdGroupMutation,
   type StatusMutation,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
@@ -15,13 +16,28 @@ import {
   type PollNotificationDispatcher,
 } from "./automation-service.js";
 
+function dateKeyInTimeZoneForTest(value: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const part = (type: "year" | "month" | "day") =>
+    parts.find((item) => item.type === type)?.value ?? "00";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 class FakeProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Fake Cookie";
   readonly capabilityVersion = "fake-cookie-v1";
-  readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status", "appeal-ads"] as const);
+  readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status", "appeal-ads", "copy-ads", "delete-ad-groups"] as const);
   readonly mutations: StatusMutation[] = [];
   readonly appeals: AppealMutation[] = [];
+  readonly appealOutcomes: boolean[] = [];
+  readonly deletions: DeleteAdGroupMutation[] = [];
+  deleteFailureKind: "retryable" | "unknown" | null = null;
   shouldFail = false;
   statusFailureKind: "retryable" | "unknown" | null = null;
   throwStatusError = false;
@@ -35,6 +51,10 @@ class FakeProvider implements AdsProvider {
   afterSync: (() => void | Promise<void>) | null = null;
   campaignCreatedAt = new Date().toISOString();
   scheduledStartAt = "2026-07-19T00:00:00.000Z";
+  adGroupConversions = 0;
+  adGroupCpa: number | null = null;
+  adGroupCpc = 1.5;
+  adGroupCarts = 0;
   scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   syncCount = 0;
@@ -76,10 +96,13 @@ class FakeProvider implements AdsProvider {
         row_data: {
           campaign_id: "campaign-1",
           stat_cost: "20",
-          cpc: "1.5",
+          cpc: String(this.adGroupCpc),
           click_cnt: "10",
-          time_attr_convert_cnt: "0",
-          time_attr_on_web_cart: "0",
+          time_attr_convert_cnt: String(this.adGroupConversions),
+          ...(this.adGroupCpa === null
+            ? {}
+            : { time_attr_conversion_cost: String(this.adGroupCpa) }),
+          time_attr_on_web_cart: String(this.adGroupCarts),
         },
       },
     };
@@ -103,7 +126,7 @@ class FakeProvider implements AdsProvider {
       };
     }
     if (this.scenario === "recovery") {
-      defaultGroup.payload.ad_primary_status = "disable";
+      defaultGroup.payload.ad_primary_status = this.adGroupStatus;
       defaultGroup.payload.row_data = {
         campaign_id: "campaign-1",
         stat_cost: "20",
@@ -208,7 +231,11 @@ class FakeProvider implements AdsProvider {
           requiredMetricsComplete: this.qualityStatus === "healthy",
           contractValid: this.qualityStatus !== "invalid",
           providerContractVersion: "test-v1",
-          coverage: { startDate: now.slice(0, 10), endDate: now.slice(0, 10), timezone: "UTC" },
+          coverage: {
+            startDate: dateKeyInTimeZoneForTest(new Date(now), "Asia/Shanghai"),
+            endDate: dateKeyInTimeZoneForTest(new Date(now), "Asia/Shanghai"),
+            timezone: "Asia/Shanghai",
+          },
           missingMetrics: this.qualityStatus === "healthy" ? [] : ["cost_per_conversion"],
           partialFailures: this.qualityStatus === "healthy" ? [] : ["test-quality"],
           lastHealthyAt: now,
@@ -250,7 +277,20 @@ class FakeProvider implements AdsProvider {
 
   async appeal(_context: unknown, mutations: AppealMutation[]) {
     this.appeals.push(...mutations);
-    return mutations.map((mutation) => ({ ...mutation, ok: true, message: "appealed" }));
+    return mutations.map((mutation) => {
+      const ok = this.appealOutcomes.shift() ?? true;
+      return { ...mutation, ok, message: ok ? "appealed" : "appeal rejected" };
+    });
+  }
+
+  async deleteAdGroups(_context: unknown, mutations: DeleteAdGroupMutation[]) {
+    this.deletions.push(...mutations);
+    return mutations.map((mutation) => ({
+      ...mutation,
+      ok: this.deleteFailureKind === null,
+      ...(this.deleteFailureKind && { failureKind: this.deleteFailureKind }),
+      message: this.deleteFailureKind ? "delete failed" : "deleted",
+    }));
   }
 }
 
@@ -291,7 +331,14 @@ describe("AutomationService", () => {
     store.updateProviderAuthorization("demo-account", "cookie", {
       status: "active",
       capabilityVersion: provider.capabilityVersion,
-      capabilities: ["read-campaigns", "read-ad-groups", "change-status"],
+      capabilities: [
+        "read-campaigns",
+        "read-ad-groups",
+        "change-status",
+        "appeal-ads",
+        "copy-ads",
+        "delete-ad-groups",
+      ],
     });
     const account = store.getAccount("demo-account")!;
     store.updateAccountSettings("demo-account", {
@@ -299,6 +346,10 @@ describe("AutomationService", () => {
       accountType: account.accountType,
       enabled: account.enabled,
       providerKind: account.providerKind,
+    });
+    store.updateLowRiskAutomationPolicy("demo-account", {
+      enabled: true,
+      dailyActionLimit: 0,
     });
     const initialSync = await provider.syncReadOnly();
     store.saveReadOnlySync(
@@ -310,7 +361,10 @@ describe("AutomationService", () => {
 
   });
 
-  afterEach(() => store.close());
+  afterEach(() => {
+    vi.useRealTimers();
+    store.close();
+  });
 
   it("previews matching decisions without writing", async () => {
     const run = await service.runAccount("demo-account", "preview");
@@ -655,7 +709,7 @@ describe("AutomationService", () => {
 
     expect(store.getAutomationDecision(stale.id)).toMatchObject({
       status: "skipped",
-      errorMessage: "广告组已关闭，已清除过期决策提醒",
+      errorMessage: "对象状态已更新，已清除过期决策提醒",
     });
     expect(store.listAutomationDecisions("demo-account").find((item) => item.id !== stale.id))
       .toMatchObject({ status: "succeeded" });
@@ -719,11 +773,15 @@ describe("AutomationService", () => {
     expect(provider.mutations).toHaveLength(0);
   });
 
-  it("directly closes matched ad groups from the scheduler", async () => {
+  it("keeps scheduled status writes in observe mode until low-risk automation is enabled", async () => {
+    store.updateLowRiskAutomationPolicy("demo-account", {
+      enabled: false,
+      dailyActionLimit: 0,
+    });
     const run = await service.runAccount("demo-account", "scheduler");
 
-    expect(run).toMatchObject({ executionMode: "automatic", actionCount: 1, successCount: 1 });
-    expect(provider.mutations).toHaveLength(1);
+    expect(run).toMatchObject({ executionMode: "observe", actionCount: 0, successCount: 0 });
+    expect(provider.mutations).toHaveLength(0);
     expect(store.getLowRiskAutomationPolicy("demo-account").enabled).toBe(false);
   });
 
@@ -755,8 +813,36 @@ describe("AutomationService", () => {
     );
   });
 
-  it("never automatically executes enable suggestions in the low-risk policy", async () => {
+  it("does not redispatch an automatic action while its durable status operation is unknown", async () => {
+    store.recordAdOperation({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      entityName: "测试广告组",
+      action: "disable",
+      source: "automation",
+      status: "unknown",
+      message: "远端结果待确认",
+    });
+
+    const run = await service.runAccount("demo-account", "scheduler");
+
+    expect(run).toMatchObject({ actionCount: 0, successCount: 0, failureCount: 0 });
+    expect(provider.mutations).toHaveLength(0);
+    expect(store.listAutomationDecisions("demo-account")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "skipped",
+          errorMessage: expect.stringContaining("结果待确认"),
+        }),
+      ]),
+    );
+  });
+
+  it("automatically executes a verified enable rule after account opt-in", async () => {
     provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
     store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
       dailyActionLimit: 5,
@@ -764,11 +850,17 @@ describe("AutomationService", () => {
 
     const run = await service.runAccount("demo-account", "scheduler");
 
-    expect(run.actionCount).toBe(0);
-    expect(provider.mutations).toHaveLength(0);
+    expect(run).toMatchObject({ executionMode: "automatic", actionCount: 1, successCount: 1 });
+    expect(provider.mutations).toEqual([
+      expect.objectContaining({
+        entityType: "ad-group",
+        externalId: "adgroup-1",
+        action: "enable",
+      }),
+    ]);
     expect(store.listAutomationDecisions("demo-account")).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ action: "enable", status: "skipped" }),
+        expect.objectContaining({ action: "enable", status: "succeeded" }),
       ]),
     );
   });
@@ -822,7 +914,7 @@ describe("AutomationService", () => {
     expect(service.getLowRiskAutomationState("demo-account").todayUsage).toBe(0);
   });
 
-  it("does not let the removed rollout policy block direct automation", async () => {
+  it("blocks a scheduled write before dispatch when low-risk automation is turned off during sync", async () => {
     store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
       dailyActionLimit: 5,
@@ -837,15 +929,26 @@ describe("AutomationService", () => {
 
     const run = await service.runAccount("demo-account", "scheduler");
 
-    expect(run).toMatchObject({ actionCount: 1, successCount: 1, failureCount: 0 });
-    expect(provider.mutations).toHaveLength(1);
+    expect(run).toMatchObject({ actionCount: 1, successCount: 0, failureCount: 1 });
+    expect(provider.mutations).toHaveLength(0);
+    expect(store.getLowRiskAutomationPolicy("demo-account").enabled).toBe(false);
     expect(store.listAutomationDecisions("demo-account")).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          status: "succeeded",
+          status: "failed",
+          errorMessage: expect.stringContaining("低风险自动化"),
         }),
       ]),
     );
+
+    store.updateLowRiskAutomationPolicy("demo-account", {
+      enabled: true,
+      dailyActionLimit: 5,
+    });
+    const retry = await service.runAccount("demo-account", "scheduler");
+
+    expect(retry).toMatchObject({ actionCount: 1, successCount: 1, failureCount: 0 });
+    expect(provider.mutations).toHaveLength(1);
   });
 
   it("blocks approval before dispatch when fresh data quality is not healthy", async () => {
@@ -1236,6 +1339,415 @@ describe("AutomationService", () => {
     ]));
   });
 
+  it("copies qualifying current-day groups before noon once per source and uses the configured count", async () => {
+    const autoCopyRunner = vi.fn(async (input: { onBeforeDispatch?: () => void }) => {
+      input.onBeforeDispatch?.();
+      return [{ ok: true, adGroupIds: ["generated-copy-1", "generated-copy-2"] }];
+    });
+    const copyService = new AutomationService(
+      store,
+      vault,
+      new ProviderRegistry([provider]),
+      autoCopyRunner,
+    );
+    const settings = store.getAutomationFeatureSettings();
+    settings.copy.autoCopyEnabled = true;
+    settings.copy.namingTemplate = "{source_name}";
+    settings.copy.autoCopyBudget = 25;
+    settings.copy.autoCopyBid = 4;
+    store.updateAutomationFeatureSettings(settings);
+    provider.adGroupConversions = 2;
+    provider.adGroupCpa = 5;
+    provider.adGroupCpc = 0.5;
+    const qualifying = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", qualifying.entities, qualifying.result);
+
+    const beforeNoon = new Date("2026-07-25T02:00:00.000Z"); // 10:00 in Asia/Shanghai.
+    vi.useFakeTimers();
+    vi.setSystemTime(beforeNoon);
+    const fresh = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", fresh.entities, fresh.result);
+    await copyService.runScheduledAutoCopies("demo-account", beforeNoon);
+    await copyService.runScheduledAutoCopies("demo-account", beforeNoon);
+
+    expect(autoCopyRunner).toHaveBeenCalledTimes(1);
+    expect(autoCopyRunner).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceAdGroupId: "adgroup-1",
+      baseAdGroupName: "测试广告组",
+      count: 2,
+      dailyBudget: 25,
+      bid: 4,
+      launchImmediately: true,
+      sameCampaign: true,
+      onBeforeDispatch: expect.any(Function),
+    }));
+    expect(autoCopyRunner).toHaveBeenCalledTimes(1);
+
+    autoCopyRunner.mockClear();
+    const nextDay = new Date(beforeNoon.getTime() + 24 * 60 * 60_000);
+    vi.setSystemTime(nextDay);
+    const nextDaySync = await provider.syncReadOnly();
+    nextDaySync.entities.push({
+      entityType: "ad-group",
+      externalId: "generated-copy-1",
+      payload: {
+        campaign_id: "campaign-1",
+        ad_name: "用户已重命名",
+        ad_primary_status: "enable",
+        row_data: {
+          campaign_id: "campaign-1",
+          time_attr_convert_cnt: "2",
+          time_attr_conversion_cost: "5",
+          time_attr_on_web_cart: "2",
+          cpc: "0.5",
+        },
+      },
+    });
+    store.saveReadOnlySync("demo-account", "cookie", nextDaySync.entities, nextDaySync.result);
+
+    await copyService.runScheduledAutoCopies("demo-account", nextDay);
+
+    expect(autoCopyRunner).toHaveBeenCalledTimes(1);
+    expect(autoCopyRunner).toHaveBeenCalledWith(expect.objectContaining({
+      sourceAdGroupId: "adgroup-1",
+    }));
+  });
+
+  it("does not start new automatic copies at or after 12:00 account time", async () => {
+    const autoCopyRunner = vi.fn(async () => [{ ok: true }]);
+    const copyService = new AutomationService(
+      store,
+      vault,
+      new ProviderRegistry([provider]),
+      autoCopyRunner,
+    );
+    const settings = store.getAutomationFeatureSettings();
+    settings.copy.autoCopyEnabled = true;
+    store.updateAutomationFeatureSettings(settings);
+    provider.adGroupConversions = 2;
+    provider.adGroupCpa = 5;
+    provider.adGroupCpc = 0.5;
+    const atNoon = new Date();
+    atNoon.setUTCHours(4, 0, 0, 0); // 12:00 in Asia/Shanghai.
+    vi.useFakeTimers();
+    vi.setSystemTime(atNoon);
+    const fresh = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", fresh.entities, fresh.result);
+
+    await copyService.runScheduledAutoCopies("demo-account", atNoon);
+
+    expect(autoCopyRunner).not.toHaveBeenCalled();
+  });
+
+  it("requires conversions, CPA, and CPC to all satisfy the automatic-copy rule", async () => {
+    const autoCopyRunner = vi.fn(async () => [{ ok: true }]);
+    const copyService = new AutomationService(
+      store,
+      vault,
+      new ProviderRegistry([provider]),
+      autoCopyRunner,
+    );
+    const settings = store.getAutomationFeatureSettings();
+    settings.copy.autoCopyEnabled = true;
+    store.updateAutomationFeatureSettings(settings);
+    provider.adGroupConversions = 2;
+    provider.adGroupCpa = 10;
+    provider.adGroupCpc = 0.5;
+    const beforeNoon = new Date();
+    beforeNoon.setUTCHours(2, 0, 0, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(beforeNoon);
+    const fresh = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", fresh.entities, fresh.result);
+
+    await copyService.runScheduledAutoCopies("demo-account", beforeNoon);
+
+    expect(autoCopyRunner).not.toHaveBeenCalled();
+  });
+
+  it("rejects a healthy automatic-copy snapshot whose coverage is not exactly the account's current day", async () => {
+    const autoCopyRunner = vi.fn(async () => [{ ok: true }]);
+    const copyService = new AutomationService(
+      store,
+      vault,
+      new ProviderRegistry([provider]),
+      autoCopyRunner,
+    );
+    const settings = store.getAutomationFeatureSettings();
+    settings.copy.autoCopyEnabled = true;
+    store.updateAutomationFeatureSettings(settings);
+    provider.adGroupConversions = 2;
+    provider.adGroupCpa = 5;
+    provider.adGroupCpc = 0.5;
+    const beforeNoon = new Date("2026-07-24T02:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(beforeNoon);
+    const sync = await provider.syncReadOnly();
+    sync.result.quality.coverage = {
+      startDate: "2026-07-23",
+      endDate: "2026-07-24",
+      timezone: "Asia/Shanghai",
+    };
+    store.saveReadOnlySync("demo-account", "cookie", sync.entities, sync.result);
+
+    await copyService.runScheduledAutoCopies("demo-account", beforeNoon);
+
+    expect(autoCopyRunner).not.toHaveBeenCalled();
+  });
+
+  it("does not enter deletion selection when healthy metrics cover an unknown or multi-day window", async () => {
+    const settings = store.getAutomationFeatureSettings();
+    settings.deletion.enabled = true;
+    store.updateAutomationFeatureSettings(settings);
+    const atSix = new Date("2026-07-24T22:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(atSix);
+    const sync = await provider.syncReadOnly();
+    sync.result.quality.coverage = {
+      startDate: "2026-07-24",
+      endDate: "2026-07-25",
+      timezone: "Asia/Shanghai",
+    };
+    store.saveReadOnlySync("demo-account", "cookie", sync.entities, sync.result);
+    const selection = vi.spyOn(store, "listDeletionReadyAdGroups");
+
+    await service.runScheduledDeletions("demo-account", atSix);
+
+    expect(selection).not.toHaveBeenCalled();
+    expect(provider.deletions).toEqual([]);
+  });
+
+  it("does not submit an automatic appeal while the account is in observe mode", async () => {
+    provider.scenario = "appeal";
+    const synced = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", synced.entities, synced.result);
+    store.setAccountExecutionMode("demo-account", "observe", "test");
+
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-20T17:00:00.000Z"));
+
+    expect(provider.appeals).toEqual([]);
+    expect(store.listAdOperations("demo-account").filter((item) => item.action === "appeal"))
+      .toEqual([]);
+  });
+
+  it("uses the configured appeal hours and retries only the configured number of confirmed failures", async () => {
+    provider.scenario = "appeal";
+    provider.appealOutcomes.push(false, true);
+    const synced = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", synced.entities, synced.result);
+    const settings = store.getAutomationFeatureSettings();
+    settings.appeal.scheduleHours = [8];
+    settings.appeal.retryLimit = 1;
+    store.updateAutomationFeatureSettings(settings);
+
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-21T00:00:00.000Z"));
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-21T00:01:00.000Z"));
+    await service.runScheduledAppeals("demo-account", new Date("2026-07-22T00:00:00.000Z"));
+
+    expect(provider.appeals).toHaveLength(2);
+    expect(store.listAdOperations("demo-account").filter((item) => item.action === "appeal"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: "failed" }),
+        expect.objectContaining({ status: "succeeded" }),
+      ]));
+  });
+
+  it("deletes only a software-confirmed disabled ad group after the protection period and never retries unknown", async () => {
+    const asOf = new Date("2026-07-24T22:00:00.000Z"); // 06:00 in Asia/Shanghai.
+    vi.useFakeTimers();
+    vi.setSystemTime(asOf);
+    provider.adGroupStatus = "disable";
+    const synced = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", synced.entities, synced.result);
+    const disabled = store.recordAdOperation({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      entityName: "测试广告组",
+      action: "disable",
+      source: "automation",
+      status: "succeeded",
+      message: "confirmed disabled",
+    });
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    (store as unknown as {
+      db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } };
+    }).db.prepare(
+      "UPDATE ad_operations SET created_at = ?, updated_at = ?, completed_at = ? WHERE id = ?",
+    ).run(twoHoursAgo, twoHoursAgo, twoHoursAgo, disabled.id);
+    const settings = store.getAutomationFeatureSettings();
+    settings.deletion.enabled = true;
+    settings.deletion.gracePeriodHours = 1;
+    store.updateAutomationFeatureSettings(settings);
+    const fresh = await provider.syncReadOnly();
+    fresh.entities.push({
+      entityType: "ad-group",
+      externalId: "adgroup-retained",
+      payload: {
+        campaign_id: "campaign-1",
+        ad_name: "系列保留组",
+        ad_primary_status: "enable",
+        row_data: {
+          campaign_id: "campaign-1",
+          time_attr_convert_cnt: "3",
+          time_attr_conversion_cost: "3",
+          time_attr_on_web_cart: "5",
+          cpc: "0.3",
+        },
+      },
+    });
+    store.saveReadOnlySync("demo-account", "cookie", fresh.entities, fresh.result);
+    provider.deleteFailureKind = "unknown";
+
+    expect(store.listDeletionReadyAdGroups(
+      "demo-account",
+      "cookie",
+      new Date(asOf.getTime() - 60 * 60 * 1000).toISOString(),
+    )).toEqual([expect.objectContaining({ externalId: "adgroup-1" })]);
+
+    await service.runScheduledDeletions("demo-account", asOf);
+    await service.runScheduledDeletions("demo-account", asOf);
+
+    expect(provider.deletions).toEqual([{ externalId: "adgroup-1" }]);
+    expect(store.listAdOperations("demo-account")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "delete", status: "unknown" }),
+    ]));
+  });
+
+  it("keeps one group per campaign and applies cart plus positive-conversion CPA checks at 06:00 only", async () => {
+    const autoCopyRunner = vi.fn(async () => [{ ok: true }]);
+    const guardedService = new AutomationService(
+      store,
+      vault,
+      new ProviderRegistry([provider]),
+      autoCopyRunner,
+    );
+    const settings = store.getAutomationFeatureSettings();
+    settings.deletion.enabled = true;
+    settings.deletion.gracePeriodHours = 1;
+    settings.deletion.maxConversions = 1;
+    settings.deletion.maxCarts = 4;
+    settings.deletion.minCpa = 9;
+    store.updateAutomationFeatureSettings(settings);
+    const asOf = new Date("2026-07-24T22:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(asOf);
+
+    const groups = [
+      { id: "delete-carts-4", name: "低质量组", conversions: 0, carts: 4, cpa: null },
+      { id: "delete-cpa-10", name: "高 CPA 组", conversions: 1, carts: 2, cpa: 10 },
+      { id: "keep-converting", name: "保留组", conversions: 2, carts: 5, cpa: 3 },
+    ];
+    const finishedAt = asOf.toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "campaign", externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "系列" } },
+      ...groups.map((group) => ({
+        entityType: "ad-group" as const,
+        externalId: group.id,
+        payload: {
+          campaign_id: "campaign-1",
+          ad_name: group.name,
+          ad_primary_status: "disable",
+          row_data: {
+            campaign_id: "campaign-1",
+            time_attr_convert_cnt: String(group.conversions),
+            time_attr_on_web_cart: String(group.carts),
+            ...(group.cpa === null ? {} : { time_attr_conversion_cost: String(group.cpa) }),
+          },
+        },
+      })),
+    ], {
+      startedAt: finishedAt,
+      finishedAt,
+      counts: { campaign: 1, "ad-group": 3, ad: 0 },
+      warnings: [],
+      quality: {
+        status: "healthy",
+        paginationComplete: true,
+        requiredMetricsComplete: true,
+        contractValid: true,
+        providerContractVersion: "test-v1",
+        coverage: { startDate: "2026-07-25", endDate: "2026-07-25", timezone: "Asia/Shanghai" },
+        missingMetrics: [],
+        partialFailures: [],
+        lastHealthyAt: finishedAt,
+      },
+    });
+    const disabledAt = new Date(asOf.getTime() - 2 * 60 * 60_000).toISOString();
+    for (const group of groups) {
+      const operation = store.recordAdOperation({
+        accountId: "demo-account",
+        providerKind: "cookie",
+        entityType: "ad-group",
+        externalId: group.id,
+        entityName: group.name,
+        action: "disable",
+        source: "automation",
+        status: "succeeded",
+        message: "disabled",
+      });
+      (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db
+        .prepare("UPDATE ad_operations SET completed_at = ? WHERE id = ?")
+        .run(disabledAt, operation.id);
+    }
+
+    await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() - 60 * 60_000));
+    await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() + 5 * 60_000));
+    expect(provider.deletions).toEqual([]);
+    await guardedService.runScheduledDeletions("demo-account", asOf);
+    await guardedService.runScheduledDeletions("demo-account", asOf);
+
+    expect(provider.deletions).toEqual([
+      { externalId: "delete-carts-4" },
+      { externalId: "delete-cpa-10" },
+    ]);
+  });
+
+  it("does not delete from a stale snapshot or an outdated capability authorization", async () => {
+    provider.adGroupStatus = "disable";
+    const synced = await provider.syncReadOnly();
+    store.saveReadOnlySync("demo-account", "cookie", synced.entities, synced.result);
+    const disabled = store.recordAdOperation({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      entityName: "测试广告组",
+      action: "disable",
+      source: "automation",
+      status: "succeeded",
+      message: "confirmed disabled",
+    });
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const database = (store as unknown as {
+      db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } };
+    }).db;
+    database.prepare(
+      "UPDATE ad_operations SET created_at = ?, updated_at = ?, completed_at = ? WHERE id = ?",
+    ).run(twoHoursAgo, twoHoursAgo, twoHoursAgo, disabled.id);
+    const settings = store.getAutomationFeatureSettings();
+    settings.deletion.enabled = true;
+    settings.deletion.gracePeriodHours = 1;
+    store.updateAutomationFeatureSettings(settings);
+
+    await service.runScheduledDeletions(
+      "demo-account",
+      new Date(Date.now() + 10 * 60 * 1000),
+    );
+    expect(provider.deletions).toEqual([]);
+
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "outdated",
+      capabilities: ["delete-ad-groups"],
+    });
+    await service.runScheduledDeletions("demo-account", new Date());
+    expect(provider.deletions).toEqual([]);
+  });
+
   it("does not close an enabled ad group scheduled to start the next day", async () => {
     provider.scheduledStartAt = "2026-07-21T00:00:00.000Z";
     const refreshed = await provider.syncReadOnly();
@@ -1411,8 +1923,9 @@ describe("AutomationService", () => {
     });
   });
 
-  it("keeps automatic recovery enable actions safely skipped", async () => {
+  it("reports a verified automatic recovery enable in the scheduler summary", async () => {
     provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
     const scheduler = new AutomationScheduler(store, service);
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
@@ -1420,15 +1933,17 @@ describe("AutomationService", () => {
     await scheduler.tick();
 
     vi.useRealTimers();
-    expect(provider.mutations).toEqual([]);
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "enable" },
+    ]);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
       externalId: "adgroup-1",
       action: "enable",
-      status: "skipped",
+      status: "succeeded",
     });
     expect(store.listPollCycles()[0]?.accounts[0]).toMatchObject({
-      status: "no-action",
-      enabledCount: 0,
+      status: "changed",
+      enabledCount: 1,
       disabledCount: 0,
     });
   });

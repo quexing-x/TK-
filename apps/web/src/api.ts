@@ -256,6 +256,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  applyAutomationFeaturesToAllAccounts: (input: AutomationFeatureSettingsInput) =>
+    request<{ settings: AutomationFeatureSettings; accountCount: number }>(
+      "/api/automation/features/apply-all",
+      { method: "POST", body: JSON.stringify(input) },
+    ),
   getSchedules: (accountId: string) =>
     request<ScheduledEntityActionRecord[]>(
       `/api/accounts/${accountId}/schedules`,

@@ -23,6 +23,8 @@ import type {
   CreationMutationResult,
   NewCreationMutation,
   TemplateCopyMutation,
+  DeleteAdGroupMutation,
+  DeleteAdGroupMutationResult,
 } from "./types.js";
 import {
   ConfirmedCreationFailureError,
@@ -47,6 +49,7 @@ const capabilities = new Set<ProviderCapability>([
   "create-campaigns",
   "copy-ads",
   "appeal-ads",
+  "delete-ad-groups",
 ]);
 
 const COOKIE_SYNC_CONTRACT_VERSION = "cookie-statistics-v5-2026-07";
@@ -64,7 +67,7 @@ interface CreationBatchReservations {
 export class CookieAdsProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Cookie 会话";
-  readonly capabilityVersion = "cookie-capabilities-v2-2026-07";
+  readonly capabilityVersion = "cookie-capabilities-v3-2026-07";
   readonly capabilities = capabilities;
   private readonly creationBatchReservations = new Map<string, CreationBatchReservations>();
   private readonly creationBatchLocks = new Map<string, Promise<void>>();
@@ -82,6 +85,9 @@ export class CookieAdsProvider implements AdsProvider {
         templates.some((item) => item.target === target && item.action === action),
       ),
     );
+    const hasAdGroupDeleteSession = templates.some(
+      (item) => item.target === "ad-group-status" && item.action === "disable",
+    );
     return new Set<ProviderCapability>([
       ...(hasListSession
         ? [
@@ -98,6 +104,7 @@ export class CookieAdsProvider implements AdsProvider {
       // advertiser-specific query parameters still come from this account's
       // imported list session, so no per-account appeal cURL is required.
       ...(hasListSession ? ["appeal-ads"] as const : []),
+      ...(hasAdGroupDeleteSession ? ["delete-ad-groups"] as const : []),
     ]);
   }
 
@@ -131,16 +138,103 @@ export class CookieAdsProvider implements AdsProvider {
       throw new RetryableCreationError("尚未导入广告组列表 cURL，无法建立当前账户的申诉会话。");
     }
     return Promise.all(mutations.map(async (mutation) => {
-      const request = buildReusableAppealRequest(
-        sessionRequest,
-        settings.advertiserId,
-        mutation,
-      );
-      const payload = await requestCookieJson(request, credential);
-      const data = isRecord(payload.data) ? payload.data : {};
-      const ok = payload.code === 0 && data.appeal_success === true;
-      return { ...mutation, ok, message: ok ? "申诉提交成功" : "申诉提交未获成功确认" };
+      let request: CapturedCookieRequest;
+      try {
+        request = buildReusableAppealRequest(
+          sessionRequest,
+          settings.advertiserId,
+          mutation,
+        );
+      } catch (cause) {
+        return {
+          ...mutation,
+          ok: false,
+          failureKind: "retryable" as const,
+          message: cause instanceof Error ? cause.message : "申诉请求构造失败。",
+        };
+      }
+      try {
+        const payload = await requestCookieJson(request, credential);
+        const data = isRecord(payload.data) ? payload.data : {};
+        const ok = payload.code === 0 && data.appeal_success === true;
+        return {
+          ...mutation,
+          ok,
+          ...(!ok && { failureKind: "retryable" as const }),
+          message: ok ? "申诉提交成功" : "申诉提交未获成功确认",
+        };
+      } catch (cause) {
+        return {
+          ...mutation,
+          ok: false,
+          failureKind: cause instanceof RetryableCreationError
+            ? "retryable" as const
+            : "unknown" as const,
+          message: cause instanceof Error ? cause.message : "申诉结果无法确认。",
+        };
+      }
     }));
+  }
+
+  async deleteAdGroups(
+    context: ProviderContext,
+    mutations: DeleteAdGroupMutation[],
+  ): Promise<DeleteAdGroupMutationResult[]> {
+    let credential: ParsedCookieCredential;
+    try {
+      CookieConnectionSettingsSchema.parse(context.settings);
+      credential = CookieCredentialInputSchema.parse(context.credential);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Cookie 删除请求参数无效。";
+      return mutations.map((mutation) => ({ ...mutation, ok: false, failureKind: "retryable", message }));
+    }
+    const template = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group-status" && item.action === "disable",
+    );
+    if (!template) {
+      return mutations.map((mutation) => ({
+        ...mutation,
+        ok: false,
+        failureKind: "retryable",
+        message: "缺少广告组关闭 cURL，无法安全派生删除请求。",
+      }));
+    }
+    const results: DeleteAdGroupMutationResult[] = [];
+    for (const mutation of mutations) {
+      let request: CapturedCookieRequest;
+      try {
+        request = materializeDeletionRequest(template, mutation.externalId);
+      } catch (cause) {
+        results.push({
+          ...mutation,
+          ok: false,
+          failureKind: "retryable",
+          message: cause instanceof Error ? cause.message : "删除请求构造失败。",
+        });
+        continue;
+      }
+      try {
+        const payload = await requestCookieJson(request, credential);
+        if (payload.code !== 0) {
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "unknown",
+            message: "删除请求已发送，但 TikTok 响应缺少明确成功代码。",
+          });
+          continue;
+        }
+        results.push({ ...mutation, ok: true, message: "TikTok 已明确确认删除广告组。" });
+      } catch (cause) {
+        results.push({
+          ...mutation,
+          ok: false,
+          failureKind: cause instanceof RetryableCreationError ? "retryable" : "unknown",
+          message: cause instanceof Error ? cause.message : "删除结果无法确认。",
+        });
+      }
+    }
+    return results;
   }
 
   async syncReadOnly(context: ProviderContext): Promise<ProviderSyncOutput> {
@@ -485,7 +579,7 @@ export class CookieAdsProvider implements AdsProvider {
       sourceCampaignBudgetOptimized?: boolean;
       onBeforeDispatch?: () => void;
     },
-  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
+  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
     const sessionRequest = credential.requestTemplates?.find(
       (item) => item.target === "ad-group" && !item.derived,
@@ -656,6 +750,7 @@ export class CookieAdsProvider implements AdsProvider {
       );
       const completed = await awaitCreationResult(sessionRequest, credential, published, input.existingCampaignId);
       const completedCounts = completedCreationCounts(completed);
+      const officialAdGroupIds = completedAdGroupIds(completed);
       const expectedCreativeCount = publishItems.reduce(
         (total, item) => total + item.creative_snap_info_list.length,
         0,
@@ -669,6 +764,7 @@ export class CookieAdsProvider implements AdsProvider {
         completedCounts.adGroupCount !== publishItems.length
         || completedCounts.creativeCount !== expectedCreativeCount
         || completedCreativeCountsByAdGroup.length !== expectedCreativeCountsByAdGroup.length
+        || officialAdGroupIds.length !== publishItems.length
         || completedCreativeCountsByAdGroup.some(
           (count, index) => count !== expectedCreativeCountsByAdGroup[index],
         )
@@ -681,6 +777,7 @@ export class CookieAdsProvider implements AdsProvider {
         ok: true,
         message: `同系列复制已发布 ${publishItems.length} 个广告组`,
         adGroupSnapIds: publishItems.map((item) => item.ad_snap_id),
+        adGroupIds: officialAdGroupIds,
       };
     } catch (cause) {
       return {
@@ -2736,6 +2833,100 @@ function materializeStatusRequest(
   return { ...template, url: url.toString(), body };
 }
 
+function completedAdGroupIds(payload: Record<string, unknown>): string[] {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const result = isRecord(data.result) ? data.result : data;
+  const ads = isRecord(result.ad_and_creative)
+    ? Object.values(result.ad_and_creative)
+    : Array.isArray(result.ad_and_creative) ? result.ad_and_creative : [];
+  return [...new Set(ads.flatMap((ad) => {
+    if (!isRecord(ad)) return [];
+    const id = nonEmptyId(ad.adgroup_id)
+      ?? nonEmptyId(ad.ad_group_id)
+      ?? nonEmptyId(ad.ad_id);
+    return id ? [id] : [];
+  }))];
+}
+
+function materializeDeletionRequest(
+  template: CapturedCookieRequest,
+  externalId: string,
+): CapturedCookieRequest {
+  const materialized = materializeStatusRequest(template, {
+    entityType: "ad-group",
+    externalId,
+    action: "disable",
+  });
+  const url = new URL(materialized.url);
+  let replacements = 0;
+  for (const key of [...url.searchParams.keys()]) {
+    if (key.toLowerCase() === "operation_status") {
+      url.searchParams.set(key, "DELETE");
+      replacements += 1;
+    }
+  }
+  let body = materialized.body;
+  if (body) {
+    const contentType = materialized.contentType?.toLowerCase() ?? "";
+    if (isMultipartBody(contentType, body)) {
+      const replaced = rewriteMultipartFields(body, (field) =>
+        field.name.toLowerCase() === "operation_status"
+          ? { value: "DELETE" }
+          : undefined,
+      );
+      replacements += replaced.changes;
+      body = replaced.body;
+    } else if (contentType.includes("json") || body.trim().startsWith("{")) {
+      const parsed = JSON.parse(body) as unknown;
+      const replaced = replaceOperationStatus(parsed, "DELETE");
+      replacements += replaced.count;
+      body = JSON.stringify(replaced.value);
+    } else {
+      const params = new URLSearchParams(body);
+      for (const key of [...params.keys()]) {
+        if (key.toLowerCase() === "operation_status") {
+          params.set(key, "DELETE");
+          replacements += 1;
+        }
+      }
+      body = params.toString();
+    }
+  }
+  if (replacements === 0) {
+    throw new Error("广告组关闭 cURL 中未找到 operation_status，无法安全派生删除请求。");
+  }
+  return { ...materialized, url: url.toString(), body };
+}
+
+function replaceOperationStatus(
+  value: unknown,
+  operationStatus: string,
+): { value: unknown; count: number } {
+  if (Array.isArray(value)) {
+    let count = 0;
+    const output = value.map((item) => {
+      const replaced = replaceOperationStatus(item, operationStatus);
+      count += replaced.count;
+      return replaced.value;
+    });
+    return { value: output, count };
+  }
+  if (!isRecord(value)) return { value, count: 0 };
+  let count = 0;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key.toLowerCase() === "operation_status") {
+      output[key] = operationStatus;
+      count += 1;
+      continue;
+    }
+    const replaced = replaceOperationStatus(item, operationStatus);
+    output[key] = replaced.value;
+    count += replaced.count;
+  }
+  return { value: output, count };
+}
+
 function replaceEntityIds(
   value: unknown,
   mutation: StatusMutation,
@@ -2886,15 +3077,22 @@ function extractEntities(
   }
   return list.flatMap((item) => {
     if (!isRecord(item)) return [];
-    // 列表统计接口把真实 id 放在 stat_data 内；两级系列（universal_type:1）顶层的
-    // creative_id 为 "0"，真实 ad_id 只在 stat_data.ad_id。优先取真实 ad_id，
-    // 并同时查顶层与 stat_data，避免把广告落成占位 "0"。
+    // 列表统计接口可能把字段放在 stat_data 内。两级系列（universal_type:1）
+    // 返回的 creative_id="0" 只是占位，ad_id 又等于广告组 ID；这类行不是
+    // 可单独启停的最终广告，不能把它重复保存成 ad 实体。
     const statData = isRecord(item.stat_data) ? item.stat_data : {};
     const lookup = (key: string): unknown => item[key] ?? statData[key];
+    if (
+      entityType === "ad" &&
+      Number(lookup("universal_type")) === 1 &&
+      String(lookup("creative_id") ?? lookup("creativeId") ?? "").trim() === "0"
+    ) {
+      return [];
+    }
     const idKeys: Record<SyncEntityType, string[]> = {
       campaign: ["campaign_id", "campaignId", "id"],
       "ad-group": ["adgroup_id", "ad_group_id", "adGroupId", "ad_id", "id"],
-      ad: ["ad_id", "adId", "creative_id", "creativeId", "id"],
+      ad: ["creative_id", "creativeId", "ad_id", "adId", "id"],
     };
     const id = idKeys[entityType].map(lookup).find(isStableExternalId);
     if (id === undefined) return [];

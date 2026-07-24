@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AutomationStore } from "@tk-auto/storage";
 import { createApp } from "./app.js";
-import { LaunchService } from "./launch-service.js";
+import {
+  LaunchService,
+  stripGeneratedAdGroupNameSuffixes,
+} from "./launch-service.js";
 import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -64,6 +67,19 @@ describe("local API", () => {
     });
   });
 
+  it("keeps only the base name when stripping generated expansion fields", () => {
+    expect(stripGeneratedAdGroupNameSuffixes("蓝牙音响0723-0724-1"))
+      .toBe("蓝牙音响");
+    expect(stripGeneratedAdGroupNameSuffixes("蓝牙音响0723-0724-1-0725-2"))
+      .toBe("蓝牙音响");
+    expect(stripGeneratedAdGroupNameSuffixes("A9音响-0724-1"))
+      .toBe("A9音响");
+    expect(stripGeneratedAdGroupNameSuffixes("蓝牙音响2024"))
+      .toBe("蓝牙音响2024");
+    expect(stripGeneratedAdGroupNameSuffixes("产品0230"))
+      .toBe("产品0230");
+  });
+
   it("passes scheduled expansion to the provider as enabled native scheduling without a software enable task", async () => {
     const scheduledStartAt = "2026-07-24T00:00:00.000Z";
     const copyAdGroupToExistingCampaign = vi.fn(async () => ({ ok: true, message: "scheduled" }));
@@ -109,7 +125,7 @@ describe("local API", () => {
           sourceCampaignId: "campaign-1",
           sourceCampaignName: "campaign",
           sourceAdGroupId: "adgroup-1",
-          sourceAdGroupName: "adgroup",
+          sourceAdGroupName: "蓝牙音响0723-0724-1",
         }],
         count: 2,
         dailyBudget: 50,
@@ -125,6 +141,7 @@ describe("local API", () => {
     expect(copyAdGroupToExistingCampaign).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
+        names: ["蓝牙音响-0724-1", "蓝牙音响-0724-2"],
         initialStatus: "enabled",
         scheduledStartAt,
         dailyBudget: 50,
@@ -386,6 +403,42 @@ describe("local API", () => {
     expect(response.json()).toMatchObject({
       pollingIntervalMinutes: 8,
       maxActionsPerRun: 20,
+    });
+  });
+
+  it("applies all three automation executor states and rules to every account", async () => {
+    store.createAccount({
+      displayName: "第二账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    const settings = store.getAutomationFeatureSettings();
+    settings.appeal.enabled = false;
+    settings.copy.autoCopyEnabled = true;
+    settings.copy.autoCopyCount = 2;
+    settings.copy.autoCopyMinConversions = 2;
+    settings.deletion.enabled = true;
+    settings.deletion.maxCarts = 4;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/automation/features/apply-all",
+      payload: settings,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      accountCount: 2,
+      settings: {
+        appeal: { enabled: false },
+        copy: {
+          autoCopyEnabled: true,
+          autoCopyCount: 2,
+          autoCopyMinConversions: 2,
+        },
+        deletion: { enabled: true, maxCarts: 4 },
+      },
     });
   });
 
@@ -1113,7 +1166,7 @@ describe("local API", () => {
     });
     expect(initial.statusCode).toBe(200);
     expect(initial.json()).toMatchObject({
-      policy: { enabled: false, policyVersion: "disable-only-v1", dailyActionLimit: 0 },
+      policy: { enabled: false, policyVersion: "enable-disable-v2", dailyActionLimit: 0 },
       todayUsage: 0,
       circuit: null,
     });

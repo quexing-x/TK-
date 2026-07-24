@@ -60,7 +60,7 @@ export type GlobalAutomationSettingsInput = z.infer<
   typeof GlobalAutomationSettingsInputSchema
 >;
 
-export const LOW_RISK_AUTOMATION_POLICY_VERSION = "disable-only-v1" as const;
+export const LOW_RISK_AUTOMATION_POLICY_VERSION = "enable-disable-v2" as const;
 
 export const LowRiskAutomationPolicySchema = z.object({
   accountId: z.string().min(1),

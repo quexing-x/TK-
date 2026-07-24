@@ -148,6 +148,7 @@ export interface AppealMutation {
 export interface AppealMutationResult extends AppealMutation {
   ok: boolean;
   message: string;
+  failureKind?: "retryable" | "unknown";
 }
 
 export interface AppealProvider extends ProviderContract {
@@ -157,12 +158,30 @@ export interface AppealProvider extends ProviderContract {
   ): Promise<AppealMutationResult[]>;
 }
 
+export interface DeleteAdGroupMutation {
+  externalId: string;
+}
+
+export interface DeleteAdGroupMutationResult extends DeleteAdGroupMutation {
+  ok: boolean;
+  message: string;
+  failureKind?: "retryable" | "unknown";
+}
+
+export interface DeleteAdGroupProvider extends ProviderContract {
+  deleteAdGroups(
+    context: ProviderContext,
+    mutations: DeleteAdGroupMutation[],
+  ): Promise<DeleteAdGroupMutationResult[]>;
+}
+
 export type AdsProvider = ProviderContract
   & Partial<ReadProvider>
   & Partial<StatusMutationProvider>
   & Partial<CreationProvider>
   & Partial<TemplateCopyProvider>
-  & Partial<AppealProvider>;
+  & Partial<AppealProvider>
+  & Partial<DeleteAdGroupProvider>;
 
 export interface ProviderDescriptor {
   kind: ProviderKind;

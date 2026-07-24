@@ -1196,6 +1196,18 @@ export class AutomationStore {
     return this.getAutomationFeatureSettings();
   }
 
+  applyAutomationFeatureSettingsToAllAccounts(
+    input: AutomationFeatureSettingsInput,
+  ): { settings: AutomationFeatureSettings; accountCount: number } {
+    const settings = this.updateAutomationFeatureSettings(input);
+    const accountCount = this.listAccounts().length;
+    this.writeSystemAudit("global.feature-settings.applied-all", {
+      accountCount,
+      settings,
+    });
+    return { settings, accountCount };
+  }
+
   countLocalUsers(): number {
     const row = this.db
       .prepare("SELECT COUNT(*) AS count FROM local_users")
@@ -2240,9 +2252,116 @@ export class AutomationStore {
     return Boolean(this.db.prepare(`SELECT 1 FROM ad_operations WHERE account_id = ? AND external_id = ? AND action = 'appeal' AND status IN ('pending','running','succeeded','failed','unknown') LIMIT 1`).get(accountId, externalId));
   }
 
+  getAppealExecutionState(accountId: string, externalId: string): {
+    confirmedFailureCount: number;
+    blocked: boolean;
+  } {
+    const rows = this.db.prepare(
+      `SELECT status FROM ad_operations
+       WHERE account_id = ? AND external_id = ? AND action = 'appeal'`,
+    ).all(accountId, externalId) as SqlRow[];
+    return {
+      confirmedFailureCount: rows.filter((row) => row.status === "failed").length,
+      blocked: rows.some((row) => ["pending", "running", "succeeded", "unknown"].includes(String(row.status))),
+    };
+  }
+
   completeAppeal(id: string, status: "succeeded" | "failed" | "unknown", message: string): void {
     const now = new Date().toISOString();
     this.db.prepare("UPDATE ad_operations SET status = ?, message = ?, updated_at = ?, completed_at = ? WHERE id = ?").run(status, message, now, now, id);
+  }
+
+  listDeletionReadyAdGroups(
+    accountId: string,
+    kind: ProviderKind,
+    disabledBefore: string,
+  ): ProviderEntity[] {
+    const rows = this.db.prepare(
+      `SELECT pe.entity_type, pe.external_id, pe.payload_json
+       FROM provider_entities pe
+       JOIN ad_operations latest_status ON latest_status.id = (
+         SELECT candidate.id
+         FROM ad_operations candidate
+         WHERE candidate.account_id = pe.account_id
+           AND candidate.provider_kind = pe.provider_kind
+           AND candidate.entity_type = 'ad-group'
+           AND candidate.external_id = pe.external_id
+           AND candidate.action IN ('enable', 'disable')
+           AND candidate.status = 'succeeded'
+         ORDER BY candidate.completed_at DESC, candidate.rowid DESC
+         LIMIT 1
+       )
+       WHERE pe.account_id = ? AND pe.provider_kind = ?
+         AND pe.entity_type = 'ad-group' AND pe.is_current = 1
+         AND latest_status.action = 'disable'
+         AND latest_status.completed_at <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM ad_operations deletion
+           WHERE deletion.account_id = pe.account_id
+             AND deletion.provider_kind = pe.provider_kind
+             AND deletion.entity_type = 'ad-group'
+             AND deletion.external_id = pe.external_id
+             AND deletion.action = 'delete'
+         )
+       ORDER BY pe.external_id`,
+    ).all(accountId, kind, disabledBefore) as SqlRow[];
+    return rows.map((row) => ({
+      entityType: "ad-group" as const,
+      externalId: String(row.external_id),
+      payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
+    }));
+  }
+
+  queueAdGroupDeletionIfAbsent(
+    accountId: string,
+    kind: ProviderKind,
+    externalId: string,
+  ): AdOperationRecord | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const exists = this.db.prepare(
+        `SELECT 1 FROM ad_operations
+         WHERE account_id = ? AND provider_kind = ? AND entity_type = 'ad-group'
+           AND external_id = ? AND action = 'delete' LIMIT 1`,
+      ).get(accountId, kind, externalId);
+      if (exists) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const task = this.recordAdOperation({
+        accountId,
+        providerKind: kind,
+        entityType: "ad-group",
+        externalId,
+        entityName: this.findEntityName(accountId, kind, "ad-group", externalId),
+        action: "delete",
+        source: "automation",
+        status: "pending",
+        message: "等待执行删除保护规则。",
+      });
+      this.db.exec("COMMIT");
+      return task;
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  releaseAutomaticAction(actionKey: string): void {
+    this.db.prepare(
+      "DELETE FROM automatic_action_claims WHERE action_key = ?",
+    ).run(actionKey);
+  }
+
+  completeAdGroupDeletion(
+    id: string,
+    status: "succeeded" | "failed" | "unknown",
+    message: string,
+  ): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      "UPDATE ad_operations SET status = ?, message = ?, updated_at = ?, completed_at = ? WHERE id = ? AND action = 'delete'",
+    ).run(status, message, now, now, id);
   }
 
   createOneTimeSchedule(
@@ -2692,6 +2811,193 @@ export class AutomationStore {
     } else {
       this.db.prepare("DELETE FROM ad_group_expand_tasks WHERE task_key = ?").run(taskKey);
     }
+  }
+
+  claimAutomaticCopyTask(input: {
+    taskKey: string;
+    accountId: string;
+    sourceCampaignId: string;
+    sourceAdGroupId: string;
+    localDate: string;
+    requestedCount: number;
+    generatedNames: string[];
+    dailyLimit: number;
+  }): "claimed" | "running" | "succeeded" | "failed" | "unknown" | "daily-limit" {
+    const now = new Date().toISOString();
+    const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.prepare(
+        "SELECT status, claimed_at, uncertain, automatic_outcome FROM ad_group_expand_tasks WHERE task_key = ?",
+      ).get(input.taskKey) as SqlRow | undefined;
+      if (existing) {
+        if (String(existing.automatic_outcome ?? "") === "failed") {
+          this.db.exec("COMMIT");
+          return "failed";
+        }
+        if (Number(existing.uncertain ?? 0) === 1) {
+          this.db.exec("COMMIT");
+          return "unknown";
+        }
+        if (String(existing.status) === "succeeded") {
+          this.db.exec("COMMIT");
+          return "succeeded";
+        }
+        if (String(existing.claimed_at) > staleBefore) {
+          this.db.exec("COMMIT");
+          return "running";
+        }
+      }
+      const reserved = this.db.prepare(
+        `SELECT COALESCE(SUM(requested_count), 0) AS count
+         FROM ad_group_expand_tasks
+         WHERE account_id = ? AND executor_kind = 'auto-copy'
+           AND local_date = ? AND task_key <> ?`,
+      ).get(input.accountId, input.localDate, input.taskKey) as SqlRow;
+      if (Number(reserved.count) + input.requestedCount > input.dailyLimit) {
+        this.db.exec("COMMIT");
+        return "daily-limit";
+      }
+      this.db.prepare(
+        `INSERT INTO ad_group_expand_tasks (
+           task_key, account_id, source_ad_group_id, status, claimed_at,
+           updated_at, uncertain, executor_kind, source_campaign_id,
+           local_date, requested_count, generated_names_json
+         ) VALUES (?, ?, ?, 'running', ?, ?, 0, 'auto-copy', ?, ?, ?, ?)
+         ON CONFLICT(task_key) DO UPDATE SET
+           status = 'running', claimed_at = excluded.claimed_at,
+           updated_at = excluded.updated_at, uncertain = 0,
+           executor_kind = 'auto-copy',
+           source_campaign_id = excluded.source_campaign_id,
+           local_date = excluded.local_date,
+           requested_count = excluded.requested_count,
+           generated_names_json = excluded.generated_names_json,
+           generated_ids_json = '[]', automatic_outcome = NULL`,
+      ).run(
+        input.taskKey,
+        input.accountId,
+        input.sourceAdGroupId,
+        now,
+        now,
+        input.sourceCampaignId,
+        input.localDate,
+        input.requestedCount,
+        JSON.stringify(input.generatedNames),
+      );
+      this.db.exec("COMMIT");
+      return "claimed";
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  markAutomaticCopyTaskDispatching(taskKey: string): void {
+    this.markAdGroupExpandTaskDispatching(taskKey);
+  }
+
+  finishAutomaticCopyTask(
+    taskKey: string,
+    outcome: "succeeded" | "failed" | "unknown",
+    generatedIds: string[] = [],
+  ): void {
+    if (generatedIds.length > 0) {
+      this.db.prepare(
+        "UPDATE ad_group_expand_tasks SET generated_ids_json = ?, updated_at = ? WHERE task_key = ?",
+      ).run(
+        JSON.stringify([...new Set(generatedIds)]),
+        new Date().toISOString(),
+        taskKey,
+      );
+    }
+    const now = new Date().toISOString();
+    if (outcome === "unknown") {
+      this.db.prepare(
+        `UPDATE ad_group_expand_tasks
+         SET status = 'running', uncertain = 1,
+             automatic_outcome = 'unknown', updated_at = ?
+         WHERE task_key = ?`,
+      ).run(now, taskKey);
+      return;
+    }
+    // Automatic copy is attempted at most once per source/day even when
+    // TikTok explicitly rejects it. The legacy status column has no `failed`
+    // value, so automatic_outcome carries the real terminal result while the
+    // terminal status keeps the row non-reclaimable.
+    this.db.prepare(
+      `UPDATE ad_group_expand_tasks
+       SET status = 'succeeded', uncertain = 0,
+           automatic_outcome = ?, updated_at = ?
+       WHERE task_key = ?`,
+    ).run(outcome, now, taskKey);
+  }
+
+  isAutomaticCopyDestination(
+    accountId: string,
+    sourceCampaignId: string,
+    adGroupId: string,
+    adGroupName: string,
+  ): boolean {
+    const rows = this.db.prepare(
+      `SELECT generated_names_json, generated_ids_json FROM ad_group_expand_tasks
+       WHERE account_id = ? AND executor_kind = 'auto-copy'
+         AND source_campaign_id = ?
+         AND COALESCE(automatic_outcome, '') <> 'failed'`,
+    ).all(accountId, sourceCampaignId) as SqlRow[];
+    return rows.some((row) => {
+      const ids = JSON.parse(String(row.generated_ids_json ?? "[]")) as string[];
+      if (ids.length > 0) return ids.includes(adGroupId);
+      const names = JSON.parse(String(row.generated_names_json ?? "[]")) as string[];
+      return names.includes(adGroupName);
+    });
+  }
+
+  claimDailyAutomationRun(
+    accountId: string,
+    executorKind: string,
+    localDate: string,
+  ): "claimed" | "running" | "completed" {
+    const now = new Date().toISOString();
+    const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.prepare(
+        `SELECT status, claimed_at FROM automation_daily_runs
+         WHERE account_id = ? AND executor_kind = ? AND local_date = ?`,
+      ).get(accountId, executorKind, localDate) as SqlRow | undefined;
+      if (String(existing?.status ?? "") === "completed") {
+        this.db.exec("COMMIT");
+        return "completed";
+      }
+      if (existing && String(existing.claimed_at) > staleBefore) {
+        this.db.exec("COMMIT");
+        return "running";
+      }
+      this.db.prepare(
+        `INSERT INTO automation_daily_runs (
+           account_id, executor_kind, local_date, status, claimed_at, updated_at
+         ) VALUES (?, ?, ?, 'running', ?, ?)
+         ON CONFLICT(account_id, executor_kind, local_date) DO UPDATE SET
+           status = 'running', claimed_at = excluded.claimed_at,
+           updated_at = excluded.updated_at`,
+      ).run(accountId, executorKind, localDate, now, now);
+      this.db.exec("COMMIT");
+      return "claimed";
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  finishDailyAutomationRun(
+    accountId: string,
+    executorKind: string,
+    localDate: string,
+  ): void {
+    this.db.prepare(
+      `UPDATE automation_daily_runs SET status = 'completed', updated_at = ?
+       WHERE account_id = ? AND executor_kind = ? AND local_date = ?`,
+    ).run(new Date().toISOString(), accountId, executorKind, localDate);
   }
 
   renewLaunchCreationScope(
@@ -4403,8 +4709,8 @@ export class AutomationStore {
     return decision;
   }
 
-  /** A completed group closure makes older open reminders for that group stale. */
-  expireOpenAutomationDecisionsForEntity(
+  /** A confirmed status change makes older pending reminders for that object stale. */
+  expireAutomationDecisionsForEntity(
     accountId: string,
     entityType: ProviderEntity["entityType"],
     externalId: string,
@@ -4413,7 +4719,7 @@ export class AutomationStore {
     const result = this.db.prepare(
       `UPDATE automation_decisions
        SET status = 'skipped',
-           error_message = '广告组已关闭，已清除过期决策提醒',
+           error_message = '对象状态已更新，已清除过期决策提醒',
            executed_at = COALESCE(executed_at, ?)
        WHERE account_id = ? AND entity_type = ? AND external_id = ?
          AND id != ? AND status IN ('preview', 'pending')`,
@@ -4695,6 +5001,20 @@ export class AutomationStore {
       `SELECT 1 FROM automation_decisions
        WHERE account_id = ? AND entity_type = ? AND external_id = ?
          AND action = ? AND status = 'unknown' LIMIT 1`,
+    ).get(accountId, entityType, externalId, action);
+    return Boolean(row);
+  }
+
+  hasUnresolvedStatusOperation(
+    accountId: string,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+    action: AutomationAction,
+  ): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 FROM ad_operations
+       WHERE account_id = ? AND entity_type = ? AND external_id = ?
+         AND action = ? AND status IN ('pending', 'running', 'unknown') LIMIT 1`,
     ).get(accountId, entityType, externalId, action);
     return Boolean(row);
   }
@@ -5572,7 +5892,24 @@ export class AutomationStore {
         status TEXT NOT NULL CHECK (status IN ('running', 'succeeded')),
         claimed_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1))
+        uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
+        executor_kind TEXT NOT NULL DEFAULT 'manual-expand',
+        source_campaign_id TEXT,
+        local_date TEXT,
+        requested_count INTEGER NOT NULL DEFAULT 0,
+        generated_names_json TEXT NOT NULL DEFAULT '[]',
+        generated_ids_json TEXT NOT NULL DEFAULT '[]',
+        automatic_outcome TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS automation_daily_runs (
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        executor_kind TEXT NOT NULL,
+        local_date TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'completed')),
+        claimed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, executor_kind, local_date)
       );
 
       CREATE TABLE IF NOT EXISTS launch_plan_item_attempts (
@@ -5851,6 +6188,17 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS audit_logs_query
       ON audit_logs (created_at DESC, account_id, actor_id, action);
     `);
+    // A legacy opt-in covered automatic closures only. Do not silently widen
+    // that consent to automatic enables after upgrading the policy contract.
+    this.db.prepare(
+      `UPDATE account_low_risk_automation_policies
+       SET enabled = 0, policy_version = ?, updated_at = ?
+       WHERE policy_version <> ?`,
+    ).run(
+      LOW_RISK_AUTOMATION_POLICY_VERSION,
+      new Date().toISOString(),
+      LOW_RISK_AUTOMATION_POLICY_VERSION,
+    );
     this.ensureColumn(
       "accounts",
       "max_actions_per_run",
@@ -5916,6 +6264,29 @@ export class AutomationStore {
       "uncertain",
       "INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1))",
     );
+    this.ensureColumn(
+      "ad_group_expand_tasks",
+      "executor_kind",
+      "TEXT NOT NULL DEFAULT 'manual-expand'",
+    );
+    this.ensureColumn("ad_group_expand_tasks", "source_campaign_id", "TEXT");
+    this.ensureColumn("ad_group_expand_tasks", "local_date", "TEXT");
+    this.ensureColumn(
+      "ad_group_expand_tasks",
+      "requested_count",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "ad_group_expand_tasks",
+      "generated_names_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    this.ensureColumn(
+      "ad_group_expand_tasks",
+      "generated_ids_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    this.ensureColumn("ad_group_expand_tasks", "automatic_outcome", "TEXT");
     if (expandTaskUncertainWasMissing) {
       // A legacy running row may have crossed the remote dispatch boundary
       // before an older process exited. Its outcome cannot be proven locally;
@@ -5925,6 +6296,10 @@ export class AutomationStore {
         "UPDATE ad_group_expand_tasks SET uncertain = 1 WHERE status = 'running'",
       ).run();
     }
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS ad_group_expand_tasks_auto_copy_day
+       ON ad_group_expand_tasks (account_id, executor_kind, local_date)`,
+    );
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS ad_operations_claim ON ad_operations (status, claimed_at, created_at)",
     );

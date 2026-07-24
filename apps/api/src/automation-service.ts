@@ -27,6 +27,7 @@ import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 
 const statusLeaseHeartbeatMs = 60 * 1000;
 const writeLeaseTimeoutMs = 30 * 60 * 1000;
+const destructiveSyncFreshnessMs = 5 * 60 * 1000;
 const verifiedDisableRuleCodes = new Set([
   "CV1_CPC_CLOSE",
   "CV1_CPA_CLOSE",
@@ -34,6 +35,11 @@ const verifiedDisableRuleCodes = new Set([
   "NO_CONV_SPEND_CLOSE",
   "NO_CONV_CPC_CLOSE",
   "NO_CART_CLOSE",
+]);
+const verifiedEnableRuleCodes = new Set([
+  "CV1_CPA_OPEN",
+  "CV2_CPA_OPEN",
+  "HAS_CART_OPEN",
 ]);
 
 export class AutomationBusyError extends Error {}
@@ -69,7 +75,14 @@ export class AutomationService {
       bid: number | null;
       launchImmediately: boolean;
       sameCampaign?: boolean | undefined;
-    }) => Promise<unknown>,
+      onBeforeDispatch?: () => void;
+    }) => Promise<Array<{
+      ok: boolean;
+      adGroupId?: string;
+      adGroupIds?: string[];
+      failureKind?: "failed" | "unknown";
+      retrySafe?: boolean;
+    }>>,
   ) {
     this.statusTasks = new WriteTaskKernel({
       claim: (taskId, executorId, expectedStatus, actor) =>
@@ -119,27 +132,333 @@ export class AutomationService {
 
   async runScheduledAppeals(accountId: string, asOf = new Date()): Promise<void> {
     const account = this.store.getAccount(accountId);
-    if (!account || !account.enabled || !this.store.getAutomationFeatureSettings().appeal.enabled) return;
+    const settings = this.store.getAutomationFeatureSettings().appeal;
+    if (
+      !account
+      || !account.enabled
+      || account.executionMode !== "automatic"
+      || !this.store.getSystemRuntimeState().enabled
+      || !settings.enabled
+    ) return;
     const local = timePartsInTimeZone(asOf, account.timezone);
-    if (local.minute !== 0 || (local.hour !== 1 && local.hour !== 12)) return;
+    if (local.minute !== 0 || !settings.scheduleHours.includes(local.hour)) return;
     const connection = this.store.getProviderConnection(accountId, account.providerKind);
     if (!connection || connection.status !== "ready") return;
+    try {
+      this.providers.requireAccountCapability(
+        accountId,
+        account.providerKind,
+        connection,
+        "appeal-ads",
+      );
+    } catch {
+      return;
+    }
     const context = await this.loadContext(accountId, account.providerKind, account.timezone);
     const provider = this.providers.get(account.providerKind);
     if (!provider.appeal || !provider.resolveCapabilities?.(context).has("appeal-ads")) return;
-    const reason = this.store.getAutomationFeatureSettings().appeal.textTemplate;
     for (const entity of this.store.listCurrentProviderEntities(accountId, account.providerKind)) {
-      if (entity.entityType !== "ad" || this.store.hasAppealForEntity(accountId, entity.externalId)) continue;
+      if (entity.entityType !== "ad") continue;
       const payload = entity.payload as Record<string, unknown>;
       const status = String(payload.creative_status ?? "");
       if (status !== "creative_offline_audit") continue;
       const creativeId = String(payload.creative_id ?? "");
       if (!creativeId) continue;
+      const execution = this.store.getAppealExecutionState(accountId, entity.externalId);
+      if (execution.blocked || execution.confirmedFailureCount > settings.retryLimit) continue;
+      const reason = renderAppealTemplate(settings.textTemplate, {
+        adName: String(payload.ad_name ?? payload.name ?? entity.externalId),
+        adId: entity.externalId,
+        rejectReason: String(payload.reject_reason ?? payload.audit_reject_reason ?? "未提供"),
+      });
       const task = this.store.queueAppeal(accountId, account.providerKind, entity.externalId, reason, "automation");
       try {
         const [result] = await provider.appeal(context, [{ externalId: entity.externalId, creativeId, reason }]);
-        this.store.completeAppeal(task.id, result?.ok ? "succeeded" : "failed", result?.message ?? "申诉未获确认");
+        const outcome = result?.ok
+          ? "succeeded" as const
+          : result?.failureKind === "unknown"
+            ? "unknown" as const
+            : "failed" as const;
+        this.store.completeAppeal(task.id, outcome, result?.message ?? "申诉未获确认");
       } catch (cause) { this.store.completeAppeal(task.id, "unknown", safeMessage(cause)); }
+    }
+  }
+
+  async runScheduledDeletions(accountId: string, asOf = new Date()): Promise<void> {
+    const settings = this.store.getAutomationFeatureSettings().deletion;
+    const account = this.store.getAccount(accountId);
+    if (
+      !settings.enabled
+      || !settings.onlyDisabled
+      || !account?.enabled
+      || account.executionMode !== "automatic"
+      || !this.store.getSystemRuntimeState().enabled
+    ) return;
+    const localTime = timePartsInTimeZone(asOf, account.timezone);
+    if (localTime.hour !== 6 || localTime.minute !== 0) return;
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    const latestSync = this.store.getLatestReadOnlySync(accountId, account.providerKind);
+    const syncAge = latestSync
+      ? asOf.getTime() - new Date(latestSync.finishedAt).getTime()
+      : Number.POSITIVE_INFINITY;
+    if (
+      connection?.status !== "ready"
+      || latestSync?.quality.status !== "healthy"
+      || !hasCurrentDayMetricCoverage(latestSync, localDate, account.timezone)
+      || syncAge < 0
+      || syncAge > destructiveSyncFreshnessMs
+    ) return;
+    try {
+      this.providers.requireAccountCapability(
+        accountId,
+        account.providerKind,
+        connection,
+        "delete-ad-groups",
+      );
+    } catch {
+      return;
+    }
+    const context = await this.loadContext(accountId, account.providerKind, account.timezone);
+    const provider = this.providers.get(account.providerKind);
+    if (
+      !provider.deleteAdGroups
+      || !provider.resolveCapabilities?.(context).has("delete-ad-groups")
+    ) return;
+    if (this.store.claimDailyAutomationRun(
+      accountId,
+      "delete-ad-groups",
+      localDate,
+    ) !== "claimed") return;
+    const disabledBefore = new Date(
+      asOf.getTime() - settings.gracePeriodHours * 60 * 60 * 1000,
+    ).toISOString();
+    try {
+      const currentGroups = this.store
+        .listCurrentManagedEntities(accountId, account.providerKind)
+        .filter((entity) => entity.entityType === "ad-group" && entity.parentCampaignId);
+      const currentCountByCampaign = new Map<string, number>();
+      for (const entity of currentGroups) {
+        currentCountByCampaign.set(
+          entity.parentCampaignId!,
+          (currentCountByCampaign.get(entity.parentCampaignId!) ?? 0) + 1,
+        );
+      }
+      const candidatesByCampaign = new Map<string, ReturnType<typeof normalizeProviderEntity>[]>();
+      for (const providerEntity of this.store.listDeletionReadyAdGroups(
+        accountId,
+        account.providerKind,
+        disabledBefore,
+      )) {
+        const entity = normalizeProviderEntity(providerEntity);
+        const conversions = entity.metrics.conversions;
+        const carts = entity.metrics.carts;
+        if (
+          entity.status !== "disabled"
+          || !entity.parentCampaignId
+          || conversions === null
+          || carts === null
+          || conversions > settings.maxConversions
+          || carts > settings.maxCarts
+          || (conversions > 0
+            && (entity.metrics.cost_per_conversion === null
+              || entity.metrics.cost_per_conversion < settings.minCpa))
+        ) continue;
+        const list = candidatesByCampaign.get(entity.parentCampaignId) ?? [];
+        list.push(entity);
+        candidatesByCampaign.set(entity.parentCampaignId, list);
+      }
+
+      const candidates = [...candidatesByCampaign.entries()].flatMap(
+        ([campaignId, entries]) => {
+          const maximumDeletions = Math.max(
+            0,
+            (currentCountByCampaign.get(campaignId) ?? 0) - 1,
+          );
+          return entries
+            .sort(compareDeletionPriority)
+            .slice(0, maximumDeletions);
+        },
+      );
+      for (const entity of candidates) {
+        const task = this.store.queueAdGroupDeletionIfAbsent(
+          accountId,
+          account.providerKind,
+          entity.externalId,
+        );
+        if (!task) continue;
+        try {
+          const [result] = await this.providers.deleteAdGroups(
+            account.providerKind,
+            context,
+            [{ externalId: entity.externalId }],
+          );
+          if (result?.ok) {
+            this.store.completeAdGroupDeletion(task.id, "succeeded", result.message);
+          } else if (result?.failureKind === "unknown") {
+            this.store.completeAdGroupDeletion(
+              task.id,
+              "unknown",
+              result.message || "删除请求已发送，但结果无法确认。",
+            );
+          } else {
+            this.store.completeAdGroupDeletion(
+              task.id,
+              "failed",
+              result?.message || "TikTok 已明确拒绝删除广告组。",
+            );
+          }
+        } catch (cause) {
+          this.store.completeAdGroupDeletion(
+            task.id,
+            "unknown",
+            `删除请求结果无法确认：${safeMessage(cause)}`,
+          );
+        }
+      }
+    } finally {
+      this.store.finishDailyAutomationRun(accountId, "delete-ad-groups", localDate);
+    }
+  }
+
+  async runScheduledAutoCopies(accountId: string, asOf = new Date()): Promise<void> {
+    const account = this.store.getAccount(accountId);
+    const copy = this.store.getAutomationFeatureSettings().copy;
+    if (
+      !this.autoCopyRunner
+      || !copy.autoCopyEnabled
+      || !account?.enabled
+      || account.executionMode !== "automatic"
+      || !this.store.getSystemRuntimeState().enabled
+    ) return;
+    const localTime = timePartsInTimeZone(asOf, account.timezone);
+    if (localTime.hour >= 12) return;
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    const latestSync = this.store.getLatestReadOnlySync(accountId, account.providerKind);
+    const syncAge = latestSync
+      ? asOf.getTime() - new Date(latestSync.finishedAt).getTime()
+      : Number.POSITIVE_INFINITY;
+    if (
+      connection?.status !== "ready"
+      || latestSync?.quality.status !== "healthy"
+      || !hasCurrentDayMetricCoverage(latestSync, localDate, account.timezone)
+      || syncAge < 0
+      || syncAge > destructiveSyncFreshnessMs
+    ) return;
+    try {
+      this.providers.requireAccountCapability(
+        accountId,
+        account.providerKind,
+        connection,
+        "copy-ads",
+      );
+    } catch {
+      return;
+    }
+
+    const entities = this.store.listCurrentManagedEntities(accountId, account.providerKind);
+    const campaignNames = new Map(
+      entities
+        .filter((entity) => entity.entityType === "campaign")
+        .map((entity) => [entity.externalId, entity.name]),
+    );
+    const date = localDate.replaceAll("-", "");
+    const candidates = entities
+      .filter((entity) => {
+        if (
+          entity.entityType !== "ad-group"
+          || entity.ignored
+          || entity.status !== "enabled"
+          || !entity.parentCampaignId
+          || entity.metrics.conversions === null
+          || entity.metrics.cost_per_conversion === null
+          || entity.metrics.cost_per_click === null
+        ) return false;
+        if (this.store.isAutomaticCopyDestination(
+          accountId,
+          entity.parentCampaignId,
+          entity.externalId,
+          entity.name,
+        )) return false;
+        return entity.metrics.conversions >= copy.autoCopyMinConversions
+          && entity.metrics.cost_per_conversion <= copy.autoCopyMaxCpa
+          && entity.metrics.cost_per_click <= copy.autoCopyMaxCpc;
+      })
+      .sort((left, right) =>
+        (right.metrics.conversions ?? 0) - (left.metrics.conversions ?? 0)
+        || (left.metrics.cost_per_conversion ?? Number.POSITIVE_INFINITY)
+          - (right.metrics.cost_per_conversion ?? Number.POSITIVE_INFINITY)
+        || (left.metrics.cost_per_click ?? Number.POSITIVE_INFINITY)
+          - (right.metrics.cost_per_click ?? Number.POSITIVE_INFINITY)
+        || left.externalId.localeCompare(right.externalId));
+
+    for (const entity of candidates) {
+      const sourceCampaignId = entity.parentCampaignId!;
+      const baseAdGroupName = renderCopyNamingTemplate(copy.namingTemplate, {
+        sourceName: entity.name,
+        accountName: account.displayName,
+        date,
+      });
+      const generatedNames = Array.from(
+        { length: copy.autoCopyCount },
+        (_unused, index) => `${baseAdGroupName}-${index + 1}`,
+      );
+      const taskKey = createHash("sha256").update(JSON.stringify({
+        executor: "scheduled-auto-copy",
+        accountId,
+        sourceAdGroupId: entity.externalId,
+        localDate,
+      })).digest("hex");
+      const claim = this.store.claimAutomaticCopyTask({
+        taskKey,
+        accountId,
+        sourceCampaignId,
+        sourceAdGroupId: entity.externalId,
+        localDate,
+        requestedCount: copy.autoCopyCount,
+        generatedNames,
+        dailyLimit: 20,
+      });
+      if (claim !== "claimed") continue;
+
+      let dispatched = false;
+      try {
+        const results = await this.autoCopyRunner({
+          accountId,
+          sourceCampaignId,
+          sourceCampaignName: campaignNames.get(sourceCampaignId) ?? sourceCampaignId,
+          sourceAdGroupId: entity.externalId,
+          baseAdGroupName,
+          count: copy.autoCopyCount,
+          dailyBudget: copy.autoCopyBudget ?? entity.metrics.budget ?? 50,
+          bid: copy.autoCopyBid,
+          launchImmediately: true,
+          sameCampaign: true,
+          onBeforeDispatch: () => {
+            dispatched = true;
+            this.store.markAutomaticCopyTaskDispatching(taskKey);
+          },
+        });
+        const succeeded = results.length > 0 && results.every((result) => result.ok);
+        const partialSuccess = results.some((result) => result.ok)
+          && results.some((result) => !result.ok);
+        const unknown = partialSuccess || results.some(
+          (result) => !result.ok
+            && (result.failureKind === "unknown" || result.retrySafe === false),
+        );
+        const generatedIds = results.flatMap((result) => [
+          ...(result.adGroupIds ?? []),
+          ...(result.adGroupId ? [result.adGroupId] : []),
+        ]);
+        this.store.finishAutomaticCopyTask(
+          taskKey,
+          succeeded ? "succeeded" : unknown ? "unknown" : "failed",
+          generatedIds,
+        );
+      } catch {
+        this.store.finishAutomaticCopyTask(taskKey, dispatched ? "unknown" : "failed");
+      }
     }
   }
 
@@ -161,12 +480,14 @@ export class AutomationService {
 
     this.runningAccounts.add(accountId);
     const writeCircuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
-    const automaticDisableRun =
+    const lowRiskPolicy = this.store.getLowRiskAutomationPolicy(accountId);
+    const automaticLowRiskRun =
       trigger !== "preview" &&
       account.enabled &&
       account.executionMode === "automatic" &&
+      lowRiskPolicy.enabled &&
       !writeCircuit?.openedAt;
-    const executionMode = automaticDisableRun ? "automatic" as const : "observe" as const;
+    const executionMode = automaticLowRiskRun ? "automatic" as const : "observe" as const;
     const run = this.store.createAutomationRun(
       accountId,
       account.providerKind,
@@ -333,39 +654,44 @@ export class AutomationService {
       let actionCount = 0;
       let successCount = 0;
       let failureCount = 0;
-      if (!automaticDisableRun || output.result.quality.status !== "healthy") {
+      if (!automaticLowRiskRun || output.result.quality.status !== "healthy") {
         for (const candidate of selected) saveSuggestion(candidate, "preview");
       } else {
         const localDate = dateKeyInTimeZone(new Date(), account.timezone);
         const automaticTargets = new Set<string>();
         for (const candidate of selected) {
-          if (
-            candidate.action !== "disable" ||
-            !verifiedDisableRuleCodes.has(candidate.thresholdCode)
-          ) {
+          const verifiedRule = candidate.action === "disable"
+            ? verifiedDisableRuleCodes.has(candidate.thresholdCode)
+            : verifiedEnableRuleCodes.has(candidate.thresholdCode);
+          if (!verifiedRule) {
             saveSuggestion(
               candidate,
               "skipped",
-              "低风险自动化只允许已验证的关闭规则，开启建议必须人工批准。",
+              "该启停规则尚未纳入低风险自动化白名单，已阻止自动执行。",
             );
             continue;
           }
-          const targetKey = `${candidate.entity.entityType}:${candidate.entity.externalId}:disable`;
+          const targetKey = `${candidate.entity.entityType}:${candidate.entity.externalId}:${candidate.action}`;
           if (automaticTargets.has(targetKey)) {
             saveSuggestion(
               candidate,
               "skipped",
-              "同一对象本轮已有更高优先级的自动关闭操作。",
+              `同一对象本轮已有更高优先级的自动${candidate.action === "enable" ? "开启" : "关闭"}操作。`,
             );
             continue;
           }
           automaticTargets.add(targetKey);
           const decision = saveSuggestion(candidate, "pending");
+          const actionKey = buildAutomaticActionKey(
+            accountId,
+            suggestionMetadata.ruleVersion,
+            candidate,
+          );
           const reservation = this.store.reserveAutomaticAction({
             accountId,
-            actionKey: buildAutomaticActionKey(accountId, suggestionMetadata.ruleVersion, candidate),
+            actionKey,
             localDate,
-            dailyLimit: 0,
+            dailyLimit: lowRiskPolicy.dailyActionLimit,
           });
           if (reservation !== "claimed") {
             this.store.updateAutomationDecision(
@@ -373,7 +699,7 @@ export class AutomationService {
               "skipped",
               reservation === "duplicate"
                 ? "相同规则输入已被其他执行器领取，本轮跳过。"
-                : "已达到每日自动关闭上限。",
+                : "已达到每日自动启停上限。",
             );
             continue;
           }
@@ -384,19 +710,20 @@ export class AutomationService {
               {
                 entityType: candidate.entity.entityType,
                 externalId: candidate.entity.externalId,
-                action: "disable",
+                action: candidate.action,
               },
               "automation",
               { id: "automation-scheduler", name: "低风险自动化", kind: "system" },
               undefined,
               true,
               undefined,
-              `命中「${candidate.reason.split("：", 1)[0]}」规则，自动关闭`,
+              `命中「${candidate.reason.split("：", 1)[0]}」规则，自动${candidate.action === "enable" ? "开启" : "关闭"}`,
+              true,
             );
             if (result.ok) {
               successCount += 1;
               if (candidate.entity.entityType === "ad-group") {
-                this.store.expireOpenAutomationDecisionsForEntity(
+                this.store.expireAutomationDecisionsForEntity(
                   accountId,
                   candidate.entity.entityType,
                   candidate.entity.externalId,
@@ -404,9 +731,6 @@ export class AutomationService {
                 );
               }
               this.store.updateAutomationDecision(decision.id, "succeeded");
-              if (candidate.entity.entityType === "ad-group") {
-                void this.maybeAutoCopyAfterClose(accountId, candidate.entity, candidate.thresholdCode);
-              }
             } else if (result.failureKind === "unknown") {
               failureCount += 1;
               this.store.updateAutomationDecision(decision.id, "unknown", result.message);
@@ -416,12 +740,15 @@ export class AutomationService {
             }
           } catch (cause) {
             failureCount += 1;
+            if (cause instanceof WriteBlockedBeforeDispatchError) {
+              this.store.releaseAutomaticAction(actionKey);
+            }
             this.store.updateAutomationDecision(
               decision.id,
               cause instanceof WriteBlockedBeforeDispatchError ? "failed" : "unknown",
               cause instanceof WriteBlockedBeforeDispatchError
-                ? `自动关闭在请求发送前被阻止：${safeMessage(cause)}`
-                : `自动关闭结果无法确认：${safeMessage(cause)}`,
+                ? `自动启停在请求发送前被阻止：${safeMessage(cause)}`
+                : `自动启停结果无法确认：${safeMessage(cause)}`,
             );
           }
         }
@@ -944,35 +1271,6 @@ export class AutomationService {
     return { overnight, closing };
   }
 
-  // 命中关闭规则并成功关闭后，按扩展配置自动复制 N 个广告组（同账户同系列）。
-  // 失败绝不能影响自动化主流程，全程 try/catch 吞掉。
-  private async maybeAutoCopyAfterClose(
-    accountId: string,
-    entity: { externalId: string; name: string; parentCampaignId: string | null; metrics: { budget: number | null } },
-    ruleCode: string,
-  ): Promise<void> {
-    try {
-      if (!this.autoCopyRunner || !entity.parentCampaignId) return;
-      const copy = this.store.getAutomationFeatureSettings().copy;
-      if (!copy.autoCopyEnabled) return;
-      if (copy.autoCopyTriggerRuleCode && copy.autoCopyTriggerRuleCode !== ruleCode) return;
-      await this.autoCopyRunner({
-        accountId,
-        sourceCampaignId: entity.parentCampaignId,
-        sourceCampaignName: entity.name,
-        sourceAdGroupId: entity.externalId,
-        baseAdGroupName: `${entity.name} 的副本`,
-        count: copy.autoCopyCount,
-        dailyBudget: copy.autoCopyBudget ?? entity.metrics.budget ?? 50,
-        bid: copy.autoCopyBid,
-        launchImmediately: copy.autoCopyLaunchImmediately,
-        sameCampaign: copy.autoCopySameCampaign,
-      });
-    } catch {
-      // 自动复制为尽力而为，任何失败都不影响自动化关闭。
-    }
-  }
-
   private async changeStatus(
     accountId: string,
     input: ManualStatusInput,
@@ -982,6 +1280,7 @@ export class AutomationService {
     requireAutomatic = true,
     existingTask?: AdOperationRecord,
     successMessage?: string,
+    requireLowRiskPolicy = false,
   ): Promise<{ result: StatusMutationResult; task: AdOperationRecord }> {
     if (!this.store.getSystemRuntimeState().enabled) {
       throw new WriteBlockedBeforeDispatchError("软件总开关已关闭，广告启停操作已暂停。");
@@ -1004,7 +1303,7 @@ export class AutomationService {
       account.providerKind,
       account.timezone,
     );
-    this.assertWriteAllowed(accountId, requireAutomatic);
+    this.assertWriteAllowed(accountId, requireAutomatic, requireLowRiskPolicy);
     const entity = this.store
       .listManagedEntities(accountId, account.providerKind)
       .find(
@@ -1033,7 +1332,7 @@ export class AutomationService {
         executorId,
         connection,
         requireAutomatic,
-        false,
+        requireLowRiskPolicy,
         successMessage,
       ),
       task,
@@ -1183,6 +1482,12 @@ export class AutomationService {
     }
     if (
       this.store.hasUnknownDecision(
+        accountId,
+        candidate.entity.entityType,
+        candidate.entity.externalId,
+        candidate.action,
+      ) ||
+      this.store.hasUnresolvedStatusOperation(
         accountId,
         candidate.entity.entityType,
         candidate.entity.externalId,
@@ -1581,6 +1886,8 @@ export class AutomationScheduler {
             continue;
           }
           const run = await this.service.runAccount(account.id, "scheduler");
+          await this.service.runScheduledAutoCopies(account.id);
+          await this.service.runScheduledDeletions(account.id);
           const counts = this.store.summarizeAutomationRun(run.id);
           const failed = run.status === "failed" || counts.failureCount > 0;
           this.store.savePollAccountResult(cycle.id, {
@@ -1625,6 +1932,28 @@ function safeMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "自动化任务失败。";
 }
 
+function renderAppealTemplate(
+  template: string,
+  values: { adName: string; adId: string; rejectReason: string },
+): string {
+  return template
+    .replaceAll("{ad_name}", values.adName)
+    .replaceAll("{ad_id}", values.adId)
+    .replaceAll("{reject_reason}", values.rejectReason);
+}
+
+function renderCopyNamingTemplate(
+  template: string,
+  values: { sourceName: string; accountName: string; date: string },
+): string {
+  const rendered = template
+    .replaceAll("{source_name}", values.sourceName)
+    .replaceAll("{account_name}", values.accountName)
+    .replaceAll("{date}", values.date)
+    .trim();
+  return rendered || values.sourceName;
+}
+
 function dateKeyInTimeZone(value: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -1635,6 +1964,20 @@ function dateKeyInTimeZone(value: Date, timeZone: string): string {
   const part = (type: "year" | "month" | "day") =>
     parts.find((item) => item.type === type)?.value ?? "00";
   return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function hasCurrentDayMetricCoverage(
+  sync: ReturnType<AutomationStore["getLatestReadOnlySync"]>,
+  localDate: string,
+  timeZone: string,
+): boolean {
+  const coverage = sync?.quality.coverage;
+  return Boolean(
+    coverage
+    && coverage.startDate === localDate
+    && coverage.endDate === localDate
+    && coverage.timezone === timeZone,
+  );
 }
 
 function timePartsInTimeZone(value: Date, timeZone: string): {
@@ -1653,6 +1996,24 @@ function timePartsInTimeZone(value: Date, timeZone: string): {
     parts.find((item) => item.type === type)?.value ?? "0",
   );
   return { hour: part("hour"), minute: part("minute"), second: part("second") };
+}
+
+function compareDeletionPriority(
+  left: ReturnType<typeof normalizeProviderEntity>,
+  right: ReturnType<typeof normalizeProviderEntity>,
+): number {
+  const conversionOrder = (left.metrics.conversions ?? Number.POSITIVE_INFINITY)
+    - (right.metrics.conversions ?? Number.POSITIVE_INFINITY);
+  if (conversionOrder !== 0) return conversionOrder;
+  const cartOrder = (left.metrics.carts ?? Number.POSITIVE_INFINITY)
+    - (right.metrics.carts ?? Number.POSITIVE_INFINITY);
+  if (cartOrder !== 0) return cartOrder;
+  const leftCpa = left.metrics.cost_per_conversion ?? Number.POSITIVE_INFINITY;
+  const rightCpa = right.metrics.cost_per_conversion ?? Number.POSITIVE_INFINITY;
+  if (leftCpa !== rightCpa) return rightCpa - leftCpa;
+  const createdOrder = new Date(left.createdAt ?? 0).getTime()
+    - new Date(right.createdAt ?? 0).getTime();
+  return createdOrder || left.externalId.localeCompare(right.externalId);
 }
 
 function buildAutomaticActionKey(
