@@ -161,7 +161,10 @@ export type LaunchPresetRecord = z.infer<typeof LaunchPresetRecordSchema>;
 export const LaunchConfigurationRowSchema = z.object({
   rowNumber: z.number().int().min(2),
   campaignName: z.string().trim().min(1).max(512),
-  videoCode: z.string().trim().min(1).max(512),
+  // One ad-group row can hold every video code of a "一组多广告" group joined by
+  // ";", so this is NOT a single-code field. Cap it to the worst case the sheet
+  // already allows: up to 500 ads (see adCount check) × 512 chars per code.
+  videoCode: z.string().trim().min(1).max(262_144),
   productUrl: z.string().url().max(2_048),
   adGroupName: z.string().trim().min(1).max(512),
   adName: z.string().trim().min(1).max(512),

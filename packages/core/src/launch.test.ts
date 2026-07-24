@@ -132,6 +132,25 @@ describe("parseLaunchSheetTable", () => {
     ]);
   });
 
+  it("imports a 一组多广告 group whose joined video codes exceed 512 chars", () => {
+    // 30 codes of ~30 chars each join to ~900 chars — a legitimate multi-ad
+    // group that the old single-code 512 cap wrongly rejected.
+    const codes = Array.from({ length: 30 }, (_unused, i) => `spark-auth-code-${String(i).padStart(12, "0")}`);
+    expect(codes.join(";").length).toBeGreaterThan(512);
+    const result = parseLaunchSheetTable(
+      [
+        ["推广系列名称", "广告组名称", "视频代码", "产品 URL"],
+        ["系列", "多广告组", codes.join(";"), "https://example.com/p"],
+      ],
+      preset,
+      new Date("2026-07-16T09:00:00.000Z"),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]!.videoCode).toBe(codes.join(";"));
+    expect(result.warnings.some((w) => w.message.includes("30 条广告"))).toBe(true);
+  });
+
   it("formats automatic names as YYMMDD:XXX", () => {
     expect(automaticName(new Date("2026-07-16T09:00:00.000Z"), 7)).toBe("260716:007");
   });
