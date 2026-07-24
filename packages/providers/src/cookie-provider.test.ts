@@ -8,6 +8,102 @@ afterEach(() => {
 });
 
 describe("CookieAdsProvider", () => {
+  it("reuses the ad-group status session to delete a disabled ad group without another cURL", async () => {
+    const sentBodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sentBodies.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ code: 0, data: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfToken: "test-csrf",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group-status",
+          action: "disable",
+          url: "https://ads.tiktok.com/api/v4/i18n/adgroup/update_status/?aadvid=654321",
+          method: "POST",
+          body: '{"adgroup_ids":["old-id"],"operation_status":"DISABLE"}',
+          contentType: "application/json",
+        }],
+      },
+    };
+    const provider = new CookieAdsProvider();
+
+    expect(provider.resolveCapabilities(context)).toContain("delete-ad-groups");
+    await expect(provider.deleteAdGroups(context, [{ externalId: "adgroup-1" }]))
+      .resolves.toEqual([expect.objectContaining({ externalId: "adgroup-1", ok: true })]);
+    expect(JSON.parse(sentBodies[0]!)).toEqual({
+      adgroup_ids: ["adgroup-1"],
+      operation_status: "DELETE",
+    });
+  });
+
+  it("keeps a dispatched deletion with a lost response in unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("connection lost");
+    }));
+    const provider = new CookieAdsProvider();
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group-status",
+          action: "disable",
+          url: "https://ads.tiktok.com/api/v4/i18n/adgroup/update_status/?aadvid=654321",
+          method: "POST",
+          body: '{"adgroup_ids":["old-id"],"operation_status":"DISABLE"}',
+          contentType: "application/json",
+        }],
+      },
+    };
+
+    await expect(provider.deleteAdGroups(context, [{ externalId: "adgroup-1" }]))
+      .resolves.toEqual([expect.objectContaining({ ok: false, failureKind: "unknown" })]);
+  });
+
+  it("keeps a dispatched deletion with an incomplete JSON response in unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: {} }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+    const provider = new CookieAdsProvider();
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group-status",
+          action: "disable",
+          url: "https://ads.tiktok.com/api/v4/i18n/adgroup/update_status/?aadvid=654321",
+          method: "POST",
+          body: '{"adgroup_ids":["old-id"],"operation_status":"DISABLE"}',
+          contentType: "application/json",
+        }],
+      },
+    };
+
+    await expect(provider.deleteAdGroups(context, [{ externalId: "adgroup-1" }]))
+      .resolves.toEqual([expect.objectContaining({ ok: false, failureKind: "unknown" })]);
+  });
+
   it("derives the reusable appeal request from the account session without an account appeal import", async () => {
     const sentRequests: Array<{ url: string; body: string; headers: Record<string, string> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -99,6 +195,40 @@ describe("CookieAdsProvider", () => {
     });
     expect(results).toEqual([expect.objectContaining({ ok: true })]);
     expect(secondResults).toEqual([expect.objectContaining({ ok: true })]);
+  });
+
+  it("keeps a dispatched appeal with a lost response in unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("connection lost");
+    }));
+    const provider = new CookieAdsProvider();
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=654321",
+          method: "POST",
+          body: "{}",
+          contentType: "application/json",
+          derived: false,
+        }],
+      },
+    };
+
+    await expect(provider.appeal(context, [{
+      externalId: "ad-1",
+      creativeId: "creative-1",
+      reason: "appeal",
+    }])).resolves.toEqual([expect.objectContaining({
+      ok: false,
+      failureKind: "unknown",
+    })]);
   });
 
   it("overrides a captured range with the account's current local date", async () => {
@@ -602,6 +732,54 @@ describe("CookieAdsProvider", () => {
         externalId: "creative-test",
       }),
     );
+  });
+
+  it("does not turn a two-level creative placeholder into a duplicate final ad", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const table = url.includes("campaign/list")
+        ? [{ campaign_id: "campaign-1", campaign_name: "系列" }]
+        : url.includes("adgroup/list")
+          ? [{ campaign_id: "campaign-1", ad_id: "adgroup-1", ad_name: "广告组" }]
+          : [{
+              campaign_id: "campaign-1",
+              adgroup_id: "adgroup-1",
+              ad_id: "adgroup-1",
+              creative_id: "0",
+              creative_name: "0",
+              ad_name: "广告组",
+              universal_type: 1,
+              stat_data: { ad_id: "adgroup-1", creative_id: "0" },
+            }];
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { table, pagination: { page: 1, page_count: 1 } },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+
+    const output = await new CookieAdsProvider().syncReadOnly({
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456",
+          method: "POST",
+          body: "{}",
+          contentType: "application/json",
+        }],
+      },
+    });
+
+    expect(output.result.quality.status).toBe("healthy");
+    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 0 });
+    expect(output.entities).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: "ad", externalId: "adgroup-1" }),
+    ]));
   });
 
   it("replays an encrypted status template with the target entity id", async () => {
@@ -1826,7 +2004,7 @@ describe("CookieAdsProvider", () => {
       bid: 7,
     });
 
-    expect(result).toMatchObject({ ok: true });
+    expect(result).toMatchObject({ ok: true, adGroupIds: ["adgroup"] });
     const save = requests.find((request) => request.path.includes("/ad_snap/save/"));
     expect(save?.body).toMatchObject({
       campaign_id: "campaign",

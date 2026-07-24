@@ -18,6 +18,8 @@ import type {
   StatusMutationResult,
   CreationMutation,
   CreationMutationResult,
+  DeleteAdGroupMutation,
+  DeleteAdGroupMutationResult,
   NewCreationMutation,
   TemplateCopyMutation,
 } from "./types.js";
@@ -155,6 +157,18 @@ export class ProviderRegistry {
     return provider.changeStatus(context, mutations);
   }
 
+  deleteAdGroups(
+    kind: ProviderKind,
+    context: ProviderContext,
+    mutations: DeleteAdGroupMutation[],
+  ): Promise<DeleteAdGroupMutationResult[]> {
+    const provider = this.get(kind);
+    if (!provider.deleteAdGroups || !provider.capabilities.has("delete-ad-groups")) {
+      throw new Error(`${provider.displayName} 暂不支持删除广告组。`);
+    }
+    return provider.deleteAdGroups(context, mutations);
+  }
+
   async create(
     kind: ProviderKind,
     context: ProviderContext,
@@ -193,7 +207,7 @@ export class ProviderRegistry {
       sourceCampaignBudgetOptimized?: boolean;
       onBeforeDispatch?: () => void;
     },
-  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
+  ): Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
     const provider = this.get(kind) as unknown as {
       copyAdGroupToExistingCampaign?: (
         context: ProviderContext,
@@ -208,7 +222,7 @@ export class ProviderRegistry {
           sourceCampaignBudgetOptimized?: boolean;
           onBeforeDispatch?: () => void;
         },
-      ) => Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }>;
+      ) => Promise<{ ok: boolean; message: string; adGroupSnapIds?: string[]; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }>;
     };
     if (!provider.copyAdGroupToExistingCampaign) {
       throw new RetryableCreationError("当前接入不支持广告组级复制。");

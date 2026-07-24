@@ -65,6 +65,103 @@ describe("AutomationStore", () => {
     expect(store.claimAdGroupExpandTask("crash-task", "demo-account", "adgroup-3")).toBe("unknown");
   });
 
+  it("reserves automatic copies atomically, enforces the daily cap, and remembers generated destinations", () => {
+    expect(store.claimAutomaticCopyTask({
+      taskKey: "auto-copy-1",
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceAdGroupId: "source-1",
+      localDate: "2026-07-24",
+      requestedCount: 2,
+      generatedNames: ["source-0724-1", "source-0724-2"],
+      dailyLimit: 3,
+    })).toBe("claimed");
+    expect(store.claimAutomaticCopyTask({
+      taskKey: "auto-copy-2",
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceAdGroupId: "source-2",
+      localDate: "2026-07-24",
+      requestedCount: 2,
+      generatedNames: ["other-0724-1", "other-0724-2"],
+      dailyLimit: 3,
+    })).toBe("daily-limit");
+    expect(store.isAutomaticCopyDestination(
+      "demo-account",
+      "campaign-1",
+      "generated-1",
+      "source-0724-1",
+    )).toBe(true);
+    store.finishAutomaticCopyTask(
+      "auto-copy-1",
+      "succeeded",
+      ["generated-1", "generated-2"],
+    );
+    expect(store.isAutomaticCopyDestination(
+      "demo-account",
+      "campaign-1",
+      "generated-1",
+      "用户已重命名",
+    )).toBe(true);
+    expect(store.claimAutomaticCopyTask({
+      taskKey: "auto-copy-1",
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceAdGroupId: "source-1",
+      localDate: "2026-07-24",
+      requestedCount: 2,
+      generatedNames: ["source-0724-1", "source-0724-2"],
+      dailyLimit: 3,
+    })).toBe("succeeded");
+
+    expect(store.claimAutomaticCopyTask({
+      taskKey: "auto-copy-failed",
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceAdGroupId: "source-failed",
+      localDate: "2026-07-25",
+      requestedCount: 2,
+      generatedNames: ["failed-1", "failed-2"],
+      dailyLimit: 20,
+    })).toBe("claimed");
+    store.finishAutomaticCopyTask("auto-copy-failed", "failed");
+    expect(store.claimAutomaticCopyTask({
+      taskKey: "auto-copy-failed",
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceAdGroupId: "source-failed",
+      localDate: "2026-07-25",
+      requestedCount: 2,
+      generatedNames: ["failed-1", "failed-2"],
+      dailyLimit: 20,
+    })).toBe("failed");
+    expect(store.isAutomaticCopyDestination(
+      "demo-account",
+      "campaign-1",
+      "failed-id",
+      "failed-1",
+    )).toBe(false);
+  });
+
+  it("claims a daily executor once and allows only stale unfinished scans to resume", () => {
+    expect(store.claimDailyAutomationRun(
+      "demo-account",
+      "delete-ad-groups",
+      "2026-07-24",
+    )).toBe("claimed");
+    expect(store.claimDailyAutomationRun(
+      "demo-account",
+      "delete-ad-groups",
+      "2026-07-24",
+    )).toBe("running");
+    store.finishDailyAutomationRun("demo-account", "delete-ad-groups", "2026-07-24");
+    expect(store.claimDailyAutomationRun(
+      "demo-account",
+      "delete-ad-groups",
+      "2026-07-24",
+    )).toBe("completed");
+  });
+
   it("migrates the expansion uncertainty guard into an existing database", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-expand-migration-"));
     const databasePath = join(directory, "automation.db");
@@ -395,8 +492,16 @@ describe("AutomationStore", () => {
     expect(() => reopened.getAutomationFeatureSettings()).not.toThrow();
     const settings = reopened.getAutomationFeatureSettings();
     expect(settings.appeal.enabled).toBe(defaultAutomationFeatureSettings.appeal.enabled);
+    expect(settings.appeal.scheduleHours).toEqual([1, 12]);
     expect(settings.appeal.textTemplate).toBe("旧模板");
     expect(settings.copy.autoCopyEnabled).toBe(false);
+    expect(settings.copy.autoCopyCount).toBe(2);
+    expect(settings.copy.autoCopyDailyAccountLimit).toBe(20);
+    expect(settings.copy.autoCopyCutoffHour).toBe(12);
+    expect(settings.deletion.enabled).toBe(false);
+    expect(settings.deletion.maxConversions).toBe(0);
+    expect(settings.deletion.maxCarts).toBe(4);
+    expect(settings.deletion.scheduleHour).toBe(6);
     reopened.close();
     rmSync(dbPath, { force: true });
   });
@@ -1838,16 +1943,42 @@ describe("AutomationStore", () => {
     }
   });
 
-  it("keeps legacy low-risk policy data independent from direct automation", () => {
+  it("persists the current low-risk enable/disable policy state", () => {
     expect(store.getLowRiskAutomationPolicy("demo-account")).toMatchObject({
       enabled: false,
-      policyVersion: "disable-only-v1",
+      policyVersion: "enable-disable-v2",
       dailyActionLimit: 0,
     });
     expect(store.updateLowRiskAutomationPolicy("demo-account", {
       enabled: true,
       dailyActionLimit: 2,
     })).toMatchObject({ enabled: true, dailyActionLimit: 0 });
+  });
+
+  it("requires a fresh opt-in when migrating the legacy disable-only policy", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-low-risk-policy-"));
+    const databasePath = join(directory, "automation.db");
+    const initial = new AutomationStore(databasePath);
+    initial.seed();
+    initial.close();
+    const legacy = new DatabaseSync(databasePath);
+    legacy.prepare(
+      `INSERT OR REPLACE INTO account_low_risk_automation_policies (
+         account_id, enabled, policy_version, daily_action_limit, updated_at
+       ) VALUES (?, 1, 'disable-only-v1', 1, ?)`,
+    ).run("demo-account", new Date().toISOString());
+    legacy.close();
+
+    const migrated = new AutomationStore(databasePath);
+    try {
+      expect(migrated.getLowRiskAutomationPolicy("demo-account")).toMatchObject({
+        enabled: false,
+        policyVersion: "enable-disable-v2",
+      });
+    } finally {
+      migrated.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("atomically deduplicates automatic actions and enforces the daily limit across instances", () => {

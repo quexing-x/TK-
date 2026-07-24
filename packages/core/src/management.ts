@@ -49,7 +49,7 @@ export interface AdOperationRecord extends WriteTaskIdentity {
   entityType: SyncEntityType;
   externalId: string;
   entityName: string;
-  action: "enable" | "disable" | "ignore" | "unignore" | "appeal";
+  action: "enable" | "disable" | "ignore" | "unignore" | "appeal" | "delete";
   source: "manual" | "automation" | "scheduled";
   status: WriteTaskStatus;
   phase: WriteTaskPhase;

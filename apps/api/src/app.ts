@@ -429,6 +429,12 @@ export async function createApp(
     ),
   );
 
+  app.post("/api/automation/features/apply-all", async (request) =>
+    dependencies.store.applyAutomationFeatureSettingsToAllAccounts(
+      AutomationFeatureSettingsInputSchema.parse(request.body),
+    ),
+  );
+
   app.get("/api/launch-plans", async () =>
     dependencies.store.listMultiAccountLaunchPlans(),
   );
