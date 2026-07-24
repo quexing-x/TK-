@@ -60,29 +60,6 @@ export type GlobalAutomationSettingsInput = z.infer<
   typeof GlobalAutomationSettingsInputSchema
 >;
 
-export const LOW_RISK_AUTOMATION_POLICY_VERSION = "enable-disable-v2" as const;
-
-export const LowRiskAutomationPolicySchema = z.object({
-  accountId: z.string().min(1),
-  enabled: z.boolean(),
-  policyVersion: z.literal(LOW_RISK_AUTOMATION_POLICY_VERSION),
-  /** 0 is the backward-compatible sentinel for no daily cap. */
-  dailyActionLimit: z.number().int().min(0).max(100),
-  updatedAt: z.string().datetime(),
-});
-export type LowRiskAutomationPolicy = z.infer<
-  typeof LowRiskAutomationPolicySchema
->;
-
-export const LowRiskAutomationPolicyInputSchema =
-  LowRiskAutomationPolicySchema.pick({
-    enabled: true,
-    dailyActionLimit: true,
-  });
-export type LowRiskAutomationPolicyInput = z.infer<
-  typeof LowRiskAutomationPolicyInputSchema
->;
-
 export const ProviderWriteCircuitSchema = z.object({
   accountId: z.string().min(1),
   providerKind: ProviderKindSchema,

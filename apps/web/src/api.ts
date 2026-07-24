@@ -4,11 +4,8 @@ import type {
   AccountCreateInput,
   GlobalAutomationSettings,
   GlobalAutomationSettingsInput,
-  LowRiskAutomationPolicy,
-  LowRiskAutomationPolicyInput,
   ProviderWriteCircuit,
   AutomationDecisionRecord,
-  AutomationApprovalRecord,
   AutomationRunRecord,
   ProviderConnection,
   ProviderConnectionSettings,
@@ -111,8 +108,7 @@ export interface LaunchQueueResult {
   queued: true;
 }
 
-export interface LowRiskAutomationState {
-  policy: LowRiskAutomationPolicy;
+export interface ProviderWriteCircuitState {
   todayUsage: number;
   circuit: ProviderWriteCircuit | null;
 }
@@ -233,20 +229,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
-  getLowRiskAutomation: (accountId: string) =>
-    request<LowRiskAutomationState>(
-      `/api/accounts/${accountId}/low-risk-automation`,
+  getWriteCircuit: (accountId: string) =>
+    request<ProviderWriteCircuitState>(
+      `/api/accounts/${accountId}/write-circuit`,
     ),
-  updateLowRiskAutomation: (
-    accountId: string,
-    input: LowRiskAutomationPolicyInput,
-  ) => request<LowRiskAutomationState>(
-    `/api/accounts/${accountId}/low-risk-automation`,
-    { method: "PUT", body: JSON.stringify(input) },
-  ),
-  resetLowRiskAutomationCircuit: (accountId: string) =>
-    request<LowRiskAutomationState>(
-      `/api/accounts/${accountId}/low-risk-automation/reset-circuit`,
+  resetWriteCircuit: (accountId: string) =>
+    request<ProviderWriteCircuitState>(
+      `/api/accounts/${accountId}/write-circuit/reset`,
       { method: "POST" },
     ),
   getAutomationFeatures: () =>
@@ -492,15 +481,6 @@ export const api = {
   getAutomationDecisions: (accountId: string) =>
     request<AutomationDecisionRecord[]>(
       `/api/accounts/${accountId}/automation/decisions`,
-    ),
-  getAutomationApprovals: (accountId: string) =>
-    request<AutomationApprovalRecord[]>(
-      `/api/accounts/${accountId}/automation/approvals`,
-    ),
-  approveAutomationDecision: (accountId: string, decisionId: string) =>
-    request<AutomationApprovalRecord>(
-      `/api/accounts/${accountId}/automation/decisions/${decisionId}/approve`,
-      { method: "POST" },
     ),
   previewAutomation: (accountId: string) =>
     request<AutomationRunRecord>(

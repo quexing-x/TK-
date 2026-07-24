@@ -200,17 +200,10 @@ describe("local authentication and authorization", () => {
     )).toBe("ads:operate");
   });
 
-  it("requires ads operation permission for approving a suggestion", () => {
+  it("requires automation execution permission for resetting the write circuit", () => {
     expect(requiredPermission(
       "POST",
-      "/api/accounts/account-1/automation/decisions/decision-1/approve",
-    )).toBe("ads:operate");
-  });
-
-  it("requires automation execution permission for changing the low-risk policy", () => {
-    expect(requiredPermission(
-      "PUT",
-      "/api/accounts/account-1/low-risk-automation",
+      "/api/accounts/account-1/write-circuit/reset",
     )).toBe("automation:execute");
   });
 

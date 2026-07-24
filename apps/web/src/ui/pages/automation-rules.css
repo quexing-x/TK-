@@ -147,15 +147,15 @@
   padding: 0 12px;
 }
 
-.automation-page > .low-risk-panel .automation-actions {
+.automation-page > .write-circuit-panel .automation-actions {
   min-height: 80px;
   align-items: center;
   padding: 16px 20px 8px;
 }
 
 .automation-page > .account-readiness-panel .retention-note,
-.automation-page > .low-risk-panel .retention-note,
-.automation-page > .low-risk-panel .error-text {
+.automation-page > .write-circuit-panel .retention-note,
+.automation-page > .write-circuit-panel .error-text {
   margin: 0;
   padding: 12px 20px 20px;
   color: var(--ink-faint);
@@ -294,12 +294,10 @@
 }
 
 .automation-flow-panel { padding-right: 32px; border-right: 1px solid var(--line); }
-.automation-decisions-panel { padding-left: 32px; }
 
-/* Direct automation has no approval queue. Historical decisions stay in the
-   audit table, while the obsolete queue cards are intentionally absent. */
-.automation-decisions-panel,
-.low-risk-panel { display: none; }
+/* Direct automation has no approval queue; the write-circuit panel is surfaced
+   inline in the flow note, so its standalone card stays hidden. */
+.write-circuit-panel { display: none; }
 .automation-flow-panel { padding-right: 0; border-right: 0; }
 
 .automation-primary-grid > .account-readiness-panel {

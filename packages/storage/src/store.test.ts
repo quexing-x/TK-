@@ -1943,46 +1943,8 @@ describe("AutomationStore", () => {
     }
   });
 
-  it("persists the current low-risk enable/disable policy state", () => {
-    expect(store.getLowRiskAutomationPolicy("demo-account")).toMatchObject({
-      enabled: false,
-      policyVersion: "enable-disable-v2",
-      dailyActionLimit: 0,
-    });
-    expect(store.updateLowRiskAutomationPolicy("demo-account", {
-      enabled: true,
-      dailyActionLimit: 2,
-    })).toMatchObject({ enabled: true, dailyActionLimit: 0 });
-  });
-
-  it("requires a fresh opt-in when migrating the legacy disable-only policy", () => {
-    const directory = mkdtempSync(join(tmpdir(), "tk-auto-low-risk-policy-"));
-    const databasePath = join(directory, "automation.db");
-    const initial = new AutomationStore(databasePath);
-    initial.seed();
-    initial.close();
-    const legacy = new DatabaseSync(databasePath);
-    legacy.prepare(
-      `INSERT OR REPLACE INTO account_low_risk_automation_policies (
-         account_id, enabled, policy_version, daily_action_limit, updated_at
-       ) VALUES (?, 1, 'disable-only-v1', 1, ?)`,
-    ).run("demo-account", new Date().toISOString());
-    legacy.close();
-
-    const migrated = new AutomationStore(databasePath);
-    try {
-      expect(migrated.getLowRiskAutomationPolicy("demo-account")).toMatchObject({
-        enabled: false,
-        policyVersion: "enable-disable-v2",
-      });
-    } finally {
-      migrated.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
   it("atomically deduplicates automatic actions and enforces the daily limit across instances", () => {
-    const directory = mkdtempSync(join(tmpdir(), "tk-auto-low-risk-"));
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-action-claims-"));
     const databasePath = join(directory, "automation.db");
     const first = new AutomationStore(databasePath);
     first.seed();

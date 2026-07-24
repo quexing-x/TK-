@@ -1159,38 +1159,23 @@ describe("local API", () => {
     }
   });
 
-  it("exposes the low-risk automation opt-in, daily usage and circuit reset", async () => {
+  it("exposes daily usage and the provider write-circuit reset", async () => {
     const initial = await app.inject({
       method: "GET",
-      url: "/api/accounts/demo-account/low-risk-automation",
+      url: "/api/accounts/demo-account/write-circuit",
     });
     expect(initial.statusCode).toBe(200);
     expect(initial.json()).toMatchObject({
-      policy: { enabled: false, policyVersion: "enable-disable-v2", dailyActionLimit: 0 },
       todayUsage: 0,
       circuit: null,
     });
 
-    store.setAccountExecutionMode("demo-account", "automatic", "test opt-in");
-    const updated = await app.inject({
-      method: "PUT",
-      url: "/api/accounts/demo-account/low-risk-automation",
-      payload: { enabled: true, dailyActionLimit: 2 },
-    });
-    expect(updated.statusCode).toBe(200);
-    expect(updated.json().policy).toMatchObject({ enabled: true, dailyActionLimit: 0 });
-
-    await app.inject({
-      method: "PUT",
-      url: "/api/accounts/demo-account/low-risk-automation",
-      payload: { enabled: false, dailyActionLimit: 2 },
-    });
     store.recordProviderWriteFailure("demo-account", "cookie", "one");
     store.recordProviderWriteFailure("demo-account", "cookie", "two");
     store.recordProviderWriteFailure("demo-account", "cookie", "three");
     const reset = await app.inject({
       method: "POST",
-      url: "/api/accounts/demo-account/low-risk-automation/reset-circuit",
+      url: "/api/accounts/demo-account/write-circuit/reset",
     });
     expect(reset.statusCode).toBe(200);
     expect(reset.json().circuit).toBeNull();
@@ -1624,6 +1609,39 @@ describe("local API", () => {
     expect(response.statusCode).toBe(500);
     expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
+  });
+
+  it("returns an actionable conflict when direct synchronization uses a stale capability contract", async () => {
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie",
+      advertiserId: "123",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const credentialRef = await vault.create(JSON.stringify({
+      kind: "cookie",
+      cookie: "sessionid=test-cookie",
+      csrfHeaderName: "x-csrftoken",
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", credentialRef);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "stale-cookie-capabilities",
+      capabilities: ["read-campaigns"],
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/connections/cookie/sync",
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      message: "Provider 能力契约已更新，请重新检测连接。",
+    });
   });
 
   it("downgrades automatic mode when direct synchronization is non-healthy without warnings", async () => {

@@ -239,33 +239,20 @@ describe("web API client", () => {
     );
   });
 
-  it("updates the account-scoped low-risk policy without enabling other automation", async () => {
+  it("resets the account-scoped provider write circuit", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
-        policy: {
-          accountId: "account-1",
-          enabled: true,
-          policyVersion: "enable-disable-v2",
-          dailyActionLimit: 3,
-          updatedAt: "2026-07-18T00:00:00.000Z",
-        },
         todayUsage: 0,
         circuit: null,
       }), { status: 200, headers: { "Content-Type": "application/json" } }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await api.updateLowRiskAutomation("account-1", {
-      enabled: true,
-      dailyActionLimit: 3,
-    });
+    await api.resetWriteCircuit("account-1");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/accounts/account-1/low-risk-automation",
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify({ enabled: true, dailyActionLimit: 3 }),
-      }),
+      "/api/accounts/account-1/write-circuit/reset",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 

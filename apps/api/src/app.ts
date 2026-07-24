@@ -8,7 +8,6 @@ import {
   AccountSettingsUpdateSchema,
   AccountCreateInputSchema,
   GlobalAutomationSettingsInputSchema,
-  LowRiskAutomationPolicyInputSchema,
   CookieCredentialInputSchema,
   ProviderConnectionSettingsSchema,
   ProviderCredentialInputSchema,
@@ -930,22 +929,13 @@ export async function createApp(
     return account;
   });
 
-  app.get("/api/accounts/:accountId/low-risk-automation", async (request) => {
+  app.get("/api/accounts/:accountId/write-circuit", async (request) => {
     const { accountId } = AccountParamsSchema.parse(request.params);
-    return automation.getLowRiskAutomationState(accountId);
-  });
-
-  app.put("/api/accounts/:accountId/low-risk-automation", async (request) => {
-    const { accountId } = AccountParamsSchema.parse(request.params);
-    dependencies.store.updateLowRiskAutomationPolicy(
-      accountId,
-      LowRiskAutomationPolicyInputSchema.parse(request.body),
-    );
-    return automation.getLowRiskAutomationState(accountId);
+    return automation.getProviderWriteCircuitState(accountId);
   });
 
   app.post(
-    "/api/accounts/:accountId/low-risk-automation/reset-circuit",
+    "/api/accounts/:accountId/write-circuit/reset",
     async (request) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
       return automation.resetProviderWriteCircuit(accountId);
@@ -1296,35 +1286,6 @@ export async function createApp(
     },
   );
 
-  app.get(
-    "/api/accounts/:accountId/automation/approvals",
-    async (request, reply) => {
-      const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
-        return reply.status(404).send({ message: "账户不存在。" });
-      }
-      return dependencies.store.listAutomationApprovals(accountId);
-    },
-  );
-
-  app.post(
-    "/api/accounts/:accountId/automation/decisions/:decisionId/approve",
-    async (request, reply) => {
-      const { accountId, decisionId } = z.object({
-        accountId: z.string().min(1),
-        decisionId: z.string().min(1),
-      }).parse(request.params);
-      const user = request.authSession?.user;
-      try {
-        return await automation.approveAutomationDecision(accountId, decisionId, user
-          ? { id: user.id, name: user.username, kind: "user" }
-          : { id: "local-user", name: "本地用户", kind: "user" });
-      } catch (cause) {
-        return reply.status(409).send({ message: getSafeProviderError(cause) });
-      }
-    },
-  );
-
   app.post(
     "/api/accounts/:accountId/status-operations/:operationId/retry",
     async (request, reply) => {
@@ -1610,12 +1571,16 @@ export async function createApp(
       if (!connection || connection.status !== "ready") {
         return reply.status(409).send({ message: "请先通过连接检测。" });
       }
-      providers.requireAccountCapability(
-        accountId,
-        providerKind,
-        connection,
-        "read-campaigns",
-      );
+      try {
+        providers.requireAccountCapability(
+          accountId,
+          providerKind,
+          connection,
+          "read-campaigns",
+        );
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
       let output: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>;
       try {
         const context = await loadProviderContext(
@@ -1729,10 +1694,7 @@ export function requiredPermission(
     path.startsWith("/api/launch-plans/")
     && (path.endsWith("/execute") || path.endsWith("/queue") || path.endsWith("/retry") || path.endsWith("/verify"))
   ) return "ads:operate";
-  if (path.includes("/automation/decisions/") && path.endsWith("/approve")) {
-    return "ads:operate";
-  }
-  if (path.includes("/low-risk-automation")) return "automation:execute";
+  if (path.includes("/write-circuit")) return "automation:execute";
   if (path.includes("/automation/")) return "automation:execute";
   if (
     path.includes("/entities/status") ||

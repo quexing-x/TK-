@@ -77,39 +77,6 @@ export interface AutomationDecisionRecord {
   executedAt: string | null;
 }
 
-export type AutomationApprovalStatus =
-  | "pending"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "unknown";
-
-/** Immutable approval snapshot plus the one-time execution outcome. */
-export interface AutomationApprovalRecord {
-  id: string;
-  decisionId: string;
-  runId: string;
-  accountId: string;
-  providerKind: "cookie" | "official-api";
-  suggestionKey: string;
-  entityType: SyncEntityType;
-  externalId: string;
-  entityName: string;
-  action: AutomationAction;
-  expectedStatus: EntityOperationalStatus;
-  beforeStatus: EntityOperationalStatus | null;
-  afterStatus: EntityOperationalStatus | null;
-  status: AutomationApprovalStatus;
-  actor: WriteTaskActor;
-  statusOperationId: string | null;
-  providerMessage: string | null;
-  errorMessage: string | null;
-  claimedBy: string | null;
-  claimedAt: string | null;
-  createdAt: string;
-  completedAt: string | null;
-}
-
 export interface NormalizedMetrics {
   cost_per_conversion: number | null;
   cost_per_click: number | null;

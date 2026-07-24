@@ -11,7 +11,6 @@ import {
   type PollCycleRecord,
   type RuleConfiguration,
   type AdOperationRecord,
-  type AutomationApprovalRecord,
   type WriteTaskActor,
   normalizeProviderEntity,
 } from "@tk-auto/core";
@@ -28,20 +27,6 @@ import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 const statusLeaseHeartbeatMs = 60 * 1000;
 const writeLeaseTimeoutMs = 30 * 60 * 1000;
 const destructiveSyncFreshnessMs = 5 * 60 * 1000;
-const verifiedDisableRuleCodes = new Set([
-  "CV1_CPC_CLOSE",
-  "CV1_CPA_CLOSE",
-  "CV2_CPA_CLOSE",
-  "NO_CONV_SPEND_CLOSE",
-  "NO_CONV_CPC_CLOSE",
-  "NO_CART_CLOSE",
-]);
-const verifiedEnableRuleCodes = new Set([
-  "CV1_CPA_OPEN",
-  "CV2_CPA_OPEN",
-  "HAS_CART_OPEN",
-]);
-
 export class AutomationBusyError extends Error {}
 class WriteBlockedBeforeDispatchError extends Error {}
 
@@ -100,21 +85,16 @@ export class AutomationService {
     this.store.recoverInterruptedScheduledActions(
       new Date(Date.now() - writeLeaseTimeoutMs).toISOString(),
     );
-    this.store.recoverInterruptedAutomationApprovals(
-      new Date(Date.now() - writeLeaseTimeoutMs).toISOString(),
-    );
     for (const task of this.store.listPendingManualStatusWriteTasks()) {
       this.queuePersistedManualStatusTask(task);
     }
   }
 
-  getLowRiskAutomationState(accountId: string) {
+  getProviderWriteCircuitState(accountId: string) {
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
-    const policy = this.store.getLowRiskAutomationPolicy(accountId);
     const localDate = dateKeyInTimeZone(new Date(), account.timezone);
     return {
-      policy,
       todayUsage: this.store.countAutomaticActions(accountId, localDate),
       circuit: this.store.getProviderWriteCircuit(accountId, account.providerKind),
     };
@@ -123,11 +103,8 @@ export class AutomationService {
   resetProviderWriteCircuit(accountId: string) {
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
-    if (this.store.getLowRiskAutomationPolicy(accountId).enabled) {
-      throw new Error("请先关闭该账户的低风险自动化，再重置熔断状态。");
-    }
     this.store.resetProviderWriteFailures(accountId, account.providerKind);
-    return this.getLowRiskAutomationState(accountId);
+    return this.getProviderWriteCircuitState(accountId);
   }
 
   async runScheduledAppeals(accountId: string, asOf = new Date()): Promise<void> {
@@ -480,14 +457,14 @@ export class AutomationService {
 
     this.runningAccounts.add(accountId);
     const writeCircuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
-    const lowRiskPolicy = this.store.getLowRiskAutomationPolicy(accountId);
-    const automaticLowRiskRun =
+    // 自动执行的唯一授权链：非预览 + 账户自动化开启 + automatic 模式 + 熔断未开。
+    // 软件总开关已在方法入口校验。不再有独立的「低风险自动化」二次授权门槛。
+    const automaticRun =
       trigger !== "preview" &&
       account.enabled &&
       account.executionMode === "automatic" &&
-      lowRiskPolicy.enabled &&
       !writeCircuit?.openedAt;
-    const executionMode = automaticLowRiskRun ? "automatic" as const : "observe" as const;
+    const executionMode = automaticRun ? "automatic" as const : "observe" as const;
     const run = this.store.createAutomationRun(
       accountId,
       account.providerKind,
@@ -654,23 +631,12 @@ export class AutomationService {
       let actionCount = 0;
       let successCount = 0;
       let failureCount = 0;
-      if (!automaticLowRiskRun || output.result.quality.status !== "healthy") {
+      if (!automaticRun || output.result.quality.status !== "healthy") {
         for (const candidate of selected) saveSuggestion(candidate, "preview");
       } else {
         const localDate = dateKeyInTimeZone(new Date(), account.timezone);
         const automaticTargets = new Set<string>();
         for (const candidate of selected) {
-          const verifiedRule = candidate.action === "disable"
-            ? verifiedDisableRuleCodes.has(candidate.thresholdCode)
-            : verifiedEnableRuleCodes.has(candidate.thresholdCode);
-          if (!verifiedRule) {
-            saveSuggestion(
-              candidate,
-              "skipped",
-              "该启停规则尚未纳入低风险自动化白名单，已阻止自动执行。",
-            );
-            continue;
-          }
           const targetKey = `${candidate.entity.entityType}:${candidate.entity.externalId}:${candidate.action}`;
           if (automaticTargets.has(targetKey)) {
             saveSuggestion(
@@ -691,7 +657,8 @@ export class AutomationService {
             accountId,
             actionKey,
             localDate,
-            dailyLimit: lowRiskPolicy.dailyActionLimit,
+            // 0 = 不限每日次数；此处仅保留跨执行器幂等去重，防止并发重复启停。
+            dailyLimit: 0,
           });
           if (reservation !== "claimed") {
             this.store.updateAutomationDecision(
@@ -713,12 +680,11 @@ export class AutomationService {
                 action: candidate.action,
               },
               "automation",
-              { id: "automation-scheduler", name: "低风险自动化", kind: "system" },
+              { id: "automation-scheduler", name: "自动启停", kind: "system" },
               undefined,
               true,
               undefined,
               `命中「${candidate.reason.split("：", 1)[0]}」规则，自动${candidate.action === "enable" ? "开启" : "关闭"}`,
-              true,
             );
             if (result.ok) {
               successCount += 1;
@@ -790,23 +756,37 @@ export class AutomationService {
         account.timezone,
       );
       const health = await this.providers.checkHealth(account.providerKind, context);
-      this.store.updateProviderStatus(
+      this.store.completeProviderHealthCheckIfCurrent(
         accountId,
         account.providerKind,
-        health.status,
-        health.message,
+        connection,
+        {
+          connectionStatus: health.status,
+          message: health.message,
+          authorizationStatus: health.status === "ready" ? "active" : "failed",
+          capabilityVersion: this.providers.capabilityVersion(account.providerKind),
+          capabilities: health.status === "ready"
+            ? this.providers.resolveAuthorizedCapabilities(account.providerKind, context)
+            : [],
+          expiresAt: connection.authorizationExpiresAt,
+        },
       );
-      if (health.status !== "ready") {
-      }
     } catch (cause) {
       const message = safeMessage(cause);
-      this.store.updateProviderStatus(
+      this.store.completeProviderHealthCheckIfCurrent(
         accountId,
         account.providerKind,
-        "failed",
-        account.providerKind === "cookie"
-          ? `Cookie 已失效或连接异常：${message}`
-          : `API 连接异常：${message}`,
+        connection,
+        {
+          connectionStatus: "failed",
+          message: account.providerKind === "cookie"
+            ? `Cookie 已失效或连接异常：${message}`
+            : `API 连接异常：${message}`,
+          authorizationStatus: "failed",
+          capabilityVersion: this.providers.capabilityVersion(account.providerKind),
+          capabilities: [],
+          expiresAt: connection.authorizationExpiresAt,
+        },
       );
     }
   }
@@ -910,7 +890,7 @@ export class AutomationService {
       throw new Error("状态写入结果待确认，禁止自动重试。");
     }
     if (task.source === "automation") {
-      throw new Error("人工批准建议为一次性操作；请重新检测并批准新建议，禁止直接重试旧任务。");
+      throw new Error("自动化启停为一次性执行；请重新检测生成新建议，禁止直接重试旧任务。");
     }
     if (task.status !== "failed") throw new Error("只有明确失败的状态写任务可以重试。");
     this.runningAccounts.add(accountId);
@@ -935,201 +915,6 @@ export class AutomationService {
         externalId: task.externalId,
         action: task.action === "enable" ? "enable" : "disable",
       }, claimed, executorId, connection, false);
-    } finally {
-      this.runningAccounts.delete(accountId);
-    }
-  }
-
-  async approveAutomationDecision(
-    accountId: string,
-    decisionId: string,
-    actor: WriteTaskActor,
-  ): Promise<AutomationApprovalRecord> {
-    const decision = this.store.getAutomationDecision(decisionId);
-    if (!decision || decision.accountId !== accountId) {
-      throw new Error("自动化建议不存在或不属于当前账户。");
-    }
-    const approval = this.store.getOrCreateAutomationApproval(decisionId, actor);
-    if (approval.status !== "pending") return approval;
-    const executorId = randomUUID();
-    const claimed = this.store.claimAutomationApproval(approval.id, executorId);
-    if (!claimed) return this.store.getAutomationApprovalByDecision(decisionId)!;
-    if (this.runningAccounts.has(accountId)) {
-      return this.store.completeAutomationApproval(claimed.id, executorId, "failed", {
-        errorMessage: "该账户已有任务正在执行，请重新生成建议后再批准。",
-      });
-    }
-
-    this.runningAccounts.add(accountId);
-    let beforeStatus: "enabled" | "disabled" | "unknown" | null = null;
-    let statusOperationId: string | null = null;
-    try {
-      if (!this.store.getSystemRuntimeState().enabled) {
-        throw new Error("软件总开关已关闭，已阻止批准执行。");
-      }
-      const account = this.store.getAccount(accountId);
-      if (!account?.enabled) throw new Error("账户自动化开关已关闭，已阻止批准执行。");
-      if (account.providerKind !== claimed.providerKind) {
-        throw new Error("账户 Provider 已变化，旧建议已阻止执行。");
-      }
-      const connection = this.store.getProviderConnection(accountId, account.providerKind);
-      if (!connection || connection.status !== "ready") {
-        throw new Error(connectionUnavailableMessage(
-          account.displayName,
-          account.providerKind,
-          connection?.status,
-        ));
-      }
-      const { maxActionsPerRun } = this.store.getGlobalAutomationSettings();
-      if (this.store.countAutomationApprovals(
-        decision.runId,
-        ["running", "succeeded", "failed", "unknown"],
-      ) > maxActionsPerRun) {
-        throw new Error(`本轮批准执行已达到操作限额 ${maxActionsPerRun}。`);
-      }
-
-      const context = await this.loadContext(accountId, account.providerKind, account.timezone);
-      const currentAccount = this.store.getAccount(accountId);
-      const dispatchConnection = this.store.getProviderConnection(
-        accountId,
-        account.providerKind,
-      );
-      if (
-        !currentAccount?.enabled
-        || currentAccount.providerKind !== account.providerKind
-        || !dispatchConnection
-        || dispatchConnection.credentialRef !== connection.credentialRef
-        || dispatchConnection.updatedAt !== connection.updatedAt
-      ) {
-        throw new Error("账户授权或凭据已变更，批准执行已阻止。");
-      }
-      this.providers.requireAccountCapability(
-        accountId,
-        account.providerKind,
-        dispatchConnection,
-        "read-campaigns",
-      );
-      let refreshed: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>;
-      try {
-        refreshed = await this.providers.syncReadOnly(account.providerKind, context);
-      } catch (cause) {
-        const message = safeMessage(cause);
-        this.store.updateProviderStatus(
-          accountId,
-          account.providerKind,
-          "failed",
-          `批准执行前同步异常：${message}`,
-        );
-        throw cause;
-      }
-      if (refreshed.result.quality.status !== "healthy") {
-        throw new Error(`最新数据质量为 ${refreshed.result.quality.status}，已阻止批准执行。`);
-      }
-      this.store.saveReadOnlySync(accountId, account.providerKind, refreshed.entities, refreshed.result);
-      const currentEntity = refreshed.entities
-        .filter((entity) => entity.entityType === decision.entityType)
-        .map(normalizeProviderEntity)
-        .find((entity) => entity.externalId === decision.externalId);
-      if (!currentEntity) throw new Error("执行前未找到建议绑定的广告对象。");
-      beforeStatus = currentEntity.status;
-      this.store.updateAutomationApprovalPreflight(claimed.id, executorId, beforeStatus);
-      if (beforeStatus !== claimed.expectedStatus) {
-        throw new Error(
-          `对象状态已从建议时预期的 ${claimed.expectedStatus} 变为 ${beforeStatus}，旧建议已阻止执行。`,
-        );
-      }
-
-      const { result } = await this.changeStatus(
-        accountId,
-        {
-          entityType: claimed.entityType,
-          externalId: claimed.externalId,
-          action: claimed.action,
-        },
-        "automation",
-        actor,
-        (task) => {
-          statusOperationId = task.operationId;
-          this.store.updateAutomationApprovalPreflight(
-            claimed.id,
-            executorId,
-            beforeStatus!,
-            statusOperationId,
-          );
-        },
-        false,
-      );
-      const status = result.ok
-        ? "succeeded"
-        : result.failureKind === "unknown" ? "unknown" : "failed";
-      const observedAfter = this.store
-        .listManagedEntities(accountId, account.providerKind)
-        .find((entity) =>
-          entity.entityType === claimed.entityType
-          && entity.externalId === claimed.externalId,
-        )?.status ?? "unknown";
-      const statusTask = statusOperationId
-        ? this.store.getAdOperationByOperationId(statusOperationId)
-        : null;
-      const desiredStatus = claimed.action === "enable" ? "enabled" : "disabled";
-      const approvalStatus = result.ok
-        && (statusTask?.syncWarning || observedAfter !== desiredStatus)
-        ? "unknown"
-        : status;
-      const confirmationError = approvalStatus === "unknown" && result.ok
-        ? `Provider 已接受操作，但写后状态未确认（当前：${observedAfter}）；禁止重复批准。`
-        : result.ok ? null : result.message;
-      const recordedAfterStatus = result.ok && !statusTask?.syncWarning
-        ? observedAfter
-        : null;
-      return this.store.completeAutomationApproval(claimed.id, executorId, approvalStatus, {
-        afterStatus: recordedAfterStatus,
-        statusOperationId,
-        providerMessage: [result.message, statusTask?.syncWarning]
-          .filter(Boolean)
-          .join("；"),
-        errorMessage: confirmationError,
-      });
-    } catch (cause) {
-      const message = safeMessage(cause);
-      const statusTask = statusOperationId
-        ? this.store.getAdOperationByOperationId(statusOperationId)
-        : null;
-      const desiredStatus = claimed.action === "enable" ? "enabled" : "disabled";
-      let confirmedAfter: "enabled" | "disabled" | "unknown" | null = null;
-      if (statusTask?.status === "succeeded" && !statusTask.syncWarning) {
-        try {
-          confirmedAfter = this.store
-            .listManagedEntities(accountId, claimed.providerKind)
-            .find((entity) =>
-              entity.entityType === claimed.entityType
-              && entity.externalId === claimed.externalId,
-            )?.status ?? "unknown";
-        } catch {
-          confirmedAfter = null;
-        }
-      }
-      const terminalStatus = !statusTask
-        ? "failed"
-        : statusTask.status === "failed"
-          ? "failed"
-          : statusTask.status === "succeeded" && confirmedAfter === desiredStatus
-            ? "succeeded"
-            : "unknown";
-      return this.store.completeAutomationApproval(claimed.id, executorId, terminalStatus, {
-        afterStatus: terminalStatus === "succeeded"
-          ? confirmedAfter
-          : statusTask ? null : beforeStatus,
-        statusOperationId,
-        providerMessage: [statusTask?.message, statusTask?.syncWarning]
-          .filter(Boolean)
-          .join("；") || null,
-        errorMessage: terminalStatus === "succeeded"
-          ? null
-          : terminalStatus === "unknown"
-            ? `写入结果无法确认：${message}；禁止重复批准。`
-            : message,
-      });
     } finally {
       this.runningAccounts.delete(accountId);
     }
@@ -1280,7 +1065,6 @@ export class AutomationService {
     requireAutomatic = true,
     existingTask?: AdOperationRecord,
     successMessage?: string,
-    requireLowRiskPolicy = false,
   ): Promise<{ result: StatusMutationResult; task: AdOperationRecord }> {
     if (!this.store.getSystemRuntimeState().enabled) {
       throw new WriteBlockedBeforeDispatchError("软件总开关已关闭，广告启停操作已暂停。");
@@ -1303,7 +1087,7 @@ export class AutomationService {
       account.providerKind,
       account.timezone,
     );
-    this.assertWriteAllowed(accountId, requireAutomatic, requireLowRiskPolicy);
+    this.assertWriteAllowed(accountId, requireAutomatic);
     const entity = this.store
       .listManagedEntities(accountId, account.providerKind)
       .find(
@@ -1332,7 +1116,6 @@ export class AutomationService {
         executorId,
         connection,
         requireAutomatic,
-        requireLowRiskPolicy,
         successMessage,
       ),
       task,
@@ -1366,7 +1149,6 @@ export class AutomationService {
     executorId: string,
     expectedCredentialGeneration: CredentialGeneration,
     requireAutomatic = true,
-    requireLowRiskPolicy = false,
     successMessage?: string,
   ): Promise<StatusMutationResult> {
     const account = this.store.getAccount(task.accountId);
@@ -1382,7 +1164,6 @@ export class AutomationService {
           [input],
           expectedCredentialGeneration,
           requireAutomatic,
-          requireLowRiskPolicy,
         ),
         () => this.store.renewStatusWriteTaskLease(task.id, executorId),
         statusLeaseHeartbeatMs,
@@ -1554,7 +1335,7 @@ export class AutomationService {
         externalId: candidate.entity.externalId,
         action: candidate.action,
       },
-    ], expectedCredentialGeneration, true, false);
+    ], expectedCredentialGeneration, true);
     return (
       results[0] ?? {
         entityType: candidate.entity.entityType,
@@ -1571,7 +1352,6 @@ export class AutomationService {
     mutations: StatusMutation[],
     expectedCredentialGeneration: CredentialGeneration,
     requireAutomatic = true,
-    requireLowRiskPolicy = false,
   ): Promise<StatusMutationResult[]> {
     const dispatchConnection = this.store.getProviderConnection(
       context.accountId,
@@ -1586,7 +1366,7 @@ export class AutomationService {
         "账户授权或凭据已变更，状态写入已在发送前阻止。",
       );
     }
-    this.assertWriteAllowed(context.accountId, requireAutomatic, requireLowRiskPolicy);
+    this.assertWriteAllowed(context.accountId, requireAutomatic);
     this.providers.requireAccountCapability(
       context.accountId,
       context.settings.kind,
@@ -1627,7 +1407,6 @@ export class AutomationService {
   private assertWriteAllowed(
     accountId: string,
     requireAutomatic: boolean,
-    requireLowRiskPolicy = false,
   ): void {
     if (!this.store.getSystemRuntimeState().enabled) {
       throw new WriteBlockedBeforeDispatchError("软件总开关已关闭，真实广告写入已暂停。");
@@ -1649,9 +1428,6 @@ export class AutomationService {
     }
     if (requireAutomatic && account.executionMode !== "automatic") {
       throw new WriteBlockedBeforeDispatchError("账户没有明确启用 automatic 模式，真实 Provider 写入已阻止。");
-    }
-    if (requireLowRiskPolicy && !this.store.getLowRiskAutomationPolicy(accountId).enabled) {
-      throw new WriteBlockedBeforeDispatchError("账户低风险自动化灰度策略已关闭，自动写入已阻止。");
     }
     if (requireAutomatic) {
       const circuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
@@ -1761,8 +1537,6 @@ function hasStartedBy(scheduledStartAt: string | null | undefined, now: Date): b
 export class AutomationScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
-  // 记录每个账户上次跨天检查的本地日期，用于「凌晨 0:00 自动关闭低风险自动化」。
-  private lowRiskResetDates = new Map<string, string>();
 
   constructor(
     private readonly store: AutomationStore,
@@ -1782,38 +1556,10 @@ export class AutomationScheduler {
     this.timer = null;
   }
 
-  // 每账户按其本地时区跨过 0:00 后，自动关闭已开启的低风险自动化，避免忘记关。
-  // 首次观察某账户只记录当天，不触发关闭，防止软件重启时误关当天刚开启的策略。
-  private resetLowRiskAutomationAtMidnight(): void {
-    for (const account of this.store.listAccounts()) {
-      const today = dateKeyInTimeZone(new Date(), account.timezone);
-      const last = this.lowRiskResetDates.get(account.id);
-      if (last === undefined) {
-        this.lowRiskResetDates.set(account.id, today);
-        continue;
-      }
-      if (last === today) continue;
-      this.lowRiskResetDates.set(account.id, today);
-      const policy = this.store.getLowRiskAutomationPolicy(account.id);
-      if (policy.enabled) {
-        this.store.updateLowRiskAutomationPolicy(account.id, {
-          enabled: false,
-          dailyActionLimit: policy.dailyActionLimit,
-        });
-      }
-    }
-  }
-
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      // 跨天关闭低风险自动化：即使总开关关闭也要执行，确保 0:00 一定关掉。
-      try {
-        this.resetLowRiskAutomationAtMidnight();
-      } catch {
-        // 关闭低风险自动化是尽力而为，绝不阻塞轮询主流程。
-      }
       if (!this.store.getSystemRuntimeState().enabled) return;
       try {
         await this.notifications?.flushPending();
