@@ -21,12 +21,7 @@ import {
   type AccountCreateInput,
   type GlobalAutomationSettings,
   type GlobalAutomationSettingsInput,
-  LOW_RISK_AUTOMATION_POLICY_VERSION,
-  LowRiskAutomationPolicyInputSchema,
-  LowRiskAutomationPolicySchema,
   ProviderWriteCircuitSchema,
-  type LowRiskAutomationPolicy,
-  type LowRiskAutomationPolicyInput,
   type ProviderWriteCircuit,
   type AutomationSwitchKey,
   type AutomationSwitches,
@@ -34,8 +29,6 @@ import {
   type AutomationCandidate,
   type AutomationDecisionRecord,
   type AutomationDecisionStatus,
-  type AutomationApprovalRecord,
-  type AutomationApprovalStatus,
   type AutomationRunRecord,
   type AutomationTrigger,
   type AdOperationRecord,
@@ -576,12 +569,6 @@ export class AutomationStore {
     if (result.changes === 0) {
       return null;
     }
-    if (current.executionMode !== "automatic") {
-      this.db.prepare(
-        `UPDATE account_low_risk_automation_policies
-         SET enabled = 0, updated_at = ? WHERE account_id = ?`,
-      ).run(now, accountId);
-    }
 
     this.writeAudit("local-user", accountId, "account.settings.updated", {
       ...settings,
@@ -599,12 +586,6 @@ export class AutomationStore {
       .prepare("UPDATE accounts SET execution_mode = ?, updated_at = ? WHERE id = ?")
       .run(executionMode, now, accountId);
     if (result.changes === 0) return null;
-    if (executionMode !== "automatic") {
-      this.db.prepare(
-        `UPDATE account_low_risk_automation_policies
-         SET enabled = 0, updated_at = ? WHERE account_id = ?`,
-      ).run(now, accountId);
-    }
     this.writeAudit("system", accountId, "account.execution-mode.changed", {
       executionMode,
       reason,
@@ -637,56 +618,6 @@ export class AutomationStore {
       .run(input.pollingIntervalMinutes, input.maxActionsPerRun, now);
     this.writeSystemAudit("global.automation-settings.updated", input);
     return this.getGlobalAutomationSettings();
-  }
-
-  getLowRiskAutomationPolicy(accountId: string): LowRiskAutomationPolicy {
-    this.assertAccount(accountId);
-    const row = this.db.prepare(
-      "SELECT * FROM account_low_risk_automation_policies WHERE account_id = ?",
-    ).get(accountId) as SqlRow | undefined;
-    if (!row) {
-      return LowRiskAutomationPolicySchema.parse({
-        accountId,
-        enabled: false,
-        policyVersion: LOW_RISK_AUTOMATION_POLICY_VERSION,
-        dailyActionLimit: 0,
-        updatedAt: this.getAccount(accountId)?.updatedAt ?? new Date(0).toISOString(),
-      });
-    }
-    return mapLowRiskAutomationPolicy(row);
-  }
-
-  updateLowRiskAutomationPolicy(
-    accountId: string,
-    input: LowRiskAutomationPolicyInput,
-  ): LowRiskAutomationPolicy {
-    this.assertAccount(accountId);
-    const policy = LowRiskAutomationPolicyInputSchema.parse(input);
-    const account = this.getAccount(accountId);
-    if (policy.enabled && account?.executionMode !== "automatic") {
-      throw new Error("启用低风险自动化前，账户必须明确切换为 automatic 模式。");
-    }
-    const now = new Date().toISOString();
-    this.db.prepare(
-      `INSERT INTO account_low_risk_automation_policies (
-         account_id, enabled, policy_version, daily_action_limit, updated_at
-       ) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(account_id) DO UPDATE SET
-         enabled = excluded.enabled,
-         policy_version = excluded.policy_version,
-         daily_action_limit = excluded.daily_action_limit,
-         updated_at = excluded.updated_at`,
-    ).run(
-      accountId,
-      toSqlBoolean(policy.enabled),
-      LOW_RISK_AUTOMATION_POLICY_VERSION,
-      // Existing SQLite schemas require 1–100. The public 0 sentinel is
-      // persisted as 1 but is always read and enforced as unlimited.
-      policy.dailyActionLimit || 1,
-      now,
-    );
-    this.writeAudit("local-user", accountId, "low-risk-automation.policy.updated", policy);
-    return this.getLowRiskAutomationPolicy(accountId);
   }
 
   reserveAutomaticAction(input: {
@@ -3292,29 +3223,6 @@ export class AutomationStore {
         now,
         taskId,
       );
-      const linkedApproval = this.db.prepare(
-        "SELECT * FROM automation_approvals WHERE status_operation_id = ? AND status = 'unknown'",
-      ).get(String(current.operation_id)) as SqlRow | undefined;
-      if (linkedApproval) {
-        this.db.prepare(
-          `UPDATE automation_approvals SET status = ?, after_status = ?, error_message = ?, completed_at = ?
-           WHERE id = ? AND status = 'unknown'`,
-        ).run(
-          nextStatus,
-          verification.observedStatus,
-          nextStatus === "failed" ? "人工核验确认状态写入未成功。" : null,
-          now,
-          String(linkedApproval.id),
-        );
-        this.db.prepare(
-          `UPDATE automation_decisions SET status = ?, error_message = ?, executed_at = ? WHERE id = ?`,
-        ).run(
-          nextStatus,
-          nextStatus === "failed" ? "人工核验确认状态写入未成功。" : null,
-          now,
-          String(linkedApproval.decision_id),
-        );
-      }
       this.writeAudit(actor.name, String(current.account_id), "status-task.manually-verified", {
         taskId,
         operationId: current.operation_id,
@@ -4734,219 +4642,6 @@ export class AutomationStore {
     return row ? mapAutomationDecision(row) : null;
   }
 
-  getOrCreateAutomationApproval(
-    decisionId: string,
-    actor: WriteTaskActor,
-  ): AutomationApprovalRecord {
-    const now = new Date().toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const decision = this.db.prepare(
-        "SELECT * FROM automation_decisions WHERE id = ?",
-      ).get(decisionId) as SqlRow | undefined;
-      if (!decision) throw new Error("自动化建议不存在。");
-      const existing = this.db.prepare(
-        "SELECT * FROM automation_approvals WHERE decision_id = ?",
-      ).get(decisionId) as SqlRow | undefined;
-      if (existing) {
-        this.db.exec("COMMIT");
-        return mapAutomationApproval(existing);
-      }
-      if (decision.status !== "preview") {
-        throw new Error("只有仍处于预览命中状态的建议可以批准执行。");
-      }
-      if (!String(decision.suggestion_key ?? "")) {
-        throw new Error("旧版建议缺少稳定标识，不能批准执行。");
-      }
-      this.db.prepare(
-        `INSERT OR IGNORE INTO automation_approvals (
-          id, decision_id, run_id, account_id, provider_kind, suggestion_key,
-          entity_type, external_id, entity_name, action, expected_status,
-          before_status, after_status, status, actor_id, actor_name, actor_kind,
-          status_operation_id, provider_message, error_message,
-          claimed_by, claimed_at, created_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'pending',
-                  ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, NULL)`,
-      ).run(
-        randomUUID(),
-        decisionId,
-        String(decision.run_id),
-        String(decision.account_id),
-        String(decision.provider_kind),
-        String(decision.suggestion_key),
-        String(decision.entity_type),
-        String(decision.external_id),
-        String(decision.entity_name),
-        String(decision.action),
-        String(decision.action) === "enable" ? "disabled" : "enabled",
-        actor.id,
-        actor.name,
-        actor.kind,
-        now,
-      );
-      const row = this.db.prepare(
-        "SELECT * FROM automation_approvals WHERE decision_id = ?",
-      ).get(decisionId) as SqlRow;
-      this.db.exec("COMMIT");
-      return mapAutomationApproval(row);
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      throw cause;
-    }
-  }
-
-  claimAutomationApproval(
-    approvalId: string,
-    executorId: string,
-  ): AutomationApprovalRecord | null {
-    const now = new Date().toISOString();
-    const row = this.db.prepare(
-      `UPDATE automation_approvals SET status = 'running', claimed_by = ?,
-       claimed_at = ?, error_message = NULL
-       WHERE id = ? AND status = 'pending' RETURNING *`,
-    ).get(executorId, now, approvalId) as SqlRow | undefined;
-    if (!row) return null;
-    this.writeAudit(String(row.actor_name), String(row.account_id), "automation.approval-claimed", {
-      approvalId,
-      decisionId: row.decision_id,
-      suggestionKey: row.suggestion_key,
-      executorId,
-    });
-    return mapAutomationApproval(row);
-  }
-
-  updateAutomationApprovalPreflight(
-    approvalId: string,
-    executorId: string,
-    beforeStatus: "enabled" | "disabled" | "unknown",
-    statusOperationId: string | null = null,
-  ): AutomationApprovalRecord {
-    const row = this.db.prepare(
-      `UPDATE automation_approvals SET before_status = ?,
-       status_operation_id = COALESCE(?, status_operation_id)
-       WHERE id = ? AND status = 'running' AND claimed_by = ? RETURNING *`,
-    ).get(beforeStatus, statusOperationId, approvalId, executorId) as SqlRow | undefined;
-    if (!row) throw new Error("审批记录未被当前执行器领取。");
-    return mapAutomationApproval(row);
-  }
-
-  completeAutomationApproval(
-    approvalId: string,
-    executorId: string,
-    status: Exclude<AutomationApprovalStatus, "pending" | "running">,
-    input: {
-      afterStatus?: "enabled" | "disabled" | "unknown" | null;
-      statusOperationId?: string | null;
-      providerMessage?: string | null;
-      errorMessage?: string | null;
-    } = {},
-  ): AutomationApprovalRecord {
-    const now = new Date().toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.db.prepare(
-        `UPDATE automation_approvals SET status = ?, after_status = ?,
-         status_operation_id = COALESCE(?, status_operation_id), provider_message = ?,
-         error_message = ?, completed_at = ?
-         WHERE id = ? AND status = 'running' AND claimed_by = ? RETURNING *`,
-      ).get(
-        status,
-        input.afterStatus ?? null,
-        input.statusOperationId ?? null,
-        input.providerMessage?.slice(0, 2000) ?? null,
-        input.errorMessage?.slice(0, 2000) ?? null,
-        now,
-        approvalId,
-        executorId,
-      ) as SqlRow | undefined;
-      if (!row) throw new Error("审批记录未被当前执行器领取。");
-      this.db.prepare(
-        `UPDATE automation_decisions SET status = ?, error_message = ?, executed_at = ?
-         WHERE id = ?`,
-      ).run(
-        status,
-        input.errorMessage?.slice(0, 2000) ?? null,
-        now,
-        String(row.decision_id),
-      );
-      this.writeAudit(String(row.actor_name), String(row.account_id), `automation.approval-${status}`, {
-        approvalId,
-        decisionId: row.decision_id,
-        suggestionKey: row.suggestion_key,
-        statusOperationId: row.status_operation_id,
-        providerMessage: row.provider_message,
-        errorMessage: row.error_message,
-      });
-      this.db.exec("COMMIT");
-      return mapAutomationApproval(row);
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      throw cause;
-    }
-  }
-
-  getAutomationApprovalByDecision(decisionId: string): AutomationApprovalRecord | null {
-    const row = this.db.prepare(
-      "SELECT * FROM automation_approvals WHERE decision_id = ?",
-    ).get(decisionId) as SqlRow | undefined;
-    return row ? mapAutomationApproval(row) : null;
-  }
-
-  listAutomationApprovals(accountId: string, limit = 100): AutomationApprovalRecord[] {
-    return (this.db.prepare(
-      `SELECT * FROM automation_approvals WHERE account_id = ?
-       ORDER BY created_at DESC LIMIT ?`,
-    ).all(accountId, limit) as SqlRow[]).map(mapAutomationApproval);
-  }
-
-  countAutomationApprovals(
-    runId: string,
-    statuses: AutomationApprovalStatus[],
-  ): number {
-    if (statuses.length === 0) return 0;
-    const row = this.db.prepare(
-      `SELECT COUNT(*) AS count FROM automation_approvals
-       WHERE run_id = ? AND status IN (${statuses.map(() => "?").join(", ")})`,
-    ).get(runId, ...statuses) as SqlRow;
-    return Number(row.count);
-  }
-
-  recoverInterruptedAutomationApprovals(staleBefore: string): number {
-    const now = new Date().toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const rows = this.db.prepare(
-        `SELECT id, decision_id, account_id, actor_name, suggestion_key
-         FROM automation_approvals
-         WHERE status = 'running' AND claimed_at <= ?`,
-      ).all(staleBefore) as SqlRow[];
-      const message = "审批执行进程中断，结果无法确认；禁止重复批准。";
-      const updateApproval = this.db.prepare(
-        `UPDATE automation_approvals SET status = 'unknown', error_message = ?, completed_at = ?
-         WHERE id = ? AND status = 'running'`,
-      );
-      const updateDecision = this.db.prepare(
-        `UPDATE automation_decisions SET status = 'unknown', error_message = ?, executed_at = ?
-         WHERE id = ?`,
-      );
-      for (const row of rows) {
-        updateApproval.run(message, now, String(row.id));
-        updateDecision.run(message, now, String(row.decision_id));
-        this.writeAudit(String(row.actor_name), String(row.account_id), "automation.approval-unknown", {
-          approvalId: row.id,
-          decisionId: row.decision_id,
-          suggestionKey: row.suggestion_key,
-          reason: "interrupted",
-        });
-      }
-      this.db.exec("COMMIT");
-      return rows.length;
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      throw cause;
-    }
-  }
-
   listAutomationRuns(accountId: string, limit = 20): AutomationRunRecord[] {
     const rows = this.db
       .prepare(
@@ -5539,14 +5234,6 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS account_low_risk_automation_policies (
-        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
-        policy_version TEXT NOT NULL,
-        daily_action_limit INTEGER NOT NULL CHECK (daily_action_limit BETWEEN 1 AND 100),
-        updated_at TEXT NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS automatic_action_claims (
         action_key TEXT PRIMARY KEY,
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -6044,36 +5731,6 @@ export class AutomationStore {
         account_id, entity_type, external_id, action, status, executed_at
       );
 
-      CREATE TABLE IF NOT EXISTS automation_approvals (
-        id TEXT PRIMARY KEY,
-        decision_id TEXT NOT NULL UNIQUE REFERENCES automation_decisions(id) ON DELETE CASCADE,
-        run_id TEXT NOT NULL,
-        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        provider_kind TEXT NOT NULL,
-        suggestion_key TEXT NOT NULL,
-        entity_type TEXT NOT NULL,
-        external_id TEXT NOT NULL,
-        entity_name TEXT NOT NULL,
-        action TEXT NOT NULL CHECK (action IN ('enable', 'disable')),
-        expected_status TEXT NOT NULL CHECK (expected_status IN ('enabled', 'disabled')),
-        before_status TEXT CHECK (before_status IN ('enabled', 'disabled', 'unknown')),
-        after_status TEXT CHECK (after_status IN ('enabled', 'disabled', 'unknown')),
-        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'unknown')),
-        actor_id TEXT NOT NULL,
-        actor_name TEXT NOT NULL,
-        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('user', 'system')),
-        status_operation_id TEXT,
-        provider_message TEXT,
-        error_message TEXT,
-        claimed_by TEXT,
-        claimed_at TEXT,
-        created_at TEXT NOT NULL,
-        completed_at TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS automation_approvals_run_status
-      ON automation_approvals (run_id, status, created_at);
-
       CREATE TABLE IF NOT EXISTS notification_channels (
         channel_kind TEXT PRIMARY KEY CHECK (channel_kind IN ('email', 'wecom', 'feishu')),
         settings_json TEXT NOT NULL,
@@ -6188,17 +5845,6 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS audit_logs_query
       ON audit_logs (created_at DESC, account_id, actor_id, action);
     `);
-    // A legacy opt-in covered automatic closures only. Do not silently widen
-    // that consent to automatic enables after upgrading the policy contract.
-    this.db.prepare(
-      `UPDATE account_low_risk_automation_policies
-       SET enabled = 0, policy_version = ?, updated_at = ?
-       WHERE policy_version <> ?`,
-    ).run(
-      LOW_RISK_AUTOMATION_POLICY_VERSION,
-      new Date().toISOString(),
-      LOW_RISK_AUTOMATION_POLICY_VERSION,
-    );
     this.ensureColumn(
       "accounts",
       "max_actions_per_run",
@@ -6829,16 +6475,6 @@ function mapAdOperation(row: SqlRow): AdOperationRecord {
   };
 }
 
-function mapLowRiskAutomationPolicy(row: SqlRow): LowRiskAutomationPolicy {
-  return LowRiskAutomationPolicySchema.parse({
-    accountId: row.account_id,
-    enabled: fromSqlBoolean(row.enabled),
-    policyVersion: row.policy_version,
-    dailyActionLimit: 0,
-    updatedAt: row.updated_at,
-  });
-}
-
 function mapProviderWriteCircuit(row: SqlRow): ProviderWriteCircuit {
   return ProviderWriteCircuitSchema.parse({
     accountId: row.account_id,
@@ -6848,37 +6484,6 @@ function mapProviderWriteCircuit(row: SqlRow): ProviderWriteCircuit {
     openedAt: row.opened_at ?? null,
     updatedAt: row.updated_at,
   });
-}
-
-function mapAutomationApproval(row: SqlRow): AutomationApprovalRecord {
-  return {
-    id: String(row.id),
-    decisionId: String(row.decision_id),
-    runId: String(row.run_id),
-    accountId: String(row.account_id),
-    providerKind: row.provider_kind === "official-api" ? "official-api" : "cookie",
-    suggestionKey: String(row.suggestion_key),
-    entityType: row.entity_type as AutomationApprovalRecord["entityType"],
-    externalId: String(row.external_id),
-    entityName: String(row.entity_name),
-    action: row.action === "enable" ? "enable" : "disable",
-    expectedStatus: row.expected_status as AutomationApprovalRecord["expectedStatus"],
-    beforeStatus: (row.before_status ?? null) as AutomationApprovalRecord["beforeStatus"],
-    afterStatus: (row.after_status ?? null) as AutomationApprovalRecord["afterStatus"],
-    status: row.status as AutomationApprovalStatus,
-    actor: {
-      id: String(row.actor_id),
-      name: String(row.actor_name),
-      kind: row.actor_kind === "system" ? "system" : "user",
-    },
-    statusOperationId: typeof row.status_operation_id === "string" ? row.status_operation_id : null,
-    providerMessage: typeof row.provider_message === "string" ? row.provider_message : null,
-    errorMessage: typeof row.error_message === "string" ? row.error_message : null,
-    claimedBy: typeof row.claimed_by === "string" ? row.claimed_by : null,
-    claimedAt: typeof row.claimed_at === "string" ? row.claimed_at : null,
-    createdAt: String(row.created_at),
-    completedAt: typeof row.completed_at === "string" ? row.completed_at : null,
-  };
 }
 
 function mapAdOperationAttempt(row: SqlRow): AdOperationAttemptRecord {

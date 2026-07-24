@@ -1154,7 +1154,7 @@ td strong { color: var(--ink); }
   box-shadow: none;
 }
 
-.automation-page .low-risk-panel > .automation-actions {
+.automation-page .write-circuit-panel > .automation-actions {
   width: 100%;
   display: flex;
   justify-content: center;

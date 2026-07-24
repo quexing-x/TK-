@@ -14,7 +14,6 @@ import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, us
 import type {
   AccountConfig,
   AdOperationRecord,
-  AutomationApprovalRecord,
   AutomationDecisionRecord,
   ManagedEntityRecord,
   SystemRuntimeState,
@@ -39,7 +38,6 @@ export function OverviewPage({
   children?: ReactNode;
 }) {
   const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
-  const [approvals, setApprovals] = useState<AutomationApprovalRecord[]>([]);
   const [entities, setEntities] = useState<Array<ManagedEntityRecord & { accountId: string }>>([]);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,17 +46,15 @@ export function OverviewPage({
     try {
       const results = await Promise.all(
         accounts.map(async (account) => {
-          const [nextDecisions, nextApprovals, nextEntities, nextOperations] = await Promise.all([
+          const [nextDecisions, nextEntities, nextOperations] = await Promise.all([
           api.getAutomationDecisions(account.id).catch(() => []),
-          api.getAutomationApprovals(account.id).catch(() => []),
           api.getManagedEntities(account.id).catch(() => []),
           api.getAdOperations(account.id).catch(() => []),
           ]);
-          return { accountId: account.id, nextDecisions, nextApprovals, nextEntities, nextOperations };
+          return { accountId: account.id, nextDecisions, nextEntities, nextOperations };
         }),
       );
       setDecisions(results.flatMap((result) => result.nextDecisions).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
-      setApprovals(results.flatMap((result) => result.nextApprovals));
       setEntities(results.flatMap((result) => result.nextEntities.map((entity) => ({ ...entity, accountId: result.accountId }))));
       setOperations(results.flatMap((result) => result.nextOperations));
     } finally {
@@ -74,11 +70,10 @@ export function OverviewPage({
   const enabledCount = accounts.filter((account) => account.enabled).length;
   const pending = useMemo(() => selectPendingAutomationDecisions({
     decisions,
-    approvals,
     entities,
     operations,
     statuses: ["preview", "pending"],
-  }), [approvals, decisions, entities, operations]);
+  }), [decisions, entities, operations]);
   const stream = useMemo(
     () => decisions
       .filter((decision) => ["succeeded", "failed", "unknown"].includes(decision.status))

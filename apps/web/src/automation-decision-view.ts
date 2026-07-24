@@ -1,13 +1,11 @@
 import type {
   AdOperationRecord,
-  AutomationApprovalRecord,
   AutomationDecisionRecord,
   ManagedEntityRecord,
 } from "@tk-auto/core";
 
 type PendingDecisionOptions = {
   decisions: AutomationDecisionRecord[];
-  approvals?: AutomationApprovalRecord[];
   entities?: Array<ManagedEntityRecord & { accountId: string }>;
   operations?: AdOperationRecord[];
   statuses?: AutomationDecisionRecord["status"][];
@@ -26,13 +24,11 @@ function entityKey(accountId: string, entityType: string, externalId: string): s
 
 export function selectPendingAutomationDecisions({
   decisions,
-  approvals = [],
   entities = [],
   operations = [],
   statuses = ["preview"],
 }: PendingDecisionOptions): AutomationDecisionRecord[] {
   const allowedStatuses = new Set(statuses);
-  const approvedDecisionIds = new Set(approvals.map((approval) => approval.decisionId));
   const entityStatusByKey = new Map(
     entities.map((entity) => [
       entityKey(entity.accountId, entity.entityType, entity.externalId),
@@ -54,7 +50,7 @@ export function selectPendingAutomationDecisions({
       if (seen.has(key)) return false;
       seen.add(key);
 
-      if (!allowedStatuses.has(decision.status) || approvedDecisionIds.has(decision.id)) return false;
+      if (!allowedStatuses.has(decision.status)) return false;
 
       const expectedStatus = decision.action === "enable" ? "enabled" : "disabled";
       if (entityStatusByKey.get(key) === expectedStatus) return false;

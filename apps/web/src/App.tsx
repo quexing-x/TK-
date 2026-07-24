@@ -42,7 +42,6 @@ import type {
   AccountCreateInput,
   GlobalAutomationSettings,
   AutomationDecisionRecord,
-  AutomationApprovalRecord,
   AutomationRunRecord,
   AdOperationRecord,
   MetricBatchRecord,
@@ -59,7 +58,7 @@ import {
   api,
   type BootstrapPayload,
   type CookieConnectionReadiness,
-  type LowRiskAutomationState,
+  type ProviderWriteCircuitState,
 } from "./api";
 import { ConnectionPage } from "./ConnectionPage";
 import { ManualPage } from "./ManualPage";
@@ -81,7 +80,7 @@ import {
   type AnalysisPreset,
 } from "./analytics";
 import { syncQualityPresentation } from "./sync-quality-view";
-import { selectActionableDecisionHistory, selectPendingAutomationDecisions } from "./automation-decision-view";
+import { selectActionableDecisionHistory } from "./automation-decision-view";
 import { nextUiTheme, resolveUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from "./ui-theme";
 import {
   secondsUntilLocalRefresh,
@@ -1000,14 +999,6 @@ function AdsManagementPage({
   const auth = useAuth();
   const { confirm, prompt, toast } = useOverlays();
   const canOperateAds = auth.status.permissions.includes("ads:operate");
-  const [lowRiskOn, setLowRiskOn] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    void api.getLowRiskAutomation(account.id)
-      .then((state) => { if (!cancelled) setLowRiskOn(state.policy.enabled); })
-      .catch(() => { if (!cancelled) setLowRiskOn(false); });
-    return () => { cancelled = true; };
-  }, [account.id]);
   const [entities, setEntities] = useState<ManagedEntityRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
   const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
@@ -1294,7 +1285,7 @@ function AdsManagementPage({
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em>{lowRiskOn && <span className="low-risk-reminder" title="该账户已开启低风险自动化：按已验证规则自动启停；每日 0:00 自动关闭本开关。">⚠ 低风险自动化已开启</span>}</h2><p>人工接管的广告组不参与自动化决策</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em></h2><p>人工接管的广告组不参与自动化决策</p></div></div>
           <small className="inline-protection-note">
             {remoteRefreshing
               ? "正在后台刷新平台数据…"
@@ -1753,10 +1744,7 @@ function AutomationPage({
   const [decisions, setDecisions] = useState<
     AutomationDecisionRecord[] | null
   >(null);
-  // Legacy approval records are no longer fetched or rendered. Keep the local
-  // value only while older client bundles finish upgrading.
-  const [approvals, setApprovals] = useState<AutomationApprovalRecord[]>([]);
-  const [lowRiskState, setLowRiskState] = useState<LowRiskAutomationState | null>(null);
+  const [circuitState, setCircuitState] = useState<ProviderWriteCircuitState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<string | null>(null);
   const connectionMessage = automationConnectionMessage(account, connection);
@@ -1766,14 +1754,14 @@ function AutomationPage({
 
   const load = useCallback(async () => {
     try {
-      const [nextRuns, nextDecisions, nextLowRiskState] = await Promise.all([
+      const [nextRuns, nextDecisions, nextCircuitState] = await Promise.all([
         api.getAutomationRuns(account.id),
         api.getAutomationDecisions(account.id),
-        api.getLowRiskAutomation(account.id),
+        api.getWriteCircuit(account.id),
       ]);
       setRuns(nextRuns);
       setDecisions(nextDecisions);
-      setLowRiskState(nextLowRiskState);
+      setCircuitState(nextCircuitState);
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -1783,7 +1771,7 @@ function AutomationPage({
   useEffect(() => {
     setRuns(null);
     setDecisions(null);
-    setLowRiskState(null);
+    setCircuitState(null);
     void load();
   }, [load]);
 
@@ -1813,79 +1801,10 @@ function AutomationPage({
     }
   };
 
-  const approve = async (decision: AutomationDecisionRecord) => {
-    const action = decision.action === "enable" ? "开启" : "关闭";
-    if (!await confirm({ title: "确认执行", message: `账户：${account.displayName}\n对象：${decision.entityName}\n动作：${action}`, confirmLabel: "确认执行", danger: true })) return;
-    try {
-      setBusy(`approve:${decision.id}`);
-      const approval = await api.approveAutomationDecision(account.id, decision.id);
-      setApprovals((current) => current ? [approval, ...current.filter((item) => item.decisionId !== approval.decisionId)] : current);
-      setRunFeedback(
-        approval.status === "succeeded"
-          ? `${decision.entityName}：${action}成功`
-          : approval.status === "unknown"
-            ? `${decision.entityName}：执行结果待确认，禁止重复批准`
-            : `${decision.entityName}：${approval.errorMessage ?? approval.providerMessage ?? "执行失败"}`,
-      );
-      await load();
-    } catch (cause) {
-      const message = getErrorMessage(cause);
-      setRunFeedback(message);
-      onError(message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const approveAll = async () => {
-    if (!await confirm({ title: "批量执行", message: `确认依次批准当前全部 ${pendingDecisions.length} 项决策？每项仍会独立执行连接、数据质量和对象状态校验。`, confirmLabel: "开始执行", danger: true })) return;
-    let succeeded = 0;
-    let unknown = 0;
-    let failed = 0;
-    try {
-      setBusy("approve-all");
-      for (const decision of pendingDecisions) {
-        try {
-          const approval = await api.approveAutomationDecision(account.id, decision.id);
-          setApprovals((current) => current ? [approval, ...current.filter((item) => item.decisionId !== approval.decisionId)] : current);
-          if (approval.status === "succeeded") succeeded += 1;
-          else if (approval.status === "unknown") unknown += 1;
-          else failed += 1;
-        } catch {
-          failed += 1;
-        }
-      }
-      setRunFeedback(`批量批准完成：成功 ${succeeded} 项，待确认 ${unknown} 项，失败 ${failed} 项。`);
-      await load();
-    } catch (cause) {
-      const message = getErrorMessage(cause);
-      setRunFeedback(message);
-      onError(message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const saveLowRiskPolicy = async (enabled: boolean) => {
-    try {
-      setBusy("low-risk-policy");
-      const next = await api.updateLowRiskAutomation(account.id, {
-        enabled,
-        dailyActionLimit: 0,
-      });
-      setLowRiskState(next);
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const resetCircuit = async () => {
     try {
       setBusy("reset-circuit");
-      setLowRiskState(await api.resetLowRiskAutomationCircuit(account.id));
+      setCircuitState(await api.resetWriteCircuit(account.id));
       onError(null);
     } catch (cause) {
       onError(getErrorMessage(cause));
@@ -1894,16 +1813,13 @@ function AutomationPage({
     }
   };
 
-  if (!runs || !decisions || !lowRiskState) {
+  if (!runs || !decisions || !circuitState) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
   const latest = runs[0];
   const actionableDecisions = selectActionableDecisionHistory(decisions);
-  const pendingDecisions: AutomationDecisionRecord[] = [];
-  const pendingDecisionIds = new Set<string>();
-  const approvalByDecision = new Map<string, AutomationApprovalRecord>();
-  const automationHealthy = canRunAutomation && !lowRiskState.circuit?.openedAt;
+  const automationHealthy = canRunAutomation && !circuitState.circuit?.openedAt;
   return (
     <section className="page-stack automation-page">
       <header className="automation-status-band">
@@ -1959,7 +1875,7 @@ function AutomationPage({
       <div className="automation-primary-grid">
         <section className="automation-flow-panel">
           <div className="automation-section-heading">
-            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动化电路状态</h2></div></div>
+            <div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>自动启停执行流程</h2></div></div>
           </div>
           <ol className="automation-flow" aria-label="自动化执行流程">
             <li className={runs.length > 0 ? "complete" : "current"}><span><Check size={14} /></span><small>检测</small></li>
@@ -1969,52 +1885,12 @@ function AutomationPage({
             <li className={latest?.successCount ? "complete" : "pending"}><span><Check size={14} /></span><small>回读确认</small></li>
           </ol>
           <p className="automation-flow-note">
-            {lowRiskState.circuit?.openedAt
-              ? `熔断已触发：${lowRiskState.circuit.lastError ?? "未知错误"}`
+            {circuitState.circuit?.openedAt
+              ? `熔断已触发：${circuitState.circuit.lastError ?? "未知错误"}`
               : latest?.failureCount
                 ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
-                : "无需人工审批；广告组可在广告管理中单独接管。"}
+                : "总开关+账户自动化+automatic 模式+熔断未触发即直接执行，无需额外授权。"}
           </p>
-          <div className="automation-actions automation-actions-center">
-            <button
-              className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
-              disabled={busy !== null || (!lowRiskState.policy.enabled && (
-                !canChangeStatus
-                || Boolean(lowRiskState.circuit?.openedAt)
-              ))}
-              onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled)}
-              type="button"
-            >
-              {busy === "low-risk-policy" ? "保存中…" : lowRiskState.policy.enabled ? "关闭低风险自动化" : "启用低风险自动化"}
-            </button>
-          </div>
-        </section>
-
-        <section className="automation-decisions-panel">
-          <div className="automation-section-heading">
-            <div><span className="panel-icon"><ListChecks size={18} /></span><div><h2>待审批决策 <span className="automation-count-badge">{pendingDecisions.length}</span></h2><p>仅显示尚未消费的一次性建议，完整记录保留在下方。</p></div></div>
-            {pendingDecisions.length > 0 && <button className="primary-button automation-approve-all" disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled} onClick={() => void approveAll()} type="button">{busy === "approve-all" ? "批量执行中…" : `全部批准（${pendingDecisions.length}）`}</button>}
-          </div>
-          <div className="automation-decision-list">
-            {pendingDecisions.length === 0 ? (
-              <p className="automation-empty-copy">暂无待审批决策。</p>
-            ) : pendingDecisions.slice(0, 5).map((decision) => (
-              <article key={decision.id}>
-                <span className={`risk-badge ${decision.dataQualityStatus === "healthy" ? "" : "destructive"}`}>{decision.dataQualityStatus}</span>
-                <div><strong>{decision.entityName}</strong><small>{decision.reason}</small></div>
-                <span className="automation-decision-impact">{decision.action === "enable" ? "开启" : "关闭"}</span>
-                <button
-                  className="secondary-button"
-                  disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled}
-                  onClick={() => void approve(decision)}
-                  type="button"
-                  title="批准后会重新检查连接、数据质量和对象状态；每条建议只能消费一次"
-                >
-                  {busy === `approve:${decision.id}` ? "执行中…" : "批准"}
-                </button>
-              </article>
-            ))}
-          </div>
         </section>
 
         <section className="automation-readiness-panel account-readiness-panel">
@@ -2030,28 +1906,16 @@ function AutomationPage({
         </section>
       </div>
 
-      <section className="automation-policy-panel low-risk-panel">
-        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>低风险自动启停</h2><p>默认关闭；开启后仅执行已验证的开启与关闭规则。数据库原子防重，多实例不会重复领取同一建议。</p></div></div></div>
+      <section className="automation-policy-panel write-circuit-panel">
+        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>写入熔断状态</h2><p>连续写入失败会自动熔断以阻止继续启停；数据库原子防重，多实例不会重复领取同一建议。</p></div></div></div>
         <div className="sync-count-grid">
-          <span>策略 <strong>{lowRiskState.policy.enabled ? "已启用" : "已关闭"}</strong></span>
-          <span>今日自动启停 <strong>{lowRiskState.todayUsage} 次（不限量）</strong></span>
-          <span>熔断 <strong>{lowRiskState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
+          <span>今日自动启停 <strong>{circuitState.todayUsage} 次（不限量）</strong></span>
+          <span>熔断 <strong>{circuitState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
         </div>
-        <div className="automation-actions">
-          <button
-            className={lowRiskState.policy.enabled ? "secondary-button" : "primary-button"}
-            disabled={busy !== null || (!lowRiskState.policy.enabled && (
-              !canChangeStatus
-              || Boolean(lowRiskState.circuit?.openedAt)
-            ))}
-            onClick={() => void saveLowRiskPolicy(!lowRiskState.policy.enabled)}
-            type="button"
-          >
-            {busy === "low-risk-policy" ? "保存中…" : lowRiskState.policy.enabled ? "关闭低风险自动化" : "启用低风险自动化"}
-          </button>
-          {lowRiskState.circuit?.openedAt && <button className="secondary-button" disabled={busy !== null || lowRiskState.policy.enabled} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>}
-        </div>
-        {lowRiskState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{lowRiskState.circuit.lastError ?? "未知错误"}。修复连接后，先关闭策略再人工重置。</p>}
+        {circuitState.circuit?.openedAt && <div className="automation-actions">
+          <button className="secondary-button" disabled={busy !== null || !canChangeStatus} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>
+        </div>}
+        {circuitState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{circuitState.circuit.lastError ?? "未知错误"}。修复连接后人工重置即可恢复自动启停。</p>}
       </section>
 
       <AutomationFeaturesPage onError={onError} />
@@ -2076,7 +1940,7 @@ function AutomationPage({
 
       <section className="automation-history-section automation-decision-history">
         <div className="automation-section-heading">
-          <div><span className="panel-icon"><ListChecks size={18} /></span><div><h2>规则建议与审批记录</h2><p>保留触发规则、指标快照、规则版本、数据质量和一次性批准结果。</p></div></div>
+          <div><span className="panel-icon"><ListChecks size={18} /></span><div><h2>规则建议与执行记录</h2><p>保留触发规则、指标快照、规则版本、数据质量和自动执行结果。</p></div></div>
           <button className="secondary-button" onClick={() => void load()} type="button"><RefreshCcw size={16} /> 刷新</button>
         </div>
         <div className="table-wrap automation-history-table">
@@ -2084,7 +1948,6 @@ function AutomationPage({
             <thead><tr><th>对象</th><th>层级</th><th>命中条件</th><th>动作</th><th>结果</th><th>时间</th></tr></thead>
             <tbody>
               {actionableDecisions.length === 0 ? <tr><td colSpan={6}>暂无实际动作、失败或状态变化记录。常规安全跳过仍会保留在本地审计中。</td></tr> : actionableDecisions.map((decision) => {
-                const approval = approvalByDecision.get(decision.id);
                 return (
                   <tr key={decision.id}>
                     <td><strong>{decision.entityName}</strong><br /><small>{decision.externalId}</small></td>
@@ -2094,13 +1957,7 @@ function AutomationPage({
                     <td>
                       <span className={`status ${decision.status === "succeeded" ? "active" : decision.status === "failed" || decision.status === "unknown" ? "danger" : "warning"}`}>{decisionStatusLabel(decision.status)}</span>
                       {decision.errorMessage && <small className="decision-error">{decision.errorMessage}</small>}
-                      {approval ? (
-                        <small className={approval.status === "succeeded" ? undefined : "decision-error"}>批准执行：{approvalStatusLabel(approval.status)}{(approval.errorMessage || approval.providerMessage) ? ` · ${approval.errorMessage ?? approval.providerMessage}` : ""}</small>
-                      ) : pendingDecisionIds.has(decision.id) ? (
-                        <button className="secondary-button" disabled={busy !== null || !canRunAutomation || !canChangeStatus || !account.enabled} onClick={() => void approve(decision)} type="button" title="批准后会重新检查连接、数据质量和对象状态；每条建议只能消费一次">{busy === `approve:${decision.id}` ? "执行中…" : "批准并执行"}</button>
-                      ) : decision.status === "preview" ? (
-                        <small>已被更新决策或对象状态取代</small>
-                      ) : null}
+                      {decision.status === "preview" && <small>已被更新决策或对象状态取代</small>}
                       <small className={decision.dataQualityStatus === "healthy" ? undefined : "decision-error"}>数据质量：{decision.dataQualityStatus}。{decision.dataQualityWarnings.length > 0 ? decision.dataQualityWarnings.join("；") : "无警告"}</small>
                     </td>
                     <td>{new Date(decision.createdAt).toLocaleString()}</td>
@@ -2341,16 +2198,6 @@ function automationTriggerLabel(trigger: AutomationRunRecord["trigger"]): string
 
 function automationRunStatusLabel(status: AutomationRunRecord["status"]): string {
   return ({ running: "进行中", completed: "已完成", failed: "失败" })[status];
-}
-
-function approvalStatusLabel(status: AutomationApprovalRecord["status"]): string {
-  return {
-    pending: "待执行",
-    running: "执行中",
-    succeeded: "成功",
-    failed: "明确失败",
-    unknown: "结果待确认",
-  }[status];
 }
 
 function operationalStatusLabel(

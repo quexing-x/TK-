@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
   AdOperationRecord,
-  AutomationApprovalRecord,
   AutomationDecisionRecord,
   ManagedEntityRecord,
 } from "@tk-auto/core";
@@ -56,11 +55,6 @@ describe("selectPendingAutomationDecisions", () => {
     });
 
     expect(result).toEqual([]);
-  });
-
-  it("removes a decision after an approval is created", () => {
-    const approval = { decisionId: "decision-new" } as AutomationApprovalRecord;
-    expect(selectPendingAutomationDecisions({ decisions: [decision()], approvals: [approval] })).toEqual([]);
   });
 
   it("removes a close decision when the entity is already closed", () => {
