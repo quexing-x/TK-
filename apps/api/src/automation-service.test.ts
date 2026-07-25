@@ -28,6 +28,12 @@ function dateKeyInTimeZoneForTest(value: Date, timeZone: string): string {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
+function futureShanghaiTime(hour: number, minute = 0): Date {
+  const value = new Date(Date.now() + 24 * 60 * 60_000);
+  value.setUTCHours((hour + 16) % 24, minute, 0, 0);
+  return value;
+}
+
 class FakeProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Fake Cookie";
@@ -292,6 +298,23 @@ class FakeProvider implements AdsProvider {
       message: this.deleteFailureKind ? "delete failed" : "deleted",
     }));
   }
+}
+
+function alignSyncTo(
+  output: Awaited<ReturnType<FakeProvider["syncReadOnly"]>>,
+  asOf: Date,
+): Awaited<ReturnType<FakeProvider["syncReadOnly"]>> {
+  const timestamp = asOf.toISOString();
+  const localDate = dateKeyInTimeZoneForTest(asOf, "Asia/Shanghai");
+  output.result.startedAt = timestamp;
+  output.result.finishedAt = timestamp;
+  output.result.quality.coverage = {
+    startDate: localDate,
+    endDate: localDate,
+    timezone: "Asia/Shanghai",
+  };
+  output.result.quality.lastHealthyAt = timestamp;
+  return output;
 }
 
 describe("AutomationService", () => {
@@ -774,6 +797,8 @@ describe("AutomationService", () => {
 
     expect(run.candidateCount).toBe(0);
     expect(provider.mutations).toHaveLength(0);
+    expect(store.listCurrentManagedEntities("demo-account", "cookie").map((entity) => entity.externalId))
+      .toEqual(expect.arrayContaining(["campaign-1", "adgroup-1"]));
   });
 
   it("does not run when the account automation switch is off", async () => {
@@ -925,10 +950,10 @@ describe("AutomationService", () => {
     const qualifying = await provider.syncReadOnly();
     store.saveReadOnlySync("demo-account", "cookie", qualifying.entities, qualifying.result);
 
-    const beforeNoon = new Date("2026-07-25T02:00:00.000Z"); // 10:00 in Asia/Shanghai.
+    const beforeNoon = futureShanghaiTime(10);
     vi.useFakeTimers();
     vi.setSystemTime(beforeNoon);
-    const fresh = await provider.syncReadOnly();
+    const fresh = alignSyncTo(await provider.syncReadOnly(), beforeNoon);
     store.saveReadOnlySync("demo-account", "cookie", fresh.entities, fresh.result);
     await copyService.runScheduledAutoCopies("demo-account", beforeNoon);
     await copyService.runScheduledAutoCopies("demo-account", beforeNoon);
@@ -951,7 +976,7 @@ describe("AutomationService", () => {
     autoCopyRunner.mockClear();
     const nextDay = new Date(beforeNoon.getTime() + 24 * 60 * 60_000);
     vi.setSystemTime(nextDay);
-    const nextDaySync = await provider.syncReadOnly();
+    const nextDaySync = alignSyncTo(await provider.syncReadOnly(), nextDay);
     nextDaySync.entities.push({
       entityType: "ad-group",
       externalId: "generated-copy-1",
@@ -1118,7 +1143,7 @@ describe("AutomationService", () => {
   });
 
   it("deletes only a software-confirmed disabled ad group after the protection period and never retries unknown", async () => {
-    const asOf = new Date("2026-07-24T22:00:00.000Z"); // 06:00 in Asia/Shanghai.
+    const asOf = futureShanghaiTime(6);
     vi.useFakeTimers();
     vi.setSystemTime(asOf);
     provider.adGroupStatus = "disable";
@@ -1145,7 +1170,7 @@ describe("AutomationService", () => {
     settings.deletion.enabled = true;
     settings.deletion.gracePeriodHours = 1;
     store.updateAutomationFeatureSettings(settings);
-    const fresh = await provider.syncReadOnly();
+    const fresh = alignSyncTo(await provider.syncReadOnly(), asOf);
     fresh.entities.push({
       entityType: "ad-group",
       externalId: "adgroup-retained",
@@ -1195,7 +1220,7 @@ describe("AutomationService", () => {
     settings.deletion.maxCarts = 4;
     settings.deletion.minCpa = 9;
     store.updateAutomationFeatureSettings(settings);
-    const asOf = new Date("2026-07-24T22:00:00.000Z");
+    const asOf = futureShanghaiTime(6);
     vi.useFakeTimers();
     vi.setSystemTime(asOf);
 
@@ -1233,7 +1258,11 @@ describe("AutomationService", () => {
         requiredMetricsComplete: true,
         contractValid: true,
         providerContractVersion: "test-v1",
-        coverage: { startDate: "2026-07-25", endDate: "2026-07-25", timezone: "Asia/Shanghai" },
+        coverage: {
+          startDate: dateKeyInTimeZoneForTest(asOf, "Asia/Shanghai"),
+          endDate: dateKeyInTimeZoneForTest(asOf, "Asia/Shanghai"),
+          timezone: "Asia/Shanghai",
+        },
         missingMetrics: [],
         partialFailures: [],
         lastHealthyAt: finishedAt,

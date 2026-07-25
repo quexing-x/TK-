@@ -4,6 +4,7 @@ import {
   buildDraftPayloads,
   buildProfileDraftPayloads,
   buildPublishInput,
+  TikTokCreationPublishSource,
   splitVideoCodes,
   deriveTikTokCreationRequest,
   normalizeProviderEntity,
@@ -61,7 +62,6 @@ type ParsedCookieCredential = ReturnType<
 interface CreationBatchReservations {
   campaignIds: Map<string, string>;
   adGroupNames: Map<string, Set<string>>;
-  uncertainCampaigns: Set<string>;
 }
 
 export class CookieAdsProvider implements AdsProvider {
@@ -280,8 +280,11 @@ export class CookieAdsProvider implements AdsProvider {
       // captured range. Some valid TikTok list requests do not expose a date
       // parameter at all; those must still be replayed with the platform's
       // request defaults rather than blocking the complete polling cycle.
+      const entityRequest = entityType === "campaign"
+        ? campaignMetricsListRequest(request)
+        : request;
       const windowedRequest = withTodayMetricWindow(
-        request,
+        entityRequest,
         context.timezone ?? "UTC",
         new Date(),
       );
@@ -296,7 +299,7 @@ export class CookieAdsProvider implements AdsProvider {
         pages = result.pages;
         entityPaginationComplete = result.complete;
       } catch (cause) {
-        if (!request.derived) throw cause;
+        if (!entityRequest.derived) throw cause;
         warnings.push(
           `${entityType} 自动补全请求失败；如需该层级数据，请补充一条真实列表 cURL。`,
         );
@@ -446,17 +449,48 @@ export class CookieAdsProvider implements AdsProvider {
         message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。",
       }));
     }
-    const campaignListRequest = credential.requestTemplates?.find(
-      (item) => item.target === "campaign",
-    ) ?? siblingListRequest(sessionRequest, "campaign");
+    const campaignObjectRequest = campaignObjectListRequest(sessionRequest);
     const results: CreationMutationResult[] = [];
     const batchId = mutations[0]?.batchId;
-    const reservationKey = batchId ? `${context.accountId}:${batchId}` : null;
+    const campaignKeys = new Set(mutations.map((mutation) => mutation.row.campaignName.trim()));
+    const initialStatuses = new Set(mutations.map((mutation) => mutation.initialStatus));
+    const canPublishAsSeriesBatch = mutations.length > 1
+      && mutations.every((mutation) => mutation.templateMode === "none")
+      && campaignKeys.size === 1
+      && initialStatuses.size === 1;
+    const seriesKey = campaignKeys.size === 1 ? [...campaignKeys][0] : "mixed";
+    const reservationKey = batchId ? `${context.accountId}:${batchId}:${seriesKey}` : null;
     const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
     try {
       const reservations = reservationKey
         ? this.creationBatchReservations.get(reservationKey) ?? this.createBatchReservations(reservationKey)
-        : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>(), uncertainCampaigns: new Set<string>() };
+        : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>() };
+      if (canPublishAsSeriesBatch) {
+        const campaignKey = [...campaignKeys][0]!;
+        const batchCampaignId = mutations.find((mutation) => mutation.batchCampaignId)?.batchCampaignId;
+        if (batchCampaignId) reservations.campaignIds.set(campaignKey, batchCampaignId);
+        const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+        for (const mutation of mutations) {
+          for (const name of mutation.batchAdGroupNames ?? []) names.add(name.trim());
+        }
+        reservations.adGroupNames.set(campaignKey, names);
+        const batchResults = await createCookieDraftBatch(
+          sessionRequest,
+          campaignObjectRequest,
+          credential,
+          mutations,
+          context.timezone ?? "UTC",
+          {
+            ...(reservations.campaignIds.get(campaignKey)
+              ? { campaignId: reservations.campaignIds.get(campaignKey)! }
+              : {}),
+            adGroupNames: names,
+          },
+        );
+        const successful = batchResults.find((result) => result.ok && result.campaignId);
+        if (successful?.campaignId) reservations.campaignIds.set(campaignKey, successful.campaignId);
+        return batchResults;
+      }
       for (const mutation of mutations) {
         const campaignKey = mutation.row.campaignName.trim();
         if (mutation.batchCampaignId) reservations.campaignIds.set(campaignKey, mutation.batchCampaignId);
@@ -465,19 +499,10 @@ export class CookieAdsProvider implements AdsProvider {
           for (const name of mutation.batchAdGroupNames) names.add(name.trim());
           reservations.adGroupNames.set(campaignKey, names);
         }
-        if (mutation.templateMode === "none" && reservations.uncertainCampaigns.has(campaignKey)) {
-          results.push({
-            ...mutation,
-            ok: false,
-            failureKind: "retryable",
-            message: "同批次前一条同系列任务结果未知，已停止后续创建以避免重复系列或广告组。",
-          });
-          continue;
-        }
         try {
           const result = await createCookieDraftChain(
             sessionRequest,
-            campaignListRequest,
+            campaignObjectRequest,
             credential,
             mutation,
             context.timezone ?? "UTC",
@@ -498,9 +523,6 @@ export class CookieAdsProvider implements AdsProvider {
             reservations.adGroupNames.set(campaignKey, names);
           }
         } catch (cause) {
-          if (mutation.templateMode === "none" && cause instanceof UnknownCreationStateError) {
-            reservations.uncertainCampaigns.add(campaignKey);
-          }
           results.push({
             ...mutation,
             ok: false,
@@ -524,7 +546,6 @@ export class CookieAdsProvider implements AdsProvider {
     const reservations: CreationBatchReservations = {
       campaignIds: new Map(),
       adGroupNames: new Map(),
-      uncertainCampaigns: new Set(),
     };
     this.creationBatchReservations.set(key, reservations);
     return reservations;
@@ -1177,12 +1198,18 @@ function formatProviderDateTime(value: Date, timezone: string): string {
 function hasNonEmptyOriginReference(
   profile: NonNullable<ParsedCookieCredential["creationProfile"]>,
 ): boolean {
+  const copyLineageKeys = new Set([
+    "origin_campaign_id",
+    "origin_ad_id",
+    "origin_creative_id",
+  ]);
   const visit = (value: unknown): boolean => {
     if (Array.isArray(value)) return value.some(visit);
     if (!isRecord(value)) return false;
-    return Object.entries(value).some(([key, item]) =>
-      (key.startsWith("origin_") && nonEmptyId(item) !== undefined) || visit(item),
-    );
+    return Object.entries(value).some(([key, item]) => {
+      const originId = copyLineageKeys.has(key) ? nonEmptyId(item) : undefined;
+      return (originId !== undefined && !/^0+$/.test(originId)) || visit(item);
+    });
   };
   return visit(profile.campaignPayload)
     || visit(profile.adGroupPayload)
@@ -1289,9 +1316,184 @@ function formatDateInTimezone(date: Date, timezone: string): string {
   }
 }
 
+interface CookieDraftBatchState {
+  campaignId?: string;
+  campaignSnapId?: string;
+  campaignSketchId?: string;
+  checkedFakeCampaignId?: string;
+  campaignResponse?: Record<string, unknown>;
+}
+
+interface PreparedCookieDraft {
+  kind: "prepared";
+  mutation: CreationMutation;
+  row: CreationMutation["row"];
+  existingCampaignId?: string;
+  campaignSnapId: string;
+  campaignSketchId: string;
+  checkedFakeCampaignId: string;
+  publishItem: DraftPublishItem;
+  riskInfo: Record<string, unknown>;
+  dispatchState: CreationDispatchState;
+}
+
+async function createCookieDraftBatch(
+  sessionRequest: CapturedCookieRequest,
+  campaignObjectRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutations: CreationMutation[],
+  timezone: string,
+  batchReservation: { campaignId?: string; adGroupNames: Set<string> },
+): Promise<CreationMutationResult[]> {
+  const batchState: CookieDraftBatchState = {
+    ...(batchReservation.campaignId ? { campaignId: batchReservation.campaignId } : {}),
+  };
+  const prepared: PreparedCookieDraft[] = [];
+  const failures: CreationMutationResult[] = [];
+
+  for (const mutation of mutations) {
+    const dispatchState: CreationDispatchState = {
+      mutationDispatched: false,
+      acceptedMutationCount: 0,
+      ...(mutation.onBeforeDispatch
+        ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
+        : {}),
+    };
+    try {
+      prepared.push(await runCookieDraftChain(
+        sessionRequest,
+        campaignObjectRequest,
+        credential,
+        mutation,
+        timezone,
+        dispatchState,
+        batchReservation,
+        batchState,
+      ));
+    } catch (cause) {
+      failures.push(creationFailureResult(mutation, cause, dispatchState));
+    }
+  }
+
+  if (prepared.length === 0) return failures;
+  const first = prepared[0]!;
+  const publishItems = prepared.map((item) => item.publishItem);
+  const combinedDispatchState: CreationDispatchState = {
+    mutationDispatched: prepared.some((item) => item.dispatchState.mutationDispatched),
+    acceptedMutationCount: prepared.reduce(
+      (total, item) => total + item.dispatchState.acceptedMutationCount,
+      0,
+    ),
+    onBeforeMutationDispatch: () => {
+      for (const item of prepared) item.dispatchState.onBeforeMutationDispatch?.();
+    },
+  };
+  try {
+    await runAdvisoryDraftSequence(sessionRequest, credential, {
+      ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
+      campaignSnapId: first.campaignSnapId,
+      campaignSketchId: first.campaignSketchId,
+      publishItems,
+      ...(first.checkedFakeCampaignId ? { fakeCampaignId: first.checkedFakeCampaignId } : {}),
+      riskInfo: first.riskInfo,
+    });
+    const publishPayload = credential.creationProfile
+      ? materializePublishProfile(credential.creationProfile.publishPayload, {
+          ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
+          campaignSnapId: first.campaignSnapId,
+          campaignSketchId: first.campaignSketchId,
+          publishItems,
+          initialStatus: first.mutation.initialStatus,
+        })
+      : buildPublishInput({
+          campaignSnapId: first.campaignSnapId || first.existingCampaignId!,
+          campaignSketchId: first.campaignSketchId || first.existingCampaignId!,
+          adAndCreativeSnapInfoList: publishItems,
+        }, first.mutation.initialStatus);
+    if (first.existingCampaignId) {
+      publishPayload.campaign_id = first.existingCampaignId;
+      publishPayload.campaign_snap_id = "";
+      publishPayload.campaign_sketch_id = "";
+    }
+    for (const item of prepared) item.mutation.onProgress?.({ phase: "publishing", evidence: {} });
+    const published = await requestCreationStep(
+      "create_by_snap",
+      () => creationRequest(sessionRequest, "async_creation/create_by_snap", publishPayload),
+      credential,
+      { semantics: "mutation", dispatchState: combinedDispatchState },
+    );
+    const asyncRequestId = responseId(published, "async_request_id");
+    const providerRequestId = responseId(published, "request_id");
+    for (const item of prepared) {
+      item.mutation.onProgress?.({
+        phase: "publishing",
+        evidence: {
+          ...(asyncRequestId ? { asyncRequestId } : {}),
+          ...(providerRequestId ? { providerRequestId } : {}),
+        },
+      });
+    }
+    const completed = await awaitCreationResult(
+      sessionRequest,
+      credential,
+      published,
+      first.existingCampaignId,
+    );
+    const completedIds = creationBatchResultIds(completed, first.existingCampaignId);
+    const completedByAdSnapId = new Map(
+      completedIds.map((ids) => [ids.byAdSnapId, ids]),
+    );
+    const mappedIds = prepared.map((item) => completedByAdSnapId.get(item.publishItem.ad_snap_id));
+    if (completedIds.length !== prepared.length || mappedIds.some((ids) => !ids)) {
+      throw new UnknownCreationStateError(
+        `TikTok 批次发布仅返回 ${completedIds.length}/${prepared.length} 个可精确回配的广告组结果。`,
+      );
+    }
+    return [
+      ...prepared.map((item, index): CreationMutationResult => {
+        const ids = mappedIds[index]!;
+        item.mutation.onProgress?.({ phase: "readback", evidence: {} });
+        return {
+          ...item.mutation,
+          row: item.row,
+          ok: true,
+          campaignId: ids.campaignId,
+          adGroupId: ids.adGroupId,
+          adId: ids.adId,
+          message: `TikTok 已同步发布同系列 ${prepared.length} 个广告组。`,
+        };
+      }),
+      ...failures,
+    ];
+  } catch (cause) {
+    return [
+      ...prepared.map((item) => creationFailureResult(item.mutation, cause, combinedDispatchState)),
+      ...failures,
+    ];
+  }
+}
+
+function creationFailureResult(
+  mutation: CreationMutation,
+  cause: unknown,
+  dispatchState: CreationDispatchState,
+): CreationMutationResult {
+  const acceptedMutation = dispatchState.acceptedMutationCount > 0;
+  const confirmed = cause instanceof ConfirmedCreationFailureError;
+  return {
+    ...mutation,
+    ok: false,
+    failureKind: cause instanceof UnknownCreationStateError || (acceptedMutation && !confirmed)
+      ? "unknown"
+      : "retryable",
+    retrySafe: confirmed ? !acceptedMutation && cause.retrySafe : !acceptedMutation,
+    message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
+  };
+}
+
 async function createCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
-  campaignListRequest: CapturedCookieRequest,
+  campaignObjectRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
@@ -1307,7 +1509,7 @@ async function createCookieDraftChain(
   try {
     return await runCookieDraftChain(
       sessionRequest,
-      campaignListRequest,
+      campaignObjectRequest,
       credential,
       mutation,
       timezone,
@@ -1362,13 +1564,33 @@ function ensureStatisticsMetric(value: unknown, metric: string): boolean {
 
 async function runCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
-  campaignListRequest: CapturedCookieRequest,
+  campaignObjectRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
   dispatchState: CreationDispatchState,
   batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
-): Promise<CreationMutationResult> {
+): Promise<CreationMutationResult>;
+async function runCookieDraftChain(
+  sessionRequest: CapturedCookieRequest,
+  campaignObjectRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutation: CreationMutation,
+  timezone: string,
+  dispatchState: CreationDispatchState,
+  batchReservation: { campaignId?: string; adGroupNames: Set<string> } | undefined,
+  batchState: CookieDraftBatchState,
+): Promise<PreparedCookieDraft>;
+async function runCookieDraftChain(
+  sessionRequest: CapturedCookieRequest,
+  campaignObjectRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutation: CreationMutation,
+  timezone: string,
+  dispatchState: CreationDispatchState,
+  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
+  batchState?: CookieDraftBatchState,
+): Promise<CreationMutationResult | PreparedCookieDraft> {
   mutation.onProgress?.({ phase: "validation", evidence: {} });
   const copyOnly = mutation.templateMode === "copy";
   if (copyOnly && !mutation.templateCampaignId) {
@@ -1383,10 +1605,6 @@ async function runCookieDraftChain(
       "当前创建样本来自 copy 流程，不能用于从零创建。请重新导入一次真正从空白页面创建广告时的创建请求。",
     );
   }
-  const bootstrapTemplateCampaignId = !copyOnly && !credential.creationProfile
-    ? nonEmptyId(mutation.preset.templateCampaignId)
-    : undefined;
-  const { row: resolvedRow, videos: resolvedVideos } = await resolveTikTokVideos(mutation, sessionRequest, credential);
   const preflightPayloads = await requestCompleteListPages(
     "adgroup/list",
     sessionRequest,
@@ -1397,7 +1615,7 @@ async function runCookieDraftChain(
     ? preflightPayloads
     : await requestCompleteListPages(
         "campaign/list",
-        campaignListRequest,
+        campaignObjectRequest,
         credential,
         dispatchState,
       );
@@ -1412,21 +1630,23 @@ async function runCookieDraftChain(
     throw new RetryableCreationError("当前账户存在多个同名推广系列，无法确定应复用哪一个系列。");
   }
   const remoteCampaignId = exactCampaigns[0]?.externalId;
-  if (batchReservation?.campaignId && remoteCampaignId && batchReservation.campaignId !== remoteCampaignId) {
+  const reservedCampaignId = batchState?.campaignId ?? batchReservation?.campaignId;
+  if (reservedCampaignId && remoteCampaignId && reservedCampaignId !== remoteCampaignId) {
     throw new RetryableCreationError("同批次系列预留与远端同名系列不一致，已停止创建。");
   }
-  const existingCampaignId = batchReservation?.campaignId ?? remoteCampaignId;
-  const creationRow = existingCampaignId
-    ? { ...resolvedRow, adGroupName: uniqueAdGroupName(
+  const existingCampaignId = reservedCampaignId ?? remoteCampaignId;
+  if (batchState && existingCampaignId) batchState.campaignId = existingCampaignId;
+  const creationRow = existingCampaignId || batchState
+    ? { ...mutation.row, adGroupName: uniqueAdGroupName(
         preflightEntities,
-        resolvedRow.adGroupName,
-        existingCampaignId,
+        mutation.row.adGroupName,
+        existingCampaignId ?? "",
         batchReservation?.adGroupNames,
       ) }
-    : resolvedRow;
-  // Persist the exact auto-suffixed name before the first creation mutation.
-  // Manual verification can then restore the same reservation after an
-  // unknown provider result without guessing from the original spreadsheet.
+    : mutation.row;
+  if (batchState) batchReservation?.adGroupNames.add(creationRow.adGroupName.trim());
+  // Persist the exact auto-suffixed name before the first creation mutation
+  // so execution records always identify the name actually sent to TikTok.
   mutation.onProgress?.({
     phase: "validation",
     evidence: { resolvedAdGroupName: creationRow.adGroupName },
@@ -1434,19 +1654,11 @@ async function runCookieDraftChain(
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
     : buildDraftPayloads(creationRow, mutation.preset, timezone);
-  // From-scratch creation bootstraps from an existing campaign's structure. The
-  // preset's templateCampaignId lives in one account, so for every other target
-  // account fall back to one of that account's own campaigns — this lets a
-  // multi-account launch "just work" without per-account template setup.
-  const effectiveBootstrapId = copyOnly || !bootstrapTemplateCampaignId
-    ? bootstrapTemplateCampaignId
-    : campaignEntities.some((entity) => entity.externalId === bootstrapTemplateCampaignId)
-      ? bootstrapTemplateCampaignId
-      : pickFallbackTemplateCampaign(campaignEntities, mutation.preset.objectiveType)
-        ?? bootstrapTemplateCampaignId;
-  const initializationTemplateCampaignId = copyOnly
-    ? mutation.templateCampaignId
-    : remoteCampaignId ?? effectiveBootstrapId;
+  // A new launch never copies a campaign. New campaign names save a fresh
+  // campaign draft; exact-name matches skip that save and attach a fresh
+  // ad-group to the existing campaign. Campaign copy is reserved for the
+  // explicit templateMode="copy" operation only.
+  const initializationTemplateCampaignId = copyOnly ? mutation.templateCampaignId : undefined;
   const initializedIds = initializationTemplateCampaignId
     ? await initializeProfileDraftIds(
         sessionRequest,
@@ -1461,22 +1673,57 @@ async function runCookieDraftChain(
   if (initializedIds) {
     applyCopiedDraftForms(drafts, initializedIds, !copyOnly, existingCampaignId);
   }
-  const campaign = existingCampaignId ? {} : await requestCreationStep("campaign_snap/save",
-    () => creationRequest(sessionRequest, "campaign_snap/save", drafts.campaign),
-    credential,
-    { semantics: "mutation", dispatchState },
+  const hasSharedCampaignDraft = Boolean(
+    batchState?.campaignSnapId && batchState.campaignSketchId,
   );
-  const campaignSnapId = existingCampaignId ? "" : responseId(campaign, "campaign_snap_id")
-    ?? initializedIds?.campaignSnapId
-    ?? requiredResponseId(campaign, "campaign_snap_id");
+  const campaign = existingCampaignId
+    ? {}
+    : hasSharedCampaignDraft
+      ? batchState?.campaignResponse ?? {}
+      : await requestCreationStep("campaign_snap/save",
+          () => creationRequest(sessionRequest, "campaign_snap/save", drafts.campaign),
+          credential,
+          { semantics: "mutation", dispatchState },
+        );
+  const campaignSnapId = existingCampaignId
+    ? ""
+    : batchState?.campaignSnapId
+      ?? responseId(campaign, "campaign_snap_id")
+      ?? initializedIds?.campaignSnapId
+      ?? requiredResponseId(campaign, "campaign_snap_id");
   if (!existingCampaignId) {
     mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId } });
   }
-  const campaignSketchId = existingCampaignId ? "" : responseId(campaign, "campaign_sketch_id")
-    ?? initializedIds?.campaignSketchId
-    ?? requiredResponseId(campaign, "campaign_sketch_id");
+  const campaignSketchId = existingCampaignId
+    ? ""
+    : batchState?.campaignSketchId
+      ?? responseId(campaign, "campaign_sketch_id")
+      ?? initializedIds?.campaignSketchId
+      ?? requiredResponseId(campaign, "campaign_sketch_id");
+  if (batchState && !existingCampaignId && !hasSharedCampaignDraft) {
+    batchState.campaignSnapId = campaignSnapId;
+    batchState.campaignSketchId = campaignSketchId;
+    batchState.campaignResponse = campaign;
+  }
   if (!existingCampaignId) {
     mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId, campaignSketchId } });
+  }
+  let checkedFakeCampaignId = "";
+  if (!copyOnly && !existingCampaignId) {
+    if (batchState?.checkedFakeCampaignId) {
+      checkedFakeCampaignId = batchState.checkedFakeCampaignId;
+    } else {
+      const campaignCheck = await requestAdvisoryCreationStep(
+        "campaign_snap/check",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
+          campaign_snap_id: campaignSnapId,
+        }),
+        credential,
+      );
+      const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : {};
+      checkedFakeCampaignId = nonEmptyId(campaignData.fake_campaign_id) ?? campaignSketchId;
+      if (batchState) batchState.checkedFakeCampaignId = checkedFakeCampaignId;
+    }
   }
 
   if (initializedIds && !existingCampaignId) {
@@ -1510,12 +1757,33 @@ async function runCookieDraftChain(
     phase: "adgroup_draft",
     evidence: { adGroupSnapId: adSnapId, adGroupSketchId: adSketchId },
   });
+  // TikTok's ad_snap/bulk_check is scoped to a newly saved campaign draft and
+  // requires the fake campaign id returned by campaign_snap/check. A formal
+  // existing campaign has no such draft id; passing its real id is rejected as
+  // stale page information. Reused campaigns continue to the later joint HAR
+  // validations, which cover the ad-group and creatives before publish.
+  if (!copyOnly && !existingCampaignId) {
+    await requestAdvisoryCreationStep(
+      "ad_snap/bulk_check",
+      () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/bulk_check/", {
+        ad_snap_ids: [adSnapId],
+        fake_campaign_id: checkedFakeCampaignId || existingCampaignId || campaignSketchId,
+      }),
+      credential,
+    );
+  }
   const creativeSnapIdFromAd = initializedIds
     ? initializedIds.creativeSnapId
     : responseId(adGroup, "creative_snap_id");
   const creativeSketchIdFromAd = initializedIds
     ? initializedIds.creativeSketchId
     : responseId(adGroup, "creative_sketch_id");
+
+  const resolvedVideos = await resolveTikTokVideos(
+    { ...mutation, row: creationRow },
+    sessionRequest,
+    credential,
+  );
 
   // One ad-group, several ads = ONE creative whose image_list carries every
   // video, each bound to its authorized creator identity. This mirrors TikTok's
@@ -1540,8 +1808,7 @@ async function runCookieDraftChain(
       singleAsset.identity_id = "";
       singleAsset.item_source = 2;
       singleAsset.ad_level2_identity_structure = 1;
-      singleAsset.coming_source_type = 6;
-      singleAsset.sketch_publish_source = 1;
+      Object.assign(singleAsset, TikTokCreationPublishSource);
       singleAsset.creative_material_mode = 6;
       singleAsset.struct_version = 1;
       singleAsset.asset_group_id = "";
@@ -1560,19 +1827,17 @@ async function runCookieDraftChain(
     creativeSnapId = initializedIds.creativeSnapId;
     creativeSketchId = initializedIds.creativeSketchId;
   } else {
-    // Spark posts must be registered by their video material id before the
-    // creative can reference them, otherwise TikTok cannot fetch the post.
-    const sparkVids = resolvedVideos
-      .filter((video) => video.identityId && video.vid)
-      .map((video) => video.vid!);
-    if (sparkVids.length > 0) {
-      const countryList = [...new Set(
-        mutation.preset.countryCodes
-          .map((id) => TIKTOK_LOCATION_TO_ISO[id])
-          .filter((code): code is string => Boolean(code)),
-      )];
-      await runSparkCreativeFixTask(sessionRequest, credential, sparkVids, countryList);
-    }
+    const adForm = requireObjectField(drafts.adGroup, "ad_sketch_form_data");
+    await prepareSparkPosts(sessionRequest, credential, resolvedVideos, {
+      countryIds: mutation.preset.countryCodes,
+      startTime: String(adForm.start_time ?? ""),
+      endTime: String(adForm.end_time ?? ""),
+      objectiveType: requireObjectField(drafts.campaign, "campaign_sketch_form_data").objective_type,
+      campaignId: existingCampaignId ?? "",
+      campaignSnapId,
+      adSnapId,
+      creativeInfo: singleAsset,
+    });
     const creativeDraft: Record<string, unknown> = {
       ...drafts.creative,
       ad_snap_id: adSnapId,
@@ -1587,9 +1852,11 @@ async function runCookieDraftChain(
     );
     lastCreativeResponse = creative;
     creativeSnapId = responseId(creative, "creative_snap_id")
+      ?? responseId(creative, "creative_snap_ids")
       ?? creativeSnapIdFromAd
       ?? requiredResponseId(creativeDraft, "creative_snap_id");
     creativeSketchId = responseId(creative, "creative_sketch_id")
+      ?? responseId(creative, "creative_sketch_ids")
       ?? creativeSketchIdFromAd
       ?? requiredResponseId(creativeDraft, "creative_sketch_id");
   }
@@ -1608,6 +1875,22 @@ async function runCookieDraftChain(
         }],
         need_publish: true as const,
       }];
+  if (batchState) {
+    return {
+      kind: "prepared",
+      mutation,
+      row: creationRow,
+      ...(existingCampaignId ? { existingCampaignId } : {}),
+      campaignSnapId,
+      campaignSketchId,
+      checkedFakeCampaignId,
+      publishItem: publishItems[0]!,
+      riskInfo: credential.creationProfile && isRecord(credential.creationProfile.publishPayload.risk_info)
+        ? credential.creationProfile.publishPayload.risk_info
+        : {},
+      dispatchState,
+    };
+  }
   const publishPayload = credential.creationProfile
     ? materializePublishProfile(credential.creationProfile.publishPayload, {
         ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
@@ -1623,8 +1906,9 @@ async function runCookieDraftChain(
     publishPayload.campaign_snap_id = "";
     publishPayload.campaign_sketch_id = "";
   }
-  await validateDraftChain(sessionRequest, credential, {
+  await runAdvisoryDraftSequence(sessionRequest, credential, {
     ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
+    ...(checkedFakeCampaignId ? { fakeCampaignId: checkedFakeCampaignId } : {}),
     riskInfo: credential.creationProfile && isRecord(credential.creationProfile.publishPayload.risk_info)
       ? credential.creationProfile.publishPayload.risk_info
       : {},
@@ -1732,11 +2016,12 @@ function safeFailureFields(value: Record<string, unknown>, prefix = ""): Record<
   return output;
 }
 
-async function validateDraftChain(
+async function runAdvisoryDraftSequence(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   ids: {
     campaignId?: string;
+    fakeCampaignId?: string;
     campaignSnapId: string;
     campaignSketchId: string;
     publishItems: DraftPublishItem[];
@@ -1744,55 +2029,42 @@ async function validateDraftChain(
   },
 ): Promise<void> {
   const adSnapIds = ids.publishItems.map((item) => item.ad_snap_id);
-  let fakeCampaignId = "";
+  let fakeCampaignId = ids.fakeCampaignId ?? "";
   if (!ids.campaignId) {
-    const consistency = await requestCreationStep("snap/cbo_consistency_check",
+    await requestAdvisoryCreationStep("snap/cbo_consistency_check",
       () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/cbo_consistency_check/", {
         campaign_snap_id: ids.campaignSnapId,
         adgroup_snap_ids: adSnapIds,
         ad_snap_ids: adSnapIds,
         is_budget_split_test: false,
       }), credential);
-    if (isRecord(consistency.data) && consistency.data.is_all_success === false) {
-      throw new ConfirmedCreationFailureError("TikTok 系列与广告组草稿一致性检查失败。");
+    if (!fakeCampaignId) {
+      const campaignCheck = await requestAdvisoryCreationStep("campaign_snap/check",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
+          campaign_snap_id: ids.campaignSnapId,
+        }), credential);
+      const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
+      fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
     }
-    const campaignCheck = await requestCreationStep("campaign_snap/check",
-      () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
-        campaign_snap_id: ids.campaignSnapId,
-      }), credential);
-    const campaignData = isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
-    if (campaignData?.success === false) {
-      const reason = isRecord(campaignData.error_item) && typeof campaignData.error_item.message === "string"
-        ? campaignData.error_item.message
-        : "系列草稿检查未通过";
-      throw new ConfirmedCreationFailureError(`TikTok 系列草稿检查失败：${reason}`);
-    }
-    fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
   }
   const checkInfo = ids.publishItems.map((item) => ({
     ad_id: "",
     ad_snap_id: item.ad_snap_id,
     creative_snap_ids: item.creative_snap_info_list.map((creative) => creative.creative_snap_id),
   }));
-  await requestCreationStep("snap/batch_create_cta_id",
-    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
-      campaign_id: ids.campaignId ?? "",
-      campaign_snap_id: ids.campaignSnapId,
-      ad_and_creative_snap_info_list: checkInfo,
-    }), credential);
-  const adCheck = await requestCreationStep("ad_creative_snap/check",
+  await requestAdvisoryCreationStep("ad_creative_snap/check",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_creative_snap/check/", {
       campaign_id: ids.campaignId ?? "",
       fake_campaign_id: fakeCampaignId,
       ad_creative_snap_check_info: checkInfo,
       risk_info: ids.riskInfo,
     }), credential);
-  const adData = isRecord(adCheck.data) ? adCheck.data : undefined;
-  if (adData?.creative_success === false) {
-    const structure = checkInfo.map((info) => `组${info.ad_snap_id}含${info.creative_snap_ids.length}条广告`).join("、");
-    const detail = JSON.stringify(adData).slice(0, 400);
-    throw new ConfirmedCreationFailureError(`TikTok 广告素材草稿检查失败[本次发出结构：${structure}]：${detail}`);
-  }
+  await requestAdvisoryCreationStep("snap/batch_create_cta_id",
+    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
+      campaign_id: ids.campaignId ?? "",
+      campaign_snap_id: ids.campaignSnapId,
+      ad_and_creative_snap_info_list: checkInfo,
+    }), credential);
 }
 
 async function awaitCreationResult(
@@ -1815,7 +2087,7 @@ async function awaitCreationResult(
       if (hasExplicitCreationFailure(data.result)) {
         if (hasAnyPublishedCreationId(data.result, existingCampaignId)) {
           throw new UnknownCreationStateError(
-            "TikTok 返回部分创建成功、部分失败；为避免重复创建，必须人工核验后再处理。",
+            "TikTok 返回部分创建成功、部分失败，本条创建按失败处理。",
           );
         }
         throw new ConfirmedCreationFailureError(`TikTok 已明确报告广告组或创意创建失败，未生成正式广告。detail=${JSON.stringify(data.result).slice(0, 300)}`);
@@ -1826,18 +2098,15 @@ async function awaitCreationResult(
       throw new ConfirmedCreationFailureError("TikTok 已明确报告创建失败，未生成正式广告。");
     }
   }
-  throw new UnknownCreationStateError("TikTok 创建任务在 9 秒内未返回最终结果；请求可能已被受理，禁止自动重试，请人工核验。");
+  throw new UnknownCreationStateError("TikTok 创建任务在 9 秒内未返回最终结果，本条创建按失败处理。");
 }
 
 /**
  * Resolves each video code in the cell to a TikTok item (Post) id. A code may
- * be resolved three ways, in priority order:
- *  1. an explicit videoPostMappings entry (manual override / cache),
- *  2. the account's own material library — a `#…` authorization code is looked
- *     up live via material/tt_video/bulk/info, which returns its item_id,
- *  3. left as-is when it is already a bare numeric id.
- * The resolved item ids are re-joined so the draft builder can split them back
- * into one creative per ad inside the ad-group.
+ * be resolved from either the account material library or a stored mapping.
+ * A `#…` authorization code always uses the live material endpoints so Spark
+ * identity is authorized and verified; mappings only guard against drift.
+ * Bare numeric ids may use their stored mapping or pass through unchanged.
  */
 interface ResolvedVideo {
   /** TikTok item id that goes into aweme_item_id. */
@@ -1852,17 +2121,14 @@ interface ResolvedVideo {
 
 /**
  * Resolves every video code in the cell to its TikTok item, in order. A `#…`
- * authorization code is looked up live in the account's material library
- * (material/tt_video/bulk/info), which returns both the item id and the
- * authorized creator identity. A videoPostMappings entry overrides the lookup;
- * a bare numeric id is used as-is. Returns the resolved videos plus a row whose
- * videoCode is the joined item ids (kept for downstream naming/placeholders).
+ * authorization code is always looked up and authorized live; a stored mapping
+ * is only a consistency check. A bare numeric id may use its stored mapping.
  */
 async function resolveTikTokVideos(
   mutation: CreationMutation,
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
-): Promise<{ row: CreationMutation["row"]; videos: ResolvedVideo[] }> {
+): Promise<ResolvedVideo[]> {
   const codes = splitVideoCodes(mutation.row.videoCode);
   const list = codes.length > 0 ? codes : [mutation.row.videoCode];
   const manual = new Map<string, string>();
@@ -1873,30 +2139,33 @@ async function resolveTikTokVideos(
     ) ?? [];
     const postIds = [...new Set(matches.map((item) => item.postId))];
     if (postIds.length > 1) {
-      throw new RetryableCreationError(`视频代码 ${code} 配置了多个 Post ID，请先统一映射。`);
+      throw new RetryableCreationError("同一授权码配置了多个 Post ID，请先统一映射。");
     }
-    if (postIds[0]) manual.set(code, postIds[0]);
-    else if (code.startsWith("#")) needLibrary.push(code);
+    if (code.startsWith("#")) needLibrary.push(code);
+    else if (postIds[0]) manual.set(code, postIds[0]);
   }
   const library = needLibrary.length > 0
     ? await resolveVideoCodesFromLibrary(sessionRequest, credential, needLibrary)
     : new Map<string, ResolvedVideo>();
   const videos = list.map((code) => {
-    const manualId = manual.get(code);
-    if (manualId) return { itemId: manualId } satisfies ResolvedVideo;
     const fromLibrary = library.get(code);
-    if (fromLibrary) return fromLibrary;
     if (code.startsWith("#")) {
+      if (fromLibrary) {
+        const mappedPostId = mutation.preset.videoPostMappings?.find((item) => item.videoCode === code)?.postId;
+        if (mappedPostId && mappedPostId !== fromLibrary.itemId) {
+          throw new RetryableCreationError("授权码解析结果与保存的 Post ID 不一致，请刷新授权关系后重试。");
+        }
+        return fromLibrary;
+      }
       throw new RetryableCreationError(
-        `视频代码 ${code} 无法在素材库中解析到帖子；请确认该视频已授权到当前账户。`,
+        "有授权码无法在素材库中解析到帖子；请确认该视频已授权到当前账户。",
       );
     }
+    const manualId = manual.get(code);
+    if (manualId) return { itemId: manualId } satisfies ResolvedVideo;
     return { itemId: code } satisfies ResolvedVideo;
   });
-  return {
-    row: { ...mutation.row, videoCode: videos.map((video) => video.itemId).join(";") },
-    videos,
-  };
+  return videos;
 }
 
 /** Looks up `#…` authorization codes in the account's material library and maps
@@ -1925,32 +2194,108 @@ async function resolveVideoCodesFromLibrary(
     const itemId = nonEmptyId(entry.item_id);
     if (!itemId) continue;
     const identityId = nonEmptyId(entry.core_user_id);
+    if (!identityId) {
+      throw new UnknownCreationStateError("TikTok 素材信息未返回可用的 Spark 身份，本条创建失败。");
+    }
     const videoInfo = isRecord(entry.video_info) ? entry.video_info : {};
     const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(videoInfo.video_id);
     out.set(code, {
       itemId,
-      ...(identityId ? { identityId } : {}),
+      identityId,
       ...(vid ? { vid } : {}),
     });
+  }
+  if (out.size !== uniqueCodes.length) return out;
+  const authorized = await requestCreationStep(
+    "material/tt_video/bulk/authorize",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/material/tt_video/bulk/authorize/",
+      { auth_code_info_list: uniqueCodes.map((auth_code) => ({ auth_code })), is_check: false },
+    ),
+    credential,
+  );
+  const authorizedData = isRecord(authorized.data) ? authorized.data : {};
+  const identityMap = isRecord(authorizedData.identity_id_map) ? authorizedData.identity_id_map : {};
+  for (const code of uniqueCodes) {
+    const video = out.get(code)!;
+    const authorizedIdentity = nonEmptyId(identityMap[code]);
+    if (!authorizedIdentity) {
+      throw new ConfirmedCreationFailureError("TikTok 未返回授权码对应的 Spark 身份，已停止创建创意。");
+    }
+    if (video.identityId && video.identityId !== authorizedIdentity) {
+      throw new ConfirmedCreationFailureError("TikTok 返回的 Spark 身份前后不一致，已停止创建创意。");
+    }
+    out.set(code, { ...video, identityId: authorizedIdentity });
   }
   return out;
 }
 
-/**
- * Registers Spark (authorized) posts by their video material id before the
- * creative is saved. Without this, creative_snap rejects the aweme_item_id with
- * "无法获取 Spark Ads 帖子信息". Best-effort: a failure here is not fatal on its
- * own — the creative save will surface any real problem.
- */
-async function runSparkCreativeFixTask(
+/** Mirrors the successful Ads Manager Spark preparation sequence captured in
+ * the verified from-scratch HAR. Every step completes before creative save. */
+interface SparkPreparationContext {
+  countryIds: number[];
+  startTime: string;
+  endTime: string;
+  objectiveType: unknown;
+  campaignId: string;
+  campaignSnapId: string;
+  adSnapId: string;
+  creativeInfo: Record<string, unknown>;
+}
+
+async function prepareSparkPosts(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
-  vids: string[],
-  countryList: string[],
+  videos: ResolvedVideo[],
+  context: SparkPreparationContext,
 ): Promise<void> {
-  const uniqueVids = [...new Set(vids)];
+  const sparkVideos = videos.filter(
+    (video): video is ResolvedVideo & { identityId: string; vid: string } => Boolean(video.identityId && video.vid),
+  );
+  if (sparkVideos.length === 0) return;
+  if (sparkVideos.length !== videos.filter((video) => video.identityId).length) {
+    throw new ConfirmedCreationFailureError("TikTok 未返回完整的 Spark 视频素材标识，已停止创建创意。");
+  }
+
+  const postList = sparkVideos.map((video) => ({
+    item_id: video.itemId,
+    identity_id: video.identityId,
+    identity_type: 2,
+  }));
+  await requestAdvisoryCreationStep(
+    "spark/validate_promote_music",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/spark/validate_promote_music/",
+      {
+        countries: [...new Set(context.countryIds)],
+        start_time: context.startTime,
+        end_time: context.endTime,
+        post_list: postList,
+      },
+    ),
+    credential,
+  );
+
+  await requestAdvisoryCreationStep(
+    "creative/creative_automation_option",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/creative/creative_automation_option/",
+      { identity_type: 2 },
+    ),
+    credential,
+  );
+
+  const uniqueVids = [...new Set(sparkVideos.map((video) => video.vid))];
+  const countryList = [...new Set(
+    context.countryIds
+      .map((id) => TIKTOK_LOCATION_TO_ISO[id])
+      .filter((code): code is string => Boolean(code)),
+  )];
   if (uniqueVids.length === 0) return;
-  await requestCreationStep(
+  const saved = await requestAdvisoryCreationStep(
     "spark/creative_fix_task/save",
     () => creationPathRequest(
       sessionRequest,
@@ -1959,6 +2304,51 @@ async function runSparkCreativeFixTask(
     ),
     credential,
   );
+  const savedData = saved && isRecord(saved.data) ? saved.data : {};
+  const taskMap = isRecord(savedData.task_map) ? savedData.task_map : {};
+  const taskIds = [...new Set(uniqueVids.map((vid) => nonEmptyId(taskMap[vid])).filter((id): id is string => Boolean(id)))];
+  await requestAdvisoryCreationStep(
+    "roi2/auction_batch_item_roi2_validate",
+    () => creationPathRequest(
+      sessionRequest,
+      "/api/v4/i18n/creation/roi2/auction_batch_item_roi2_validate/",
+      {
+        ad_infos: [],
+        campaign_info: { objective_type: context.objectiveType },
+        smart_plus_plus_info: {
+          ad_id: "",
+          ad_snap_id: context.adSnapId,
+          campaign_id: context.campaignId,
+          campaign_snap_id: context.campaignSnapId,
+          creative_info: context.creativeInfo,
+        },
+      },
+    ),
+    credential,
+  );
+  if (taskIds.length !== uniqueVids.length) return;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
+    const info = await requestAdvisoryCreationStep(
+      "spark/creative_fix_task/info",
+      () => creationPathRequest(
+        sessionRequest,
+        "/api/v4/i18n/creation/spark/creative_fix_task/info/",
+        { task_id_list: taskIds },
+      ),
+      credential,
+      { semantics: "result-query" },
+    );
+    if (!info) return;
+    const infoData = isRecord(info.data) ? info.data : {};
+    const infoMap = isRecord(infoData.task_info_map) ? infoData.task_info_map : {};
+    const statuses = taskIds.map((taskId) => {
+      const task = isRecord(infoMap[taskId]) ? infoMap[taskId] : {};
+      return typeof task.task_status === "number" ? task.task_status : null;
+    });
+    if (statuses.every((status) => status === 2)) return;
+  }
 }
 
 /** Maps TikTok location ids used by the ad targeting to the ISO country codes
@@ -1980,29 +2370,6 @@ function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unkn
     media_tag: 0,
     ...(video.identityId ? { identity_type: 2, identity_id: video.identityId } : {}),
   }));
-}
-
-/**
- * Picks one of the account's own campaigns to bootstrap a from-scratch creation
- * when the preset's template campaign does not exist in this account. Prefers a
- * campaign matching the requested objective, then a disabled one (safe to copy),
- * then any. Returns undefined when the account has no campaigns to copy from.
- */
-function pickFallbackTemplateCampaign(
-  campaigns: ProviderEntity[],
-  objectiveType: number | null,
-): string | undefined {
-  if (campaigns.length === 0) return undefined;
-  const matchesObjective = (entity: ProviderEntity) =>
-    objectiveType != null && Number(entity.payload.objective_type) === objectiveType;
-  const isDisabled = (entity: ProviderEntity) =>
-    normalizeProviderEntity(entity).status === "disabled";
-  const ranked = [...campaigns].sort((a, b) => {
-    const score = (entity: ProviderEntity) =>
-      (matchesObjective(entity) ? 2 : 0) + (isDisabled(entity) ? 1 : 0);
-    return score(b) - score(a);
-  });
-  return ranked[0]?.externalId;
 }
 
 function uniqueAdGroupName(
@@ -2117,6 +2484,41 @@ function creationResultIds(payload: Record<string, unknown>): { campaignId?: str
     ...(adGroupId ? { adGroupId } : {}),
     ...(adId ? { adId } : {}),
   };
+}
+
+function creationBatchResultIds(
+  payload: Record<string, unknown>,
+  existingCampaignId?: string,
+): Array<{ campaignId: string; adGroupId: string; adId: string; byAdSnapId: string }> {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const result = isRecord(data.result) ? data.result : data;
+  const campaignId = nonEmptyId(result.campaign_id) ?? existingCampaignId;
+  if (!campaignId) return [];
+  const adsValue = result.ad_and_creative;
+  const ads = Array.isArray(adsValue)
+    ? adsValue
+    : isRecord(adsValue) ? Object.values(adsValue) : [];
+  return ads.flatMap((value) => {
+    if (!isRecord(value)) return [];
+    const byAdSnapId = nonEmptyId(value.by_ad_snap_id);
+    const adGroupId = nonEmptyId(value.ad_id)
+      ?? nonEmptyId(value.adgroup_id)
+      ?? nonEmptyId(value.ad_group_id);
+    const groupsValue = value.asset_group_result;
+    const groups = Array.isArray(groupsValue)
+      ? groupsValue
+      : isRecord(groupsValue) ? Object.values(groupsValue) : [];
+    const firstGroup = groups.find(isRecord);
+    const creativesValue = firstGroup?.creative_items;
+    const creatives = Array.isArray(creativesValue)
+      ? creativesValue
+      : isRecord(creativesValue) ? Object.values(creativesValue) : [];
+    const firstCreative = creatives.find(isRecord);
+    const adId = firstCreative ? nonEmptyId(firstCreative.id) : undefined;
+    return byAdSnapId && adGroupId && adId
+      ? [{ campaignId, adGroupId, adId, byAdSnapId }]
+      : [];
+  });
 }
 
 interface InitializedDraftIds {
@@ -2400,6 +2802,7 @@ function materializePublishProfile(
   body.campaign_id = ids.campaignId ?? "";
   body.campaign_snap_id = ids.campaignSnapId;
   body.campaign_sketch_id = ids.campaignSketchId;
+  Object.assign(body, TikTokCreationPublishSource);
   body.is_status_disabled = ids.initialStatus === "disabled";
   const ads = body.ad_and_creative_snap_info_list;
   if (!Array.isArray(ads) || !isRecord(ads[0])) throw new Error("发布模板缺少广告组草稿结构。");
@@ -2701,7 +3104,9 @@ function responseId(value: unknown, key: string): string | undefined {
   }
   if (!isRecord(value)) return undefined;
   const direct = value[key];
-  const id = nonEmptyId(direct);
+  const id = Array.isArray(direct)
+    ? direct.map(nonEmptyId).find((candidate): candidate is string => Boolean(candidate))
+    : nonEmptyId(direct);
   if (id) return id;
   for (const nested of Object.values(value)) {
     const found = responseId(nested, key);
@@ -3214,6 +3619,78 @@ function siblingListRequest(
   return { ...template, target, derived: true, url: url.toString() };
 }
 
+/** Runs a browser-side helper/check call in the captured HAR order without
+ * turning its page-level result into an ad-creation outcome. The authoritative
+ * result comes from draft saves and async_creation/create_by_snap + detail. */
+async function requestAdvisoryCreationStep(
+  step: string,
+  createRequest: () => CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  boundary: CreationRequestBoundary = {},
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    return await requestCreationStep(step, createRequest, credential, boundary);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Campaign existence is independent from ad/report rows. The imported
+ * ad-group request keeps the valid account/session query, while the body must
+ * use the campaign object dimension captured in the verified HAR. */
+function campaignObjectListRequest(
+  template: CapturedCookieRequest,
+): CapturedCookieRequest {
+  return campaignStatisticsListRequest(template, false);
+}
+
+function campaignMetricsListRequest(
+  template: CapturedCookieRequest,
+): CapturedCookieRequest {
+  return campaignStatisticsListRequest(template, true);
+}
+
+function campaignStatisticsListRequest(
+  template: CapturedCookieRequest,
+  includeMetrics: boolean,
+): CapturedCookieRequest {
+  const url = new URL(template.url);
+  url.pathname = url.pathname.replace(
+    /\/(campaign|adgroup)\/list(?=\/|$)/i,
+    "/campaign/list",
+  );
+  let body = template.body;
+  if (body && template.contentType?.toLowerCase().includes("json")) {
+    try {
+      const value = JSON.parse(body) as unknown;
+      if (isRecord(value)) {
+        const commonRequest = isRecord(value.common_req) ? value.common_req : {};
+        commonRequest.dimensions = ["campaign_id"];
+        if (!includeMetrics) commonRequest.metrics = [];
+        commonRequest.filters = [
+          { field: "campaign_status", in_field_values: ["delete"], filter_type: 10 },
+          { field: "campaign_system_origin", in_field_values: ["100000"], filter_type: 0 },
+        ];
+        commonRequest.lifetime = 0;
+        commonRequest.page = 1;
+        commonRequest.page_size = 100;
+        value.common_req = commonRequest;
+        body = JSON.stringify(value);
+      }
+    } catch {
+      // The normal list preflight will reject an unrecognized body/response
+      // before any creation mutation is sent.
+    }
+  }
+  return {
+    ...template,
+    target: "campaign",
+    derived: true,
+    url: url.toString(),
+    body,
+  };
+}
+
 function rewritePageValue(value: unknown, page: number): { value: unknown; changed: boolean } {
   if (Array.isArray(value)) {
     let changed = false;
@@ -3392,7 +3869,9 @@ function assertListPreflight(
   step: "campaign/list" | "adgroup/list",
 ): void {
   const data = isRecord(payload.data) ? payload.data : undefined;
-  const listKeys = ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"];
+  const listKeys = step === "campaign/list"
+    ? ["campaigns", "campaign_list", "table", "list", "items"]
+    : ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"];
   if (!data || !listKeys.some((key) => Array.isArray(data[key]))) {
     throw new RetryableCreationError(
       `${step} 预检响应缺少可识别的列表结构，尚未发送任何创建请求。`,

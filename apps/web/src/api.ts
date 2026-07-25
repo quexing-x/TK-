@@ -44,8 +44,6 @@ import type {
   LaunchPresetRecord,
   LaunchPlanItemRecord,
   LaunchPlanItemAttemptRecord,
-  LaunchManualVerificationInput,
-  LaunchManualVerificationRecord,
   LaunchCopyPreviewInput,
   LaunchCopyPreviewRecord,
   WriteTaskKind,
@@ -321,17 +319,6 @@ export const api = {
     }),
   getLaunchPlanItemAttempts: (planId: string, itemId: string) =>
     request<LaunchPlanItemAttemptRecord[]>(`/api/launch-plans/${planId}/items/${itemId}/attempts`),
-  getLaunchPlanItemVerifications: (planId: string, itemId: string) =>
-    request<LaunchManualVerificationRecord[]>(`/api/launch-plans/${planId}/items/${itemId}/verifications`),
-  verifyLaunchPlanItem: (planId: string, itemId: string, input: LaunchManualVerificationInput) =>
-    request<{
-      verification: LaunchManualVerificationRecord;
-      item: LaunchPlanItemRecord;
-      plan: MultiAccountLaunchPlanRecord;
-    }>(`/api/launch-plans/${planId}/items/${itemId}/verify`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
   getWriteTasks: (filters: WriteTaskFilters = {}) => {
     const query = new URLSearchParams();
     if (filters.kind) query.set("kind", filters.kind);

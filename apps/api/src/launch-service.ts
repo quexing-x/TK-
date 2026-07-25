@@ -16,6 +16,7 @@ import {
   ProviderRegistry,
   RetryableCreationError,
   UnknownCreationStateError,
+  type CreationMutation,
   type ProviderContext,
 } from "@tk-auto/providers";
 import { AutomationStore, LaunchPlanStore } from "@tk-auto/storage";
@@ -46,7 +47,8 @@ export class LaunchService {
   private readonly launchStore: LaunchPlanStore;
   private readonly tasks: WriteTaskKernel<
     LaunchPlanItemRecord,
-    { campaignId: string; adGroupId: string; adId: string }
+    { campaignId: string; adGroupId: string; adId: string },
+    "pending" | "failed" | "unknown"
   >;
 
   constructor(
@@ -102,14 +104,18 @@ export class LaunchService {
     // Plan execution claims only pending items. Failed items are retried only
     // through retryItem with an explicit itemId.
     const candidates = allItems.filter((item) => item.status === "pending");
-    const executorId = randomUUID();
-    const results: LaunchExecutionItemResult[] = [];
-
-    for (const candidate of candidates) {
-      const item = this.tasks.claim(candidate.itemId, executorId, "pending", actor);
-      if (!item) continue;
-      results.push(await this.executeItem(plan.presetSnapshot.creationConfig, item, executorId));
-    }
+    const groupsByAccount = groupLaunchItemsByAccountAndCampaign(candidates);
+    const accountResults = await Promise.all(
+      [...groupsByAccount.values()].map((groups) => mapWithConcurrency(
+        groups,
+        3,
+        (group) => this.executeSeriesBatch(plan.presetSnapshot!.creationConfig, group, actor),
+      )),
+    );
+    const itemOrder = new Map(candidates.map((item) => [item.itemId, item.itemIndex]));
+    const results = accountResults
+      .flat(2)
+      .sort((left, right) => (itemOrder.get(left.itemId) ?? 0) - (itemOrder.get(right.itemId) ?? 0));
 
     return {
       plan: this.launchStore.refresh(planId),
@@ -139,340 +145,294 @@ export class LaunchService {
     }
     const item = this.launchStore.listItems(planId).find((candidate) => candidate.itemId === itemId);
     if (!item) throw new Error("创建任务不存在或不属于当前计划。");
-    if (item.status === "unknown") {
-      throw new Error("创建结果待确认，禁止重试，需人工核验。");
+    if (item.status !== "failed" && item.status !== "unknown") {
+      throw new Error("只有创建失败的任务可以单项重试。");
     }
-    if (item.status !== "failed") throw new Error("只有明确失败的创建任务可以单项重试。");
-    const executorId = randomUUID();
-    const claimed = this.tasks.claim(itemId, executorId, "failed", actor);
-    if (!claimed) throw new Error("创建任务正在执行或状态已经变化。");
-    const result = await this.executeItem(plan.presetSnapshot.creationConfig, claimed, executorId);
+    const results = await this.executeSeriesBatch(plan.presetSnapshot.creationConfig, [item], actor);
+    if (results.length === 0) throw new Error("创建任务正在执行或状态已经变化。");
     return {
       plan: this.launchStore.refresh(planId),
-      results: [result],
+      results,
     };
   }
 
-  private async executeItem(
+  private async executeSeriesBatch(
     preset: CreationPresetConfig,
-    claimed: LaunchPlanItemRecord,
-    executorId: string,
-  ): Promise<LaunchExecutionItemResult> {
+    candidates: LaunchPlanItemRecord[],
+    actor: WriteTaskActor,
+  ): Promise<LaunchExecutionItemResult[]> {
+    const executorId = randomUUID();
+    const claimed = candidates.flatMap((candidate) => {
+      if (!["pending", "failed", "unknown"].includes(candidate.status)) return [];
+      const item = this.tasks.claim(
+        candidate.itemId,
+        executorId,
+        candidate.status as "pending" | "failed" | "unknown",
+        actor,
+      );
+      return item ? [item] : [];
+    });
+    if (claimed.length === 0) return [];
+
     let providerInvoked = false;
-    let providerConfirmed = false;
-    let creationScopeLocked = false;
-    let creationScopeReservation: { campaignId: string | null; adGroupNames: string[] } | null = null;
-    const campaignName = claimed.launchRow.campaignName.trim();
-    const creationScopeOwner = `${executorId}:${claimed.itemId}`;
     try {
-      creationScopeReservation = this.store.claimLaunchCreationScope(
-        claimed.planId,
-        claimed.accountId,
-        campaignName,
-        creationScopeOwner,
-      );
-      creationScopeLocked = creationScopeReservation !== null;
-      if (!creationScopeLocked) {
-        throw new RetryableCreationError("同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。");
+      const first = claimed[0]!;
+      if (claimed.some((item) => item.accountId !== first.accountId)) {
+        throw new Error("系列批次包含多个账户，无法执行。");
       }
-      const uncertainSibling = this.launchStore.listItems(claimed.planId).some((item) =>
-        item.itemId !== claimed.itemId
-        && item.accountId === claimed.accountId
-        && item.launchRow.campaignName.trim() === claimed.launchRow.campaignName.trim()
-        && item.status === "unknown",
-      );
-      if (uncertainSibling) {
-        throw new RetryableCreationError("同计划内已有同系列任务结果未知，已停止后续创建以避免重复系列或广告组。");
+      if (claimed.some((item) => item.launchRow.campaignName.trim() !== first.launchRow.campaignName.trim())) {
+        throw new Error("系列批次包含多个系列，无法执行。");
       }
-      const account = this.store.getAccount(claimed.accountId);
+      if (claimed.some((item) => item.templateMode !== first.templateMode)) {
+        throw new Error("系列批次包含不同创建模式，无法执行。");
+      }
+      if (claimed.some((item) => item.launchRow.initialStatus !== first.launchRow.initialStatus)) {
+        throw new Error("同系列广告组的初始状态不一致，无法同步发布。");
+      }
+
+      const account = this.store.getAccount(first.accountId);
       if (!account) throw new Error("目标广告账户不存在。");
-      // A launch plan is an explicit user-triggered write with its own audit,
-      // confirmation and manual-verification path. It must not require the
-      // account's background automation mode to be enabled.
-      const connection = this.store.getProviderConnection(claimed.accountId, account.providerKind);
+      const connection = this.store.getProviderConnection(first.accountId, account.providerKind);
       if (!connection || connection.status !== "ready") {
         throw new Error("目标账户未通过连接验证。");
       }
       this.providers.requireAccountCapability(
-        claimed.accountId,
+        first.accountId,
         account.providerKind,
         connection,
-        claimed.templateMode === "copy" ? "copy-ads" : "create-campaigns",
+        first.templateMode === "copy" ? "copy-ads" : "create-campaigns",
       );
-      const latestSync = this.store.getLatestReadOnlySync(claimed.accountId, account.providerKind);
-      if (claimed.templateMode === "copy" && (!latestSync || latestSync.quality.status !== "healthy")) {
+      const latestSync = this.store.getLatestReadOnlySync(first.accountId, account.providerKind);
+      if (first.templateMode === "copy" && (!latestSync || latestSync.quality.status !== "healthy")) {
         throw new Error(
           `目标账户同步数据不是 healthy，批量创建已阻止（当前：${latestSync?.quality.status ?? "none"}）。`,
         );
       }
-      this.store.validateLaunchCopyItem(claimed);
-      const context = await this.loadProviderContext(claimed.accountId, account.providerKind);
-      if (!claimed.attemptId) throw new Error("创建任务缺少 attemptId，禁止调用 Provider。");
-      const attemptId = claimed.attemptId;
-      const templateCampaignId = claimed.templateCampaignId;
-      if (claimed.templateMode === "copy" && !templateCampaignId) {
-        throw new Error("复制计划没有冻结 templateCampaignId，禁止执行且不会按系列名称回退。");
+      for (const item of claimed) {
+        this.store.validateLaunchCopyItem(item);
+        if (!item.attemptId) throw new Error("创建任务缺少 attemptId，禁止调用 Provider。");
+        if (item.templateMode === "copy" && !item.templateCampaignId) {
+          throw new Error("复制计划没有冻结 templateCampaignId，禁止执行且不会按系列名称回退。");
+        }
       }
+      const context = await this.loadProviderContext(first.accountId, account.providerKind);
+      for (const item of claimed) {
+        await this.refreshLaunchCopyEvidence(item, context);
+      }
+      for (const item of claimed) this.store.validateLaunchCopyItem(item);
 
-      if (!this.store.getSystemRuntimeState().enabled) {
-        throw new Error("软件总开关已关闭，批量创建写入已暂停。");
-      }
-      // A copy preview is evidence from a prior sync. Refresh both the source
-      // structure and the target-account asset evidence before the write. A
-      // read failure is safe to retry because no creation request was sent.
-      await this.refreshLaunchCopyEvidence(claimed, context);
-
-      // Re-check all mutable local safety gates synchronously at the final
-      // boundary. There is no await between these checks and Provider dispatch.
-      if (!this.store.getSystemRuntimeState().enabled) {
-        throw new Error("软件总开关已关闭，批量创建写入已暂停。");
-      }
-      const currentAccount = this.store.getAccount(claimed.accountId);
-      if (!currentAccount) {
-        throw new Error("目标广告账户不存在，批量创建已阻止。");
-      }
-      if (currentAccount.providerKind !== account.providerKind) {
-        throw new Error("目标账户 Provider 已变更，批量创建已阻止。");
-      }
-      const currentSync = this.store.getLatestReadOnlySync(claimed.accountId, account.providerKind);
-      if (claimed.templateMode === "copy" && (!currentSync || currentSync.quality.status !== "healthy")) {
-        throw new Error(
-          `目标账户同步数据已变化，批量创建已阻止（当前：${currentSync?.quality.status ?? "none"}）。`,
+      const validateBeforeDispatch = () => {
+        if (!this.store.getSystemRuntimeState().enabled) {
+          throw new Error("软件总开关已关闭，批量创建写入已暂停。");
+        }
+        const currentAccount = this.store.getAccount(first.accountId);
+        if (!currentAccount || currentAccount.providerKind !== account.providerKind) {
+          throw new Error("目标账户配置已变化，批量创建已阻止。");
+        }
+        const dispatchConnection = this.store.getProviderConnection(
+          first.accountId,
+          currentAccount.providerKind,
         );
-      }
-      this.store.validateLaunchCopyItem(claimed);
-
-      // The evidence refresh above performs remote reads. Revalidate the
-      // authorization and exact credential generation immediately before the
-      // irreversible Provider write, with no await between this boundary and
-      // dispatch.
-      const dispatchConnection = this.store.getProviderConnection(
-        claimed.accountId,
-        currentAccount.providerKind,
-      );
-      if (
-        !dispatchConnection
-        || dispatchConnection.credentialRef !== connection.credentialRef
-        || dispatchConnection.updatedAt !== connection.updatedAt
-      ) {
-        throw new Error("目标账户授权或凭据已变更，批量创建已阻止。");
-      }
-      this.providers.requireAccountCapability(
-        claimed.accountId,
-        currentAccount.providerKind,
-        dispatchConnection,
-        claimed.templateMode === "copy" ? "copy-ads" : "create-campaigns",
-      );
-
-      if (!this.store.renewLaunchCreationScope(
-        claimed.planId,
-        claimed.accountId,
-        campaignName,
-        creationScopeOwner,
-      )) {
-        throw new RetryableCreationError("同系列创建锁已失效，当前任务未发送 Provider 请求，请重新执行。");
-      }
-
-      providerInvoked = true;
-      const creationMutation = {
-        row: claimed.launchRow,
-        preset,
-        initialStatus: claimed.launchRow.initialStatus,
-        operationId: claimed.operationId,
-        attemptId,
-        correlationId: claimed.correlationId,
-        batchId: claimed.planId,
-        ...(creationScopeReservation?.campaignId
-          ? { batchCampaignId: creationScopeReservation.campaignId }
-          : {}),
-        ...(creationScopeReservation?.adGroupNames.length
-          ? { batchAdGroupNames: creationScopeReservation.adGroupNames }
-          : {}),
-        onProgress: (progress: LaunchCreationProgress) => {
-          this.launchStore.progress(claimed.itemId, executorId, progress);
-        },
+        if (
+          !dispatchConnection
+          || dispatchConnection.credentialRef !== connection.credentialRef
+          || dispatchConnection.updatedAt !== connection.updatedAt
+        ) {
+          throw new Error("目标账户授权或凭据已变更，批量创建已阻止。");
+        }
+        this.providers.requireAccountCapability(
+          first.accountId,
+          currentAccount.providerKind,
+          dispatchConnection,
+          first.templateMode === "copy" ? "copy-ads" : "create-campaigns",
+        );
+        if (!claimed.every((item) => this.launchStore.renew(item.itemId, executorId))) {
+          throw new Error("创建批次执行权已变化，当前请求未发送。");
+        }
       };
-      const [created] = await withLeaseHeartbeat(
-        () => claimed.templateMode === "copy"
-          ? this.providers.copy(account.providerKind, context, [{
-              ...creationMutation,
-              templateCampaignId: templateCampaignId!,
-            }])
-          : this.providers.create(account.providerKind, context, [creationMutation]),
-        () => {
-          const itemRenewed = this.launchStore.renew(claimed.itemId, executorId);
-          const scopeRenewed = this.store.renewLaunchCreationScope(
-            claimed.planId,
-            claimed.accountId,
-            campaignName,
-            creationScopeOwner,
-          );
-          return itemRenewed && scopeRenewed;
+
+      const mutations: CreationMutation[] = claimed.map((item) => ({
+        row: item.launchRow,
+        preset,
+        initialStatus: item.launchRow.initialStatus,
+        templateMode: item.templateMode,
+        ...(item.templateCampaignId ? { templateCampaignId: item.templateCampaignId } : {}),
+        operationId: item.operationId,
+        attemptId: item.attemptId!,
+        correlationId: item.correlationId,
+        batchId: item.planId,
+        onBeforeDispatch: validateBeforeDispatch,
+        onProgress: (progress: LaunchCreationProgress) => {
+          this.launchStore.progress(item.itemId, executorId, progress);
         },
+      }));
+
+      validateBeforeDispatch();
+      providerInvoked = true;
+      const createdResults = await withLeaseHeartbeat(
+        () => this.providers.createFromPreset(account.providerKind, context, mutations),
+        () => claimed.every((item) => this.launchStore.renew(item.itemId, executorId)),
         launchLeaseHeartbeatMs,
       );
-      if (!created?.ok) {
-        const message = created?.message ?? "Provider 未返回创建结果。";
-        if (created?.failureKind === "unknown" || created?.retrySafe === false) {
-          throw new UnknownCreationStateError(
-            created?.retrySafe === false
-              ? `${message}；此前已有创建步骤被 TikTok 接受，禁止自动重试。`
-              : message,
-          );
-        }
-        throw new RetryableCreationError(message);
-      }
-      providerConfirmed = true;
-      if (!created.campaignId || !created.adGroupId || !created.adId) {
-        throw new UnknownCreationStateError(
-          "Provider 报告成功，但没有返回完整的系列、广告组和广告 ID；为避免重复投放，系统不会自动重试。",
-        );
-      }
-      if (!this.store.completeLaunchCreationScope(
-        claimed.planId,
-        claimed.accountId,
-        campaignName,
-        creationScopeOwner,
-        created.campaignId,
-        created.row.adGroupName,
-      )) {
-        throw new UnknownCreationStateError("Provider 已确认创建，但批次系列预留未能持久化；后续同系列任务已阻止。");
-      }
-      creationScopeLocked = false;
+      const byAttemptId = new Map(
+        createdResults
+          .filter((result) => result.attemptId)
+          .map((result) => [result.attemptId!, result]),
+      );
+      const byOperationId = new Map(
+        createdResults
+          .filter((result) => result.operationId)
+          .map((result) => [result.operationId!, result]),
+      );
+      const outputs: LaunchExecutionItemResult[] = [];
+      const successes: Array<{
+        item: LaunchPlanItemRecord;
+        created: NonNullable<(typeof createdResults)[number]>;
+        output: LaunchExecutionItemResult;
+      }> = [];
+      let providerFailureRecorded = false;
 
-      this.tasks.succeed(claimed.itemId, executorId, {
-        campaignId: created.campaignId,
-        adGroupId: created.adGroupId,
-        adId: created.adId,
-      });
-      let syncWarning: string | null = null;
-      try {
-        this.store.resetProviderWriteFailures(claimed.accountId, account.providerKind);
-      } catch (cause) {
-        syncWarning = `写入失败计数重置失败：${safeError(cause)}`;
-      }
-      let syncResult: ReadOnlySyncResult | null = null;
-      try {
-        const sync = await this.providers.syncReadOnly(account.providerKind, context);
-        syncResult = sync.result;
-        this.store.saveReadOnlySync(
-          claimed.accountId,
-          account.providerKind,
-          sync.entities,
-          sync.result,
-        );
-        const expectedEntities = [
-          ["campaign", created.campaignId] as const,
-          ["ad-group", created.adGroupId] as const,
-          ["ad", created.adId] as const,
-        ];
-        const missingEntities = expectedEntities.filter(([entityType, externalId]) =>
-          !sync.entities.some((entity) =>
-            entity.entityType === entityType && entity.externalId === externalId,
-          ),
-        );
-        const safetyWarnings = [
-          ...(sync.result.quality.status !== "healthy"
-            ? [`创建后同步质量为 ${sync.result.quality.status}，结果数据不可用于继续自动写入`]
-            : []),
-          ...sync.result.warnings,
-          ...(missingEntities.length > 0
-            ? [`创建后未回读到：${missingEntities.map(([entityType]) => entityType).join("、")}`]
-            : []),
-        ];
-        if (safetyWarnings.length > 0) {
-          syncWarning = [syncWarning, ...safetyWarnings].filter(Boolean).join("；");
+      for (const [index, item] of claimed.entries()) {
+        const created = (item.attemptId ? byAttemptId.get(item.attemptId) : undefined)
+          ?? byOperationId.get(item.operationId)
+          ?? createdResults[index];
+        if (!created?.ok || !created.campaignId || !created.adGroupId || !created.adId) {
+          const message = created?.ok
+            ? "Provider 未返回完整的系列、广告组和广告 ID，本条创建按失败处理。"
+            : created?.message ?? "Provider 未返回本广告组的创建结果。";
+          this.tasks.fail(item.itemId, executorId, message);
+          if (!providerFailureRecorded) {
+            this.recordCreationWriteFailure(first.accountId, account.providerKind, message);
+            providerFailureRecorded = true;
+          }
+          outputs.push({
+            itemId: item.itemId,
+            accountId: item.accountId,
+            status: "failed",
+            message,
+            syncWarning: null,
+            ok: false,
+            created: [{ ok: false, message }],
+            sync: null,
+          });
+          continue;
         }
-      } catch (cause) {
-        syncWarning = [syncWarning, safeError(cause)].filter(Boolean).join("；");
-        this.store.updateProviderStatus(
-          claimed.accountId,
-          account.providerKind,
-          "failed",
-          `创建后同步异常：${syncWarning}`,
-        );
-      }
-      try {
-        this.launchStore.sync(claimed.itemId, syncWarning);
-      } catch (cause) {
-        syncWarning = [syncWarning, `同步阶段记录失败：${safeError(cause)}`]
-          .filter(Boolean)
-          .join("；");
-      }
-      return {
-        itemId: claimed.itemId,
-        accountId: claimed.accountId,
-        status: "succeeded",
-        message: created.message,
-        syncWarning,
-        ok: true,
-        created: [{
-          ok: true,
+        const successIds = {
           campaignId: created.campaignId,
           adGroupId: created.adGroupId,
           adId: created.adId,
-          message: created.message,
-        }],
-        sync: syncResult,
-      };
-    } catch (cause) {
-      const message = safeError(cause);
-      if (providerInvoked && !providerConfirmed) {
-        const providerKind = this.store.getAccount(claimed.accountId)?.providerKind;
-        if (providerKind) this.recordCreationWriteFailure(claimed.accountId, providerKind, message);
-      }
-      const unknown = cause instanceof UnknownCreationStateError
-        || providerConfirmed
-        || (providerInvoked && !(cause instanceof RetryableCreationError));
-      if (unknown && creationScopeLocked) {
-        // Never release an unknown provider result, even if persisting the
-        // explicit uncertain marker fails. The retained owner lease expires
-        // into an uncertain scope on the next claim, which remains fail-closed.
-        creationScopeLocked = false;
+        };
         try {
-          this.store.markLaunchCreationScopeUncertain(
-            claimed.planId,
-            claimed.accountId,
-            campaignName,
-            creationScopeOwner,
-          );
+          this.tasks.succeed(item.itemId, executorId, successIds);
         } catch {
-          // The item still transitions to unknown below; the scope must not be
-          // reopened by the finally block.
+          // Provider is already terminal-successful. Retry only the local
+          // transaction; never resend the TikTok batch because of a transient
+          // SQLite write failure.
+          this.tasks.succeed(item.itemId, executorId, successIds);
+        }
+        const output: LaunchExecutionItemResult = {
+          itemId: item.itemId,
+          accountId: item.accountId,
+          status: "succeeded",
+          message: created.message,
+          syncWarning: null,
+          ok: true,
+          created: [{
+            ok: true,
+            campaignId: created.campaignId,
+            adGroupId: created.adGroupId,
+            adId: created.adId,
+            message: created.message,
+          }],
+          sync: null,
+        };
+        outputs.push(output);
+        successes.push({ item, created, output });
+      }
+
+      if (successes.length > 0) {
+        let commonSyncWarning: string | null = null;
+        let syncResult: ReadOnlySyncResult | null = null;
+        let syncEntities: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>["entities"] = [];
+        let syncCompleted = false;
+        try {
+          this.store.resetProviderWriteFailures(first.accountId, account.providerKind);
+        } catch (cause) {
+          commonSyncWarning = `写入失败计数重置失败：${safeError(cause)}`;
+        }
+        try {
+          const sync = await this.providers.syncReadOnly(account.providerKind, context);
+          syncResult = sync.result;
+          syncEntities = sync.entities;
+          this.store.saveReadOnlySync(first.accountId, account.providerKind, sync.entities, sync.result);
+          syncCompleted = true;
+          if (sync.result.quality.status !== "healthy" || sync.result.warnings.length > 0) {
+            commonSyncWarning = [
+              commonSyncWarning,
+              ...(sync.result.quality.status !== "healthy"
+                ? [`创建后同步质量为 ${sync.result.quality.status}`]
+                : []),
+              ...sync.result.warnings,
+            ].filter(Boolean).join("；");
+          }
+        } catch (cause) {
+          commonSyncWarning = [commonSyncWarning, safeError(cause)].filter(Boolean).join("；");
+          this.store.updateProviderStatus(
+            first.accountId,
+            account.providerKind,
+            "failed",
+            `创建后同步异常：${commonSyncWarning}`,
+          );
+        }
+        for (const success of successes) {
+          const missing = [
+            ["campaign", success.created.campaignId] as const,
+            ["ad-group", success.created.adGroupId] as const,
+            ["ad", success.created.adId] as const,
+          ].filter(([entityType, externalId]) =>
+            syncCompleted
+            && !syncEntities.some((entity) => entity.entityType === entityType && entity.externalId === externalId),
+          );
+          const itemWarning = [
+            commonSyncWarning,
+            ...(missing.length > 0 ? [`创建后未回读到：${missing.map(([type]) => type).join("、")}`] : []),
+          ].filter(Boolean).join("；") || null;
+          try {
+            this.launchStore.sync(success.item.itemId, itemWarning);
+          } catch (cause) {
+            success.output.syncWarning = [itemWarning, `同步阶段记录失败：${safeError(cause)}`]
+              .filter(Boolean)
+              .join("；");
+          }
+          success.output.syncWarning ??= itemWarning;
+          success.output.sync = syncResult;
         }
       }
-      if (unknown) {
-        this.tasks.unknown(
-          claimed.itemId,
-          executorId,
-          message,
-        );
-      } else {
-        this.tasks.fail(
-          claimed.itemId,
-          executorId,
-          message,
-        );
+      return outputs;
+    } catch (cause) {
+      const message = safeError(cause);
+      if (providerInvoked) {
+        const providerKind = this.store.getAccount(claimed[0]!.accountId)?.providerKind;
+        if (providerKind) this.recordCreationWriteFailure(claimed[0]!.accountId, providerKind, message);
       }
-      return {
-        itemId: claimed.itemId,
-        accountId: claimed.accountId,
-        status: unknown ? "unknown" : "failed",
-        message,
-        syncWarning: null,
-        ok: false,
-        created: [{ ok: false, message }],
-        sync: null,
-      };
-    } finally {
-      if (creationScopeLocked) {
-        this.store.releaseLaunchCreationScope(
-          claimed.planId,
-          claimed.accountId,
-          campaignName,
-          creationScopeOwner,
-        );
-      }
+      const current = new Map(
+        this.launchStore.listItems(claimed[0]!.planId).map((item) => [item.itemId, item]),
+      );
+      return claimed.map((item): LaunchExecutionItemResult => {
+        if (current.get(item.itemId)?.status === "running") {
+          this.tasks.fail(item.itemId, executorId, message);
+        }
+        return {
+          itemId: item.itemId,
+          accountId: item.accountId,
+          status: "failed",
+          message,
+          syncWarning: null,
+          ok: false,
+          created: [{ ok: false, message }],
+          sync: null,
+        };
+      });
     }
   }
 
@@ -488,6 +448,11 @@ export class LaunchService {
     this.launchStore.recover(
       new Date(Date.now() - launchLeaseTimeoutMs).toISOString(),
     );
+    const resumed = this.launchStore.recoverLegacySeriesBlocks();
+    const repaired = this.launchStore.recoverDefinitiveFailures();
+    for (const planId of new Set([...resumed.planIds, ...repaired.planIds])) {
+      this.launchStore.refresh(planId);
+    }
   }
 
   private async refreshLaunchCopyEvidence(
@@ -802,6 +767,45 @@ export class LaunchService {
     return { createdGroups, scheduled, failed, skipped };
   }
 
+}
+
+function groupLaunchItemsByAccountAndCampaign(
+  items: LaunchPlanItemRecord[],
+): Map<string, LaunchPlanItemRecord[][]> {
+  const accountGroups = new Map<string, Map<string, LaunchPlanItemRecord[]>>();
+  for (const item of items) {
+    const seriesKey = [
+      item.launchRow.campaignName.trim(),
+      item.templateMode,
+      item.templateCampaignId ?? "",
+    ].join("\u0000");
+    const groups = accountGroups.get(item.accountId) ?? new Map<string, LaunchPlanItemRecord[]>();
+    const group = groups.get(seriesKey) ?? [];
+    group.push(item);
+    groups.set(seriesKey, group);
+    accountGroups.set(item.accountId, groups);
+  }
+  return new Map(
+    [...accountGroups].map(([accountId, groups]) => [accountId, [...groups.values()]]),
+  );
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  work: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await work(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 /**

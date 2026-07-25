@@ -31,12 +31,10 @@ import {
   MultiAccountLaunchPlanInputSchema,
   LaunchCopyPreviewInputSchema,
   LaunchPresetInputSchema,
-  LaunchManualVerificationInputSchema,
   getCreationTemplateReadiness,
   StatusManualVerificationInputSchema,
   WriteTaskStatusSchema,
   AuditLogFilterSchema,
-  filterEntitiesToRecentWindow,
   type AppPermission,
   type ProviderKind,
   type WriteTaskActor,
@@ -552,16 +550,6 @@ export async function createApp(
     return dependencies.store.listLaunchPlanItemAttempts(itemId);
   });
 
-  app.get("/api/launch-plans/:planId/items/:itemId/verifications", async (request, reply) => {
-    const { planId, itemId } = z.object({
-      planId: z.string().min(1),
-      itemId: z.string().min(1),
-    }).parse(request.params);
-    const item = dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId);
-    if (!item) return reply.status(404).send({ message: "创建任务不存在。" });
-    return dependencies.store.listLaunchPlanItemVerifications(itemId);
-  });
-
   app.get("/api/launch-presets", async () =>
     dependencies.store.listLaunchPresets(),
   );
@@ -725,33 +713,6 @@ export async function createApp(
       return await launchService.retryItem(planId, itemId, user
         ? { id: user.id, name: user.username, kind: "user" }
         : { id: "local-user", name: "本地用户", kind: "user" });
-    } catch (cause) {
-      return reply.status(409).send({ message: getSafeProviderError(cause) });
-    }
-  });
-
-  app.post("/api/launch-plans/:planId/items/:itemId/verify", async (request, reply) => {
-    const { planId, itemId } = z.object({
-      planId: z.string().min(1),
-      itemId: z.string().min(1),
-    }).parse(request.params);
-    const item = dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId);
-    if (!item) return reply.status(404).send({ message: "创建任务不存在。" });
-    const actor = request.authSession?.user ?? {
-      id: "isolated-test",
-      username: "isolated-test",
-    };
-    try {
-      const verification = dependencies.store.verifyUnknownLaunchPlanItem(
-        itemId,
-        LaunchManualVerificationInputSchema.parse(request.body),
-        { id: actor.id, name: actor.username },
-      );
-      return {
-        verification,
-        item: dependencies.store.listLaunchPlanItems(planId).find((candidate) => candidate.itemId === itemId),
-        plan: dependencies.store.refreshLaunchPlanResult(planId),
-      };
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
@@ -1599,24 +1560,8 @@ export async function createApp(
         );
         throw cause;
       }
-      const recent = filterEntitiesToRecentWindow(
-        output.entities,
-        new Date(),
-        dependencies.store.getRuleConfiguration().lookbackHours,
-      );
-      const filteredResult = {
-        ...output.result,
-        counts: {
-          campaign: recent.entities.filter((entity) => entity.entityType === "campaign").length,
-          "ad-group": recent.entities.filter((entity) => entity.entityType === "ad-group").length,
-          ad: recent.entities.filter((entity) => entity.entityType === "ad").length,
-        },
-        warnings: recent.excludedCount > 0
-          ? [...output.result.warnings, `已排除 ${recent.excludedCount} 个不属于最近 ${dependencies.store.getRuleConfiguration().lookbackHours} 小时广告组窗口的对象。`]
-          : output.result.warnings,
-      };
-      dependencies.store.saveReadOnlySync(accountId, providerKind, recent.entities, filteredResult);
-      return filteredResult;
+      dependencies.store.saveReadOnlySync(accountId, providerKind, output.entities, output.result);
+      return output.result;
     },
   );
 

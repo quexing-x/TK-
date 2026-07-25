@@ -97,10 +97,6 @@ import {
   type LaunchPlanItemStatus,
   LaunchPlanItemAttemptRecordSchema,
   type LaunchPlanItemAttemptRecord,
-  LaunchManualVerificationInputSchema,
-  LaunchManualVerificationRecordSchema,
-  type LaunchManualVerificationInput,
-  type LaunchManualVerificationRecord,
   LaunchCreationProgressSchema,
   type LaunchCreationProgress,
   LaunchPresetInputSchema,
@@ -3280,7 +3276,7 @@ export class AutomationStore {
   claimLaunchPlanItem(
     itemId: string,
     executorId: string,
-    expectedStatus: "pending" | "failed",
+    expectedStatus: "pending" | "failed" | "unknown",
     actor: WriteTaskActor = { id: "local-user", name: "本地用户", kind: "user" },
   ): LaunchPlanItemRecord | null {
     const now = new Date().toISOString();
@@ -3301,6 +3297,19 @@ export class AutomationStore {
       if (!row) {
         this.db.exec("COMMIT");
         return null;
+      }
+      if (expectedStatus === "unknown") {
+        const launchRow = JSON.parse(String(row.launch_row_json)) as { campaignName?: unknown };
+        const campaignName = typeof launchRow.campaignName === "string" ? launchRow.campaignName.trim() : "";
+        if (campaignName) {
+          // Re-opening an unknown scope only happens after the user explicitly
+          // clicks Retry. It is never performed by background recovery.
+          this.db.prepare(
+            `UPDATE launch_creation_locks
+             SET owner_id = NULL, uncertain = 0, claimed_at = ?
+             WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+          ).run(now, String(row.plan_id), String(row.account_id), campaignName);
+        }
       }
       this.db.prepare(
         `INSERT INTO launch_plan_item_attempts (
@@ -3372,135 +3381,6 @@ export class AutomationStore {
       "SELECT * FROM launch_plan_item_attempts WHERE item_id = ? ORDER BY attempt_number",
     ).all(itemId) as SqlRow[];
     return rows.map(mapLaunchPlanItemAttempt);
-  }
-
-  listLaunchPlanItemVerifications(itemId: string): LaunchManualVerificationRecord[] {
-    const rows = this.db.prepare(
-      "SELECT * FROM launch_plan_item_verifications WHERE item_id = ? ORDER BY created_at",
-    ).all(itemId) as SqlRow[];
-    return rows.map(mapLaunchManualVerification);
-  }
-
-  verifyUnknownLaunchPlanItem(
-    itemId: string,
-    input: LaunchManualVerificationInput,
-    actor: { id: string; name: string },
-  ): LaunchManualVerificationRecord {
-    const verification = LaunchManualVerificationInputSchema.parse(input);
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    const nextStatus = verification.decision === "confirmed-succeeded" ? "succeeded" : "failed";
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const current = this.db.prepare(
-        "SELECT * FROM launch_plan_items WHERE item_id = ? AND status = 'unknown'",
-      ).get(itemId) as SqlRow | undefined;
-      if (!current) throw new Error("只有创建结果未知的任务可以人工核验。");
-      const launchRow = JSON.parse(String(current.launch_row_json)) as {
-        campaignName: string;
-        adGroupName: string;
-      };
-      const creationEvidence = JSON.parse(String(current.evidence_json ?? "{}")) as {
-        resolvedAdGroupName?: unknown;
-      };
-      this.db.prepare(
-        `INSERT INTO launch_plan_item_verifications (
-          id, item_id, actor_id, actor_name, decision, evidence, note,
-          campaign_id, adgroup_id, ad_id, previous_status, next_status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)`,
-      ).run(
-        id,
-        itemId,
-        actor.id,
-        actor.name,
-        verification.decision,
-        verification.evidence,
-        verification.note,
-        verification.campaignId,
-        verification.adGroupId,
-        verification.adId,
-        nextStatus,
-        now,
-      );
-      if (nextStatus === "succeeded") {
-        this.db.prepare(
-          `UPDATE launch_plan_items SET status = 'succeeded', phase = 'readback',
-           campaign_id = ?, adgroup_id = ?, ad_id = ?, error_message = NULL,
-           sync_warning = '人工核验确认成功，尚未完成自动回读。', completed_at = ?, updated_at = ?
-           WHERE item_id = ? AND status = 'unknown'`,
-        ).run(
-          verification.campaignId,
-          verification.adGroupId,
-          verification.adId,
-          now,
-          now,
-          itemId,
-        );
-      } else {
-        this.db.prepare(
-          `UPDATE launch_plan_items SET status = 'failed',
-           error_message = '人工核验确认未创建；可由用户显式单项重试。', updated_at = ?
-           WHERE item_id = ? AND status = 'unknown'`,
-        ).run(now, itemId);
-      }
-      if (verification.decision === "confirmed-succeeded") {
-        const existingScope = this.db.prepare(
-          `SELECT ad_group_names_json FROM launch_creation_locks
-           WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
-        ).get(String(current.plan_id), String(current.account_id), launchRow.campaignName.trim()) as SqlRow | undefined;
-        const names = new Set(JSON.parse(String(existingScope?.ad_group_names_json ?? "[]")) as string[]);
-        const resolvedAdGroupName = typeof creationEvidence.resolvedAdGroupName === "string"
-          ? creationEvidence.resolvedAdGroupName.trim()
-          : "";
-        if (!resolvedAdGroupName) {
-          throw new Error("未知创建记录缺少实际广告组名称，禁止猜测原名或后续名并确认成功。");
-        }
-        names.add(resolvedAdGroupName);
-        this.db.prepare(
-          `INSERT INTO launch_creation_locks (
-             plan_id, account_id, campaign_name, owner_id, claimed_at,
-             campaign_id, ad_group_names_json, uncertain
-           ) VALUES (?, ?, ?, NULL, ?, ?, ?, 0)
-           ON CONFLICT(plan_id, account_id, campaign_name) DO UPDATE SET
-             owner_id = NULL, claimed_at = excluded.claimed_at,
-             campaign_id = excluded.campaign_id,
-             ad_group_names_json = excluded.ad_group_names_json, uncertain = 0`,
-        ).run(
-          String(current.plan_id),
-          String(current.account_id),
-          launchRow.campaignName.trim(),
-          now,
-          verification.campaignId,
-          JSON.stringify([...names]),
-        );
-      } else {
-        this.db.prepare(
-          `UPDATE launch_creation_locks
-           SET owner_id = NULL, uncertain = 0, claimed_at = ?
-           WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
-        ).run(now, String(current.plan_id), String(current.account_id), launchRow.campaignName.trim());
-      }
-      this.writeAudit(actor.name, String(current.account_id), "launch-item.manually-verified", {
-        itemId,
-        verificationId: id,
-        decision: verification.decision,
-        previousStatus: "unknown",
-        nextStatus,
-        evidence: verification.evidence,
-        note: verification.note,
-        campaignId: verification.campaignId,
-        adGroupId: verification.adGroupId,
-        adId: verification.adId,
-      });
-      this.db.exec("COMMIT");
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      throw cause;
-    }
-    const row = this.db.prepare(
-      "SELECT * FROM launch_plan_item_verifications WHERE id = ?",
-    ).get(id) as SqlRow;
-    return mapLaunchManualVerification(row);
   }
 
   completeLaunchPlanItemSuccess(
@@ -3670,6 +3550,129 @@ export class AutomationStore {
     }
   }
 
+  recoverLegacySeriesCoordinationFailures(): {
+    resumedItemCount: number;
+    planIds: string[];
+  } {
+    const blocked = this.db.prepare(
+      `SELECT item_id, plan_id FROM launch_plan_items
+       WHERE status = 'failed'
+         AND (
+           instr(COALESCE(error_message, ''), '当前任务未发送 Provider 请求') > 0
+           OR instr(COALESCE(error_message, ''), '同批次前一条同系列任务结果未知') > 0
+           OR instr(COALESCE(error_message, ''), '同计划内已有同系列任务结果未知') > 0
+           OR instr(COALESCE(error_message, ''), '同系列创建锁已失效') > 0
+         )`,
+    ).all() as SqlRow[];
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const resume = this.db.prepare(
+        `UPDATE launch_plan_items
+         SET status = 'pending', phase = 'validation', attempt_id = NULL,
+             claimed_by = NULL, claimed_at = NULL, error_message = NULL,
+             sync_warning = NULL, completed_at = NULL, updated_at = ?
+         WHERE item_id = ? AND status = 'failed'`,
+      );
+      let resumedItemCount = 0;
+      for (const row of blocked) {
+        resumedItemCount += Number(resume.run(now, String(row.item_id)).changes);
+      }
+      // Series coordination is now performed by the account/campaign batch
+      // scheduler. Legacy per-item locks must not remain as a business gate.
+      this.db.prepare(
+        "UPDATE launch_creation_locks SET owner_id = NULL, uncertain = 0, claimed_at = ?",
+      ).run(now);
+      this.db.exec("COMMIT");
+      return {
+        resumedItemCount,
+        planIds: [...new Set(blocked.map((row) => String(row.plan_id)))],
+      };
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  recoverDefinitiveLaunchFailures(): {
+    recoveredItemCount: number;
+    resumedItemCount: number;
+    planIds: string[];
+  } {
+    const definitiveFailures = this.db.prepare(
+      `SELECT * FROM launch_plan_items
+       WHERE status = 'unknown'
+         AND (
+           instr(COALESCE(error_message, ''), 'TikTok 已明确报告广告组或创意创建失败，未生成正式广告') > 0
+           OR instr(COALESCE(error_message, ''), 'TikTok 已明确报告创建失败，未生成正式广告') > 0
+         )`,
+    ).all() as SqlRow[];
+    if (definitiveFailures.length === 0) {
+      return { recoveredItemCount: 0, resumedItemCount: 0, planIds: [] };
+    }
+
+    const now = new Date().toISOString();
+    const planIds = new Set<string>();
+    const resumedItemIds = new Set<string>();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const markFailed = this.db.prepare(
+        `UPDATE launch_plan_items
+         SET status = 'failed', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+         WHERE item_id = ? AND status = 'unknown'`,
+      );
+      const releaseScope = this.db.prepare(
+        `UPDATE launch_creation_locks
+         SET owner_id = NULL, uncertain = 0, claimed_at = ?
+         WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
+      );
+      const blockedSiblings = this.db.prepare(
+        `SELECT item_id, launch_row_json, error_message FROM launch_plan_items
+         WHERE plan_id = ? AND account_id = ? AND status = 'failed'`,
+      );
+      const resumeSibling = this.db.prepare(
+        `UPDATE launch_plan_items
+         SET status = 'pending', phase = 'validation', attempt_id = NULL,
+             claimed_by = NULL, claimed_at = NULL, error_message = NULL,
+             sync_warning = NULL, completed_at = NULL, updated_at = ?
+         WHERE item_id = ? AND status = 'failed'`,
+      );
+
+      for (const row of definitiveFailures) {
+        const planId = String(row.plan_id);
+        const accountId = String(row.account_id);
+        const launchRow = JSON.parse(String(row.launch_row_json)) as { campaignName?: unknown };
+        const campaignName = typeof launchRow.campaignName === "string" ? launchRow.campaignName.trim() : "";
+        if (!campaignName) continue;
+        markFailed.run(now, String(row.item_id));
+        releaseScope.run(now, planId, accountId, campaignName);
+        planIds.add(planId);
+
+        const siblings = blockedSiblings.all(planId, accountId) as SqlRow[];
+        for (const sibling of siblings) {
+          const message = String(sibling.error_message ?? "");
+          const wasNeverDispatched = message.includes("当前任务未发送 Provider 请求")
+            || message.includes("同批次前一条同系列任务结果未知")
+            || message.includes("同计划内已有同系列任务结果未知");
+          if (!wasNeverDispatched) continue;
+          const siblingLaunchRow = JSON.parse(String(sibling.launch_row_json)) as { campaignName?: unknown };
+          if (typeof siblingLaunchRow.campaignName !== "string" || siblingLaunchRow.campaignName.trim() !== campaignName) continue;
+          const result = resumeSibling.run(now, String(sibling.item_id));
+          if (result.changes === 1) resumedItemIds.add(String(sibling.item_id));
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+    return {
+      recoveredItemCount: definitiveFailures.length,
+      resumedItemCount: resumedItemIds.size,
+      planIds: [...planIds],
+    };
+  }
+
   private finishLaunchAttempt(
     itemRow: SqlRow,
     status: "succeeded" | "failed" | "unknown",
@@ -3708,7 +3711,7 @@ export class AutomationStore {
         ok: accountItems.length > 0 && accountItems.every((item) => item.status === "succeeded"),
         message: [
           failureMessage ? `明确失败：${failureMessage}` : "",
-          unknownMessage ? `创建结果待确认：${unknownMessage}` : "",
+          unknownMessage ? `创建失败：${unknownMessage}` : "",
         ].filter(Boolean).join("；").slice(0, 2000) || null,
         createdCount: accountItems.filter((item) => item.status === "succeeded").length,
         failedCount: failures.length,
@@ -3723,7 +3726,7 @@ export class AutomationStore {
       : [
           `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条`,
           ...(failedCount > 0 ? [`明确失败 ${failedCount} 条，可单独重试`] : []),
-          ...(unknownCount > 0 ? [`结果未知 ${unknownCount} 条，禁止重试，需人工核验`] : []),
+          ...(unknownCount > 0 ? [`创建失败 ${unknownCount} 条`] : []),
         ].join("；") + "。";
     this.db
       .prepare(
@@ -6778,24 +6781,6 @@ function mapLaunchPlanItemAttempt(row: SqlRow): LaunchPlanItemAttemptRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at ?? null,
-  });
-}
-
-function mapLaunchManualVerification(row: SqlRow): LaunchManualVerificationRecord {
-  return LaunchManualVerificationRecordSchema.parse({
-    id: row.id,
-    itemId: row.item_id,
-    actorId: row.actor_id,
-    actorName: row.actor_name,
-    decision: row.decision,
-    evidence: row.evidence,
-    note: row.note,
-    campaignId: row.campaign_id ?? null,
-    adGroupId: row.adgroup_id ?? null,
-    adId: row.ad_id ?? null,
-    previousStatus: row.previous_status,
-    nextStatus: row.next_status,
-    createdAt: row.created_at,
   });
 }
 

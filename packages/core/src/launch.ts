@@ -260,36 +260,6 @@ export const LaunchPlanItemAttemptRecordSchema = z.object({
 });
 export type LaunchPlanItemAttemptRecord = z.infer<typeof LaunchPlanItemAttemptRecordSchema>;
 
-const LaunchManualVerificationFieldsSchema = z.object({
-  decision: z.enum(["confirmed-succeeded", "confirmed-not-created"]),
-  evidence: z.string().trim().min(10).max(4_000),
-  note: z.string().trim().max(2_000).default(""),
-  campaignId: z.string().trim().min(1).max(256).nullable().default(null),
-  adGroupId: z.string().trim().min(1).max(256).nullable().default(null),
-  adId: z.string().trim().min(1).max(256).nullable().default(null),
-});
-export const LaunchManualVerificationInputSchema = LaunchManualVerificationFieldsSchema.superRefine((value, context) => {
-  if (value.decision === "confirmed-succeeded" && (!value.campaignId || !value.adGroupId || !value.adId)) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "确认成功必须填写 campaignId、adGroupId 和 adId。",
-      path: ["campaignId"],
-    });
-  }
-});
-export type LaunchManualVerificationInput = z.infer<typeof LaunchManualVerificationInputSchema>;
-
-export const LaunchManualVerificationRecordSchema = LaunchManualVerificationFieldsSchema.extend({
-  id: z.string().min(1),
-  itemId: z.string().min(1),
-  actorId: z.string().min(1),
-  actorName: z.string().min(1),
-  previousStatus: z.literal("unknown"),
-  nextStatus: z.enum(["succeeded", "failed"]),
-  createdAt: z.string().datetime(),
-});
-export type LaunchManualVerificationRecord = z.infer<typeof LaunchManualVerificationRecordSchema>;
-
 export const LaunchSheetIssueSchema = z.object({
   rowNumber: z.number().int().min(1),
   field: z.string().min(1),

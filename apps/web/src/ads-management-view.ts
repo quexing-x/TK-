@@ -2,7 +2,6 @@ import type { ManagedEntityRecord } from "@tk-auto/core";
 
 export const ADS_MANAGEMENT_DEFAULT_LEVEL = "ad-group" as const;
 export const ADS_MANAGEMENT_DEFAULT_STATUS = "enabled" as const;
-export const ADS_MANAGEMENT_WINDOW_HOURS = 48 as const;
 export const ADS_MANAGEMENT_PAGE_SIZE = 15 as const;
 
 export function compareAdsManagementSpend(
@@ -38,12 +37,9 @@ export function filterAdsManagementEntities(
   },
 ): ManagedEntityRecord[] {
   const normalizedQuery = input.query.trim().toLowerCase();
-  const cutoff = (input.now ?? new Date()).getTime() - ADS_MANAGEMENT_WINDOW_HOURS * 60 * 60_000;
   return entities
     .map((entity, index) => ({ entity, index }))
     .filter(({ entity }) => {
-      const createdAt = entity.createdAt ? new Date(entity.createdAt).getTime() : Number.NaN;
-      if (!Number.isFinite(createdAt) || createdAt < cutoff) return false;
       if (input.level !== "all" && entity.entityType !== input.level) return false;
       if (input.status !== "all" && entity.status !== input.status) return false;
       return !normalizedQuery

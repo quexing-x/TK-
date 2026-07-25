@@ -397,8 +397,11 @@ describe("CookieAdsProvider", () => {
   it("loads every Cookie list page before declaring pagination complete", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      const body = JSON.parse(String(init?.body ?? "{}")) as { page?: number };
-      const page = body.page ?? Number(new URL(url).searchParams.get("page") ?? 1);
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        page?: number;
+        common_req?: { page?: number };
+      };
+      const page = body.common_req?.page ?? body.page ?? Number(new URL(url).searchParams.get("page") ?? 1);
       const prefix = url.includes("adgroup/list") ? "g" : url.includes("campaign/list") ? "c" : "a";
       return new Response(JSON.stringify({
         code: 0,
@@ -642,9 +645,16 @@ describe("CookieAdsProvider", () => {
   });
 
   it("keeps a single imported ad-group cURL fully usable by deriving the other read layers", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      const table = url.includes("campaign/list")
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body });
+      const commonRequest = body.common_req as Record<string, unknown> | undefined;
+      const campaignDimensionValid = JSON.stringify(commonRequest?.dimensions) === JSON.stringify(["campaign_id"]);
+      const table = url.includes("campaign/list") && !campaignDimensionValid
+        ? []
+        : url.includes("campaign/list")
         ? [{ campaign_id: "c1", campaign_name: "系列" }]
         : url.includes("adgroup/list")
           ? [{ campaign_id: "c1", adgroup_id: "g1", adgroup_name: "广告组", spend: "1" }]
@@ -667,7 +677,17 @@ describe("CookieAdsProvider", () => {
           target: "ad-group",
           url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456",
           method: "POST",
-          body: JSON.stringify({ start_date: "2026-07-01", end_date: "2026-07-07" }),
+          body: JSON.stringify({
+            common_req: {
+              st: "2026-07-01",
+              et: "2026-07-07",
+              dimensions: ["ad_id"],
+              metrics: ["stat_cost"],
+              filters: [{ field: "ad_status", in_field_values: ["delete"], filter_type: 10 }],
+              page: 1,
+              page_size: 20,
+            },
+          }),
           contentType: "application/json",
         }],
       },
@@ -675,6 +695,12 @@ describe("CookieAdsProvider", () => {
 
     expect(output.result.quality.status).toBe("healthy");
     expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 1 });
+    expect(requested.find((item) => item.url.includes("campaign/list"))?.body).toMatchObject({
+      common_req: {
+        dimensions: ["campaign_id"],
+        metrics: ["stat_cost", "time_attr_on_web_cart"],
+      },
+    });
   });
 
   it("derives the final-ad read request from the only imported adgroup-list cURL", async () => {
@@ -961,6 +987,7 @@ describe("CookieAdsProvider", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      const validation = successfulDraftValidationPayload(url);
       const body = url.includes("adgroup/list") || url.includes("campaign/list")
         ? { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 }
         : url.includes("campaign_snap/save")
@@ -969,7 +996,7 @@ describe("CookieAdsProvider", () => {
           ? { data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }, code: 0 }
           : url.includes("creative_snap/save")
             ? { data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }, code: 0 }
-            : { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
+            : validation ?? { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     }));
 
@@ -977,8 +1004,8 @@ describe("CookieAdsProvider", () => {
       accountId: "test-account", settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
       credential: { kind: "cookie", cookie: "sessionid=test-cookie", csrfHeaderName: "x-csrftoken", requestTemplates: [{ target: "ad-group", url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=123456&msToken=session", method: "POST", body: "{}", contentType: "application/json" }] },
     }, [{
-      row: { rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "#authorization-code", productUrl: "https://example.com", region: "US", dailyBudget: 100, bid: null, startAt: null, endAt: null, initialStatus: "enabled" },
-      preset: { objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0, pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null, identityType: 1, identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [1], smartTargeting: true, commentDisabled: false, shareDisabled: false, videoPostMappings: [{ advertiserId: "different-account", videoCode: "#authorization-code", postId: "7663403524864167176" }] },
+      row: { rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "7663403524864167176", productUrl: "https://example.com", region: "US", dailyBudget: 100, bid: null, startAt: null, endAt: null, initialStatus: "enabled" },
+      preset: { objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0, pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null, identityType: 1, identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [1], smartTargeting: true, commentDisabled: false, shareDisabled: false, videoPostMappings: [] },
       initialStatus: "enabled",
       templateMode: "none",
       operationId: "operation-1",
@@ -992,16 +1019,17 @@ describe("CookieAdsProvider", () => {
       "/api/v3/i18n/statistics/op/adgroup/list/",
       "/api/v3/i18n/statistics/op/campaign/list/",
       "/api/v4/i18n/creation/campaign_snap/save/",
+      "/api/v4/i18n/creation/campaign_snap/check/",
       "/api/v4/i18n/creation/ad_snap/save/",
+      "/api/v4/i18n/creation/ad_snap/bulk_check/",
       "/api/v4/i18n/creation/creative_snap/save/",
       "/api/v4/i18n/creation/snap/cbo_consistency_check/",
-      "/api/v4/i18n/creation/campaign_snap/check/",
-      "/api/v4/i18n/creation/snap/batch_create_cta_id/",
       "/api/v4/i18n/creation/ad_creative_snap/check/",
+      "/api/v4/i18n/creation/snap/batch_create_cta_id/",
       "/api/v4/i18n/creation/async_creation/create_by_snap/",
     ]);
-    expect(requested[9]?.body).toMatchObject({ is_status_disabled: false });
-    expect(requested[4]?.body).toMatchObject({
+    expect(requested[10]?.body).toMatchObject({ is_status_disabled: false });
+    expect(requested[6]?.body).toMatchObject({
       asset_group_sketch_form_data_list: [{ image_list: [{ aweme_item_id: "7663403524864167176" }] }],
     });
     expect(progress).toEqual(expect.arrayContaining([
@@ -1014,12 +1042,76 @@ describe("CookieAdsProvider", () => {
     ]));
   });
 
+  it("builds every same-campaign draft before one synchronized publish", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let campaignSaves = 0;
+    let adGroupSaves = 0;
+    let creativeSaves = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body: requestBody });
+      let body: Record<string, unknown>;
+      if (url.includes("adgroup/list") || url.includes("campaign/list")) {
+        body = { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 };
+      } else if (url.includes("campaign_snap/save")) {
+        campaignSaves += 1;
+        body = { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 };
+      } else if (url.includes("ad_snap/save")) {
+        adGroupSaves += 1;
+        body = { data: { ad_snap_id: `ad-snap-${adGroupSaves}`, ad_sketch_id: `ad-sketch-${adGroupSaves}` }, code: 0 };
+      } else if (url.includes("creative_snap/save")) {
+        creativeSaves += 1;
+        body = { data: { creative_snap_id: `creative-snap-${creativeSaves}`, creative_sketch_id: `creative-sketch-${creativeSaves}` }, code: 0 };
+      } else if (url.includes("async_creation/detail")) {
+        body = { code: 0, data: { status: 1, result: {
+          campaign_id: "campaign",
+          ad_and_creative: {
+            // TikTok can return the terminal objects in a different order
+            // than the submitted drafts. by_ad_snap_id is the stable join key.
+            0: { by_ad_snap_id: "ad-snap-2", ad_id: "adgroup-2", asset_group_result: { 0: { creative_items: [{ id: "creative-2" }] } } },
+            1: { by_ad_snap_id: "ad-snap-1", ad_id: "adgroup-1", asset_group_result: { 0: { creative_items: [{ id: "creative-1" }] } } },
+          },
+        } } };
+      } else {
+        body = successfulDraftValidationPayload(url, ["ad-snap-1", "ad-snap-2"])
+          ?? { code: 0, data: { async_request_id: "async-batch" } };
+      }
+      return jsonResponse(body);
+    }));
+
+    const first = creationTestMutation("none");
+    const second = creationTestMutation("none");
+    first.operationId = "operation-1";
+    first.attemptId = "attempt-1";
+    second.operationId = "operation-2";
+    second.attemptId = "attempt-2";
+    second.row = { ...second.row, rowNumber: 3, adGroupName: "group-2", adName: "260717:002" };
+
+    const result = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [first, second],
+    );
+
+    const publishes = requested.filter((item) => item.url.includes("async_creation/create_by_snap"));
+    expect(campaignSaves).toBe(1);
+    expect(adGroupSaves).toBe(2);
+    expect(creativeSaves).toBe(2);
+    expect(publishes).toHaveLength(1);
+    expect(publishes[0]?.body.ad_and_creative_snap_info_list).toHaveLength(2);
+    expect(result).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: "operation-1", ok: true, campaignId: "campaign", adGroupId: "adgroup-1", adId: "creative-1" }),
+      expect.objectContaining({ operationId: "operation-2", ok: true, campaignId: "campaign", adGroupId: "adgroup-2", adId: "creative-2" }),
+    ]));
+  });
+
   it("creates one ad-group with several ads from a multi-code cell", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     let creativeSaves = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      const validation = successfulDraftValidationPayload(url);
       const body = url.includes("adgroup/list") || url.includes("campaign/list")
         ? { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 }
         : url.includes("campaign_snap/save")
@@ -1028,7 +1120,7 @@ describe("CookieAdsProvider", () => {
           ? { data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }, code: 0 }
           : url.includes("creative_snap/save")
             ? (creativeSaves += 1, { data: { creative_snap_id: `creative-snap-${creativeSaves}`, creative_sketch_id: `creative-sketch-${creativeSaves}` }, code: 0 })
-            : { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
+            : validation ?? { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     }));
 
@@ -1036,8 +1128,8 @@ describe("CookieAdsProvider", () => {
       accountId: "test-account", settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
       credential: { kind: "cookie", cookie: "sessionid=test-cookie", csrfHeaderName: "x-csrftoken", requestTemplates: [{ target: "ad-group", url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=123456&msToken=session", method: "POST", body: "{}", contentType: "application/json" }] },
     }, [{
-      row: { rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "#codeA;#codeB", productUrl: "https://example.com", region: "US", dailyBudget: 100, bid: null, startAt: null, endAt: null, initialStatus: "enabled" },
-      preset: { objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0, pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null, identityType: 1, identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [1], smartTargeting: true, commentDisabled: false, shareDisabled: false, videoPostMappings: [{ advertiserId: "x", videoCode: "#codeA", postId: "1111" }, { advertiserId: "x", videoCode: "#codeB", postId: "2222" }] },
+      row: { rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "1111;2222", productUrl: "https://example.com", region: "US", dailyBudget: 100, bid: null, startAt: null, endAt: null, initialStatus: "enabled" },
+      preset: { objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0, pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null, identityType: 1, identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [1], smartTargeting: true, commentDisabled: false, shareDisabled: false, videoPostMappings: [] },
       initialStatus: "enabled",
       templateMode: "none",
       operationId: "operation-1",
@@ -1128,8 +1220,12 @@ describe("CookieAdsProvider", () => {
             ? { data: { is_all_success: true }, code: 0 }
           : url.includes("campaign_snap/check")
             ? { data: { success: true, fake_campaign_id: "campaign-sketch" }, code: 0 }
+          : url.includes("ad_snap/bulk_check")
+            ? { data: { ad_snap_check_report_map: { "ad-snap": { success: true, ad_snap_id: "ad-snap", fake_ad_id: "ad-sketch" } } }, code: 0 }
           : url.includes("ad_creative_snap/check")
-            ? { data: { creative_success: true }, code: 0 }
+            ? { data: { creative_success: true, ad_snap_check_report_map: { "ad-snap": { success: true, ad_snap_id: "ad-snap", fake_ad_id: "ad-sketch" } } }, code: 0 }
+          : url.includes("creative_snap/check")
+            ? { data: { success: true }, code: 0 }
           : url.includes("batch_create_cta_id")
             ? { data: { cta_id_map: {} }, code: 0 }
           : url.includes("campaign_snap/save")
@@ -1176,21 +1272,22 @@ describe("CookieAdsProvider", () => {
       "/api/v3/i18n/statistics/op/adgroup/list/",
       "/api/v3/i18n/statistics/op/campaign/list/",
       "/api/v4/i18n/creation/campaign_snap/save/",
+      "/api/v4/i18n/creation/campaign_snap/check/",
       "/api/v4/i18n/creation/ad_snap/save/",
+      "/api/v4/i18n/creation/ad_snap/bulk_check/",
       "/api/v4/i18n/creation/creative_snap/save/",
       "/api/v4/i18n/creation/snap/cbo_consistency_check/",
-      "/api/v4/i18n/creation/campaign_snap/check/",
-      "/api/v4/i18n/creation/snap/batch_create_cta_id/",
       "/api/v4/i18n/creation/ad_creative_snap/check/",
+      "/api/v4/i18n/creation/snap/batch_create_cta_id/",
       "/api/v4/i18n/creation/async_creation/create_by_snap/",
       "/api/v4/i18n/creation/async_creation/detail/",
     ]);
-    expect(requested[3]?.body).toMatchObject({ campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" });
-    expect(requested[9]?.body).toMatchObject({ is_status_disabled: true });
+    expect(requested[4]?.body).toMatchObject({ campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" });
+    expect(requested[10]?.body).toMatchObject({ is_status_disabled: true });
     expect(result[0]).toMatchObject({ campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
   });
 
-  it("blocks a code the material library cannot resolve, before any creation request", async () => {
+  it("stops before creative save when the HAR material lookup cannot resolve a code", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -1198,7 +1295,7 @@ describe("CookieAdsProvider", () => {
       // The library returns no entry for the unknown code.
       const body = url.includes("material/tt_video/bulk/info")
         ? { data: { tt_video_map: {} }, code: 0 }
-        : { data: {}, code: 0 };
+        : successfulCreationPayload(url);
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     }));
     const mutation = creationTestMutation("none");
@@ -1209,33 +1306,42 @@ describe("CookieAdsProvider", () => {
       [mutation],
     );
 
-    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
-    // The only network call is the library lookup — no creation was dispatched.
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
     expect(requested.some((url) => url.includes("material/tt_video/bulk/info"))).toBe(true);
-    expect(requested.some((url) => url.includes("campaign_snap/save"))).toBe(false);
+    expect(requested.some((url) => url.includes("ad_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
   });
 
-  it("auto-resolves a #code from the material library and creates without a manual mapping", async () => {
+  it("runs the successful HAR Spark authorization sequence before saving the creative", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       const body = url.includes("material/tt_video/bulk/info")
-        ? { data: { tt_video_map: { "#lib-code": { item_id: "9998887776665" } } }, code: 0 }
-        : url.includes("adgroup/list") || url.includes("campaign/list")
-        ? { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 }
-        : url.includes("campaign_snap/save")
-        ? { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 }
-        : url.includes("ad_snap/save")
-          ? { data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" }, code: 0 }
-          : url.includes("creative_snap/save")
-            ? { data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" }, code: 0 }
-            : { data: { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "creative" }, code: 0 };
+        ? { data: { tt_video_map: { "#lib-code": {
+            item_id: "9998887776665",
+            core_user_id: "spark-identity",
+            video_info: { vid: "spark-video" },
+          } } }, code: 0 }
+        : url.includes("material/tt_video/bulk/authorize")
+          ? { data: { identity_id_map: { "#lib-code": "spark-identity" } }, code: 0 }
+          : url.includes("spark/validate_promote_music")
+            ? { data: { music_info_map: { "9998887776665": { status: 0 } } }, code: 0 }
+            : url.includes("creative/creative_automation_option")
+              ? { data: { strategy_ids: [], group_strategies: [] }, code: 0 }
+              : url.includes("spark/creative_fix_task/save")
+                ? { data: { task_map: { "spark-video": "spark-task" } }, code: 0 }
+                : url.includes("spark/creative_fix_task/info")
+                  ? { data: { task_info_map: { "spark-task": { task_status: 2 } } }, code: 0 }
+                  : url.includes("/creative_snap/check/")
+                    ? { data: { success: true }, code: 0 }
+                    : successfulCreationPayload(url);
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     }));
     const mutation = creationTestMutation("none");
     mutation.row.videoCode = "#lib-code";
     mutation.preset.videoPostMappings = [];
+    mutation.preset.countryCodes = [1668284];
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
       creationTestContext(false),
@@ -1243,9 +1349,274 @@ describe("CookieAdsProvider", () => {
     );
 
     expect(result).toMatchObject({ ok: true });
-    // The library-resolved item_id is what lands in the creative's aweme_item_id.
+    const paths = requested.map((item) => new URL(item.url).pathname);
+    const indexOf = (path: string) => paths.indexOf(path);
+    expect(indexOf("/api/v4/i18n/creation/campaign_snap/save/")).toBeLessThan(indexOf("/api/v4/i18n/creation/campaign_snap/check/"));
+    expect(indexOf("/api/v4/i18n/creation/campaign_snap/check/")).toBeLessThan(indexOf("/api/v4/i18n/creation/ad_snap/save/"));
+    expect(indexOf("/api/v4/i18n/creation/ad_snap/save/")).toBeLessThan(indexOf("/api/v4/i18n/creation/ad_snap/bulk_check/"));
+    expect(indexOf("/api/v4/i18n/creation/ad_snap/bulk_check/")).toBeLessThan(indexOf("/api/v4/i18n/creation/material/tt_video/bulk/info/"));
+    expect(indexOf("/api/v4/i18n/creation/material/tt_video/bulk/info/")).toBeLessThan(indexOf("/api/v4/i18n/creation/material/tt_video/bulk/authorize/"));
+    expect(indexOf("/api/v4/i18n/creation/material/tt_video/bulk/authorize/")).toBeLessThan(indexOf("/api/v4/i18n/creation/spark/validate_promote_music/"));
+    expect(indexOf("/api/v4/i18n/creation/spark/validate_promote_music/")).toBeLessThan(indexOf("/api/v4/i18n/creation/spark/creative_fix_task/save/"));
+    expect(indexOf("/api/v4/i18n/creation/spark/creative_fix_task/save/")).toBeLessThan(indexOf("/api/v4/i18n/creation/roi2/auction_batch_item_roi2_validate/"));
+    expect(indexOf("/api/v4/i18n/creation/roi2/auction_batch_item_roi2_validate/")).toBeLessThan(indexOf("/api/v4/i18n/creation/spark/creative_fix_task/info/"));
+    expect(indexOf("/api/v4/i18n/creation/spark/creative_fix_task/info/")).toBeLessThan(indexOf("/api/v4/i18n/creation/creative_snap/save/"));
+    expect(paths).not.toContain("/api/v4/i18n/creation/creative_snap/check/");
+    expect(indexOf("/api/v4/i18n/creation/creative_snap/save/")).toBeLessThan(indexOf("/api/v4/i18n/creation/ad_creative_snap/check/"));
+    expect(indexOf("/api/v4/i18n/creation/ad_creative_snap/check/")).toBeLessThan(indexOf("/api/v4/i18n/creation/snap/batch_create_cta_id/"));
+    expect(indexOf("/api/v4/i18n/creation/snap/batch_create_cta_id/")).toBeLessThan(indexOf("/api/v4/i18n/creation/async_creation/create_by_snap/"));
+
+    expect(requested.find((item) => item.url.includes("bulk/authorize"))?.body).toEqual({
+      auth_code_info_list: [{ auth_code: "#lib-code" }],
+      is_check: false,
+    });
+    expect(requested.find((item) => item.url.includes("validate_promote_music"))?.body).toMatchObject({
+      countries: [1668284],
+      post_list: [{ item_id: "9998887776665", identity_id: "spark-identity", identity_type: 2 }],
+    });
+    expect(requested.find((item) => item.url.includes("creative_automation_option"))?.body).toEqual({ identity_type: 2 });
+    expect(requested.find((item) => item.url.includes("creative_fix_task/save"))?.body).toEqual({
+      creative_fix_vid_list: ["spark-video"],
+      country_list: ["TW"],
+    });
+    expect(requested.find((item) => item.url.includes("creative_fix_task/info"))?.body).toEqual({
+      task_id_list: ["spark-task"],
+    });
+    expect(requested.find((item) => item.url.includes("auction_batch_item_roi2_validate"))?.body).toMatchObject({
+      ad_infos: [],
+      campaign_info: { objective_type: 1 },
+      smart_plus_plus_info: {
+        ad_id: "",
+        ad_snap_id: "ad-snap",
+        campaign_id: "",
+        campaign_snap_id: "campaign-snap",
+        creative_info: expect.objectContaining({ identity_type: 2, item_source: 2 }),
+      },
+    });
+
     const creativeSave = requested.find((item) => item.url.includes("creative_snap/save"));
-    expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<{ image_list: Array<{ aweme_item_id: string }> }>)[0]!.image_list[0]!.aweme_item_id).toBe("9998887776665");
+    expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<{ image_list: Array<Record<string, unknown>> }>)[0]!.image_list[0]).toMatchObject({
+      aweme_item_id: "9998887776665",
+      identity_id: "spark-identity",
+      identity_type: 2,
+      item_source: 2,
+    });
+    expect(requested.some((item) =>
+      new URL(item.url).pathname === "/api/v4/i18n/creation/creative_snap/check/"
+    )).toBe(false);
+  });
+
+  it("does not save a creative when TikTok does not confirm the authorization identity", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.includes("material/tt_video/bulk/info")) {
+        return jsonResponse({ code: 0, data: { tt_video_map: { "#lib-code": {
+          item_id: "9998887776665",
+          core_user_id: "spark-identity",
+          video_info: { vid: "spark-video" },
+        } } } });
+      }
+      if (url.includes("material/tt_video/bulk/authorize")) {
+        return jsonResponse({ code: 0, data: { identity_id_map: {} } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
+    expect(requested.some((url) => url.includes("bulk/authorize"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_fix_task"))).toBe(false);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
+  });
+
+  it("does not authorize or save a creative when bulk info omits its Spark identity", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.includes("material/tt_video/bulk/info")) {
+        return jsonResponse({ code: 0, data: { tt_video_map: { "#lib-code": {
+          item_id: "9998887776665",
+          video_info: { vid: "spark-video" },
+        } } } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    expect(result).toMatchObject({ ok: false });
+    expect(requested.some((url) => url.includes("bulk/info"))).toBe(true);
+    expect(requested.some((url) => url.includes("bulk/authorize"))).toBe(false);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
+  });
+
+  it.each([
+    ["returns a failed item", "failed-item"],
+    ["rejects the advisory request", "rejected-request"],
+    ["cannot complete the advisory request", "request-error"],
+  ])("continues the successful HAR flow when music validation %s", async (_label, musicOutcome) => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.includes("material/tt_video/bulk/info")) {
+        return jsonResponse({ code: 0, data: { tt_video_map: { "#lib-code": {
+          item_id: "9998887776665",
+          core_user_id: "spark-identity",
+          video_info: { vid: "spark-video" },
+        } } } });
+      }
+      if (url.includes("material/tt_video/bulk/authorize")) {
+        return jsonResponse({ code: 0, data: { identity_id_map: { "#lib-code": "spark-identity" } } });
+      }
+      if (url.includes("spark/validate_promote_music")) {
+        if (musicOutcome === "request-error") throw new TypeError("music validation unavailable");
+        if (musicOutcome === "rejected-request") {
+          return jsonResponse({ code: 40001, msg: "music validation rejected" });
+        }
+        return jsonResponse({ code: 0, data: { music_info_map: { "9998887776665": { status: 1 } } } });
+      }
+      if (url.includes("spark/creative_fix_task/save")) {
+        return jsonResponse({ code: 0, data: { task_map: { "spark-video": "spark-task" } } });
+      }
+      if (url.includes("spark/creative_fix_task/info")) {
+        return jsonResponse({ code: 0, data: { task_info_map: { "spark-task": { task_status: 2 } } } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
+    expect(requested.some((url) => url.includes("validate_promote_music"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_fix_task"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("async_creation/create_by_snap"))).toBe(true);
+  });
+
+  it.each([
+    ["creative automation option", "/api/v4/i18n/creation/creative/creative_automation_option/"],
+    ["Spark fix task save", "/api/v4/i18n/creation/spark/creative_fix_task/save/"],
+    ["ROI validation", "/api/v4/i18n/creation/roi2/auction_batch_item_roi2_validate/"],
+    ["Spark fix task status", "/api/v4/i18n/creation/spark/creative_fix_task/info/"],
+  ])("publishes when the advisory %s request is rejected", async (_label, rejectedPath) => {
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const pathname = new URL(url).pathname;
+      requestedPaths.push(pathname);
+      if (url.includes("material/tt_video/bulk/info")) {
+        return jsonResponse({ code: 0, data: { tt_video_map: { "#lib-code": {
+          item_id: "9998887776665",
+          core_user_id: "spark-identity",
+          video_info: { vid: "spark-video" },
+        } } } });
+      }
+      if (url.includes("material/tt_video/bulk/authorize")) {
+        return jsonResponse({ code: 0, data: { identity_id_map: { "#lib-code": "spark-identity" } } });
+      }
+      if (pathname === rejectedPath) return jsonResponse({ code: 40001, msg: "advisory rejected" });
+      if (url.includes("spark/creative_fix_task/save")) {
+        return jsonResponse({ code: 0, data: { task_map: { "spark-video": "spark-task" } } });
+      }
+      if (url.includes("spark/creative_fix_task/info")) {
+        return jsonResponse({ code: 0, data: { task_info_map: { "spark-task": { task_status: 2 } } } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
+    expect(requestedPaths).toContain(rejectedPath);
+    expect(requestedPaths).toContain("/api/v4/i18n/creation/creative_snap/save/");
+    expect(requestedPaths).toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
+  });
+
+  it("publishes when the advisory final ad report is red", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.includes("ad_creative_snap/check")) {
+        return jsonResponse({ code: 0, data: {
+          creative_success: true,
+          ad_snap_check_report_map: { "ad-snap": { success: false, ad_snap_id: "ad-snap" } },
+        } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [creationTestMutation("none")],
+    );
+
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
+    expect(requested.some((url) => url.includes("ad_creative_snap/check"))).toBe(true);
+    expect(requested.some((url) => url.includes("batch_create_cta_id"))).toBe(true);
+    expect(requested.some((url) => url.includes("create_by_snap"))).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "campaign check",
+      pathname: "/api/v4/i18n/creation/campaign_snap/check/",
+      response: { code: 0, data: { success: false } },
+    },
+    {
+      label: "ad-group check",
+      pathname: "/api/v4/i18n/creation/ad_snap/bulk_check/",
+      response: { code: 0, data: { ad_snap_check_report_map: { "ad-snap": { success: false } } } },
+    },
+    {
+      label: "campaign and ad-group consistency check",
+      pathname: "/api/v4/i18n/creation/snap/cbo_consistency_check/",
+      response: { code: 0, data: { is_all_success: false } },
+    },
+    {
+      label: "final ad and creative check",
+      pathname: "/api/v4/i18n/creation/ad_creative_snap/check/",
+      response: { code: 0, data: { creative_success: true, ad_snap_check_report_map: {} } },
+    },
+    {
+      label: "CTA helper",
+      pathname: "/api/v4/i18n/creation/snap/batch_create_cta_id/",
+      response: { code: 40001, msg: "advisory rejected" },
+    },
+  ])("continues when the HAR $label response is red or incomplete", async ({ pathname, response }) => {
+    const requestedPaths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const currentPath = new URL(url).pathname;
+      requestedPaths.push(currentPath);
+      return jsonResponse(currentPath === pathname ? response : successfulCreationPayload(url));
+    }));
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [creationTestMutation("none")],
+    );
+
+    expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
+    expect(requestedPaths).toContain(pathname);
+    expect(requestedPaths).toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
   });
 
   it("reuses the unique exact-name campaign instead of creating another campaign", async () => {
@@ -1260,33 +1631,75 @@ describe("CookieAdsProvider", () => {
           { campaign_id: "source-campaign", campaign_name: "source", campaign_status: "enabled", adgroup_id: "existing-group-001", adgroup_name: "group-001" },
         ], pagination: { page: 1, page_count: 1 } } });
       }
+      if (url.includes("creative_snap/save")) {
+        return jsonResponse({ code: 0, data: {
+          creative_snap_ids: ["creative-snap"],
+          creative_sketch_ids: ["creative-sketch"],
+        } });
+      }
+      if (new URL(url).pathname === "/api/v4/i18n/creation/creative_snap/check/") {
+        return jsonResponse({ code: 2, msg: "页面信息已过期。刷新页面重试。" });
+      }
       return jsonResponse(successfulCreationPayload(url));
     }));
     const mutation = creationTestMutation("none");
     mutation.row.campaignName = "source";
+    mutation.preset.callToActionId = "0";
     mutation.onProgress = (event) => progress.push(event);
+    const context = creationTestContext(true);
+    if (context.credential.kind !== "cookie" || !context.credential.creationProfile) {
+      throw new Error("test fixture must include a verified creation profile");
+    }
+    const profileCreativePayload = context.credential.creationProfile.creativePayload as {
+      asset_group_sketch_form_data_list: Array<Record<string, unknown>>;
+    };
+    const profileAsset = profileCreativePayload.asset_group_sketch_form_data_list[0];
+    if (!profileAsset) {
+      throw new Error("test fixture must include a creative asset");
+    }
+    Object.assign(profileAsset, {
+      external_url: "https://old.example/landing",
+      open_url: "",
+      is_open_url: 0,
+      auto_open: 0,
+      call_to_action_id: "",
+      need_create_cta_id: true,
+      creative_automation_type: 2,
+      call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
+    });
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
-      creationTestContext(false),
+      context,
       [mutation],
     );
 
     expect(result).toMatchObject({ ok: true });
     const bodyFor = (fragment: string) => requested.find((item) => item.url.includes(fragment))?.body;
+    expect(bodyFor("campaign_snap/copy")).toBeUndefined();
     expect(bodyFor("campaign_snap/save")).toBeUndefined();
     expect(bodyFor("ad_snap/save")).toMatchObject({ campaign_id: "source-campaign" });
     expect(bodyFor("ad_snap/save")).toMatchObject({ campaign_snap_id: "", campaign_sketch_id: "" });
+    expect(requested.some((item) =>
+      new URL(item.url).pathname === "/api/v4/i18n/creation/creative_snap/check/"
+    )).toBe(false);
     expect(bodyFor("ad_snap/save")?.ad_sketch_form_data).toMatchObject({
       origin_ad_id: 0,
       ad_name: "group-002",
-      ad_snap_id: "ad-snap",
-      ad_sketch_id: "ad-sketch",
+      ad_snap_id: "",
+      ad_sketch_id: "",
     });
+    expect(bodyFor("ad_snap/bulk_check")).toBeUndefined();
     const creativeBody = bodyFor("creative_snap/save")?.asset_group_sketch_form_data_list as Array<Record<string, unknown>>;
     expect(creativeBody[0]).toMatchObject({
-      origin_creative_id: 0,
-      creative_snap_id: "creative-snap",
-      creative_sketch_id: "creative-sketch",
+      creative_snap_id: "",
+      creative_sketch_id: "",
+      external_url: "https://example.com",
+      open_url: "",
+      is_open_url: 0,
+      auto_open: 0,
+      call_to_action_id: "",
+      need_create_cta_id: true,
+      call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
     });
     expect(bodyFor("create_by_snap")).toMatchObject({ campaign_id: "source-campaign" });
     expect(progress).toContainEqual({
@@ -1295,12 +1708,93 @@ describe("CookieAdsProvider", () => {
     });
   });
 
+  it("discovers an exact-name formal campaign independently from the captured ad dimension", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const context = creationTestContext(false);
+    if (context.credential.kind !== "cookie" || !context.credential.requestTemplates?.[0]) {
+      throw new Error("test fixture must include a list request");
+    }
+    context.credential.requestTemplates[0] = {
+      ...context.credential.requestTemplates[0],
+      body: JSON.stringify({
+        common_req: {
+          st: "2026-07-22",
+          et: "2026-07-24",
+          lifetime: 0,
+          dimensions: ["ad_id"],
+          metrics: ["stat_cost"],
+          filters: [{ field: "ad_status", in_field_values: ["delete"], filter_type: 10 }],
+          page: 1,
+          page_size: 20,
+        },
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body });
+      if (url.includes("/statistics/op/campaign/list")) {
+        const commonRequest = body.common_req as Record<string, unknown> | undefined;
+        const filters = Array.isArray(commonRequest?.filters)
+          ? commonRequest.filters as Array<Record<string, unknown>>
+          : [];
+        const isCampaignObjectList = JSON.stringify(commonRequest?.dimensions) === JSON.stringify(["campaign_id"])
+          && JSON.stringify(commonRequest?.metrics) === JSON.stringify([])
+          && filters.some((item) => item.field === "campaign_status" && item.filter_type === 10)
+          && filters.some((item) => item.field === "campaign_system_origin" && item.filter_type === 0);
+        return jsonResponse({ code: 0, data: {
+          table: isCampaignObjectList
+            ? [{ campaign_id: "lifetime-campaign", campaign_name: "old-campaign" }]
+            : [],
+          pagination: { page: 1, page_count: 1, limit: 100, total_count: 1 },
+        } });
+      }
+      if (url.includes("adgroup/list")) {
+        return jsonResponse({ code: 0, data: { table: [], pagination: { page: 1, page_count: 1 } } });
+      }
+      if (url.includes("async_creation/detail")) {
+        return jsonResponse({ code: 0, data: { status: 1, result: {
+          campaign_id: "lifetime-campaign",
+          ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: {
+            0: { creative_items: [{ id: "creative" }] },
+          } } },
+        } } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.campaignName = "old-campaign";
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(context, [mutation]);
+
+    expect(result).toMatchObject({ ok: true, campaignId: "lifetime-campaign" });
+    expect(requested.find((item) => item.url.includes("/statistics/op/campaign/list"))?.body).toMatchObject({
+      common_req: {
+        dimensions: ["campaign_id"],
+        metrics: [],
+        lifetime: 0,
+        filters: [
+          { field: "campaign_status", in_field_values: ["delete"], filter_type: 10 },
+          { field: "campaign_system_origin", in_field_values: ["100000"], filter_type: 0 },
+        ],
+      },
+    });
+    expect(requested.some((item) => item.url.includes("campaign_snap/save"))).toBe(false);
+    expect(requested.find((item) => item.url.includes("ad_snap/save"))?.body).toMatchObject({
+      campaign_id: "lifetime-campaign",
+      campaign_snap_id: "",
+      campaign_sketch_id: "",
+    });
+  });
+
   it("checks every campaign and ad-group page before reusing and auto-naming", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      const page = Number(new URL(url).searchParams.get("page") ?? "1");
+      const requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body: requestBody });
+      const commonRequest = requestBody.common_req as Record<string, unknown> | undefined;
+      const page = Number(commonRequest?.page ?? new URL(url).searchParams.get("page") ?? "1");
       if (url.includes("campaign/list")) {
         return jsonResponse({ code: 0, data: {
           table: page === 1
@@ -1384,7 +1878,7 @@ describe("CookieAdsProvider", () => {
     expect(adNames).toEqual(["group", "group-001"]);
   });
 
-  it("stops later same-campaign calls after an unknown result in the same plan", async () => {
+  it("continues later same-campaign calls after a failed result in the same plan", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.includes("campaign/list") || url.includes("adgroup/list")) {
@@ -1401,62 +1895,22 @@ describe("CookieAdsProvider", () => {
     second.batchId = "plan-unknown";
 
     const [unknown] = await provider.createFromPreset!(creationTestContext(false), [first]);
-    const callsAfterUnknown = fetchMock.mock.calls.length;
-    const [blocked] = await provider.createFromPreset!(creationTestContext(false), [second]);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    const [continued] = await provider.createFromPreset!(creationTestContext(false), [second]);
 
     expect(unknown).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(blocked).toMatchObject({ ok: false, failureKind: "retryable" });
-    expect(blocked?.message).toContain("前一条同系列任务结果未知");
-    expect(fetchMock).toHaveBeenCalledTimes(callsAfterUnknown);
+    expect(continued).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(continued?.message).not.toContain("前一条同系列任务结果未知");
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
   });
 
-  it("bootstraps a zero-create draft from a stable campaign template when no verified profile exists", async () => {
+  it("creates a new campaign directly even when the preset still contains a template campaign id", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ url, body });
-      const payload = url.includes("campaign_snap/copy")
-        ? { code: 0, data: {
-            new_campaign_snap_info_item: {
-              campaign_snap_id: "campaign-snap",
-              campaign_snap_form_data: {
-                campaign_name: "source",
-                objective_type: 999,
-                industry_audit_form_data: { industry_type: 42 },
-              },
-            },
-            new_campaign_sketch_id: "campaign-sketch",
-            new_ad_snap_info_item_list: [{
-              ad_snap_id: "ad-snap",
-                ad_snap_form_data: {
-                  ad_name: "source",
-                  budget: "1",
-                  pricing: 999,
-                  creative_material_mode: 999,
-                  product_platform_id: "source-catalog",
-                  product_set_id: "source-product-set",
-                  catalog_authorized_bc: "source-bc",
-                  supply_catalog_id: "source-catalog",
-                  promotion_catalog_type: 1,
-                  product_specific_type: 2,
-                },
-            }],
-            new_ad_and_creative_snap_info_item_map: {
-              "ad-snap": [{
-                creative_snap_id: "creative-snap",
-                asset_group_creative_snap_form_data: {
-                  creative_name: "source",
-                  identity_type: 999,
-                  external_url: "https://old.example",
-                  image_list: [{ aweme_item_id: "old-video" }],
-                },
-              }],
-            },
-            new_ad_and_creative_sketch_ids_map: { "ad-sketch": ["creative-sketch"] },
-          } }
-        : successfulCreationPayload(url);
-      return jsonResponse(payload);
+      return jsonResponse(successfulCreationPayload(url));
     }));
     const mutation = creationTestMutation("none");
     mutation.preset = {
@@ -1470,27 +1924,16 @@ describe("CookieAdsProvider", () => {
     );
 
     expect(result[0]).toMatchObject({ ok: true });
-    expect(requested.map((item) => new URL(item.url).pathname)[2]).toBe(
-      "/mi/api/v4/i18n/creation/campaign_snap/copy/",
-    );
+    expect(requested.some((item) => item.url.includes("campaign_snap/copy"))).toBe(false);
     const campaignSave = requested.find((item) => item.url.includes("campaign_snap/save"));
     expect(campaignSave?.body.campaign_sketch_form_data).toMatchObject({
       campaign_name: "campaign",
       objective_type: 1,
-      industry_audit_form_data: { industry_type: 42 },
     });
     const adSave = requested.find((item) => item.url.includes("ad_snap/save"));
     expect(adSave?.body.ad_sketch_form_data).toMatchObject({
       ad_name: "group",
       pricing: 1,
-      creative_material_mode: 6,
-      product_platform_id: "0",
-      product_set_id: "",
-      catalog_authorized_bc: "0",
-      supply_catalog_id: "0",
-      promotion_catalog_type: 0,
-      product_specific_type: 0,
-      budget_auto_adjust: { is_enabled: 0, initial_budget: "0" },
     });
     const creativeSave = requested.find((item) => item.url.includes("creative_snap/save"));
     expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<Record<string, unknown>>)[0]).toMatchObject({
@@ -1499,7 +1942,7 @@ describe("CookieAdsProvider", () => {
     });
   });
 
-  it("falls back to the account's own campaign when the preset template is missing (multi-account)", async () => {
+  it("does not fall back to an account campaign when a new campaign preset template is missing", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
@@ -1514,10 +1957,11 @@ describe("CookieAdsProvider", () => {
     const result = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
 
     expect(result[0]).toMatchObject({ ok: true });
-    // Bootstrap copies this account's own campaign instead of erroring on the
-    // missing preset template.
     const copy = requested.find((item) => item.url.includes("campaign_snap/copy"));
-    expect(copy?.body).toMatchObject({ campaign_id: "source-campaign" });
+    expect(copy).toBeUndefined();
+    expect(requested.find((item) => item.url.includes("campaign_snap/save"))?.body).toMatchObject({
+      campaign_sketch_form_data: { campaign_name: "campaign" },
+    });
   });
 
   it("publishes every copied ad group when the source campaign contains multiple groups", async () => {
@@ -1555,7 +1999,10 @@ describe("CookieAdsProvider", () => {
               : url.includes("campaign_snap/check")
                 ? { data: { success: true, fake_campaign_id: "campaign-sketch" }, code: 0 }
                 : url.includes("ad_creative_snap/check")
-                  ? { data: { creative_success: true }, code: 0 }
+                  ? { data: { creative_success: true, ad_snap_check_report_map: {
+                      "ad-snap-1": { success: true, ad_snap_id: "ad-snap-1", fake_ad_id: "ad-sketch-1" },
+                      "ad-snap-2": { success: true, ad_snap_id: "ad-snap-2", fake_ad_id: "ad-sketch-2" },
+                    } }, code: 0 }
                   : url.includes("batch_create_cta_id")
                     ? { data: { cta_id_map: {} }, code: 0 }
                     : url.includes("async_creation/detail")
@@ -1587,8 +2034,8 @@ describe("CookieAdsProvider", () => {
       "/api/v4/i18n/creation/campaign_snap/save/",
       "/api/v4/i18n/creation/snap/cbo_consistency_check/",
       "/api/v4/i18n/creation/campaign_snap/check/",
-      "/api/v4/i18n/creation/snap/batch_create_cta_id/",
       "/api/v4/i18n/creation/ad_creative_snap/check/",
+      "/api/v4/i18n/creation/snap/batch_create_cta_id/",
       "/api/v4/i18n/creation/async_creation/create_by_snap/",
       "/api/v4/i18n/creation/async_creation/detail/",
     ]);
@@ -1601,8 +2048,8 @@ describe("CookieAdsProvider", () => {
       campaign_snap_id: "campaign-snap",
       campaign_sketch_id: "campaign-sketch",
     });
-    expect(requested[5]?.body.ad_and_creative_snap_info_list).toHaveLength(2);
-    expect(requested[6]?.body.ad_creative_snap_check_info).toHaveLength(2);
+    expect(requested[6]?.body.ad_and_creative_snap_info_list).toHaveLength(2);
+    expect(requested[5]?.body.ad_creative_snap_check_info).toHaveLength(2);
     const published = requested[7]?.body.ad_and_creative_snap_info_list as Array<Record<string, unknown>>;
     expect(published).toHaveLength(2);
     expect(published.map((item) => item.ad_snap_id)).toEqual(["ad-snap-1", "ad-snap-2"]);
@@ -1707,6 +2154,8 @@ describe("CookieAdsProvider", () => {
           headers: { "content-type": "application/json" },
         });
       }
+      const validation = successfulDraftValidationPayload(url);
+      if (validation) return jsonResponse(validation);
       const data = url.includes("adgroup/list") || url.includes("campaign/list")
         ? { table: [], pagination: { page: 1, page_count: 1 } }
         : url.includes("campaign_snap/save")
@@ -1906,6 +2355,37 @@ describe("CookieAdsProvider", () => {
     expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
     expect(result?.message).toContain("copy");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts a from-scratch profile with zero lineage ids and unrelated origin metadata", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) =>
+      jsonResponse(successfulCreationPayload(String(input))),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const context = creationTestContext(true);
+    if (context.credential.kind !== "cookie" || !context.credential.creationProfile) {
+      throw new Error("test fixture must include a creation profile");
+    }
+    context.credential.creationProfile.adGroupPayload = {
+      campaign_id: "",
+      ad_sketch_form_data: { ad_name: "fresh", budget: "1", origin_ad_id: 0 },
+    };
+    context.credential.creationProfile.campaignPayload = {
+      campaign_sketch_form_data: {
+        campaign_name: "fresh",
+        virtual_isolated: {
+          validation: { extras: { origin_extra: "provider-validation-metadata" } },
+        },
+      },
+    };
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      context,
+      [creationTestMutation("none")],
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalled();
   });
 
   it.each(["transport", "parse"] as const)(
@@ -2417,7 +2897,7 @@ describe("CookieAdsProvider", () => {
     const result = await pending;
 
     expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(result.message).toContain("禁止自动重试");
+    expect(result.message).toContain("本条创建按失败处理");
   });
 
   it("treats an incomplete terminal copy result as unknown instead of reporting success", async () => {
@@ -2655,12 +3135,28 @@ function successfulCreationPayload(url: string): Record<string, unknown> {
   if (url.includes("campaign_snap/save")) return { code: 0, data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" } };
   if (url.includes("ad_snap/save")) return { code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } };
   if (url.includes("creative_snap/save")) return { code: 0, data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" } };
-  if (url.includes("cbo_consistency_check")) return { code: 0, data: { is_all_success: true } };
-  if (url.includes("campaign_snap/check")) return { code: 0, data: { success: true, fake_campaign_id: "campaign-sketch" } };
-  if (url.includes("ad_creative_snap/check")) return { code: 0, data: { creative_success: true } };
-  if (url.includes("batch_create_cta_id")) return { code: 0, data: { cta_id_map: {} } };
+  const validation = successfulDraftValidationPayload(url);
+  if (validation) return validation;
   if (url.includes("async_creation/detail")) return { code: 0, data: { status: 1, result: { campaign_id: "campaign", ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: { 0: { creative_items: [{ id: "creative" }] } } } } } } };
   return { code: 0, data: { async_request_id: "async" } };
+}
+
+function successfulDraftValidationPayload(
+  url: string,
+  adSnapIds = ["ad-snap"],
+): Record<string, unknown> | undefined {
+  const reports = Object.fromEntries(adSnapIds.map((adSnapId, index) => [adSnapId, {
+    success: true,
+    ad_snap_id: adSnapId,
+    fake_ad_id: adSnapIds.length === 1 ? "ad-sketch" : `ad-sketch-${index + 1}`,
+  }]));
+  if (url.includes("ad_snap/bulk_check")) return { code: 0, data: { ad_snap_check_report_map: reports } };
+  if (url.includes("ad_creative_snap/check")) return { code: 0, data: { creative_success: true, ad_snap_check_report_map: reports } };
+  if (url.includes("creative_snap/check")) return { code: 0, data: { success: true } };
+  if (url.includes("cbo_consistency_check")) return { code: 0, data: { is_all_success: true } };
+  if (url.includes("campaign_snap/check")) return { code: 0, data: { success: true, fake_campaign_id: "campaign-sketch" } };
+  if (url.includes("batch_create_cta_id")) return { code: 0, data: { cta_id_map: {} } };
+  return undefined;
 }
 
 function jsonResponse(payload: Record<string, unknown>): Response {

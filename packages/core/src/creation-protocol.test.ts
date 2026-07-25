@@ -14,8 +14,8 @@ describe("creation protocol", () => {
   it("uses the confirmed four-step draft chain and makes the initial state explicit", () => {
     expect(TikTokCreationSteps).toEqual(["campaign_snap/save", "ad_snap/save", "creative_snap/save", "async_creation/create_by_snap"]);
     const input = { campaignSnapId: "campaign-snap", campaignSketchId: "campaign-sketch", adAndCreativeSnapInfoList: [{ ad_snap_id: "ad-snap" }] };
-    expect(buildPublishInput(input, "disabled")).toMatchObject({ campaign_id: "", is_status_disabled: true, is_partial_publish: false });
-    expect(buildPublishInput(input, "enabled")).toMatchObject({ campaign_id: "", is_status_disabled: false, is_partial_publish: false });
+    expect(buildPublishInput(input, "disabled")).toMatchObject({ campaign_id: "", is_status_disabled: true, is_partial_publish: false, coming_source_type: 6, sketch_publish_source: 1 });
+    expect(buildPublishInput(input, "enabled")).toMatchObject({ campaign_id: "", is_status_disabled: false, is_partial_publish: false, coming_source_type: 6, sketch_publish_source: 1 });
   });
 
   it("derives each fixed creation path from the two-cURL session without retaining credentials", () => {
@@ -84,13 +84,13 @@ describe("creation protocol", () => {
   it("uses an encrypted account snapshot while replacing only creation inputs", () => {
     const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
       campaignPayload: { campaign_sketch_form_data: { campaign_name: "old", objective_type: 9, campaign_id: "old-id" }, risk_info: { browser_name: "saved" } },
-      adGroupPayload: { ad_sketch_form_data: { ad_name: "old", budget: "1", cpa_bid: "1", identity_only: "kept" }, risk_info: { browser_name: "saved" } },
-      creativePayload: { asset_group_sketch_form_data_list: [{ creative_name: "old", external_url: "https://old.example", image_list: [{ aweme_item_id: "old-video", identity_id: "kept" }] }] },
+      adGroupPayload: { ad_sketch_form_data: { ad_name: "old", budget: "1", cpa_bid: "1", identity_only: "kept", origin_ad_id: 0, ad_snap_id: "captured-ad-snap", ad_sketch_id: "captured-ad-sketch", by_ad_sketch_id: "captured-ad-sketch" }, risk_info: { browser_name: "saved" } },
+      creativePayload: { asset_group_sketch_form_data_list: [{ creative_name: "old", external_url: "https://old.example", creative_snap_id: "captured-creative-snap", creative_sketch_id: "captured-creative-sketch", image_list: [{ aweme_item_id: "old-video", identity_id: "kept" }] }] },
       publishPayload: {},
     }, { rowNumber: 2, campaignName: "new campaign", adGroupName: "new group", adName: "260716:001", videoCode: "new-video", productUrl: "https://example.com/product", region: "US", dailyBudget: 25, bid: 2.5, startAt: null, endAt: null, initialStatus: "disabled" });
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ campaign_name: "new campaign", campaign_id: "", objective_type: 9 });
-    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ ad_name: "new group", budget: "25", cpa_bid: "2.5", identity_only: "kept" });
-    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: "https://example.com/product", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ ad_name: "new group", budget: "25", cpa_bid: "2.5", identity_only: "kept", origin_ad_id: 0, ad_snap_id: "", ad_sketch_id: "", by_ad_sketch_id: "" });
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: "https://example.com/product", creative_snap_id: "", creative_sketch_id: "", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
   });
 
   it("applies a complete advanced preset as an explicit override of the account snapshot", () => {
@@ -108,6 +108,70 @@ describe("creation protocol", () => {
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ objective_type: 1, buying_type: 2, budget_mode: 3 });
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 4, pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [11] });
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ identity_type: 8, identity_id: "identity", call_to_action_id: "SHOP_NOW", is_comment_disable: 1, is_share_disable: 1 });
+  });
+
+  it("preserves the verified programmatic CTA assets instead of replacing them with preset id zero", () => {
+    const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: { objective_type: 9 } },
+      adGroupPayload: { ad_sketch_form_data: { budget: "1" } },
+      creativePayload: { asset_group_sketch_form_data_list: [{
+        image_list: [{}],
+        call_to_action_id: "",
+        need_create_cta_id: true,
+        creative_automation_type: 2,
+        call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
+      }] },
+      publishPayload: {},
+    }, { rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad", videoCode: "video", productUrl: "https://example.com", region: "US", dailyBudget: 10, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }, "UTC", new Date("2026-07-20T00:00:00.000Z"), {
+      objectiveType: 1, buyingType: 2, campaignBudgetMode: 3, adBudgetMode: 4,
+      pricing: 5, optimizeGoal: 6, externalAction: 7, pixelId: "pixel", identityType: 8,
+      identityId: "identity", callToActionId: "0", countryCodes: [840], placementIds: [11],
+      smartTargeting: false, commentDisabled: true, shareDisabled: true,
+    });
+
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({
+      call_to_action_id: "",
+      need_create_cta_id: true,
+      creative_automation_type: 2,
+      call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
+    });
+  });
+
+  it("keeps direct-link mode disabled while replacing the normal landing-page URL", () => {
+    const payloads = buildProfileDraftPayloads({
+      version: 1,
+      verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: {} },
+      adGroupPayload: { ad_sketch_form_data: {} },
+      creativePayload: { asset_group_sketch_form_data_list: [{
+        image_list: [{}],
+        external_url: "https://old.example/landing",
+        open_url: "",
+        is_open_url: 0,
+        auto_open: 0,
+      }] },
+      publishPayload: {},
+    }, {
+      rowNumber: 2,
+      campaignName: "campaign",
+      adGroupName: "group",
+      adName: "ad",
+      videoCode: "video",
+      productUrl: "https://example.com/product",
+      region: "US",
+      dailyBudget: 10,
+      bid: null,
+      startAt: null,
+      endAt: null,
+      initialStatus: "disabled",
+    });
+
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({
+      external_url: "https://example.com/product",
+      open_url: "",
+      is_open_url: 0,
+      auto_open: 0,
+    });
   });
 
 });

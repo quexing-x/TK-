@@ -463,8 +463,41 @@ function createAllReadTemplates(request: ReadTemplateRequest) {
     );
     if (replaced === url.pathname) return { ...request, derived: false };
     url.pathname = replaced;
-    return { ...request, target, url: url.toString(), derived: true };
+    return {
+      ...request,
+      target,
+      url: url.toString(),
+      body: adaptDerivedReadBody(request.body, request.contentType, target),
+      derived: true,
+    };
   });
+}
+
+function adaptDerivedReadBody(
+  body: string | undefined,
+  contentType: string | undefined,
+  target: ReadTarget,
+): string | undefined {
+  if (target !== "campaign" || !body || !contentType?.toLowerCase().includes("json")) {
+    return body;
+  }
+  try {
+    const value = JSON.parse(body) as Record<string, unknown>;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return body;
+    const current = value.common_req;
+    const commonRequest = current && typeof current === "object" && !Array.isArray(current)
+      ? current as Record<string, unknown>
+      : {};
+    commonRequest.dimensions = ["campaign_id"];
+    commonRequest.filters = [
+      { field: "campaign_status", in_field_values: ["delete"], filter_type: 10 },
+      { field: "campaign_system_origin", in_field_values: ["100000"], filter_type: 0 },
+    ];
+    value.common_req = commonRequest;
+    return JSON.stringify(value);
+  } catch {
+    return body;
+  }
 }
 
 function createAllStatusTemplatePairs(request: {

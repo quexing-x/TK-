@@ -6,11 +6,15 @@ export type WritableTaskStatus =
   | "unknown"
   | "cancelled";
 
-export interface WriteTaskLifecycle<TTask, TSuccess> {
+export interface WriteTaskLifecycle<
+  TTask,
+  TSuccess,
+  TExpectedStatus extends "pending" | "failed" | "unknown" = "pending" | "failed",
+> {
   claim(
     taskId: string,
     executorId: string,
-    expectedStatus: "pending" | "failed",
+    expectedStatus: TExpectedStatus,
     actor: WriteTaskActor,
   ): TTask | null;
   succeed(taskId: string, executorId: string, result: TSuccess): TTask;
@@ -22,13 +26,17 @@ export interface WriteTaskLifecycle<TTask, TSuccess> {
  * Small shared lifecycle for provider writes. Storage adapters retain their
  * domain tables, while claim and terminal-state semantics stay identical.
  */
-export class WriteTaskKernel<TTask, TSuccess> {
-  constructor(private readonly lifecycle: WriteTaskLifecycle<TTask, TSuccess>) {}
+export class WriteTaskKernel<
+  TTask,
+  TSuccess,
+  TExpectedStatus extends "pending" | "failed" | "unknown" = "pending" | "failed",
+> {
+  constructor(private readonly lifecycle: WriteTaskLifecycle<TTask, TSuccess, TExpectedStatus>) {}
 
   claim(
     taskId: string,
     executorId: string,
-    expectedStatus: "pending" | "failed",
+    expectedStatus: TExpectedStatus,
     actor: WriteTaskActor,
   ): TTask | null {
     return this.lifecycle.claim(taskId, executorId, expectedStatus, actor);
