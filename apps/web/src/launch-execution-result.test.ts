@@ -1,12 +1,31 @@
 import { describe, expect, it } from "vitest";
-import type { AccountConfig } from "@tk-auto/core";
+import type { AccountConfig, ManagedEntityRecord } from "@tk-auto/core";
 import type { LaunchExecutionResult } from "./api";
-import { launchVerificationIdentityLines, summarizeExecution, summarizePlanAccountResult } from "./LaunchPage";
+import { buildSourceAdGroupOptions, launchVerificationIdentityLines, summarizeExecution, summarizePlanAccountResult } from "./LaunchPage";
 
 const accounts = [{ id: "account-1", displayName: "测试账户" }] as AccountConfig[];
 const plan = {} as LaunchExecutionResult["plan"];
 
 describe("launch item result presentation", () => {
+  it("shows one source option per ad group using only the ad-group name", () => {
+    const entities = [
+      { entityType: "ad-group", externalId: "group-2", name: "蓝牙音响组", ignored: false },
+      { entityType: "ad-group", externalId: "group-1", name: "K歌耳机组", ignored: false },
+      { entityType: "ad-group", externalId: "group-without-name", name: "group-without-name", ignored: false },
+      { entityType: "ad", externalId: "ad-2", name: "0", parentAdGroupId: "group-2", ignored: false },
+      { entityType: "ad", externalId: "ad-1", name: "0", parentAdGroupId: "group-1", ignored: false },
+      { entityType: "ad", externalId: "ad-1-duplicate", name: "0", parentAdGroupId: "group-1", ignored: false },
+      { entityType: "ad", externalId: "ad-without-group-name", name: "0", parentAdGroupId: "group-without-name", ignored: false },
+    ] as ManagedEntityRecord[];
+
+    const options = buildSourceAdGroupOptions(entities);
+    expect(options).toHaveLength(2);
+    expect(options).toEqual(expect.arrayContaining([
+      { sourceAdId: "ad-1", adGroupId: "group-1", name: "K歌耳机组" },
+      { sourceAdId: "ad-2", adGroupId: "group-2", name: "蓝牙音响组" },
+    ]));
+  });
+
   it("presents succeeded items as success instead of an error", () => {
     expect(summarizeExecution({ plan, results: [{
       itemId: "item-1", accountId: "account-1", status: "succeeded",

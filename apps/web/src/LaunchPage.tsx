@@ -29,6 +29,43 @@ type LaunchAccountReadiness = {
   checks: Array<{ label: string; passed: boolean }>;
 };
 
+export interface SourceAdGroupOption {
+  sourceAdId: string;
+  adGroupId: string;
+  name: string;
+}
+
+/** Presents copy sources at the ad-group level while retaining the source ad
+ * id required by the existing copy-preview and execution contracts. */
+export function buildSourceAdGroupOptions(entities: ManagedEntityRecord[]): SourceAdGroupOption[] {
+  const sourceAdByGroupId = new Map<string, ManagedEntityRecord>();
+  for (const entity of entities) {
+    if (
+      entity.entityType !== "ad"
+      || entity.ignored
+      || !entity.parentAdGroupId
+      || !entity.externalId
+      || entity.externalId === "0"
+    ) continue;
+    if (!sourceAdByGroupId.has(entity.parentAdGroupId)) {
+      sourceAdByGroupId.set(entity.parentAdGroupId, entity);
+    }
+  }
+
+  return entities.flatMap((entity) => {
+    if (
+      entity.entityType !== "ad-group"
+      || entity.ignored
+      || !entity.externalId
+      || entity.externalId === "0"
+    ) return [];
+    const name = entity.name?.trim();
+    const sourceAd = sourceAdByGroupId.get(entity.externalId);
+    if (!sourceAd || !name || name === entity.externalId) return [];
+    return [{ sourceAdId: sourceAd.externalId, adGroupId: entity.externalId, name }];
+  }).sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+}
+
 /** Mirrors the service's final manual-creation authorization boundary. */
 function isLaunchExecutionReady(
   _account: AccountConfig,
@@ -71,7 +108,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [dispatchMode, setDispatchMode] = useState<LaunchDispatchMode>("queue");
   const [sourceAccountId, setSourceAccountId] = useState(accounts[0]?.id ?? "");
   const [targetIds, setTargetIds] = useState<string[]>([]);
-  const [sourceAds, setSourceAds] = useState<ManagedEntityRecord[]>([]);
+  const [sourceAdGroups, setSourceAdGroups] = useState<SourceAdGroupOption[]>([]);
   const [sourceAdId, setSourceAdId] = useState("");
   const [copyPreview, setCopyPreview] = useState<LaunchCopyPreviewRecord | null>(null);
   const [accountQuery, setAccountQuery] = useState("");
@@ -191,7 +228,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     presetId && !selectedPresetLaunchReady ? "当前预设参数映射尚未完成，请先在高级自定义中补全。" : null,
     !sheet ? "请导入创建信息表。" : null,
     sheet && sheet.errors.length > 0 ? "请先修正导入表错误。" : null,
-    launchMode === "copy" && !sourceAdId ? "请选择稳定 ID 对应的源广告。" : null,
+    launchMode === "copy" && !sourceAdId ? "请选择源广告组。" : null,
     launchMode === "copy" && !copySourceReady ? "源账户缺少广告读取能力，请重新检测接入。" : null,
     launchMode === "copy" && copyTaskCount > 3 ? "复制迁移当前每次最多 3 个逐项任务。" : null,
     launchMode === "copy" && !copyPreview ? "请先生成并核对复制差异预览。" : null,
@@ -243,20 +280,15 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   }, [launchMode, preferredAccountId, sourceAccountId, sourceAccounts, targets]);
   useEffect(() => {
     if (launchMode !== "copy" || !sourceAccountId) {
-      setSourceAds([]);
+      setSourceAdGroups([]);
       setSourceAdId("");
       return;
     }
     void api.getManagedEntities(sourceAccountId)
       .then((entities) => {
-        const ads = entities.filter((entity) =>
-          entity.entityType === "ad"
-          && !entity.ignored
-          && Boolean(entity.externalId)
-          && entity.externalId !== "0"
-          && Boolean(entity.name?.trim()));
-        setSourceAds(ads);
-        setSourceAdId((current) => ads.some((ad) => ad.externalId === current) ? current : "");
+        const groups = buildSourceAdGroupOptions(entities);
+        setSourceAdGroups(groups);
+        setSourceAdId((current) => groups.some((group) => group.sourceAdId === current) ? current : "");
       })
       .catch((cause) => onError(messageOf(cause)));
   }, [launchMode, onError, sourceAccountId]);
@@ -436,13 +468,13 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <main className="launch-workspace">
         {launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onError={onError} /> : <>
 
-    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先按稳定 ID 选择源广告，再选择 1–3 个目标逐项任务。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
+    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "先选择源广告组，再选择 1–3 个目标逐项任务。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
       {accounts.length === 0 ? <p className="launch-account-empty">先在“用户管理”添加广告账户并完成接入，随后可回到此处选择发布账户。</p> : <div className="launch-account-readiness-grid">{accountReadiness.map(({ account, checks, ready }) => <article className={ready ? "launch-account-readiness ready" : "launch-account-readiness"} key={account.id}><header><div><strong>{account.displayName}</strong><span>{account.providerKind === "cookie" ? "Cookie 接入" : "Marketing API"}</span></div><em className={ready ? "status active" : "status warning"}>{ready ? "可发布" : "待完善"}</em></header><div>{checks.map((check) => <span className={check.passed ? "passed" : "missing"} key={check.label}>{check.passed ? <CircleCheck size={14} /> : <CircleX size={14} />}{check.label}</span>)}</div></article>)}</div>}
     </div><div className="form-grid">
       {targets.length === 0 ? <div className="launch-target-empty"><CircleX size={18} /><div><strong>暂时没有可发布账户</strong><span>人工真实创建只要求接入检测通过且具备创建权限；自动化开关和执行模式不再阻止手动发布。</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button">去完善账户</button></div> : <>
         {launchMode === "single" && <label className="field"><span>创建账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>仅显示已授权创建能力的账户。</small></label>}
-        {launchMode === "copy" && <><label className="field"><span>源广告账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>源账户只需具备广告读取能力。</small></label><label className="field"><span>源广告（稳定 ID）</span><select value={sourceAdId} onChange={(event) => setSourceAdId(event.target.value)}><option value="">请选择已同步广告</option>{sourceAds.map((ad) => <option key={ad.externalId} value={ad.externalId}>{ad.name} · {ad.externalId}</option>)}</select><small>不会按广告名称、广告组名称或系列名称回退定位。</small></label></>}
+        {launchMode === "copy" && <><label className="field"><span>源广告账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>源账户只需具备广告读取能力。</small></label><label className="field"><span>源广告组</span><select value={sourceAdId} onChange={(event) => setSourceAdId(event.target.value)}><option value="">请选择已同步广告组</option>{sourceAdGroups.map((group) => <option key={group.adGroupId} value={group.sourceAdId}>{group.name}</option>)}</select><small>下拉框仅显示广告组名称，复制时自动定位对应源结构。</small></label></>}
         {launchMode !== "single" && <div className="field wide target-account-selector"><span>{launchMode === "copy" ? "目标账户（复制迁移）" : "发布账户（可多选）"}</span><div className="target-account-toolbar"><input aria-label="搜索可用发布账户" placeholder="搜索已接入账户" value={accountQuery} onChange={(event) => setAccountQuery(event.target.value)} /><span>已选 {targetIds.length} / {availableTargets.length}</span><button className="secondary-button compact-button" onClick={() => setTargetIds(visibleTargets.slice(0, launchMode === "copy" ? 3 : visibleTargets.length).map((account) => account.id))} type="button">全选当前结果</button><button className="secondary-button compact-button" onClick={() => setTargetIds([])} type="button">清空</button></div><div className="target-account-grid">{visibleTargets.length === 0 ? <p className="target-account-empty">没有匹配的可用账户。</p> : visibleTargets.map((account) => <label key={account.id}><input checked={targetIds.includes(account.id)} disabled={launchMode === "copy" && !targetIds.includes(account.id) && targetIds.length >= 3} onChange={(event) => setTargetIds((current) => event.target.checked ? [...new Set([...current, account.id])].slice(0, launchMode === "copy" ? 3 : 100) : current.filter((id) => id !== account.id))} type="checkbox" /><span>{account.displayName}</span><small>已接入 · {account.providerKind === "cookie" ? "Cookie" : "Marketing API"}</small></label>)}</div></div>}
       </>}
     </div></div>
