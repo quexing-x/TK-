@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AccountConfig, ManagedEntityRecord } from "@tk-auto/core";
 import type { LaunchExecutionResult } from "./api";
-import { buildSourceAdGroupOptions, summarizeExecution, summarizePlanAccountResult } from "./LaunchPage";
+import {
+  buildSourceAdGroupOptions,
+  summarizeExecution,
+  summarizeLaunchOutcomeToast,
+  summarizePlanAccountResult,
+} from "./LaunchPage";
 
 const accounts = [{ id: "account-1", displayName: "测试账户" }] as AccountConfig[];
 const plan = {} as LaunchExecutionResult["plan"];
@@ -32,8 +37,8 @@ describe("launch item result presentation", () => {
       message: "创建完成", syncWarning: null,
     }] }, accounts)).toEqual({
       tone: "success",
-      title: "创建成功 1 条",
-      lines: ["测试账户：成功"],
+      title: "创建成功 1 个广告组",
+      lines: ["测试账户：成功 1 个广告组"],
     });
   });
 
@@ -43,8 +48,8 @@ describe("launch item result presentation", () => {
       message: "预算无效", syncWarning: null,
     }] }, accounts)).toMatchObject({
       tone: "danger",
-      title: "创建失败 1 条",
-      lines: ["测试账户：失败"],
+      title: "创建失败 1 个广告组",
+      lines: ["测试账户：预算无效"],
     });
   });
 
@@ -54,11 +59,11 @@ describe("launch item result presentation", () => {
       message: "创建完成", syncWarning: "列表暂时不可用",
     }] }, accounts)).toMatchObject({
       tone: "success",
-      lines: ["测试账户：成功"],
+      lines: ["测试账户：成功 1 个广告组"],
     });
   });
 
-  it("presents legacy unknown creation results as failures without a verification form", () => {
+  it("presents unknown creation results as non-retryable remote verification", () => {
     const feedback = summarizeExecution({ plan, results: [{
       itemId: "item-unknown", accountId: "account-1", status: "unknown",
       message: "响应在请求发送后丢失", syncWarning: null,
@@ -66,10 +71,26 @@ describe("launch item result presentation", () => {
 
     expect(feedback).toMatchObject({
       tone: "danger",
-      title: "创建失败 1 条",
-      lines: ["测试账户：失败"],
+      title: "创建失败 1 个广告组",
+      lines: ["测试账户：结果核验失败：响应在请求发送后丢失；可只读重新核验，不会重复创建"],
     });
     expect(feedback.lines.join(" ")).not.toContain("人工核验");
+  });
+
+  it("shows confirmed and readback failures together without hiding either node", () => {
+    const feedback = summarizeExecution({ plan, results: [
+      { itemId: "item-failed", accountId: "account-1", status: "failed", message: "预算无效", syncWarning: null },
+      { itemId: "item-unknown", accountId: "account-1", status: "unknown", message: "Cookie 连接中断", syncWarning: null },
+    ] }, accounts);
+
+    expect(feedback).toMatchObject({
+      tone: "danger",
+      title: "创建失败 2 个广告组",
+      lines: [
+        "测试账户：预算无效",
+        "测试账户：结果核验失败：Cookie 连接中断；可只读重新核验，不会重复创建",
+      ],
+    });
   });
 
   it("does not surface readback warnings as a creation failure", () => {
@@ -80,25 +101,59 @@ describe("launch item result presentation", () => {
 
     expect(feedback.tone).toBe("success");
     expect(feedback.lines).toEqual([
-      "测试账户：成功",
+      "测试账户：成功 1 个广告组",
     ]);
     expect(feedback.lines[0]).not.toContain("创建结果待确认");
   });
 
-  it("folds legacy unknown counts into failed account summaries", () => {
+  it("keeps the ad-group successful and reports skipped materials without a red result", () => {
+    const results = [{
+      itemId: "item-success", accountId: "account-1", status: "succeeded" as const,
+      message: "广告组已创建", syncWarning: "素材提示：广告组已创建成功；已跳过 2 条素材。",
+    }];
+
+    expect(summarizeExecution({ plan, results }, accounts)).toEqual({
+      tone: "success",
+      title: "创建成功 1 个广告组（2 条素材失败，已跳过）",
+      lines: ["测试账户：成功 1 个广告组"],
+    });
+    expect(summarizeLaunchOutcomeToast(results)).toEqual({
+      message: "创建成功（2 条素材失败，已跳过）",
+      tone: "success",
+    });
+  });
+
+  it("uses a red toast only when an ad group failed or could not be verified", () => {
+    expect(summarizeLaunchOutcomeToast([
+      { status: "succeeded", syncWarning: null },
+      { status: "failed", syncWarning: null },
+    ])).toEqual({
+      message: "创建完成：成功 1 个广告组，失败 1 个广告组",
+      tone: "error",
+    });
+    expect(summarizeLaunchOutcomeToast([
+      { status: "succeeded", syncWarning: "列表刷新稍慢" },
+      { status: "succeeded", syncWarning: null },
+    ])).toEqual({
+      message: "创建任务全部成功（2 个广告组）",
+      tone: "success",
+    });
+  });
+
+  it("keeps unknown counts separate from confirmed failures", () => {
     expect(summarizePlanAccountResult({
       accountId: "account-1", ok: false, message: "创建结果待确认：响应丢失",
       createdCount: 0, failedCount: 0, unknownCount: 1,
     })).toEqual({
       tone: "danger",
-      text: "失败 1 条",
+      text: "结果核验失败 1 条：创建结果待确认：响应丢失",
     });
     expect(summarizePlanAccountResult({
       accountId: "account-1", ok: false, message: "明确失败：预算被拒绝",
       createdCount: 0, failedCount: 1, unknownCount: 0,
     })).toEqual({
       tone: "danger",
-      text: "失败 1 条",
+      text: "失败 1 条：明确失败：预算被拒绝",
     });
   });
 });

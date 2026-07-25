@@ -8,6 +8,7 @@ import type {
   SyncEntityType,
   CreationPresetConfig,
   LaunchConfigurationRow,
+  LaunchCreationEvidence,
   LaunchCreationProgress,
   ProviderCapability,
 } from "@tk-auto/core";
@@ -61,9 +62,14 @@ export interface CreationMutation {
   operationId?: string;
   attemptId?: string;
   correlationId?: string;
-  batchId?: string;
   batchCampaignId?: string;
   batchAdGroupNames?: string[];
+  /** Read-only recovery for a previously unknown dispatch. The provider must
+   * query remote state and must not save or publish another draft. */
+  reconcileOnly?: boolean;
+  /** Snap/sketch ids persisted before an unknown result. They scope read-only
+   * reconciliation to this task instead of unrelated account drafts. */
+  reconcileEvidence?: LaunchCreationEvidence;
   onBeforeDispatch?: () => void;
   onProgress?: (progress: LaunchCreationProgress) => void;
 }
@@ -74,6 +80,9 @@ export interface CreationMutationResult extends CreationMutation {
   adGroupId?: string;
   adId?: string;
   message: string;
+  /** Non-blocking completion detail. A created campaign/ad-group remains a
+   * success when TikTok skips its ad material during publication. */
+  warning?: string;
   failureKind?: "retryable" | "unknown";
   /** False when an earlier accepted mutation makes replaying the whole
    * operation unsafe even though the final rejection is explicit. */

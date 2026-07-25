@@ -68,7 +68,10 @@ export function buildPublishInput(
   initialStatus: "enabled" | "disabled",
 ) {
   const value = DisabledPublishInputSchema.parse(input);
-  return { campaign_id: "", campaign_snap_id: value.campaignSnapId, campaign_sketch_id: value.campaignSketchId, ad_and_creative_snap_info_list: value.adAndCreativeSnapInfoList, ...TikTokCreationPublishSource, is_status_disabled: initialStatus === "disabled", is_partial_publish: false };
+  // Publish only the explicitly supplied snap list. TikTok accounts can retain
+  // unrelated unfinished drafts; a full-draft-tree publish may otherwise pull
+  // those objects into this batch.
+  return { campaign_id: "", campaign_snap_id: value.campaignSnapId, campaign_sketch_id: value.campaignSketchId, ad_and_creative_snap_info_list: value.adAndCreativeSnapInfoList, ...TikTokCreationPublishSource, is_status_disabled: initialStatus === "disabled", is_partial_publish: true };
 }
 
 export class CreationPresetIncompleteError extends Error {

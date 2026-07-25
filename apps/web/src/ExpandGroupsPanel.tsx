@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { CheckCircle2, CopyPlus, Inbox, Info, RefreshCcw, XCircle } from "lucide-react";
 import type {
   AccountConfig,
@@ -63,12 +64,14 @@ export function ExpandGroupsPanel({
   accounts,
   connectionStates,
   onError,
+  presetHost,
 }: {
   accounts: AccountConfig[];
   connectionStates: ConnectionState[];
   onError: (message: string | null) => void;
+  presetHost?: HTMLElement | null;
 }) {
-  const { confirm } = useOverlays();
+  const { confirm, toast } = useOverlays();
   const [entitiesByAccount, setEntitiesByAccount] = useState<Record<string, ManagedEntityRecord[]>>({});
   const [loadingAccounts, setLoadingAccounts] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -278,6 +281,12 @@ export function ExpandGroupsPanel({
         title: created ? "创建成功" : "创建失败",
         lines,
       });
+      toast(
+        result.failed.length > 0
+          ? `扩组完成：成功 ${result.createdGroups} 个广告组，失败 ${result.failed.length} 个广告组`
+          : `扩组任务全部成功（${result.createdGroups} 个广告组）`,
+        result.failed.length > 0 ? "error" : "success",
+      );
       setSelected([]);
       // 扩组后刷新涉及账户，展示新组。
       for (const accountId of new Set(sources.map((source) => source.accountId))) {
@@ -291,6 +300,24 @@ export function ExpandGroupsPanel({
   };
 
   const totalSelectable = selectableKeys.size;
+  const presetPanel = <div className={presetHost ? "expand-preset sidebar" : "expand-preset"}>
+    <div className="expand-preset-head"><CopyPlus size={15} /> 扩组预设</div>
+    <div className="expand-preset-grid">
+      <label className="field"><span>每个源组复制份数</span><input max={10} min={1} type="number" value={count} onChange={(event) => setCount(Math.max(1, Math.min(10, Number(event.target.value) || 1)))} /><small>1–10，命名为“原组名-投放日期-序号”。</small></label>
+      <label className="field"><span>日预算</span><input min={1} type="number" value={dailyBudget} onChange={(event) => setDailyBudget(Number(event.target.value))} /><small>覆盖新组的日预算。</small></label>
+      <label className="field"><span>出价</span><input placeholder="留空继承源组" value={bidText} onChange={(event) => setBidText(event.target.value)} /><small>留空则继承源组出价。</small></label>
+    </div>
+    <div className="expand-timing">
+      <span className="expand-timing-label">投放时间</span>
+      <div className="expand-timing-modes">
+        <button className={timingMode === "immediate" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("immediate")} type="button">立即投放</button>
+        <button className={timingMode === "scheduled" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("scheduled")} type="button">定时投放</button>
+      </div>
+      {timingMode === "scheduled"
+        ? <label className="expand-timing-when"><input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新组将以开启状态发布，并由 TikTok 在设定时间开始投放。默认次日 06:00，可改。</small></label>
+        : <small className="expand-timing-hint">新组创建后立即开启投放。</small>}
+    </div>
+  </div>;
 
   return <div className="panel expand-groups-panel">
     <div className="panel-heading"><div><span className="panel-icon"><CopyPlus size={18} /></span><div><h2>一键扩组</h2><p>先选账户，再勾选目标广告组，按预设为每个源组各复制 N 个新组（挂原系列、克隆源创意）。</p></div></div></div>
@@ -365,24 +392,7 @@ export function ExpandGroupsPanel({
       })}
     </div>}
 
-    <div className="expand-preset">
-      <div className="expand-preset-head"><CopyPlus size={15} /> 扩组预设</div>
-      <div className="expand-preset-grid">
-        <label className="field"><span>每个源组复制份数</span><input max={10} min={1} type="number" value={count} onChange={(event) => setCount(Math.max(1, Math.min(10, Number(event.target.value) || 1)))} /><small>1–10，命名为“原组名-投放日期-序号”。</small></label>
-        <label className="field"><span>日预算</span><input min={1} type="number" value={dailyBudget} onChange={(event) => setDailyBudget(Number(event.target.value))} /><small>覆盖新组的日预算。</small></label>
-        <label className="field"><span>出价</span><input placeholder="留空继承源组" value={bidText} onChange={(event) => setBidText(event.target.value)} /><small>留空则继承源组出价。</small></label>
-      </div>
-      <div className="expand-timing">
-        <span className="expand-timing-label">投放时间</span>
-        <div className="expand-timing-modes">
-          <button className={timingMode === "immediate" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("immediate")} type="button">立即投放</button>
-          <button className={timingMode === "scheduled" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("scheduled")} type="button">定时投放</button>
-        </div>
-        {timingMode === "scheduled"
-          ? <label className="expand-timing-when"><input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新组将以开启状态发布，并由 TikTok 在设定时间开始投放。默认次日 06:00，可改。</small></label>
-          : <small className="expand-timing-hint">新组创建后立即开启投放。</small>}
-      </div>
-    </div>
+    {presetHost ? createPortal(presetPanel, presetHost) : presetPanel}
 
     {feedback && <div className={`expand-feedback ${feedback.tone}`}>{feedback.tone === "success" ? <CheckCircle2 size={16} /> : <XCircle size={16} />}<div><strong>{feedback.title}</strong>{feedback.lines.length > 0 && <ul>{feedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul>}</div></div>}
 

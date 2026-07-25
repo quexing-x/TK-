@@ -3386,7 +3386,7 @@ export class AutomationStore {
   completeLaunchPlanItemSuccess(
     itemId: string,
     executorId: string,
-    ids: { campaignId: string; adGroupId: string; adId: string },
+    ids: { campaignId: string; adGroupId: string; adId?: string; warning?: string },
   ): LaunchPlanItemRecord {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
@@ -3395,11 +3395,11 @@ export class AutomationStore {
       .prepare(
         `UPDATE launch_plan_items
          SET status = 'succeeded', campaign_id = ?, adgroup_id = ?, ad_id = ?,
-             phase = 'readback', error_message = NULL, completed_at = ?, updated_at = ?
+             phase = 'readback', error_message = NULL, sync_warning = ?, completed_at = ?, updated_at = ?
          WHERE item_id = ? AND status = 'running' AND claimed_by = ?
          RETURNING *`,
       )
-      .get(ids.campaignId, ids.adGroupId, ids.adId, now, now, itemId, executorId) as SqlRow | undefined;
+      .get(ids.campaignId, ids.adGroupId, ids.adId ?? null, ids.warning ?? null, now, now, itemId, executorId) as SqlRow | undefined;
     if (!row) throw new Error("创建任务未被当前执行器领取。");
     this.finishLaunchAttempt(row, "succeeded", null, now);
     const attemptActor = this.db.prepare(
@@ -3412,7 +3412,8 @@ export class AutomationStore {
       correlationId: row.correlation_id,
       campaignId: ids.campaignId,
       adGroupId: ids.adGroupId,
-      adId: ids.adId,
+      ...(ids.adId ? { adId: ids.adId } : {}),
+      ...(ids.warning ? { warning: ids.warning } : {}),
     });
     this.db.exec("COMMIT");
     return mapLaunchPlanItem(row);
@@ -3594,85 +3595,6 @@ export class AutomationStore {
     }
   }
 
-  recoverDefinitiveLaunchFailures(): {
-    recoveredItemCount: number;
-    resumedItemCount: number;
-    planIds: string[];
-  } {
-    const definitiveFailures = this.db.prepare(
-      `SELECT * FROM launch_plan_items
-       WHERE status = 'unknown'
-         AND (
-           instr(COALESCE(error_message, ''), 'TikTok 已明确报告广告组或创意创建失败，未生成正式广告') > 0
-           OR instr(COALESCE(error_message, ''), 'TikTok 已明确报告创建失败，未生成正式广告') > 0
-         )`,
-    ).all() as SqlRow[];
-    if (definitiveFailures.length === 0) {
-      return { recoveredItemCount: 0, resumedItemCount: 0, planIds: [] };
-    }
-
-    const now = new Date().toISOString();
-    const planIds = new Set<string>();
-    const resumedItemIds = new Set<string>();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const markFailed = this.db.prepare(
-        `UPDATE launch_plan_items
-         SET status = 'failed', claimed_by = NULL, claimed_at = NULL, updated_at = ?
-         WHERE item_id = ? AND status = 'unknown'`,
-      );
-      const releaseScope = this.db.prepare(
-        `UPDATE launch_creation_locks
-         SET owner_id = NULL, uncertain = 0, claimed_at = ?
-         WHERE plan_id = ? AND account_id = ? AND campaign_name = ?`,
-      );
-      const blockedSiblings = this.db.prepare(
-        `SELECT item_id, launch_row_json, error_message FROM launch_plan_items
-         WHERE plan_id = ? AND account_id = ? AND status = 'failed'`,
-      );
-      const resumeSibling = this.db.prepare(
-        `UPDATE launch_plan_items
-         SET status = 'pending', phase = 'validation', attempt_id = NULL,
-             claimed_by = NULL, claimed_at = NULL, error_message = NULL,
-             sync_warning = NULL, completed_at = NULL, updated_at = ?
-         WHERE item_id = ? AND status = 'failed'`,
-      );
-
-      for (const row of definitiveFailures) {
-        const planId = String(row.plan_id);
-        const accountId = String(row.account_id);
-        const launchRow = JSON.parse(String(row.launch_row_json)) as { campaignName?: unknown };
-        const campaignName = typeof launchRow.campaignName === "string" ? launchRow.campaignName.trim() : "";
-        if (!campaignName) continue;
-        markFailed.run(now, String(row.item_id));
-        releaseScope.run(now, planId, accountId, campaignName);
-        planIds.add(planId);
-
-        const siblings = blockedSiblings.all(planId, accountId) as SqlRow[];
-        for (const sibling of siblings) {
-          const message = String(sibling.error_message ?? "");
-          const wasNeverDispatched = message.includes("当前任务未发送 Provider 请求")
-            || message.includes("同批次前一条同系列任务结果未知")
-            || message.includes("同计划内已有同系列任务结果未知");
-          if (!wasNeverDispatched) continue;
-          const siblingLaunchRow = JSON.parse(String(sibling.launch_row_json)) as { campaignName?: unknown };
-          if (typeof siblingLaunchRow.campaignName !== "string" || siblingLaunchRow.campaignName.trim() !== campaignName) continue;
-          const result = resumeSibling.run(now, String(sibling.item_id));
-          if (result.changes === 1) resumedItemIds.add(String(sibling.item_id));
-        }
-      }
-      this.db.exec("COMMIT");
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      throw cause;
-    }
-    return {
-      recoveredItemCount: definitiveFailures.length,
-      resumedItemCount: resumedItemIds.size,
-      planIds: [...planIds],
-    };
-  }
-
   private finishLaunchAttempt(
     itemRow: SqlRow,
     status: "succeeded" | "failed" | "unknown",
@@ -3711,7 +3633,7 @@ export class AutomationStore {
         ok: accountItems.length > 0 && accountItems.every((item) => item.status === "succeeded"),
         message: [
           failureMessage ? `明确失败：${failureMessage}` : "",
-          unknownMessage ? `创建失败：${unknownMessage}` : "",
+          unknownMessage ? `结果核验失败：${unknownMessage}` : "",
         ].filter(Boolean).join("；").slice(0, 2000) || null,
         createdCount: accountItems.filter((item) => item.status === "succeeded").length,
         failedCount: failures.length,
@@ -3726,7 +3648,7 @@ export class AutomationStore {
       : [
           `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条`,
           ...(failedCount > 0 ? [`明确失败 ${failedCount} 条，可单独重试`] : []),
-          ...(unknownCount > 0 ? [`创建失败 ${unknownCount} 条`] : []),
+          ...(unknownCount > 0 ? [`结果核验失败 ${unknownCount} 条，可执行只读重新核验`] : []),
         ].join("；") + "。";
     this.db
       .prepare(
@@ -4059,6 +3981,26 @@ export class AutomationStore {
     actor: WriteTaskActor = { id: "local-user", name: "本地用户", kind: "user" },
   ): MultiAccountLaunchPlanRecord {
     const plan = MultiAccountLaunchPlanInputSchema.parse(input);
+    const clientRequestHash = jsonHash({
+      mode: plan.mode,
+      sourceAccountId: plan.sourceAccountId,
+      sourceAdId: plan.sourceAdId,
+      copyPreviewId: plan.copyPreviewId,
+      targetAccountIds: [...new Set(plan.targetAccountIds)],
+      launchPresetId: plan.launchPresetId,
+      launchRows: plan.launchRows,
+    });
+    if (plan.clientRequestId) {
+      const existing = this.db.prepare(
+        "SELECT id, client_request_hash FROM multi_account_launch_plans WHERE client_request_id = ?",
+      ).get(plan.clientRequestId) as SqlRow | undefined;
+      if (existing) {
+        if (String(existing.client_request_hash ?? "") !== clientRequestHash) {
+          throw new Error("同一创建请求标识已用于不同的表格或账户范围，请重新导入后再提交。");
+        }
+        return this.getMultiAccountLaunchPlan(String(existing.id)) as MultiAccountLaunchPlanRecord;
+      }
+    }
     const preset = this.listLaunchPresets().find((item) => item.id === plan.launchPresetId);
     if (!preset) throw new Error("请选择有效的广告预设。");
     const sourceAccount = this.getAccount(plan.sourceAccountId);
@@ -4136,13 +4078,15 @@ export class AutomationStore {
       this.db
         .prepare(
           `INSERT INTO multi_account_launch_plans (
-            id, copy_preview_id, source_account_id, source_ad_id, source_ad_name,
+            id, client_request_id, client_request_hash, copy_preview_id, source_account_id, source_ad_id, source_ad_name,
             target_account_ids_json, naming_template, start_paused, launch_mode, launch_preset_id, preset_name, preset_snapshot_json,
             launch_rows_json, status, message, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', ?, ?, ?)`,
         )
         .run(
           id,
+          plan.clientRequestId ?? null,
+          clientRequestHash,
           preview?.id ?? null,
           plan.sourceAccountId,
           plan.sourceAdId ?? "__new__",
@@ -4189,7 +4133,7 @@ export class AutomationStore {
           }
           const idempotencyKey = jsonHash({
             kind: plan.mode,
-            planSeed: preview?.id ?? id,
+            planSeed: preview?.id ?? plan.clientRequestId ?? id,
             accountId,
             itemIndex,
           });
@@ -4252,6 +4196,17 @@ export class AutomationStore {
       this.db.exec("COMMIT");
     } catch (cause) {
       this.db.exec("ROLLBACK");
+      // A second API process can pass the optimistic lookup before this
+      // transaction commits. The unique request id still makes that race
+      // idempotent: return the committed plan when the payload hash matches.
+      if (plan.clientRequestId) {
+        const existing = this.db.prepare(
+          "SELECT id, client_request_hash FROM multi_account_launch_plans WHERE client_request_id = ?",
+        ).get(plan.clientRequestId) as SqlRow | undefined;
+        if (existing && String(existing.client_request_hash ?? "") === clientRequestHash) {
+          return this.getMultiAccountLaunchPlan(String(existing.id)) as MultiAccountLaunchPlanRecord;
+        }
+      }
       throw cause;
     }
     return this.listMultiAccountLaunchPlans().find(
@@ -5489,6 +5444,8 @@ export class AutomationStore {
 
       CREATE TABLE IF NOT EXISTS multi_account_launch_plans (
         id TEXT PRIMARY KEY,
+        client_request_id TEXT UNIQUE,
+        client_request_hash TEXT,
         copy_preview_id TEXT UNIQUE,
         source_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         source_ad_id TEXT NOT NULL,
@@ -5622,22 +5579,6 @@ export class AutomationStore {
 
       CREATE INDEX IF NOT EXISTS launch_plan_item_attempts_item
       ON launch_plan_item_attempts (item_id, attempt_number);
-
-      CREATE TABLE IF NOT EXISTS launch_plan_item_verifications (
-        id TEXT PRIMARY KEY,
-        item_id TEXT NOT NULL REFERENCES launch_plan_items(item_id) ON DELETE CASCADE,
-        actor_id TEXT NOT NULL,
-        actor_name TEXT NOT NULL,
-        decision TEXT NOT NULL CHECK (decision IN ('confirmed-succeeded', 'confirmed-not-created')),
-        evidence TEXT NOT NULL,
-        note TEXT NOT NULL,
-        campaign_id TEXT,
-        adgroup_id TEXT,
-        ad_id TEXT,
-        previous_status TEXT NOT NULL CHECK (previous_status = 'unknown'),
-        next_status TEXT NOT NULL CHECK (next_status IN ('succeeded', 'failed')),
-        created_at TEXT NOT NULL
-      );
 
       CREATE INDEX IF NOT EXISTS launch_plan_items_claim
       ON launch_plan_items (plan_id, status, account_id, item_index);
@@ -6000,6 +5941,11 @@ export class AutomationStore {
       "multi_account_launch_plans",
       "launch_rows_json",
       "TEXT NOT NULL DEFAULT '[]'",
+    );
+    this.ensureColumn("multi_account_launch_plans", "client_request_id", "TEXT");
+    this.ensureColumn("multi_account_launch_plans", "client_request_hash", "TEXT");
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_launch_plans_client_request_id ON multi_account_launch_plans(client_request_id) WHERE client_request_id IS NOT NULL",
     );
     this.ensureColumn("multi_account_launch_plans", "copy_preview_id", "TEXT");
     this.ensureColumn(
@@ -6701,6 +6647,7 @@ function isHttpUrl(value: string): boolean {
 function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
   return MultiAccountLaunchPlanRecordSchema.parse({
     id: row.id,
+    ...(row.client_request_id ? { clientRequestId: row.client_request_id } : {}),
     copyPreviewId: row.copy_preview_id ?? null,
     sourceAccountId: row.source_account_id,
     sourceAdId: row.source_ad_id === "__new__" ? null : row.source_ad_id,
