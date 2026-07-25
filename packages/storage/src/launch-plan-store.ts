@@ -31,7 +31,7 @@ export class LaunchPlanStore {
     return this.store.renewLaunchPlanItemLease(itemId, executorId);
   }
 
-  succeed(itemId: string, executorId: string, ids: { campaignId: string; adGroupId: string; adId: string }) {
+  succeed(itemId: string, executorId: string, ids: { campaignId: string; adGroupId: string; adId?: string; warning?: string }) {
     return this.store.completeLaunchPlanItemSuccess(itemId, executorId, ids);
   }
 
@@ -52,11 +52,9 @@ export class LaunchPlanStore {
   }
 
   recoverLegacySeriesBlocks() {
+    // One-way upgrade compatibility for plans created by releases that used
+    // database series locks. New creation tasks never acquire these locks.
     return this.store.recoverLegacySeriesCoordinationFailures();
-  }
-
-  recoverDefinitiveFailures() {
-    return this.store.recoverDefinitiveLaunchFailures();
   }
 
   refresh(planId: string): MultiAccountLaunchPlanRecord {

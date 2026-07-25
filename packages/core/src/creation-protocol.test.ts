@@ -14,8 +14,8 @@ describe("creation protocol", () => {
   it("uses the confirmed four-step draft chain and makes the initial state explicit", () => {
     expect(TikTokCreationSteps).toEqual(["campaign_snap/save", "ad_snap/save", "creative_snap/save", "async_creation/create_by_snap"]);
     const input = { campaignSnapId: "campaign-snap", campaignSketchId: "campaign-sketch", adAndCreativeSnapInfoList: [{ ad_snap_id: "ad-snap" }] };
-    expect(buildPublishInput(input, "disabled")).toMatchObject({ campaign_id: "", is_status_disabled: true, is_partial_publish: false, coming_source_type: 6, sketch_publish_source: 1 });
-    expect(buildPublishInput(input, "enabled")).toMatchObject({ campaign_id: "", is_status_disabled: false, is_partial_publish: false, coming_source_type: 6, sketch_publish_source: 1 });
+    expect(buildPublishInput(input, "disabled")).toMatchObject({ campaign_id: "", is_status_disabled: true, is_partial_publish: true, coming_source_type: 6, sketch_publish_source: 1 });
+    expect(buildPublishInput(input, "enabled")).toMatchObject({ campaign_id: "", is_status_disabled: false, is_partial_publish: true, coming_source_type: 6, sketch_publish_source: 1 });
   });
 
   it("derives each fixed creation path from the two-cURL session without retaining credentials", () => {

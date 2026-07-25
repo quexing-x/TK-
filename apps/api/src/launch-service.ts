@@ -47,7 +47,7 @@ export class LaunchService {
   private readonly launchStore: LaunchPlanStore;
   private readonly tasks: WriteTaskKernel<
     LaunchPlanItemRecord,
-    { campaignId: string; adGroupId: string; adId: string },
+    { campaignId: string; adGroupId: string; adId?: string; warning?: string },
     "pending" | "failed" | "unknown"
   >;
 
@@ -106,10 +106,12 @@ export class LaunchService {
     const candidates = allItems.filter((item) => item.status === "pending");
     const groupsByAccount = groupLaunchItemsByAccountAndCampaign(candidates);
     const accountResults = await Promise.all(
-      [...groupsByAccount.values()].map((groups) => mapWithConcurrency(
-        groups,
-        3,
-        (group) => this.executeSeriesBatch(plan.presetSnapshot!.creationConfig, group, actor),
+      [...groupsByAccount.values()].map((groups) => Promise.all(
+        groups.map((group) => this.executeSeriesBatch(
+          plan.presetSnapshot!.creationConfig,
+          group,
+          actor,
+        )),
       )),
     );
     const itemOrder = new Map(candidates.map((item) => [item.itemId, item.itemIndex]));
@@ -146,7 +148,7 @@ export class LaunchService {
     const item = this.launchStore.listItems(planId).find((candidate) => candidate.itemId === itemId);
     if (!item) throw new Error("创建任务不存在或不属于当前计划。");
     if (item.status !== "failed" && item.status !== "unknown") {
-      throw new Error("只有创建失败的任务可以单项重试。");
+      throw new Error("只有失败或待远端核验的创建任务可以单项处理。");
     }
     const results = await this.executeSeriesBatch(plan.presetSnapshot.creationConfig, [item], actor);
     if (results.length === 0) throw new Error("创建任务正在执行或状态已经变化。");
@@ -162,6 +164,9 @@ export class LaunchService {
     actor: WriteTaskActor,
   ): Promise<LaunchExecutionItemResult[]> {
     const executorId = randomUUID();
+    const reconcileOnlyItemIds = new Set(
+      candidates.filter((item) => item.status === "unknown").map((item) => item.itemId),
+    );
     const claimed = candidates.flatMap((candidate) => {
       if (!["pending", "failed", "unknown"].includes(candidate.status)) return [];
       const item = this.tasks.claim(
@@ -216,6 +221,7 @@ export class LaunchService {
         }
       }
       const context = await this.loadProviderContext(first.accountId, account.providerKind);
+      const connectionFingerprint = creationConnectionFingerprint(connection);
       for (const item of claimed) {
         await this.refreshLaunchCopyEvidence(item, context);
       }
@@ -235,8 +241,7 @@ export class LaunchService {
         );
         if (
           !dispatchConnection
-          || dispatchConnection.credentialRef !== connection.credentialRef
-          || dispatchConnection.updatedAt !== connection.updatedAt
+          || creationConnectionFingerprint(dispatchConnection) !== connectionFingerprint
         ) {
           throw new Error("目标账户授权或凭据已变更，批量创建已阻止。");
         }
@@ -260,7 +265,9 @@ export class LaunchService {
         operationId: item.operationId,
         attemptId: item.attemptId!,
         correlationId: item.correlationId,
-        batchId: item.planId,
+        ...(reconcileOnlyItemIds.has(item.itemId)
+          ? { reconcileOnly: true, reconcileEvidence: item.evidence }
+          : {}),
         onBeforeDispatch: validateBeforeDispatch,
         onProgress: (progress: LaunchCreationProgress) => {
           this.launchStore.progress(item.itemId, executorId, progress);
@@ -290,25 +297,24 @@ export class LaunchService {
         created: NonNullable<(typeof createdResults)[number]>;
         output: LaunchExecutionItemResult;
       }> = [];
-      let providerFailureRecorded = false;
-
       for (const [index, item] of claimed.entries()) {
         const created = (item.attemptId ? byAttemptId.get(item.attemptId) : undefined)
           ?? byOperationId.get(item.operationId)
           ?? createdResults[index];
-        if (!created?.ok || !created.campaignId || !created.adGroupId || !created.adId) {
+        if (!created?.ok || !created.campaignId || !created.adGroupId) {
           const message = created?.ok
-            ? "Provider 未返回完整的系列、广告组和广告 ID，本条创建按失败处理。"
+            ? "Provider 已返回成功但缺少完整的系列或广告组 ID，真实结果仍需远端核验。"
             : created?.message ?? "Provider 未返回本广告组的创建结果。";
-          this.tasks.fail(item.itemId, executorId, message);
-          if (!providerFailureRecorded) {
-            this.recordCreationWriteFailure(first.accountId, account.providerKind, message);
-            providerFailureRecorded = true;
-          }
+          const unknown = !created
+            || created.ok
+            || created.failureKind === "unknown"
+            || created.retrySafe === false;
+          if (unknown) this.tasks.unknown(item.itemId, executorId, message);
+          else this.tasks.fail(item.itemId, executorId, message);
           outputs.push({
             itemId: item.itemId,
             accountId: item.accountId,
-            status: "failed",
+            status: unknown ? "unknown" : "failed",
             message,
             syncWarning: null,
             ok: false,
@@ -320,7 +326,8 @@ export class LaunchService {
         const successIds = {
           campaignId: created.campaignId,
           adGroupId: created.adGroupId,
-          adId: created.adId,
+          ...(created.adId ? { adId: created.adId } : {}),
+          ...(created.warning ? { warning: created.warning } : {}),
         };
         try {
           this.tasks.succeed(item.itemId, executorId, successIds);
@@ -335,13 +342,13 @@ export class LaunchService {
           accountId: item.accountId,
           status: "succeeded",
           message: created.message,
-          syncWarning: null,
+          syncWarning: created.warning ?? null,
           ok: true,
           created: [{
             ok: true,
             campaignId: created.campaignId,
             adGroupId: created.adGroupId,
-            adId: created.adId,
+            ...(created.adId ? { adId: created.adId } : {}),
             message: created.message,
           }],
           sync: null,
@@ -355,11 +362,6 @@ export class LaunchService {
         let syncResult: ReadOnlySyncResult | null = null;
         let syncEntities: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>["entities"] = [];
         let syncCompleted = false;
-        try {
-          this.store.resetProviderWriteFailures(first.accountId, account.providerKind);
-        } catch (cause) {
-          commonSyncWarning = `写入失败计数重置失败：${safeError(cause)}`;
-        }
         try {
           const sync = await this.providers.syncReadOnly(account.providerKind, context);
           syncResult = sync.result;
@@ -388,12 +390,13 @@ export class LaunchService {
           const missing = [
             ["campaign", success.created.campaignId] as const,
             ["ad-group", success.created.adGroupId] as const,
-            ["ad", success.created.adId] as const,
+            ...(success.created.adId ? [["ad", success.created.adId] as const] : []),
           ].filter(([entityType, externalId]) =>
             syncCompleted
             && !syncEntities.some((entity) => entity.entityType === entityType && entity.externalId === externalId),
           );
           const itemWarning = [
+            success.output.syncWarning,
             commonSyncWarning,
             ...(missing.length > 0 ? [`创建后未回读到：${missing.map(([type]) => type).join("、")}`] : []),
           ].filter(Boolean).join("；") || null;
@@ -411,21 +414,19 @@ export class LaunchService {
       return outputs;
     } catch (cause) {
       const message = safeError(cause);
-      if (providerInvoked) {
-        const providerKind = this.store.getAccount(claimed[0]!.accountId)?.providerKind;
-        if (providerKind) this.recordCreationWriteFailure(claimed[0]!.accountId, providerKind, message);
-      }
+      const unknown = providerInvoked && !(cause instanceof RetryableCreationError);
       const current = new Map(
         this.launchStore.listItems(claimed[0]!.planId).map((item) => [item.itemId, item]),
       );
       return claimed.map((item): LaunchExecutionItemResult => {
         if (current.get(item.itemId)?.status === "running") {
-          this.tasks.fail(item.itemId, executorId, message);
+          if (unknown) this.tasks.unknown(item.itemId, executorId, message);
+          else this.tasks.fail(item.itemId, executorId, message);
         }
         return {
           itemId: item.itemId,
           accountId: item.accountId,
-          status: "failed",
+          status: unknown ? "unknown" : "failed",
           message,
           syncWarning: null,
           ok: false,
@@ -436,21 +437,12 @@ export class LaunchService {
     }
   }
 
-  private recordCreationWriteFailure(
-    accountId: string,
-    providerKind: ProviderKind,
-    message: string,
-  ): void {
-    const failures = this.store.recordProviderWriteFailure(accountId, providerKind, message);
-  }
-
   private recoverExpiredLeases(): void {
     this.launchStore.recover(
       new Date(Date.now() - launchLeaseTimeoutMs).toISOString(),
     );
     const resumed = this.launchStore.recoverLegacySeriesBlocks();
-    const repaired = this.launchStore.recoverDefinitiveFailures();
-    for (const planId of new Set([...resumed.planIds, ...repaired.planIds])) {
+    for (const planId of new Set(resumed.planIds)) {
       this.launchStore.refresh(planId);
     }
   }
@@ -790,24 +782,6 @@ function groupLaunchItemsByAccountAndCampaign(
   );
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  work: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await work(items[index]!);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 /**
  * Remove only the date/index fields generated by batch expansion. Repeated
  * expansion can otherwise turn `name0723-0724-1` into
@@ -839,6 +813,17 @@ function isValidMonthDay(value: string): boolean {
   if (!Number.isInteger(month) || month < 1 || month > 12) return false;
   const lastDay = new Date(Date.UTC(2000, month, 0)).getUTCDate();
   return Number.isInteger(day) && day >= 1 && day <= lastDay;
+}
+
+function creationConnectionFingerprint(
+  connection: NonNullable<ReturnType<AutomationStore["getProviderConnection"]>>,
+): string {
+  // `updatedAt` also changes after harmless health/status refreshes. Freeze
+  // only the fields that can change the actual Cookie request or credential.
+  return createHash("sha256").update(JSON.stringify({
+    credentialRef: connection.credentialRef,
+    settings: connection.settings,
+  })).digest("hex");
 }
 
 function safeError(cause: unknown): string {

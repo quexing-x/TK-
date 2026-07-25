@@ -714,6 +714,34 @@ describe("AutomationStore", () => {
     expect(store.listMultiAccountLaunchPlans()[0]?.launchRows).toEqual(plan.launchRows);
   });
 
+  it("deduplicates repeated plan submissions by client request id", () => {
+    const target = store.createAccount({
+      displayName: "幂等目标账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    const input = {
+      clientRequestId: "11111111-1111-4111-8111-111111111111",
+      mode: "multi" as const,
+      sourceAccountId: target.id,
+      sourceAdId: null,
+      targetAccountIds: [target.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    };
+
+    const first = store.createMultiAccountLaunchPlan(input);
+    const repeated = store.createMultiAccountLaunchPlan(input);
+
+    expect(repeated.id).toBe(first.id);
+    expect(store.listLaunchPlanItems(first.id)).toHaveLength(1);
+    expect(() => store.createMultiAccountLaunchPlan({
+      ...input,
+      launchRows: [{ ...input.launchRows[0]!, adGroupName: "不同广告组" }],
+    })).toThrow("同一创建请求标识已用于不同的表格或账户范围");
+  });
+
   it("blocks copy migration when a target account has no synced asset evidence", () => {
     const target = store.createAccount({
       displayName: "无素材目标账户",
@@ -1574,79 +1602,8 @@ describe("AutomationStore", () => {
       unknownCount: 1,
     });
     expect(refreshed.message).toContain("明确失败 1 条，可单独重试");
-    expect(refreshed.message).toContain("创建失败 1 条");
+    expect(refreshed.message).toContain("结果核验失败 1 条，可执行只读重新核验");
     expect(store.claimLaunchPlanItem(unknown!.itemId, "executor-b", "failed")).toBeNull();
-  });
-
-  it("repairs a legacy definitive failure and resumes same-campaign items that were never dispatched", () => {
-    const rows = [launchItemRow(2), launchItemRow(3), launchItemRow(4)].map((row) => ({
-      ...row,
-      campaignName: "same-campaign",
-    }));
-    const plan = store.createMultiAccountLaunchPlan({
-      mode: "single",
-      sourceAccountId: "demo-account",
-      sourceAdId: null,
-      targetAccountIds: ["demo-account"],
-      launchPresetId: "default-launch-preset",
-      launchRows: rows,
-    });
-    const [succeeded, definitiveFailure, blockedSibling] = store.listLaunchPlanItems(plan.id);
-
-    store.claimLaunchPlanItem(succeeded!.itemId, "executor-a", "pending");
-    const firstScopeOwner = `executor-a:${succeeded!.itemId}`;
-    expect(store.claimLaunchCreationScope(plan.id, "demo-account", "same-campaign", firstScopeOwner)).not.toBeNull();
-    expect(store.completeLaunchCreationScope(
-      plan.id,
-      "demo-account",
-      "same-campaign",
-      firstScopeOwner,
-      "formal-campaign",
-      rows[0]!.adGroupName,
-    )).toBe(true);
-    store.completeLaunchPlanItemSuccess(succeeded!.itemId, "executor-a", {
-      campaignId: "formal-campaign",
-      adGroupId: "formal-group",
-      adId: "formal-ad",
-    });
-
-    store.claimLaunchPlanItem(definitiveFailure!.itemId, "executor-b", "pending");
-    const failedScopeOwner = `executor-b:${definitiveFailure!.itemId}`;
-    expect(store.claimLaunchCreationScope(plan.id, "demo-account", "same-campaign", failedScopeOwner)).toMatchObject({
-      campaignId: "formal-campaign",
-    });
-    store.markLaunchCreationScopeUncertain(plan.id, "demo-account", "same-campaign", failedScopeOwner);
-    store.completeLaunchPlanItemUnknown(
-      definitiveFailure!.itemId,
-      "executor-b",
-      "TikTok 已明确报告广告组或创意创建失败，未生成正式广告；此前已有草稿步骤。",
-    );
-
-    store.claimLaunchPlanItem(blockedSibling!.itemId, "executor-c", "pending");
-    store.completeLaunchPlanItemFailure(
-      blockedSibling!.itemId,
-      "executor-c",
-      "同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。",
-    );
-
-    expect(store.recoverDefinitiveLaunchFailures()).toEqual({
-      recoveredItemCount: 1,
-      resumedItemCount: 1,
-      planIds: [plan.id],
-    });
-    expect(store.listLaunchPlanItems(plan.id).map((item) => item.status)).toEqual([
-      "succeeded",
-      "failed",
-      "pending",
-    ]);
-    expect(store.claimLaunchCreationScope(
-      plan.id,
-      "demo-account",
-      "same-campaign",
-      "executor-d:next",
-    )).toMatchObject({
-      campaignId: "formal-campaign",
-    });
   });
 
   it("migrates legacy series-lock failures back to pending without touching Provider", () => {

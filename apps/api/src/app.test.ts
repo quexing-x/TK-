@@ -12,6 +12,7 @@ import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
+  RetryableCreationError,
   UnknownCreationStateError,
   type AdsProvider,
   type CreationMutation,
@@ -906,11 +907,30 @@ describe("local API", () => {
       });
     }
     const cookies: string[] = [];
+    const publishedCookies = new Set<string>();
+    const publishedAdNames = new Map<string, string>();
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
       const cookie = new Headers(init?.headers).get("cookie");
       if (cookie) cookies.push(cookie);
-       const data = url.includes("campaign_snap/save")
+      if (url.includes("creative_snap/save") && cookie) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          asset_group_sketch_form_data_list?: Array<{ creative_name?: string }>;
+        };
+        const creativeName = body.asset_group_sketch_form_data_list?.[0]?.creative_name;
+        if (creativeName) publishedAdNames.set(cookie, creativeName);
+      }
+      if (url.includes("create_by_snap") && cookie) publishedCookies.add(cookie);
+      const published = cookie ? publishedCookies.has(cookie) : false;
+      const data = url.includes("statistics/sketch/")
+        ? { table: [], pagination: { page: 1, page_count: 0, total_count: 0, limit: 100 } }
+        : url.includes("/statistics/op/campaign/list")
+          ? { table: published ? [{ campaign_id: "campaign", campaign_name: "测试系列" }] : [], pagination: { page: 1, page_count: 1, total_count: published ? 1 : 0 } }
+        : url.includes("/statistics/op/adgroup/list")
+          ? { table: published ? [{ campaign_id: "campaign", ad_id: "adgroup", ad_name: "测试广告组" }] : [], pagination: { page: 1, page_count: 1, total_count: published ? 1 : 0 } }
+        : url.includes("/statistics/op/ad/list")
+          ? { table: published ? [{ campaign_id: "campaign", ad_id: "adgroup", creative_id: "ad", creative_name: publishedAdNames.get(cookie ?? "") }] : [], pagination: { page: 1, page_count: 1, total_count: published ? 1 : 0 } }
+        : url.includes("campaign_snap/save")
          ? { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }
         : url.includes("campaign_snap/check")
           ? { success: true, fake_campaign_id: "campaign-sketch" }
@@ -929,7 +949,9 @@ describe("local API", () => {
             : url.includes("batch_create_cta_id")
               ? { cta_id_map: {} }
              : url.includes("create_by_snap")
-              ? { campaign_id: "campaign", adgroup_id: "adgroup", creative_id: "ad" }
+              ? { async_request_id: "async" }
+              : url.includes("async_creation/detail")
+                ? { status: 1, result: { campaign_id: "campaign", ad_and_creative: { 0: { by_ad_snap_id: "ad-snap", ad_id: "adgroup", asset_group_result: { 0: { creative_items: [{ id: "ad" }] } } } } } }
               : { list: [], pagination: { page: 1, page_count: 1 } };
       return new Response(JSON.stringify({ code: 0, data }), { status: 200, headers: { "content-type": "application/json" } });
     });
@@ -943,7 +965,7 @@ describe("local API", () => {
     const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${created.json().id}/execute` });
 
     expect(executed.statusCode, executed.body).toBe(200);
-    expect(executed.json().plan).toMatchObject({ status: "completed", executionResults: [{ accountId: "demo-account", ok: true, createdCount: 1, failedCount: 0 }, { accountId: second.id, ok: true, createdCount: 1, failedCount: 0 }] });
+    expect(executed.json().plan, JSON.stringify(executed.json(), null, 2)).toMatchObject({ status: "completed", executionResults: [{ accountId: "demo-account", ok: true, createdCount: 1, failedCount: 0 }, { accountId: second.id, ok: true, createdCount: 1, failedCount: 0 }] });
     expect(executed.json().results).toEqual(expect.arrayContaining([
       expect.objectContaining({ accountId: "demo-account", status: "succeeded" }),
       expect.objectContaining({ accountId: second.id, status: "succeeded" }),
@@ -1354,7 +1376,56 @@ describe("local API", () => {
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
-  it("keeps an item succeeded when post-create failure-counter cleanup fails", async () => {
+  it("persists ad-group success when the provider skips a missing material", async () => {
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "campaign-created",
+        adGroupId: "group-created",
+        warning: "素材提示：广告组已创建成功；已跳过 1 条素材。",
+        message: "ad group created",
+      })),
+    );
+    const planId = await installLaunchTestProvider(
+      createFromPreset,
+      [apiLaunchRow(2)],
+      async () => {
+        const finishedAt = new Date().toISOString();
+        return {
+          entities: [
+            { entityType: "campaign" as const, externalId: "campaign-created", payload: {} },
+            { entityType: "ad-group" as const, externalId: "group-created", payload: {} },
+          ],
+          result: {
+            startedAt: finishedAt,
+            finishedAt,
+            counts: { campaign: 1, "ad-group": 1, ad: 0 },
+            warnings: [],
+            quality: testSyncQuality(finishedAt),
+          },
+        };
+      },
+    );
+
+    const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const item = store.listLaunchPlanItems(planId)[0];
+
+    expect(executed.statusCode).toBe(200);
+    expect(executed.json().results[0]).toMatchObject({
+      status: "succeeded",
+      syncWarning: expect.stringContaining("已跳过 1 条素材"),
+    });
+    expect(item).toMatchObject({
+      status: "succeeded",
+      campaignId: "campaign-created",
+      adGroupId: "group-created",
+      adId: null,
+      syncWarning: expect.stringContaining("已跳过 1 条素材"),
+    });
+  });
+
+  it("does not consult the automation write-failure counter after confirmed creation", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1366,7 +1437,7 @@ describe("local API", () => {
       })),
     );
     const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
-    vi.spyOn(store, "resetProviderWriteFailures").mockImplementationOnce(() => {
+    const resetFailureCounter = vi.spyOn(store, "resetProviderWriteFailures").mockImplementationOnce(() => {
       throw new Error("cleanup unavailable");
     });
 
@@ -1375,9 +1446,10 @@ describe("local API", () => {
     expect(executed.statusCode).toBe(200);
     expect(executed.json().results[0]).toMatchObject({
       status: "succeeded",
-      syncWarning: expect.stringContaining("cleanup unavailable"),
+      syncWarning: null,
     });
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" });
+    expect(resetFailureCounter).not.toHaveBeenCalled();
   });
 
   it("returns a conflict when an unknown status write is retried", async () => {
@@ -1690,7 +1762,7 @@ describe("local API", () => {
     expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
-  it("reports a provider result with incomplete IDs as failed", async () => {
+  it("keeps a provider result with incomplete IDs unknown and does not resend it", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1706,14 +1778,14 @@ describe("local API", () => {
 
     expect(createFromPreset).toHaveBeenCalledTimes(1);
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
-      status: "failed",
+      status: "unknown",
       attemptCount: 1,
-      errorMessage: expect.stringContaining("本条创建按失败处理"),
+      errorMessage: expect.stringContaining("真实结果仍需远端核验"),
     });
   });
 
-  it("reports an unclassified provider exception as failed and keeps one-click retry available", async () => {
-    const createFromPreset = vi.fn(async () => {
+  it("keeps an exception after provider dispatch unknown and makes explicit retry read-only", async () => {
+    const createFromPreset = vi.fn(async (_context: ProviderContext, _mutations: CreationMutation[]) => {
       throw new Error("connection reset after request dispatch");
     });
     const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
@@ -1727,15 +1799,71 @@ describe("local API", () => {
     });
 
     expect(createFromPreset).toHaveBeenCalledTimes(2);
+    expect(createFromPreset.mock.calls[1]?.[1]?.[0]).toMatchObject({ reconcileOnly: true });
     expect(retry.statusCode).toBe(200);
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
-      status: "failed",
+      status: "unknown",
       attemptCount: 2,
       errorMessage: "connection reset after request dispatch",
     });
   });
 
-  it("continues later same-campaign items after a draft-only provider rejection", async () => {
+  it("changes an unknown item to a correctable failure when read-only recheck proves nothing was created", async () => {
+    const createFromPreset = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => mutation.reconcileOnly
+        ? {
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            retrySafe: true,
+            message: "Cookie 正式列表和草稿列表均确认本条未创建",
+          }
+        : {
+            ...mutation,
+            ok: false,
+            failureKind: "unknown",
+            retrySafe: false,
+            message: "响应在发布后丢失",
+          }),
+    );
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const unknownItem = store.listLaunchPlanItems(planId)[0]!;
+    const rechecked = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/items/${unknownItem.itemId}/retry`,
+    });
+
+    expect(rechecked.statusCode).toBe(200);
+    expect(createFromPreset).toHaveBeenCalledTimes(2);
+    expect(createFromPreset.mock.calls[1]?.[1]?.[0]).toMatchObject({ reconcileOnly: true });
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
+      status: "failed",
+      attemptCount: 2,
+      errorMessage: "Cookie 正式列表和草稿列表均确认本条未创建",
+    });
+  });
+
+  it("keeps a provider-declared pre-dispatch exception as a correctable failure", async () => {
+    const createFromPreset = vi.fn(async (_context: ProviderContext, _mutations: CreationMutation[]) => {
+      throw new RetryableCreationError("创建配置无效，尚未发送请求");
+    });
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const failedItem = store.listLaunchPlanItems(planId)[0]!;
+
+    expect(createFromPreset).toHaveBeenCalledTimes(1);
+    expect(failedItem).toMatchObject({
+      status: "failed",
+      attemptCount: 1,
+      errorMessage: "创建配置无效，尚未发送请求",
+    });
+  });
+
+  it("keeps a draft-only provider rejection non-retryable without blocking sibling results", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => mutation.row.rowNumber === 3
         ? {
@@ -1766,11 +1894,11 @@ describe("local API", () => {
     expect(executed.statusCode).toBe(200);
     expect(createFromPreset).toHaveBeenCalledTimes(1);
     expect(createFromPreset.mock.calls[0]![1]).toHaveLength(3);
-    expect(items.map((item) => item.status)).toEqual(["succeeded", "failed", "succeeded"]);
+    expect(items.map((item) => item.status)).toEqual(["succeeded", "unknown", "succeeded"]);
     expect(executed.json().plan.executionResults[0]).toMatchObject({
       createdCount: 2,
-      failedCount: 1,
-      unknownCount: 0,
+      failedCount: 0,
+      unknownCount: 1,
     });
   });
 
@@ -1791,8 +1919,8 @@ describe("local API", () => {
         message: "created",
       }));
     });
-    const rows = [apiLaunchRow(2), apiLaunchRow(3), apiLaunchRow(4)].map((row, index) => ({
-      ...row,
+    const rows = [2, 3, 4, 5, 6].map((rowNumber, index) => ({
+      ...apiLaunchRow(rowNumber),
       campaignName: `series-${index + 1}`,
     }));
     const planId = await installLaunchTestProvider(createFromPreset, rows);
@@ -1800,14 +1928,11 @@ describe("local API", () => {
     const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
 
     expect(executed.statusCode).toBe(200);
-    expect(createFromPreset).toHaveBeenCalledTimes(3);
+    expect(createFromPreset).toHaveBeenCalledTimes(5);
     expect(createFromPreset.mock.calls.every((call) => call[1].length === 1)).toBe(true);
-    expect(maxActiveBatches).toBeGreaterThan(1);
-    expect(store.listLaunchPlanItems(planId).map((item) => item.status)).toEqual([
-      "succeeded",
-      "succeeded",
-      "succeeded",
-    ]);
+    expect(maxActiveBatches).toBe(5);
+    expect(store.listLaunchPlanItems(planId).map((item) => item.status))
+      .toEqual(Array.from({ length: 5 }, () => "succeeded"));
   });
 
   it("retries only the local transaction after confirmed creation", async () => {

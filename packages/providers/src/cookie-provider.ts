@@ -59,17 +59,11 @@ type ParsedCookieCredential = ReturnType<
   typeof CookieCredentialInputSchema.parse
 >;
 
-interface CreationBatchReservations {
-  campaignIds: Map<string, string>;
-  adGroupNames: Map<string, Set<string>>;
-}
-
 export class CookieAdsProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Cookie 会话";
   readonly capabilityVersion = "cookie-capabilities-v3-2026-07";
   readonly capabilities = capabilities;
-  private readonly creationBatchReservations = new Map<string, CreationBatchReservations>();
   private readonly creationBatchLocks = new Map<string, Promise<void>>();
 
   resolveCapabilities(context: ProviderContext): ReadonlySet<ProviderCapability> {
@@ -451,20 +445,26 @@ export class CookieAdsProvider implements AdsProvider {
     }
     const campaignObjectRequest = campaignObjectListRequest(sessionRequest);
     const results: CreationMutationResult[] = [];
-    const batchId = mutations[0]?.batchId;
     const campaignKeys = new Set(mutations.map((mutation) => mutation.row.campaignName.trim()));
     const initialStatuses = new Set(mutations.map((mutation) => mutation.initialStatus));
-    const canPublishAsSeriesBatch = mutations.length > 1
+    const canPublishAsSeriesBatch = mutations.length > 0
       && mutations.every((mutation) => mutation.templateMode === "none")
       && campaignKeys.size === 1
       && initialStatuses.size === 1;
     const seriesKey = campaignKeys.size === 1 ? [...campaignKeys][0] : "mixed";
-    const reservationKey = batchId ? `${context.accountId}:${batchId}:${seriesKey}` : null;
+    // Serialize only writes to the same account/series. The lock is deliberately
+    // independent from a local plan id, so two UI requests cannot concurrently
+    // attach drafts to the same TikTok series. Different series and accounts
+    // remain concurrent.
+    const reservationKey = `${context.accountId}:${seriesKey}`;
     const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
     try {
-      const reservations = reservationKey
-        ? this.creationBatchReservations.get(reservationKey) ?? this.createBatchReservations(reservationKey)
-        : { campaignIds: new Map<string, string>(), adGroupNames: new Map<string, Set<string>>() };
+      // Reservations are scoped to this invocation only. Persisting failed names
+      // across retries was the source of unrequested `-001` ad groups.
+      const reservations = {
+        campaignIds: new Map<string, string>(),
+        adGroupNames: new Map<string, Set<string>>(),
+      };
       if (canPublishAsSeriesBatch) {
         const campaignKey = [...campaignKeys][0]!;
         const batchCampaignId = mutations.find((mutation) => mutation.batchCampaignId)?.batchCampaignId;
@@ -522,17 +522,21 @@ export class CookieAdsProvider implements AdsProvider {
             names.add(result.row.adGroupName.trim());
             reservations.adGroupNames.set(campaignKey, names);
           }
-        } catch (cause) {
+      } catch (cause) {
+          const unsafeToRetry = cause instanceof UnknownCreationStateError
+            || (cause instanceof ConfirmedCreationFailureError && !cause.retrySafe);
           results.push({
             ...mutation,
             ok: false,
-            failureKind: cause instanceof UnknownCreationStateError
+            failureKind: unsafeToRetry
               ? "unknown"
               : "retryable",
             retrySafe: cause instanceof ConfirmedCreationFailureError
               ? cause.retrySafe
               : !(cause instanceof UnknownCreationStateError),
-            message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
+            message: cause instanceof Error
+              ? `${cause.message}${unsafeToRetry && !cause.message.includes("不会自动重试") ? "；系统不会自动重试。" : ""}`
+              : "TikTok 创建请求失败。",
           });
         }
       }
@@ -540,15 +544,6 @@ export class CookieAdsProvider implements AdsProvider {
     } finally {
       releaseBatchLock?.();
     }
-  }
-
-  private createBatchReservations(key: string): CreationBatchReservations {
-    const reservations: CreationBatchReservations = {
-      campaignIds: new Map(),
-      adGroupNames: new Map(),
-    };
-    this.creationBatchReservations.set(key, reservations);
-    return reservations;
   }
 
   private async acquireBatchLock(key: string): Promise<() => void> {
@@ -910,6 +905,97 @@ async function materializeSimpleCopyCreativeDrafts(input: {
     });
   }
   return result;
+}
+
+type CookieSketchKind = "campaign" | "ad" | "creative";
+
+async function listAllSketchRows(input: {
+  kind: CookieSketchKind;
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  semantics: "preflight-read" | "result-query";
+}): Promise<Record<string, unknown>[]> {
+  const limit = 100;
+  const rows: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const payload = await requestCreationStep(
+      `statistics/sketch/${input.kind}/list 第 ${page} 页`,
+      () => creationPathRequest(
+        input.sessionRequest,
+        `/api/v4/i18n/statistics/sketch/${input.kind}/list/`,
+        {
+          query_list: [],
+          page,
+          limit,
+          sort_order: 1,
+          sort_stat: "modify_time",
+          filters: [],
+        },
+      ),
+      input.credential,
+      { semantics: input.semantics, dispatchState: input.dispatchState },
+    );
+    const data = isRecord(payload.data) ? payload.data : undefined;
+    const pagination = data && isRecord(data.pagination) ? data.pagination : undefined;
+    const pageRows = data && Array.isArray(data.table) ? data.table.filter(isRecord) : undefined;
+    if (!data || !pagination || !pageRows) {
+      // Draft inspection is an isolation aid before publish. Some older Cookie
+      // sessions do not expose these list contracts; partial publish plus the
+      // mandatory post-publish six-list reconciliation remains authoritative.
+      if (input.semantics === "preflight-read") return [];
+      throw new RetryableCreationError(
+        `statistics/sketch/${input.kind}/list 缺少完整列表或分页结构。`,
+      );
+    }
+    const responsePage = Number(pagination.page);
+    const pageCount = Number(pagination.page_count);
+    const responseLimit = Number(pagination.limit);
+    const totalCount = Number(pagination.total_count);
+    const expectedPageCount = totalCount === 0 ? 0 : Math.ceil(totalCount / responseLimit);
+    if (
+      !Number.isInteger(responsePage)
+      || responsePage !== page
+      || !Number.isInteger(pageCount)
+      || pageCount < 0
+      || !Number.isInteger(responseLimit)
+      || responseLimit < 1
+      || !Number.isInteger(totalCount)
+      || totalCount < 0
+      || pageCount !== expectedPageCount
+      || pageRows.length > responseLimit
+    ) {
+      if (input.semantics === "preflight-read") return [];
+      throw new RetryableCreationError(
+        `statistics/sketch/${input.kind}/list 分页结构不一致。`,
+      );
+    }
+    rows.push(...pageRows);
+    if (pageCount === 0 || page >= pageCount) {
+      if (rows.length !== totalCount) {
+        if (input.semantics === "preflight-read") return [];
+        throw new RetryableCreationError(
+          `statistics/sketch/${input.kind}/list 返回条数与 total_count 不一致。`,
+        );
+      }
+      return rows;
+    }
+  }
+  throw new RetryableCreationError(
+    `statistics/sketch/${input.kind}/list 超过 100 页，无法确认草稿全集。`,
+  );
+}
+
+function sketchRowIds(
+  rows: Record<string, unknown>[],
+  kind: CookieSketchKind,
+): Set<string> {
+  const key = kind === "campaign"
+    ? "campaign_sketch_id"
+    : kind === "ad" ? "ad_sketch_id" : "creative_sketch_id";
+  return new Set(
+    rows.map((row) => nonEmptyId(row[key])).filter((id): id is string => Boolean(id)),
+  );
 }
 
 async function listAllCreativeSketchRows(input: {
@@ -1337,6 +1423,24 @@ interface PreparedCookieDraft {
   dispatchState: CreationDispatchState;
 }
 
+interface CookieDraftPreflight {
+  adGroupPayloads: Record<string, unknown>[];
+  campaignPayloads: Record<string, unknown>[];
+  resolvedVideos: ResolvedVideo[];
+  baseline: CookieCreationBaseline;
+}
+
+interface CookieCreationBaseline {
+  campaignIds: Set<string>;
+  adGroupIds: Set<string>;
+  campaignSketchIds: Set<string>;
+  adSketchIds: Set<string>;
+  creativeSketchIds: Set<string>;
+  campaignSketchRows: Record<string, unknown>[];
+  adSketchRows: Record<string, unknown>[];
+  creativeSketchRows: Record<string, unknown>[];
+}
+
 async function createCookieDraftBatch(
   sessionRequest: CapturedCookieRequest,
   campaignObjectRequest: CapturedCookieRequest,
@@ -1350,8 +1454,175 @@ async function createCookieDraftBatch(
   };
   const prepared: PreparedCookieDraft[] = [];
   const failures: CreationMutationResult[] = [];
+  const draftFailures: CreationMutationResult[] = [];
+  const reconcileOnly = mutations.every((mutation) => mutation.reconcileOnly === true);
+  if (!reconcileOnly && mutations.some((mutation) => mutation.reconcileOnly === true)) {
+    const cause = new RetryableCreationError("同系列批次不能混合新建任务与只读核验任务。");
+    return mutations.map((mutation) => creationFailureResult(mutation, cause, {
+      mutationDispatched: false,
+      acceptedMutationCount: 0,
+    }));
+  }
 
+  // Resolve the complete remote object baseline and every spreadsheet material
+  // before saving the first campaign/ad-group draft. A bad authorization code
+  // must be a correctable row error, never an orphan TikTok draft.
+  const preflightDispatchState: CreationDispatchState = {
+    mutationDispatched: false,
+    acceptedMutationCount: 0,
+  };
+  try {
+    for (const mutation of mutations) assertStaticCreationMutation(credential, mutation);
+  } catch (cause) {
+    return mutations.map((mutation) => creationFailureResult(
+      mutation,
+      cause,
+      preflightDispatchState,
+    ));
+  }
+  const requestedNameCounts = new Map<string, number>();
   for (const mutation of mutations) {
+    const name = mutation.row.adGroupName.trim();
+    requestedNameCounts.set(name, (requestedNameCounts.get(name) ?? 0) + 1);
+  }
+  const duplicateNames = [...requestedNameCounts]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name);
+  if (duplicateNames.length > 0) {
+    const cause = new RetryableCreationError(
+      `同系列批次存在重复广告组名称：${duplicateNames.join("、")}；系统不会擅自添加后缀，请修正表格后重试。`,
+    );
+    return mutations.map((mutation) => creationFailureResult(
+      mutation,
+      cause,
+      preflightDispatchState,
+    ));
+  }
+  let adGroupPayloads: Record<string, unknown>[];
+  let campaignPayloads: Record<string, unknown>[];
+  let reconcileAdPayloads: Record<string, unknown>[] = [];
+  let baseline: CookieCreationBaseline;
+  let library = new Map<string, ResolvedVideo>();
+  try {
+    adGroupPayloads = await requestCompleteListPages(
+      "adgroup/list",
+      sessionRequest,
+      credential,
+      preflightDispatchState,
+    );
+    campaignPayloads = await requestCompleteListPages(
+      "campaign/list",
+      campaignObjectRequest,
+      credential,
+      preflightDispatchState,
+    );
+    const campaignSketchRows = await listAllSketchRows({
+      kind: "campaign",
+      sessionRequest,
+      credential,
+      dispatchState: preflightDispatchState,
+      semantics: "preflight-read",
+    });
+    const adSketchRows = await listAllSketchRows({
+      kind: "ad",
+      sessionRequest,
+      credential,
+      dispatchState: preflightDispatchState,
+      semantics: "preflight-read",
+    });
+    const creativeSketchRows = await listAllSketchRows({
+      kind: "creative",
+      sessionRequest,
+      credential,
+      dispatchState: preflightDispatchState,
+      semantics: "preflight-read",
+    });
+    if (reconcileOnly) {
+      const adRequest = deriveFinalAdReadRequest(sessionRequest);
+      if (!adRequest) {
+        throw new RetryableCreationError("当前 Cookie 会话无法派生正式广告列表请求，不能执行只读结果核验。");
+      }
+      reconcileAdPayloads = await requestCompleteListPages(
+        "ad/list",
+        adRequest,
+        credential,
+        preflightDispatchState,
+      );
+    }
+    baseline = {
+      campaignIds: new Set(
+        campaignPayloads
+          .flatMap((payload) => extractEntities(payload, "campaign"))
+          .map((entity) => entity.externalId),
+      ),
+      adGroupIds: new Set(
+        adGroupPayloads
+          .flatMap((payload) => extractEntities(payload, "ad-group"))
+          .map((entity) => entity.externalId),
+      ),
+      campaignSketchIds: sketchRowIds(campaignSketchRows, "campaign"),
+      adSketchIds: sketchRowIds(adSketchRows, "ad"),
+      creativeSketchIds: sketchRowIds(creativeSketchRows, "creative"),
+      campaignSketchRows,
+      adSketchRows,
+      creativeSketchRows,
+    };
+    const authorizationCodes = reconcileOnly ? [] : [...new Set(mutations.flatMap((mutation) => {
+      const codes = splitVideoCodes(mutation.row.videoCode);
+      return (codes.length > 0 ? codes : [mutation.row.videoCode])
+        .filter((code) => code.startsWith("#"));
+    }))];
+    if (authorizationCodes.length > 0) {
+      library = await resolveVideoCodesFromLibrary(
+        sessionRequest,
+        credential,
+        authorizationCodes,
+        preflightDispatchState,
+      );
+    }
+  } catch (cause) {
+    return mutations.map((mutation) => creationFailureResult(
+      mutation,
+      cause,
+      preflightDispatchState,
+    ));
+  }
+
+  if (reconcileOnly) {
+    return reconcileExistingCookieBatch(
+      mutations,
+      campaignPayloads,
+      adGroupPayloads,
+      reconcileAdPayloads,
+      baseline,
+    );
+  }
+
+  const ready: Array<{ mutation: CreationMutation; resolvedVideos: ResolvedVideo[] }> = [];
+  for (const mutation of mutations) {
+    const dispatchState: CreationDispatchState = {
+      mutationDispatched: false,
+      acceptedMutationCount: 0,
+      ...(mutation.onBeforeDispatch
+        ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
+        : {}),
+    };
+    try {
+      ready.push({
+        mutation,
+        resolvedVideos: await resolveTikTokVideos(
+          mutation,
+          sessionRequest,
+          credential,
+          library,
+        ),
+      });
+    } catch (cause) {
+      failures.push(creationFailureResult(mutation, cause, dispatchState));
+    }
+  }
+
+  for (const { mutation, resolvedVideos } of ready) {
     const dispatchState: CreationDispatchState = {
       mutationDispatched: false,
       acceptedMutationCount: 0,
@@ -1369,13 +1640,25 @@ async function createCookieDraftBatch(
         dispatchState,
         batchReservation,
         batchState,
+        { adGroupPayloads, campaignPayloads, resolvedVideos, baseline },
       ));
     } catch (cause) {
-      failures.push(creationFailureResult(mutation, cause, dispatchState));
+      const failure = creationFailureResult(mutation, cause, dispatchState);
+      failures.push(failure);
+      draftFailures.push(failure);
     }
   }
 
   if (prepared.length === 0) return failures;
+  if (draftFailures.length > 0) {
+    const cause = new UnknownCreationStateError(
+      "同系列草稿未全部完成，系统已停止发布；现有草稿必须先通过 Cookie 远端核验并收敛，禁止直接重试。",
+    );
+    return [
+      ...prepared.map((item) => creationFailureResult(item.mutation, cause, item.dispatchState)),
+      ...failures,
+    ];
+  }
   const first = prepared[0]!;
   const publishItems = prepared.map((item) => item.publishItem);
   const combinedDispatchState: CreationDispatchState = {
@@ -1415,6 +1698,7 @@ async function createCookieDraftBatch(
       publishPayload.campaign_snap_id = "";
       publishPayload.campaign_sketch_id = "";
     }
+    publishPayload.is_partial_publish = true;
     for (const item of prepared) item.mutation.onProgress?.({ phase: "publishing", evidence: {} });
     const published = await requestCreationStep(
       "create_by_snap",
@@ -1433,33 +1717,49 @@ async function createCookieDraftBatch(
         },
       });
     }
-    const completed = await awaitCreationResult(
-      sessionRequest,
-      credential,
-      published,
-      first.existingCampaignId,
-    );
-    const completedIds = creationBatchResultIds(completed, first.existingCampaignId);
-    const completedByAdSnapId = new Map(
-      completedIds.map((ids) => [ids.byAdSnapId, ids]),
-    );
-    const mappedIds = prepared.map((item) => completedByAdSnapId.get(item.publishItem.ad_snap_id));
-    if (completedIds.length !== prepared.length || mappedIds.some((ids) => !ids)) {
-      throw new UnknownCreationStateError(
-        `TikTok 批次发布仅返回 ${completedIds.length}/${prepared.length} 个可精确回配的广告组结果。`,
+    let completed: Record<string, unknown> | undefined;
+    let terminalError: unknown;
+    try {
+      completed = await awaitCreationResult(
+        sessionRequest,
+        credential,
+        published,
+        first.existingCampaignId,
       );
+    } catch (cause) {
+      // async_creation/detail is progress evidence, not the final authority.
+      // A timeout or contradictory result must still be reconciled against the
+      // Cookie formal-object and sketch lists before the item is classified.
+      terminalError = cause;
     }
+    for (const item of prepared) {
+      item.mutation.onProgress?.({ phase: "readback", evidence: {} });
+    }
+    const readback = await verifyPublishedCookieBatch({
+      sessionRequest,
+      campaignObjectRequest,
+      credential,
+      prepared,
+      baseline,
+      dispatchState: combinedDispatchState,
+      ...(completed ? { completed } : {}),
+      ...(terminalError ? { terminalError } : {}),
+    });
     return [
       ...prepared.map((item, index): CreationMutationResult => {
-        const ids = mappedIds[index]!;
-        item.mutation.onProgress?.({ phase: "readback", evidence: {} });
+        const outcome = readback[index]!;
+        if ("error" in outcome) {
+          return creationFailureResult(item.mutation, outcome.error, item.dispatchState);
+        }
+        const ids = outcome.ids;
         return {
           ...item.mutation,
           row: item.row,
           ok: true,
           campaignId: ids.campaignId,
           adGroupId: ids.adGroupId,
-          adId: ids.adId,
+          ...(ids.adId ? { adId: ids.adId } : {}),
+          ...(ids.warning ? { warning: ids.warning } : {}),
           message: `TikTok 已同步发布同系列 ${prepared.length} 个广告组。`,
         };
       }),
@@ -1473,6 +1773,436 @@ async function createCookieDraftBatch(
   }
 }
 
+interface CookieRemoteCreationSnapshot {
+  campaigns: ProviderEntity[];
+  adGroups: ProviderEntity[];
+  ads: ProviderEntity[];
+  campaignSketchIds: Set<string>;
+  adSketchIds: Set<string>;
+  creativeSketchIds: Set<string>;
+}
+
+type VerifiedCreationIds = {
+  campaignId: string;
+  adGroupId: string;
+  adId?: string;
+  warning?: string;
+};
+
+type VerifiedCreationOutcome =
+  | { ids: VerifiedCreationIds }
+  | { error: Error };
+
+interface CookieSnapshotReconciliation {
+  ids: Array<VerifiedCreationIds | null>;
+  reasons: string[];
+}
+
+function reconcileExistingCookieBatch(
+  mutations: CreationMutation[],
+  campaignPayloads: Record<string, unknown>[],
+  adGroupPayloads: Record<string, unknown>[],
+  adPayloads: Record<string, unknown>[],
+  baseline: CookieCreationBaseline,
+): CreationMutationResult[] {
+  const campaigns = campaignPayloads.flatMap((payload) => extractEntities(payload, "campaign"));
+  const adGroups = adGroupPayloads.flatMap((payload) => extractEntities(payload, "ad-group"));
+  const ads = adPayloads.flatMap((payload) => extractEntities(payload, "ad"));
+  const campaignName = mutations[0]?.row.campaignName.trim() ?? "";
+  const campaignCandidates = campaigns.filter(
+    (entity) => normalizeProviderEntity(entity).name.trim() === campaignName,
+  );
+  const matchingCampaignDraft = reconciliationDraftExists(
+    mutations[0]!,
+    baseline,
+    "campaign",
+    campaignName,
+  );
+  if (campaignCandidates.length === 0) {
+    return mutations.map((mutation) => matchingCampaignDraft
+      ? unknownReconciliationResult(
+          mutation,
+          `系列“${campaignName}”仍存在本任务草稿，正式结果尚未收敛。`,
+        )
+      : retryableReconciliationResult(
+          mutation,
+          `系列“${campaignName}”没有正式对象且没有本任务草稿，已确认本次未创建成功。`,
+        ));
+  }
+  if (campaignCandidates.length !== 1) {
+    return mutations.map((mutation) => unknownReconciliationResult(
+      mutation,
+      `系列“${campaignName}”在 Cookie 正式列表中匹配 ${campaignCandidates.length} 个，尚不能确认创建成功。`,
+    ));
+  }
+  const campaignId = campaignCandidates[0]!.externalId;
+  return mutations.map((mutation): CreationMutationResult => {
+    mutation.onProgress?.({ phase: "readback", evidence: {} });
+    const groupCandidates = adGroups.filter((entity) => {
+      const normalized = normalizeProviderEntity(entity);
+      return normalized.parentCampaignId === campaignId
+        && normalized.name.trim() === mutation.row.adGroupName.trim();
+    });
+    const matchingAdDraft = reconciliationDraftExists(
+      mutation,
+      baseline,
+      "ad",
+      mutation.row.adGroupName.trim(),
+    );
+    if (groupCandidates.length === 0) {
+      return matchingAdDraft
+        ? unknownReconciliationResult(
+            mutation,
+            `广告组“${mutation.row.adGroupName}”仍存在本任务草稿，正式结果尚未收敛。`,
+          )
+        : retryableReconciliationResult(
+            mutation,
+            `广告组“${mutation.row.adGroupName}”没有正式对象且没有本任务草稿，已确认本条未创建成功。`,
+          );
+    }
+    if (groupCandidates.length !== 1) {
+      return unknownReconciliationResult(
+        mutation,
+        `广告组“${mutation.row.adGroupName}”在 Cookie 正式列表中匹配 ${groupCandidates.length} 个，尚不能确认创建成功。`,
+      );
+    }
+    const adGroupId = groupCandidates[0]!.externalId;
+    const adCandidates = ads.filter((entity) => {
+      const normalized = normalizeProviderEntity(entity);
+      return normalized.parentAdGroupId === adGroupId
+        && normalized.name.trim() === mutation.row.adName.trim();
+    });
+    const matchingCreativeDraft = reconciliationDraftExists(
+      mutation,
+      baseline,
+      "creative",
+      mutation.row.adName.trim(),
+    );
+    const warning = adCandidates.length === 0
+      ? materialSkippedWarning(mutation, matchingCreativeDraft)
+      : matchingCreativeDraft
+        ? "素材提示：广告组已创建成功，TikTok 仍保留本任务的素材草稿。"
+        : undefined;
+    return {
+      ...mutation,
+      ok: true,
+      campaignId,
+      adGroupId,
+      ...(adCandidates[0]?.externalId ? { adId: adCandidates[0].externalId } : {}),
+      ...(warning ? { warning } : {}),
+      message: warning
+        ? "Cookie 远端重新核验已确认广告组创建成功，素材结果仅作提示。"
+        : "Cookie 远端重新核验已确认系列和广告组创建成功。",
+    };
+  });
+}
+
+function materialSkippedWarning(
+  mutation: CreationMutation,
+  draftStillExists = false,
+): string {
+  const materialCount = Math.max(1, splitVideoCodes(mutation.row.videoCode).length);
+  return `素材提示：广告组已创建成功，但 TikTok 未生成广告“${mutation.row.adName}”；已跳过 ${materialCount} 条素材${draftStillExists ? "，远端仍可见素材草稿" : ""}。`;
+}
+
+function unknownReconciliationResult(
+  mutation: CreationMutation,
+  message: string,
+): CreationMutationResult {
+  return {
+    ...mutation,
+    ok: false,
+    failureKind: "unknown",
+    retrySafe: false,
+    message: `${message} 本次只执行远端查询，未发送任何新建或发布请求。`,
+  };
+}
+
+function retryableReconciliationResult(
+  mutation: CreationMutation,
+  message: string,
+): CreationMutationResult {
+  return {
+    ...mutation,
+    ok: false,
+    failureKind: "retryable",
+    retrySafe: true,
+    message: `${message} 本次只执行远端查询，未发送任何新建或发布请求。`,
+  };
+}
+
+function sketchRowName(
+  row: Record<string, unknown>,
+  kind: CookieSketchKind,
+): string {
+  const keys = kind === "campaign"
+    ? ["campaign_sketch_name", "campaign_name", "name"]
+    : kind === "ad"
+      ? ["ad_sketch_name", "ad_name", "adgroup_name", "name"]
+      : ["creative_sketch_name", "creative_name", "name"];
+  return keys.map((key) => row[key]).find((value) => typeof value === "string")?.toString().trim() ?? "";
+}
+
+function reconciliationDraftExists(
+  mutation: CreationMutation,
+  baseline: CookieCreationBaseline,
+  kind: CookieSketchKind,
+  legacyName: string,
+): boolean {
+  const trackedId = kind === "campaign"
+    ? mutation.reconcileEvidence?.campaignSketchId
+    : kind === "ad"
+      ? mutation.reconcileEvidence?.adGroupSketchId
+      : mutation.reconcileEvidence?.creativeSketchId;
+  if (trackedId) {
+    const ids = kind === "campaign"
+      ? baseline.campaignSketchIds
+      : kind === "ad" ? baseline.adSketchIds : baseline.creativeSketchIds;
+    return ids.has(trackedId);
+  }
+  // Legacy unknown tasks did not persist sketch ids. Name matching is kept only
+  // for those records; new tasks always use their exact tracked evidence.
+  const rows = kind === "campaign"
+    ? baseline.campaignSketchRows
+    : kind === "ad" ? baseline.adSketchRows : baseline.creativeSketchRows;
+  return rows.some((row) => sketchRowName(row, kind) === legacyName);
+}
+
+async function verifyPublishedCookieBatch(input: {
+  sessionRequest: CapturedCookieRequest;
+  campaignObjectRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  prepared: PreparedCookieDraft[];
+  baseline: CookieCreationBaseline;
+  dispatchState: CreationDispatchState;
+  completed?: Record<string, unknown>;
+  terminalError?: unknown;
+}): Promise<VerifiedCreationOutcome[]> {
+  const completedIds = input.completed
+    ? creationBatchResultIds(input.completed, input.prepared[0]?.existingCampaignId)
+    : [];
+  const completedByAdSnapId = new Map(
+    completedIds.map((ids) => [ids.byAdSnapId, ids]),
+  );
+  const attempts = input.terminalError instanceof ConfirmedCreationFailureError ? 1 : 8;
+  let lastReason = "Cookie 远端列表尚未出现本批次的完整正式对象。";
+  let lastReadError: unknown;
+  let lastReconciliation: CookieSnapshotReconciliation | null = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0 && !process.env.VITEST) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    let snapshot: CookieRemoteCreationSnapshot;
+    try {
+      snapshot = await readCookieCreationSnapshot(input);
+      lastReadError = undefined;
+    } catch (cause) {
+      lastReadError = cause;
+      lastReason = cause instanceof Error ? cause.message : "Cookie 远端核验请求失败。";
+      continue;
+    }
+    const reconciled = reconcileCookieCreationSnapshot(
+      snapshot,
+      input.prepared,
+      input.baseline,
+      completedByAdSnapId,
+    );
+    lastReconciliation = reconciled;
+    const allAdGroupsResolved = reconciled.ids.every(Boolean);
+    const materialStillPending = reconciled.ids.some((ids) => ids && !ids.adId);
+    if (allAdGroupsResolved && (!materialStillPending || attempt === attempts - 1)) {
+      return reconciled.ids.map((ids) => ({ ids: ids! }));
+    }
+    lastReason = reconciled.reasons.find((reason, index) => !reconciled.ids[index])
+      ?? reconciled.reasons[0]
+      ?? lastReason;
+  }
+
+  const terminalDetail = input.terminalError instanceof Error
+    ? `；异步任务回执：${input.terminalError.message}`
+    : "";
+  const readDetail = lastReadError instanceof Error
+    ? `；Cookie 核验异常：${lastReadError.message}`
+    : "";
+  return input.prepared.map((_item, index): VerifiedCreationOutcome => {
+    const ids = lastReconciliation?.ids[index];
+    if (ids) return { ids };
+    if (input.terminalError instanceof ConfirmedCreationFailureError) {
+      return { error: input.terminalError };
+    }
+    const reason = lastReconciliation?.reasons[index] ?? lastReason;
+    return {
+      error: new UnknownCreationStateError(
+        `${reason}${terminalDetail}${readDetail}；系统不会自动重试。`,
+      ),
+    };
+  });
+}
+
+async function readCookieCreationSnapshot(input: {
+  sessionRequest: CapturedCookieRequest;
+  campaignObjectRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+}): Promise<CookieRemoteCreationSnapshot> {
+  const adRequest = deriveFinalAdReadRequest(input.sessionRequest);
+  if (!adRequest) {
+    throw new UnknownCreationStateError("当前 Cookie 会话无法派生正式广告列表请求，不能确认真实创建结果。");
+  }
+  const campaignPayloads = await requestCompleteListPages(
+    "campaign/list",
+    input.campaignObjectRequest,
+    input.credential,
+    input.dispatchState,
+    "result-query",
+  );
+  const adGroupPayloads = await requestCompleteListPages(
+    "adgroup/list",
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    "result-query",
+  );
+  const adPayloads = await requestCompleteListPages(
+    "ad/list",
+    adRequest,
+    input.credential,
+    input.dispatchState,
+    "result-query",
+  );
+  const campaignSketchRows = await listAllSketchRows({
+    kind: "campaign",
+    ...input,
+    semantics: "result-query",
+  });
+  const adSketchRows = await listAllSketchRows({
+    kind: "ad",
+    ...input,
+    semantics: "result-query",
+  });
+  const creativeSketchRows = await listAllSketchRows({
+    kind: "creative",
+    ...input,
+    semantics: "result-query",
+  });
+  return {
+    campaigns: campaignPayloads.flatMap((payload) => extractEntities(payload, "campaign")),
+    adGroups: adGroupPayloads.flatMap((payload) => extractEntities(payload, "ad-group")),
+    ads: adPayloads.flatMap((payload) => extractEntities(payload, "ad")),
+    campaignSketchIds: sketchRowIds(campaignSketchRows, "campaign"),
+    adSketchIds: sketchRowIds(adSketchRows, "ad"),
+    creativeSketchIds: sketchRowIds(creativeSketchRows, "creative"),
+  };
+}
+
+function reconcileCookieCreationSnapshot(
+  snapshot: CookieRemoteCreationSnapshot,
+  prepared: PreparedCookieDraft[],
+  baseline: CookieCreationBaseline,
+  completedByAdSnapId: ReadonlyMap<string, ReturnType<typeof creationBatchResultIds>[number]>,
+): CookieSnapshotReconciliation {
+  const first = prepared[0];
+  if (!first) return { ids: [], reasons: [] };
+  const expectedCampaignId = first.existingCampaignId
+    ?? completedByAdSnapId.get(first.publishItem.ad_snap_id)?.campaignId;
+  const campaignCandidates = snapshot.campaigns.filter((entity) => {
+    if (expectedCampaignId) return entity.externalId === expectedCampaignId;
+    return !baseline.campaignIds.has(entity.externalId)
+      && normalizeProviderEntity(entity).name.trim() === first.row.campaignName.trim();
+  });
+  if (campaignCandidates.length !== 1) {
+    const reason = `Cookie 正式系列核验为 ${campaignCandidates.length} 个精确匹配，期望 1 个。`;
+    return {
+      ids: prepared.map(() => null),
+      reasons: prepared.map(() => reason),
+    };
+  }
+  const campaignId = campaignCandidates[0]!.externalId;
+  const ids: Array<VerifiedCreationIds | null> = [];
+  const reasons: string[] = [];
+  for (const item of prepared) {
+    const asyncIds = completedByAdSnapId.get(item.publishItem.ad_snap_id);
+    const groupCandidates = snapshot.adGroups.filter((entity) => {
+      const normalized = normalizeProviderEntity(entity);
+      if (asyncIds?.adGroupId) {
+        return entity.externalId === asyncIds.adGroupId
+          && normalized.parentCampaignId === campaignId
+          && normalized.name.trim() === item.row.adGroupName.trim();
+      }
+      return !baseline.adGroupIds.has(entity.externalId)
+        && normalized.parentCampaignId === campaignId
+        && normalized.name.trim() === item.row.adGroupName.trim();
+    });
+    if (groupCandidates.length !== 1) {
+      ids.push(null);
+      reasons.push(`广告组“${item.row.adGroupName}”在 Cookie 正式列表中匹配 ${groupCandidates.length} 个，期望 1 个。`);
+      continue;
+    }
+    const adGroupId = groupCandidates[0]!.externalId;
+    const adCandidates = snapshot.ads.filter((entity) => {
+      const normalized = normalizeProviderEntity(entity);
+      if (asyncIds?.adId) {
+        return entity.externalId === asyncIds.adId
+          && normalized.parentAdGroupId === adGroupId
+          && normalized.name.trim() === item.row.adName.trim();
+      }
+      return normalized.parentAdGroupId === adGroupId
+        && normalized.name.trim() === item.row.adName.trim();
+    });
+    const warning = adCandidates.length === 0
+      ? materialSkippedWarning(item.mutation)
+      : undefined;
+    ids.push({
+      campaignId,
+      adGroupId,
+      ...(adCandidates[0]?.externalId ? { adId: adCandidates[0].externalId } : {}),
+      ...(warning ? { warning } : {}),
+    });
+    reasons.push(warning ?? `广告组“${item.row.adGroupName}”已在 Cookie 正式列表中确认。`);
+  }
+
+  const allowedAdGroupIds = new Set(ids.flatMap((item) => item ? [item.adGroupId] : []));
+  const unexpectedAdGroups = snapshot.adGroups.filter((entity) => {
+    const normalized = normalizeProviderEntity(entity);
+    return normalized.parentCampaignId === campaignId
+      && !baseline.adGroupIds.has(entity.externalId)
+      && !allowedAdGroupIds.has(entity.externalId);
+  });
+  if (unexpectedAdGroups.length > 0) {
+    const reason = `目标系列出现 ${unexpectedAdGroups.length} 个未列入任务的新广告组，已拒绝把批次标记为成功。`;
+    return {
+      ids: prepared.map(() => null),
+      reasons: prepared.map(() => reason),
+    };
+  }
+
+  return {
+    ids: ids.map((item, index) => {
+      if (!item) return null;
+      const preparedItem = prepared[index]!;
+      const relatedDraftStillExists = Boolean(
+        (preparedItem.campaignSketchId
+          && snapshot.campaignSketchIds.has(preparedItem.campaignSketchId)
+          && !baseline.campaignSketchIds.has(preparedItem.campaignSketchId))
+        || (snapshot.adSketchIds.has(preparedItem.publishItem.ad_sketch_id)
+          && !baseline.adSketchIds.has(preparedItem.publishItem.ad_sketch_id))
+        || preparedItem.publishItem.creative_snap_info_list.some((creative) =>
+          snapshot.creativeSketchIds.has(creative.creative_sketch_id)
+          && !baseline.creativeSketchIds.has(creative.creative_sketch_id)),
+      );
+      if (!relatedDraftStillExists) return item;
+      return {
+        ...item,
+        warning: [item.warning, "素材提示：广告组已创建成功，但 Cookie 远端仍可见本任务草稿。"]
+          .filter(Boolean)
+          .join("；"),
+      };
+    }),
+    reasons,
+  };
+}
+
 function creationFailureResult(
   mutation: CreationMutation,
   cause: unknown,
@@ -1480,14 +2210,18 @@ function creationFailureResult(
 ): CreationMutationResult {
   const acceptedMutation = dispatchState.acceptedMutationCount > 0;
   const confirmed = cause instanceof ConfirmedCreationFailureError;
+  const failureKind = cause instanceof UnknownCreationStateError || acceptedMutation
+    ? "unknown" as const
+    : "retryable" as const;
+  const detail = cause instanceof Error ? cause.message : "TikTok 创建请求失败。";
   return {
     ...mutation,
     ok: false,
-    failureKind: cause instanceof UnknownCreationStateError || (acceptedMutation && !confirmed)
-      ? "unknown"
-      : "retryable",
+    failureKind,
     retrySafe: confirmed ? !acceptedMutation && cause.retrySafe : !acceptedMutation,
-    message: cause instanceof Error ? cause.message : "TikTok 创建请求失败。",
+    message: failureKind === "unknown" && !detail.includes("不会自动重试")
+      ? `${detail}；此前已有创建请求被 TikTok 接受，系统不会自动重试。`
+      : detail,
   };
 }
 
@@ -1580,6 +2314,7 @@ async function runCookieDraftChain(
   dispatchState: CreationDispatchState,
   batchReservation: { campaignId?: string; adGroupNames: Set<string> } | undefined,
   batchState: CookieDraftBatchState,
+  preflight: CookieDraftPreflight,
 ): Promise<PreparedCookieDraft>;
 async function runCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
@@ -1590,22 +2325,12 @@ async function runCookieDraftChain(
   dispatchState: CreationDispatchState,
   batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
   batchState?: CookieDraftBatchState,
+  preflight?: CookieDraftPreflight,
 ): Promise<CreationMutationResult | PreparedCookieDraft> {
   mutation.onProgress?.({ phase: "validation", evidence: {} });
+  assertStaticCreationMutation(credential, mutation);
   const copyOnly = mutation.templateMode === "copy";
-  if (copyOnly && !mutation.templateCampaignId) {
-    throw new Error("复制模板无效：缺少 templateCampaignId，不能按系列名称回退定位。");
-  }
-  if (
-    !copyOnly
-    && credential.creationProfile
-    && hasNonEmptyOriginReference(credential.creationProfile)
-  ) {
-    throw new RetryableCreationError(
-      "当前创建样本来自 copy 流程，不能用于从零创建。请重新导入一次真正从空白页面创建广告时的创建请求。",
-    );
-  }
-  const preflightPayloads = await requestCompleteListPages(
+  const preflightPayloads = preflight?.adGroupPayloads ?? await requestCompleteListPages(
     "adgroup/list",
     sessionRequest,
     credential,
@@ -1613,7 +2338,7 @@ async function runCookieDraftChain(
   );
   const campaignPayloads = copyOnly
     ? preflightPayloads
-    : await requestCompleteListPages(
+    : preflight?.campaignPayloads ?? await requestCompleteListPages(
         "campaign/list",
         campaignObjectRequest,
         credential,
@@ -1636,17 +2361,16 @@ async function runCookieDraftChain(
   }
   const existingCampaignId = reservedCampaignId ?? remoteCampaignId;
   if (batchState && existingCampaignId) batchState.campaignId = existingCampaignId;
-  const creationRow = existingCampaignId || batchState
-    ? { ...mutation.row, adGroupName: uniqueAdGroupName(
-        preflightEntities,
-        mutation.row.adGroupName,
-        existingCampaignId ?? "",
-        batchReservation?.adGroupNames,
-      ) }
-    : mutation.row;
+  assertAdGroupNameAvailable(
+    preflightEntities,
+    mutation.row.adGroupName,
+    existingCampaignId ?? "",
+    batchReservation?.adGroupNames,
+  );
+  const creationRow = mutation.row;
   if (batchState) batchReservation?.adGroupNames.add(creationRow.adGroupName.trim());
-  // Persist the exact auto-suffixed name before the first creation mutation
-  // so execution records always identify the name actually sent to TikTok.
+  // Persist the exact table name before the first creation mutation so the
+  // execution record always identifies the value actually sent to TikTok.
   mutation.onProgress?.({
     phase: "validation",
     evidence: { resolvedAdGroupName: creationRow.adGroupName },
@@ -1779,10 +2503,12 @@ async function runCookieDraftChain(
     ? initializedIds.creativeSketchId
     : responseId(adGroup, "creative_sketch_id");
 
-  const resolvedVideos = await resolveTikTokVideos(
+  const resolvedVideos = preflight?.resolvedVideos ?? await resolveTikTokVideos(
     { ...mutation, row: creationRow },
     sessionRequest,
     credential,
+    undefined,
+    dispatchState,
   );
 
   // One ad-group, several ads = ONE creative whose image_list carries every
@@ -1906,6 +2632,8 @@ async function runCookieDraftChain(
     publishPayload.campaign_snap_id = "";
     publishPayload.campaign_sketch_id = "";
   }
+  // TikTok 会把同一编辑会话中未指定的草稿一并带入全量发布；这里只发布本任务显式列出的 snap。
+  publishPayload.is_partial_publish = true;
   await runAdvisoryDraftSequence(sessionRequest, credential, {
     ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
     ...(checkedFakeCampaignId ? { fakeCampaignId: checkedFakeCampaignId } : {}),
@@ -2087,7 +2815,7 @@ async function awaitCreationResult(
       if (hasExplicitCreationFailure(data.result)) {
         if (hasAnyPublishedCreationId(data.result, existingCampaignId)) {
           throw new UnknownCreationStateError(
-            "TikTok 返回部分创建成功、部分失败，本条创建按失败处理。",
+            "TikTok 返回部分创建成功、部分失败，转入 Cookie 远端列表核验。",
           );
         }
         throw new ConfirmedCreationFailureError(`TikTok 已明确报告广告组或创意创建失败，未生成正式广告。detail=${JSON.stringify(data.result).slice(0, 300)}`);
@@ -2098,7 +2826,7 @@ async function awaitCreationResult(
       throw new ConfirmedCreationFailureError("TikTok 已明确报告创建失败，未生成正式广告。");
     }
   }
-  throw new UnknownCreationStateError("TikTok 创建任务在 9 秒内未返回最终结果，本条创建按失败处理。");
+  throw new UnknownCreationStateError("TikTok 创建任务在 9 秒内未返回最终结果，转入 Cookie 远端列表核验。");
 }
 
 /**
@@ -2128,6 +2856,8 @@ async function resolveTikTokVideos(
   mutation: CreationMutation,
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
+  preloadedLibrary?: ReadonlyMap<string, ResolvedVideo>,
+  dispatchState?: CreationDispatchState,
 ): Promise<ResolvedVideo[]> {
   const codes = splitVideoCodes(mutation.row.videoCode);
   const list = codes.length > 0 ? codes : [mutation.row.videoCode];
@@ -2144,9 +2874,14 @@ async function resolveTikTokVideos(
     if (code.startsWith("#")) needLibrary.push(code);
     else if (postIds[0]) manual.set(code, postIds[0]);
   }
-  const library = needLibrary.length > 0
-    ? await resolveVideoCodesFromLibrary(sessionRequest, credential, needLibrary)
-    : new Map<string, ResolvedVideo>();
+  const library = preloadedLibrary ?? (needLibrary.length > 0
+    ? await resolveVideoCodesFromLibrary(
+        sessionRequest,
+        credential,
+        needLibrary,
+        dispatchState ?? { mutationDispatched: false, acceptedMutationCount: 0 },
+      )
+    : new Map<string, ResolvedVideo>());
   const videos = list.map((code) => {
     const fromLibrary = library.get(code);
     if (code.startsWith("#")) {
@@ -2174,6 +2909,7 @@ async function resolveVideoCodesFromLibrary(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   codes: string[],
+  dispatchState: CreationDispatchState,
 ): Promise<Map<string, ResolvedVideo>> {
   const uniqueCodes = [...new Set(codes)];
   const response = await requestCreationStep(
@@ -2184,6 +2920,7 @@ async function resolveVideoCodesFromLibrary(
       { video_code_list: uniqueCodes },
     ),
     credential,
+    { semantics: "preflight-read", dispatchState },
   );
   const data = isRecord(response.data) ? response.data : {};
   const videoMap = isRecord(data.tt_video_map) ? data.tt_video_map : {};
@@ -2195,7 +2932,9 @@ async function resolveVideoCodesFromLibrary(
     if (!itemId) continue;
     const identityId = nonEmptyId(entry.core_user_id);
     if (!identityId) {
-      throw new UnknownCreationStateError("TikTok 素材信息未返回可用的 Spark 身份，本条创建失败。");
+      throw dispatchState.mutationDispatched
+        ? new UnknownCreationStateError("TikTok 素材信息未返回可用的 Spark 身份；已有草稿请求发出，不能直接重试。")
+        : new RetryableCreationError("TikTok 素材信息未返回可用的 Spark 身份，请更新授权后重试本条。");
     }
     const videoInfo = isRecord(entry.video_info) ? entry.video_info : {};
     const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(videoInfo.video_id);
@@ -2205,19 +2944,21 @@ async function resolveVideoCodesFromLibrary(
       ...(vid ? { vid } : {}),
     });
   }
-  if (out.size !== uniqueCodes.length) return out;
+  const resolvedCodes = uniqueCodes.filter((code) => out.has(code));
+  if (resolvedCodes.length === 0) return out;
   const authorized = await requestCreationStep(
     "material/tt_video/bulk/authorize",
     () => creationPathRequest(
       sessionRequest,
       "/api/v4/i18n/creation/material/tt_video/bulk/authorize/",
-      { auth_code_info_list: uniqueCodes.map((auth_code) => ({ auth_code })), is_check: false },
+      { auth_code_info_list: resolvedCodes.map((auth_code) => ({ auth_code })), is_check: false },
     ),
     credential,
+    { semantics: "preflight-read", dispatchState },
   );
   const authorizedData = isRecord(authorized.data) ? authorized.data : {};
   const identityMap = isRecord(authorizedData.identity_id_map) ? authorizedData.identity_id_map : {};
-  for (const code of uniqueCodes) {
+  for (const code of resolvedCodes) {
     const video = out.get(code)!;
     const authorizedIdentity = nonEmptyId(identityMap[code]);
     if (!authorizedIdentity) {
@@ -2372,12 +3113,12 @@ function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unkn
   }));
 }
 
-function uniqueAdGroupName(
+function assertAdGroupNameAvailable(
   preflightEntities: ProviderEntity[],
   requestedName: string,
   campaignId: string,
   reservedNames: ReadonlySet<string> = new Set(),
-): string {
+): void {
   const existingNames = new Set(
     preflightEntities
       .filter((entity) => nonEmptyId(entity.payload.campaign_id) === campaignId)
@@ -2385,12 +3126,32 @@ function uniqueAdGroupName(
       .filter(Boolean),
   );
   for (const name of reservedNames) existingNames.add(name);
-  if (!existingNames.has(requestedName)) return requestedName;
-  for (let suffix = 1; suffix <= 999; suffix += 1) {
-    const candidate = `${requestedName}-${String(suffix).padStart(3, "0")}`;
-    if (!existingNames.has(candidate)) return candidate;
+  if (existingNames.has(requestedName)) {
+    throw new RetryableCreationError(
+      `广告组名称“${requestedName}”已存在于目标系列或本批次中；系统不会擅自改名，请修正表格名称后重试。`,
+    );
   }
-  throw new RetryableCreationError("同一推广系列下的广告组名称已用尽 001-999 后缀，请修改表格中的广告组名称。");
+}
+
+function assertStaticCreationMutation(
+  credential: ParsedCookieCredential,
+  mutation: CreationMutation,
+): void {
+  const copyOnly = mutation.templateMode === "copy";
+  if (copyOnly && !mutation.templateCampaignId) {
+    throw new RetryableCreationError(
+      "复制模板无效：缺少 templateCampaignId，不能按系列名称回退定位。",
+    );
+  }
+  if (
+    !copyOnly
+    && credential.creationProfile
+    && hasNonEmptyOriginReference(credential.creationProfile)
+  ) {
+    throw new RetryableCreationError(
+      "当前创建样本来自 copy 流程，不能用于从零创建。请重新导入一次真正从空白页面创建广告时的创建请求。",
+    );
+  }
 }
 
 function hasExplicitCreationFailure(value: unknown): boolean {
@@ -3508,7 +4269,12 @@ function extractEntities(
           ...item,
           campaign_id: lookup("campaign_id") ?? item.campaign_id,
           adgroup_id:
-            item.adgroup_id ?? item.ad_group_id ?? statData.adgroup_id ?? id,
+            item.adgroup_id
+            ?? item.ad_group_id
+            ?? statData.adgroup_id
+            ?? item.ad_id
+            ?? statData.ad_id
+            ?? id,
         }
       : item;
     return [{ entityType, externalId: String(id), payload }];
@@ -3550,10 +4316,11 @@ function isStableExternalId(value: unknown): value is string | number {
 }
 
 async function requestCompleteListPages(
-  step: "campaign/list" | "adgroup/list",
+  step: "campaign/list" | "adgroup/list" | "ad/list",
   template: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   dispatchState: CreationDispatchState,
+  semantics: "preflight-read" | "result-query" = "preflight-read",
 ): Promise<Record<string, unknown>[]> {
   const pages: Record<string, unknown>[] = [];
   for (let page = 1; page <= 100; page += 1) {
@@ -3561,21 +4328,27 @@ async function requestCompleteListPages(
       `${step} 第 ${page} 页`,
       () => page === 1 ? template : withRequestedPage(template, page),
       credential,
-      { semantics: "preflight-read", dispatchState },
+      { semantics, dispatchState },
     );
-    assertListPreflight(payload, step);
+    assertListPreflight(payload, step, semantics);
     const responsePage = responsePageNumber(payload);
     if (responsePage !== null && responsePage !== page) {
-      throw new RetryableCreationError(`${step} 未返回请求的第 ${page} 页，无法安全判断同名对象。`);
+      throw new RetryableCreationError(
+        `${step} 未返回请求的第 ${page} 页，无法${semantics === "result-query" ? "确认创建结果" : "安全判断同名对象"}。`,
+      );
     }
     pages.push(payload);
     if (hasExplicitAdditionalPages(payload)) continue;
     if (!hasExplicitPaginationEnd(payload)) {
-      throw new RetryableCreationError(`${step} 缺少可验证的分页结束信息，无法安全判断同名对象。`);
+      throw new RetryableCreationError(
+        `${step} 缺少可验证的分页结束信息，无法${semantics === "result-query" ? "确认创建结果" : "安全判断同名对象"}。`,
+      );
     }
     return pages;
   }
-  throw new RetryableCreationError(`${step} 超过 100 页，无法在创建前完成安全查重。`);
+  throw new RetryableCreationError(
+    `${step} 超过 100 页，无法${semantics === "result-query" ? "确认创建结果" : "在创建前完成安全查重"}。`,
+  );
 }
 
 function withRequestedPage(template: CapturedCookieRequest, page: number): CapturedCookieRequest {
@@ -3866,15 +4639,20 @@ function findJsonPage(value: unknown): number | null {
 
 function assertListPreflight(
   payload: Record<string, unknown>,
-  step: "campaign/list" | "adgroup/list",
+  step: "campaign/list" | "adgroup/list" | "ad/list",
+  semantics: "preflight-read" | "result-query",
 ): void {
   const data = isRecord(payload.data) ? payload.data : undefined;
   const listKeys = step === "campaign/list"
     ? ["campaigns", "campaign_list", "table", "list", "items"]
-    : ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"];
+    : step === "adgroup/list"
+      ? ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"]
+      : ["ads", "ad_list", "table", "list", "items"];
   if (!data || !listKeys.some((key) => Array.isArray(data[key]))) {
     throw new RetryableCreationError(
-      `${step} 预检响应缺少可识别的列表结构，尚未发送任何创建请求。`,
+      semantics === "result-query"
+        ? `${step} 结果核验响应缺少可识别的列表结构。`
+        : `${step} 预检响应缺少可识别的列表结构，尚未发送任何创建请求。`,
     );
   }
 }

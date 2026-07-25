@@ -136,6 +136,8 @@ export function onUnauthorized(handler: () => void): () => void {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
+  const usesDedicatedResultToast = path.startsWith("/api/launch-plans")
+    || path === "/api/ad-groups/batch-expand";
   const response = await fetch(path, {
     ...init,
     credentials: "same-origin",
@@ -158,7 +160,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
 
-  if (typeof window !== "undefined" && !["GET", "HEAD", "OPTIONS"].includes(method)) window.dispatchEvent(new CustomEvent("tk-api-write", { detail: { ok: true, message: "操作已完成" } }));
+  if (
+    typeof window !== "undefined"
+    && !usesDedicatedResultToast
+    && !["GET", "HEAD", "OPTIONS"].includes(method)
+  ) window.dispatchEvent(new CustomEvent("tk-api-write", { detail: { ok: true, message: "操作已完成" } }));
 
   if (response.status === 204) {
     return undefined as T;

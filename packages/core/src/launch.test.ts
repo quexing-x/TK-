@@ -66,7 +66,7 @@ describe("parseLaunchSheetTable", () => {
     );
 
     expect(result.errors).toEqual([]);
-    expect(result.warnings).toEqual([expect.objectContaining({ field: "视频代码" })]);
+    expect(result.warnings).toEqual([]);
     // One row (one ad-group) whose cell holds all three codes; the create chain
     // later splits it into three ads under the same ad-group.
     expect(result.rows.map((row) => [row.videoCode, row.adGroupName, row.adName])).toEqual([
@@ -148,7 +148,7 @@ describe("parseLaunchSheetTable", () => {
     expect(result.errors).toEqual([]);
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0]!.videoCode).toBe(codes.join(";"));
-    expect(result.warnings.some((w) => w.message.includes("30 条广告"))).toBe(true);
+    expect(result.warnings).toEqual([]);
   });
 
   it("formats automatic names as YYMMDD:XXX", () => {

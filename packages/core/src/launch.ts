@@ -435,9 +435,6 @@ export function parseLaunchSheetTable(
       endAt: preset.endAt,
       initialStatus: preset.initialStatus,
     }));
-    if (videoCodes.length > 1) {
-      warnings.push({ rowNumber, field: "视频代码", message: `该广告组将创建 ${videoCodes.length} 条广告。` });
-    }
   }
   if (rows.length === 0 && errors.length === 0) {
     errors.push({ rowNumber: 2, field: "数据", message: "没有可导入的任务行。" });
@@ -463,6 +460,7 @@ export function automaticName(now: Date, serial: number): string {
 }
 
 export const MultiAccountLaunchPlanInputSchema = z.object({
+  clientRequestId: z.string().uuid().optional(),
   mode: LaunchModeSchema.default("copy"),
   sourceAccountId: z.string().trim().min(1),
   sourceAdId: z.string().trim().min(1).max(128).nullable().default(null),
