@@ -1503,7 +1503,7 @@ describe("AutomationStore", () => {
     });
   });
 
-  it("recovers an interrupted running item as unknown instead of retryable", () => {
+  it("does not automatically retry an interrupted item but permits an explicit retry", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
@@ -1514,6 +1514,13 @@ describe("AutomationStore", () => {
     });
     const pending = store.listLaunchPlanItems(plan.id)[0]!;
     store.claimLaunchPlanItem(pending.itemId, "terminated-executor", "pending");
+    const firstScopeOwner = `terminated-executor:${pending.itemId}`;
+    expect(store.claimLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      pending.launchRow.campaignName,
+      firstScopeOwner,
+    )).not.toBeNull();
 
     expect(store.recoverInterruptedLaunchPlanItems(
       new Date(Date.now() - 30 * 60 * 1000).toISOString(),
@@ -1526,6 +1533,22 @@ describe("AutomationStore", () => {
       errorMessage: expect.stringContaining("不会自动重试"),
     });
     expect(store.claimLaunchPlanItem(pending.itemId, "new-executor", "failed")).toBeNull();
+    store.markLaunchCreationScopeUncertain(
+      plan.id,
+      "demo-account",
+      pending.launchRow.campaignName,
+      firstScopeOwner,
+    );
+    expect(store.claimLaunchPlanItem(pending.itemId, "new-executor", "unknown")).toMatchObject({
+      status: "running",
+      attemptCount: 2,
+    });
+    expect(store.claimLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      pending.launchRow.campaignName,
+      `new-executor:${pending.itemId}`,
+    )).not.toBeNull();
   });
 
   it("summarizes retryable failures separately from unknown outcomes", () => {
@@ -1551,8 +1574,126 @@ describe("AutomationStore", () => {
       unknownCount: 1,
     });
     expect(refreshed.message).toContain("明确失败 1 条，可单独重试");
-    expect(refreshed.message).toContain("结果未知 1 条，禁止重试，需人工核验");
+    expect(refreshed.message).toContain("创建失败 1 条");
     expect(store.claimLaunchPlanItem(unknown!.itemId, "executor-b", "failed")).toBeNull();
+  });
+
+  it("repairs a legacy definitive failure and resumes same-campaign items that were never dispatched", () => {
+    const rows = [launchItemRow(2), launchItemRow(3), launchItemRow(4)].map((row) => ({
+      ...row,
+      campaignName: "same-campaign",
+    }));
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: rows,
+    });
+    const [succeeded, definitiveFailure, blockedSibling] = store.listLaunchPlanItems(plan.id);
+
+    store.claimLaunchPlanItem(succeeded!.itemId, "executor-a", "pending");
+    const firstScopeOwner = `executor-a:${succeeded!.itemId}`;
+    expect(store.claimLaunchCreationScope(plan.id, "demo-account", "same-campaign", firstScopeOwner)).not.toBeNull();
+    expect(store.completeLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      "same-campaign",
+      firstScopeOwner,
+      "formal-campaign",
+      rows[0]!.adGroupName,
+    )).toBe(true);
+    store.completeLaunchPlanItemSuccess(succeeded!.itemId, "executor-a", {
+      campaignId: "formal-campaign",
+      adGroupId: "formal-group",
+      adId: "formal-ad",
+    });
+
+    store.claimLaunchPlanItem(definitiveFailure!.itemId, "executor-b", "pending");
+    const failedScopeOwner = `executor-b:${definitiveFailure!.itemId}`;
+    expect(store.claimLaunchCreationScope(plan.id, "demo-account", "same-campaign", failedScopeOwner)).toMatchObject({
+      campaignId: "formal-campaign",
+    });
+    store.markLaunchCreationScopeUncertain(plan.id, "demo-account", "same-campaign", failedScopeOwner);
+    store.completeLaunchPlanItemUnknown(
+      definitiveFailure!.itemId,
+      "executor-b",
+      "TikTok 已明确报告广告组或创意创建失败，未生成正式广告；此前已有草稿步骤。",
+    );
+
+    store.claimLaunchPlanItem(blockedSibling!.itemId, "executor-c", "pending");
+    store.completeLaunchPlanItemFailure(
+      blockedSibling!.itemId,
+      "executor-c",
+      "同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。",
+    );
+
+    expect(store.recoverDefinitiveLaunchFailures()).toEqual({
+      recoveredItemCount: 1,
+      resumedItemCount: 1,
+      planIds: [plan.id],
+    });
+    expect(store.listLaunchPlanItems(plan.id).map((item) => item.status)).toEqual([
+      "succeeded",
+      "failed",
+      "pending",
+    ]);
+    expect(store.claimLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      "same-campaign",
+      "executor-d:next",
+    )).toMatchObject({
+      campaignId: "formal-campaign",
+    });
+  });
+
+  it("migrates legacy series-lock failures back to pending without touching Provider", () => {
+    const row = { ...launchItemRow(2), campaignName: "legacy-series" };
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [row],
+    });
+    const item = store.listLaunchPlanItems(plan.id)[0]!;
+    store.claimLaunchPlanItem(item.itemId, "legacy-executor", "pending");
+    const scopeOwner = `legacy-executor:${item.itemId}`;
+    expect(store.claimLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      row.campaignName,
+      scopeOwner,
+    )).not.toBeNull();
+    store.markLaunchCreationScopeUncertain(
+      plan.id,
+      "demo-account",
+      row.campaignName,
+      scopeOwner,
+    );
+    store.completeLaunchPlanItemFailure(
+      item.itemId,
+      "legacy-executor",
+      "同计划同账户的同系列任务正在创建，当前任务未发送 Provider 请求，请稍后重试。",
+    );
+
+    expect(store.recoverLegacySeriesCoordinationFailures()).toEqual({
+      resumedItemCount: 1,
+      planIds: [plan.id],
+    });
+    expect(store.listLaunchPlanItems(plan.id)[0]).toMatchObject({
+      status: "pending",
+      errorMessage: null,
+    });
+    expect(store.claimLaunchCreationScope(
+      plan.id,
+      "demo-account",
+      row.campaignName,
+      "new-executor:batch",
+    )).not.toBeNull();
   });
 
   it("persists stable operation identity, per-attempt identity, phases and provider evidence", () => {
@@ -1638,96 +1779,6 @@ describe("AutomationStore", () => {
     });
     expect(store.listLaunchPlanItemAttempts(item.itemId)[0]).toMatchObject({ status: "running" });
     database.exec("DROP TRIGGER reject_attempt_completion");
-  });
-
-  it("requires evidence to resolve unknown items and records actor plus before/after state", () => {
-    const plan = store.createMultiAccountLaunchPlan({
-      mode: "single",
-      sourceAccountId: "demo-account",
-      sourceAdId: null,
-      targetAccountIds: ["demo-account"],
-      launchPresetId: "default-launch-preset",
-      launchRows: [launchItemRow(2), launchItemRow(3), launchItemRow(4)],
-    });
-    const [confirmed, notCreated, legacyUnknown] = store.listLaunchPlanItems(plan.id);
-    store.claimLaunchPlanItem(confirmed!.itemId, "executor-a", "pending");
-    store.updateLaunchPlanItemProgress(confirmed!.itemId, "executor-a", {
-      phase: "validation",
-      evidence: { resolvedAdGroupName: `${confirmed!.launchRow.adGroupName}-001` },
-    });
-    store.completeLaunchPlanItemUnknown(confirmed!.itemId, "executor-a", "response lost");
-    store.claimLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-seed");
-    store.completeLaunchCreationScope(
-      plan.id,
-      "demo-account",
-      confirmed!.launchRow.campaignName,
-      "scope-seed",
-      "campaign-existing",
-      confirmed!.launchRow.adGroupName,
-    );
-    store.claimLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-a");
-    store.markLaunchCreationScopeUncertain(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-a");
-    store.claimLaunchPlanItem(notCreated!.itemId, "executor-a", "pending");
-    store.completeLaunchPlanItemUnknown(notCreated!.itemId, "executor-a", "response lost");
-    store.claimLaunchCreationScope(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-b");
-    store.markLaunchCreationScopeUncertain(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-b");
-    store.claimLaunchPlanItem(legacyUnknown!.itemId, "executor-a", "pending");
-    store.completeLaunchPlanItemUnknown(legacyUnknown!.itemId, "executor-a", "legacy response lost");
-
-    expect(() => store.verifyUnknownLaunchPlanItem(confirmed!.itemId, {
-      decision: "confirmed-succeeded",
-      evidence: "后台已经显示创建成功",
-      note: "",
-      campaignId: null,
-      adGroupId: null,
-      adId: null,
-    }, { id: "user-1", name: "reviewer" })).toThrow("必须填写");
-
-    expect(() => store.verifyUnknownLaunchPlanItem(legacyUnknown!.itemId, {
-      decision: "confirmed-succeeded",
-      evidence: "TikTok 后台可见但旧任务没有记录实际广告组名称",
-      note: "legacy unknown",
-      campaignId: "campaign-legacy",
-      adGroupId: "group-legacy",
-      adId: "ad-legacy",
-    }, { id: "user-1", name: "reviewer" })).toThrow("缺少实际广告组名称");
-
-    const success = store.verifyUnknownLaunchPlanItem(confirmed!.itemId, {
-      decision: "confirmed-succeeded",
-      evidence: "TikTok 后台按操作时间查询到三个对象且状态关闭",
-      note: "人工核验",
-      campaignId: "campaign-1",
-      adGroupId: "group-1",
-      adId: "ad-1",
-    }, { id: "user-1", name: "reviewer" });
-    const failed = store.verifyUnknownLaunchPlanItem(notCreated!.itemId, {
-      decision: "confirmed-not-created",
-      evidence: "TikTok 后台按账户和时间范围查询，没有找到对应对象",
-      note: "允许稍后显式重试",
-      campaignId: null,
-      adGroupId: null,
-      adId: null,
-    }, { id: "user-1", name: "reviewer" });
-
-    expect(success).toMatchObject({ previousStatus: "unknown", nextStatus: "succeeded", actorId: "user-1" });
-    expect(failed).toMatchObject({ previousStatus: "unknown", nextStatus: "failed", actorName: "reviewer" });
-    expect(store.listLaunchPlanItems(plan.id)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ itemId: confirmed!.itemId, status: "succeeded", campaignId: "campaign-1", adGroupId: "group-1", adId: "ad-1" }),
-      expect.objectContaining({ itemId: notCreated!.itemId, status: "failed", errorMessage: expect.stringContaining("人工核验确认未创建") }),
-    ]));
-    expect(store.listLaunchPlanItemVerifications(confirmed!.itemId)).toHaveLength(1);
-    expect(store.claimLaunchCreationScope(
-      plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-c",
-    )).toEqual({
-      campaignId: "campaign-1",
-      adGroupNames: [confirmed!.launchRow.adGroupName, `${confirmed!.launchRow.adGroupName}-001`],
-    });
-    store.releaseLaunchCreationScope(plan.id, "demo-account", confirmed!.launchRow.campaignName, "scope-c");
-    expect(store.claimLaunchCreationScope(
-      plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-d",
-    )).toEqual({ campaignId: null, adGroupNames: [] });
-    store.releaseLaunchCreationScope(plan.id, "demo-account", notCreated!.launchRow.campaignName, "scope-d");
-    expect(store.claimLaunchPlanItem(notCreated!.itemId, "executor-b", "failed")).toMatchObject({ attemptCount: 2 });
   });
 
   it("refuses to cancel a plan while an item is running", () => {

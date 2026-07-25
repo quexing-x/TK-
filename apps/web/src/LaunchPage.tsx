@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, CircleCheck, CircleX, Download, FileSpreadsheet, Pencil, RefreshCcw, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
-import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchManualVerificationInput, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
+import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
@@ -125,15 +125,6 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [busy, setBusy] = useState(false);
   const [executionFeedback, setExecutionFeedback] = useState<LaunchFeedback | null>(null);
   const [presetFeedback, setPresetFeedback] = useState<LaunchFeedback | null>(null);
-  const [verificationTarget, setVerificationTarget] = useState<{ planId: string; item: LaunchPlanItemRecord } | null>(null);
-  const [verificationForm, setVerificationForm] = useState<LaunchManualVerificationInput>({
-    decision: "confirmed-not-created",
-    evidence: "",
-    note: "",
-    campaignId: null,
-    adGroupId: null,
-    adId: null,
-  });
   const fileInput = useRef<HTMLInputElement>(null);
   const loadRef = useRef<() => Promise<void>>(async () => {});
 
@@ -426,23 +417,6 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     } catch (cause) { onError(messageOf(cause)); }
     finally { setBusy(false); }
   };
-  const verifyPlanItem = async () => {
-    if (!verificationTarget) return;
-    try {
-      setBusy(true);
-      await api.verifyLaunchPlanItem(
-        verificationTarget.planId,
-        verificationTarget.item.itemId,
-        verificationForm,
-      );
-      setVerificationTarget(null);
-      setVerificationForm({ decision: "confirmed-not-created", evidence: "", note: "", campaignId: null, adGroupId: null, adId: null });
-      await load();
-      onError(null);
-    } catch (cause) { onError(messageOf(cause)); }
-    finally { setBusy(false); }
-  };
-
   return <section className="page-stack launch-page">
     <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>批量创建广告</h2><p>预设统一覆盖预算、出价、地区与创建时间；表格只填系列、广告组、视频与产品 URL。</p></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? "创建参数已就绪" : "创建参数待完善"}</span></div>
 
@@ -527,58 +501,17 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       {executionFeedback && <div className={executionFeedback.tone === "success" ? "creation-template-note" : `sheet-issues ${executionFeedback.tone}`}><strong>{executionFeedback.title}</strong><ul>{executionFeedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul></div>}
     </div>
 
-    <div className="panel table-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>后台执行时会自动刷新逐项状态和当前阶段。</p></div></div></div><div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>{plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => { const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0); const failed = plan.executionResults.reduce((total, item) => total + item.failedCount, 0); const unknown = plan.executionResults.reduce((total, item) => total + item.unknownCount, 0); const items = planItems[plan.id] ?? []; const failedItems = items.filter((item) => item.status === "failed"); const unknownItems = items.filter((item) => item.status === "unknown"); return <tr key={plan.id}><td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.launchRows.length} 条 × {plan.targetAccountIds.length} 个账户</td><td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : ["failed", "unknown"].includes(item.status) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adName} · {launchItemStatusLabel(item.status)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td><td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">成功 {created} · 失败 {failed} · 待核验 {unknown}</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{item.accountId}：{detail.text}</small> : null; })}</td><td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重试 {item.launchRow.adName}</button>)}{unknownItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => setVerificationTarget({ planId: plan.id, item })} type="button">人工核验 {item.launchRow.adName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td></tr>; })}</tbody></table></div></div>
+    <div className="panel table-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>后台执行时会自动刷新逐项状态和当前阶段。</p></div></div></div><div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>{plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => { const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0); const failed = plan.executionResults.reduce((total, item) => total + item.failedCount + item.unknownCount, 0); const items = planItems[plan.id] ?? []; const failedItems = items.filter((item) => item.status === "failed" || item.status === "unknown"); return <tr key={plan.id}><td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.launchRows.length} 条 × {plan.targetAccountIds.length} 个账户</td><td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : ["failed", "unknown"].includes(item.status) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adName} · {launchItemStatusLabel(item.status)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td><td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">成功 {created} · 失败 {failed}</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{item.accountId}：{detail.text}</small> : null; })}</td><td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重试 {item.launchRow.adName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td></tr>; })}</tbody></table></div></div>
 
         </>}
       </main>
     </div>
 
-    {verificationTarget && <LaunchVerificationDialog
-      accountName={accounts.find((account) => account.id === verificationTarget.item.accountId)?.displayName ?? verificationTarget.item.accountId}
-      busy={busy}
-      form={verificationForm}
-      item={verificationTarget.item}
-      onCancel={() => setVerificationTarget(null)}
-      onChange={setVerificationForm}
-      onSubmit={() => void verifyPlanItem()}
-    />}
   </section>;
 }
 
 function IssueList({ issues, tone = "danger" }: { issues: LaunchSheetImportResult["errors"]; tone?: "danger" | "warning" }) { return <div className={`sheet-issues ${tone}`}><strong>{tone === "danger" ? "需要修正" : "导入提示"}</strong><ul>{issues.slice(0, 20).map((issue, index) => <li key={`${issue.rowNumber}-${issue.field}-${index}`}>第 {issue.rowNumber} 行 · {issue.field}：{issue.message}</li>)}</ul></div>; }
 
-function LaunchVerificationDialog({ accountName, busy, form, item, onCancel, onChange, onSubmit }: {
-  accountName: string;
-  busy: boolean;
-  form: LaunchManualVerificationInput;
-  item: LaunchPlanItemRecord;
-  onCancel: () => void;
-  onChange: Dispatch<SetStateAction<LaunchManualVerificationInput>>;
-  onSubmit: () => void;
-}) {
-  const identityLines = launchVerificationIdentityLines(item, accountName);
-  return <div className="modal-backdrop"><div aria-labelledby="launch-verification-title" aria-modal="true" className="modal" role="dialog">
-    <div className="modal-header"><div><span className="eyebrow">创建结果待确认</span><h2 id="launch-verification-title">人工核验 {item.launchRow.adName}</h2></div><button aria-label="关闭人工核验" disabled={busy} onClick={onCancel} type="button"><X size={18} /></button></div>
-    <div className="creation-template-note" role="status"><strong>请先核对任务身份</strong>{identityLines.map((line) => <span key={line}>{line}</span>)}</div>
-    <div className="form-grid"><label className="field wide"><span>核验结论</span><select value={form.decision} onChange={(event) => onChange((value) => ({ ...value, decision: event.target.value as LaunchManualVerificationInput["decision"] }))}><option value="confirmed-not-created">确认未创建（之后可显式单项重试）</option><option value="confirmed-succeeded">确认已创建（必须填写三个正式 ID）</option></select></label><label className="field wide"><span>核验证据</span><textarea minLength={10} placeholder="填写后台查询结果、时间、对象状态或其他可复核依据（至少 10 个字符）" value={form.evidence} onChange={(event) => onChange((value) => ({ ...value, evidence: event.target.value }))} /></label><label className="field wide"><span>备注</span><textarea value={form.note} onChange={(event) => onChange((value) => ({ ...value, note: event.target.value }))} /></label>{form.decision === "confirmed-succeeded" && <><label className="field"><span>Campaign ID</span><input value={form.campaignId ?? ""} onChange={(event) => onChange((value) => ({ ...value, campaignId: event.target.value || null }))} /></label><label className="field"><span>Ad Group ID</span><input value={form.adGroupId ?? ""} onChange={(event) => onChange((value) => ({ ...value, adGroupId: event.target.value || null }))} /></label><label className="field"><span>Ad ID</span><input value={form.adId ?? ""} onChange={(event) => onChange((value) => ({ ...value, adId: event.target.value || null }))} /></label></>}</div>
-    <div className="form-actions"><button className="primary-button" disabled={busy || form.evidence.trim().length < 10 || (form.decision === "confirmed-succeeded" && (!form.campaignId || !form.adGroupId || !form.adId))} onClick={onSubmit} type="button">保存核验结论</button><button className="secondary-button" disabled={busy} onClick={onCancel} type="button">取消</button></div>
-  </div></div>;
-}
-
-export function launchVerificationIdentityLines(item: LaunchPlanItemRecord, accountName: string): string[] {
-  const evidence = Object.entries(item.evidence)
-    .filter(([, value]) => value)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join(" · ") || "暂无 Provider 证据 ID";
-  return [
-    `账户：${accountName}（${item.accountId}）`,
-    `operationId：${item.operationId}`,
-    `attemptId：${item.attemptId ?? "无"}`,
-    `correlationId：${item.correlationId}`,
-    `阶段：${item.phase} · 领取时间：${item.claimedAt ? new Date(item.claimedAt).toLocaleString() : "无"}`,
-    evidence,
-  ];
-}
 function toIso(value: string): string | null { return value ? new Date(value).toISOString() : null; }
 function nullableInteger(value: string): number | null {
   if (value.trim() === "") return null;
@@ -629,25 +562,19 @@ export function summarizeExecution(
 ): LaunchFeedback {
   const accountNames = new Map(accounts.map((account) => [account.id, account.displayName]));
   const label = (accountId: string) => accountNames.get(accountId) ?? accountId;
-  const failed = execution.results.filter((item) => item.status === "failed");
-  const unknown = execution.results.filter((item) => item.status === "unknown");
+  const failed = execution.results.filter((item) => item.status === "failed" || item.status === "unknown");
   const succeeded = execution.results.filter((item) => item.status === "succeeded");
-  const syncWarnings = succeeded.filter((item) => item.syncWarning);
-  const lines = [
-    ...failed.map((item) => `${label(item.accountId)}：${item.message}`),
-    ...unknown.map((item) => `${label(item.accountId)}：创建结果待确认，${item.message}`),
-    ...syncWarnings.map((item) => `${label(item.accountId)}：广告已创建，但同步警告：${item.syncWarning}`),
-  ];
   if (failed.length > 0) {
-    return { tone: "danger", title: `创建失败 ${failed.length} 条`, lines };
-  }
-  if (unknown.length > 0 || syncWarnings.length > 0) {
-    return { tone: "warning", title: `成功 ${succeeded.length} 条，另有待处理提示`, lines };
+    return {
+      tone: "danger",
+      title: `创建失败 ${failed.length} 条`,
+      lines: failed.map((item) => `${label(item.accountId)}：失败`),
+    };
   }
   return {
     tone: "success",
     title: `创建成功 ${succeeded.length} 条`,
-    lines: succeeded.map((item) => `${label(item.accountId)}：${item.message}`),
+    lines: succeeded.map((item) => `${label(item.accountId)}：成功`),
   };
 }
 
@@ -655,19 +582,14 @@ export function summarizePlanAccountResult(
   result: MultiAccountLaunchPlanRecord["executionResults"][number],
 ): { tone: "danger" | "warning"; text: string } | null {
   if (result.failedCount === 0 && result.unknownCount === 0) return null;
-  const parts = [
-    result.failedCount > 0 ? `明确失败 ${result.failedCount} 条，可单项重试` : "",
-    result.unknownCount > 0 ? `创建结果待确认 ${result.unknownCount} 条，禁止重试，需人工核验` : "",
-    result.message ?? "",
-  ].filter(Boolean);
   return {
-    tone: result.failedCount > 0 ? "danger" : "warning",
-    text: parts.join("；"),
+    tone: "danger",
+    text: `失败 ${result.failedCount + result.unknownCount} 条`,
   };
 }
 
 function launchItemStatusLabel(status: LaunchPlanItemRecord["status"]): string {
-  return ({ pending: "排队中", running: "执行中", succeeded: "已成功", failed: "明确失败", unknown: "待核验", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
+  return ({ pending: "排队中", running: "执行中", succeeded: "已成功", failed: "失败", unknown: "失败", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
 }
 
 function launchPhaseLabel(phase: LaunchPlanItemRecord["phase"]): string {

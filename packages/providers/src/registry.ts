@@ -235,6 +235,15 @@ export class ProviderRegistry {
     context: ProviderContext,
     mutations: CreationMutation[],
   ): Promise<CreationMutationResult[]> {
+    if (mutations.every((mutation) => mutation.templateMode === "none")) {
+      return this.create(kind, context, mutations);
+    }
+    if (mutations.every((mutation) => mutation.templateMode === "copy")) {
+      return this.copy(kind, context, mutations.map((mutation) => ({
+        ...mutation,
+        templateCampaignId: mutation.templateCampaignId ?? "",
+      })));
+    }
     const results: CreationMutationResult[] = [];
     for (const mutation of mutations) {
       const [result] = mutation.templateMode === "copy"

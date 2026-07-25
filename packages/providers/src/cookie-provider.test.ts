@@ -1042,6 +1042,69 @@ describe("CookieAdsProvider", () => {
     ]));
   });
 
+  it("builds every same-campaign draft before one synchronized publish", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let campaignSaves = 0;
+    let adGroupSaves = 0;
+    let creativeSaves = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body: requestBody });
+      let body: Record<string, unknown>;
+      if (url.includes("adgroup/list") || url.includes("campaign/list")) {
+        body = { data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 };
+      } else if (url.includes("campaign_snap/save")) {
+        campaignSaves += 1;
+        body = { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 };
+      } else if (url.includes("ad_snap/save")) {
+        adGroupSaves += 1;
+        body = { data: { ad_snap_id: `ad-snap-${adGroupSaves}`, ad_sketch_id: `ad-sketch-${adGroupSaves}` }, code: 0 };
+      } else if (url.includes("creative_snap/save")) {
+        creativeSaves += 1;
+        body = { data: { creative_snap_id: `creative-snap-${creativeSaves}`, creative_sketch_id: `creative-sketch-${creativeSaves}` }, code: 0 };
+      } else if (url.includes("async_creation/detail")) {
+        body = { code: 0, data: { status: 1, result: {
+          campaign_id: "campaign",
+          ad_and_creative: {
+            // TikTok can return the terminal objects in a different order
+            // than the submitted drafts. by_ad_snap_id is the stable join key.
+            0: { by_ad_snap_id: "ad-snap-2", ad_id: "adgroup-2", asset_group_result: { 0: { creative_items: [{ id: "creative-2" }] } } },
+            1: { by_ad_snap_id: "ad-snap-1", ad_id: "adgroup-1", asset_group_result: { 0: { creative_items: [{ id: "creative-1" }] } } },
+          },
+        } } };
+      } else {
+        body = successfulDraftValidationPayload(url, ["ad-snap-1", "ad-snap-2"])
+          ?? { code: 0, data: { async_request_id: "async-batch" } };
+      }
+      return jsonResponse(body);
+    }));
+
+    const first = creationTestMutation("none");
+    const second = creationTestMutation("none");
+    first.operationId = "operation-1";
+    first.attemptId = "attempt-1";
+    second.operationId = "operation-2";
+    second.attemptId = "attempt-2";
+    second.row = { ...second.row, rowNumber: 3, adGroupName: "group-2", adName: "260717:002" };
+
+    const result = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [first, second],
+    );
+
+    const publishes = requested.filter((item) => item.url.includes("async_creation/create_by_snap"));
+    expect(campaignSaves).toBe(1);
+    expect(adGroupSaves).toBe(2);
+    expect(creativeSaves).toBe(2);
+    expect(publishes).toHaveLength(1);
+    expect(publishes[0]?.body.ad_and_creative_snap_info_list).toHaveLength(2);
+    expect(result).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: "operation-1", ok: true, campaignId: "campaign", adGroupId: "adgroup-1", adId: "creative-1" }),
+      expect.objectContaining({ operationId: "operation-2", ok: true, campaignId: "campaign", adGroupId: "adgroup-2", adId: "creative-2" }),
+    ]));
+  });
+
   it("creates one ad-group with several ads from a multi-code cell", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     let creativeSaves = 0;
@@ -1815,7 +1878,7 @@ describe("CookieAdsProvider", () => {
     expect(adNames).toEqual(["group", "group-001"]);
   });
 
-  it("stops later same-campaign calls after an unknown result in the same plan", async () => {
+  it("continues later same-campaign calls after a failed result in the same plan", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.includes("campaign/list") || url.includes("adgroup/list")) {
@@ -1832,13 +1895,13 @@ describe("CookieAdsProvider", () => {
     second.batchId = "plan-unknown";
 
     const [unknown] = await provider.createFromPreset!(creationTestContext(false), [first]);
-    const callsAfterUnknown = fetchMock.mock.calls.length;
-    const [blocked] = await provider.createFromPreset!(creationTestContext(false), [second]);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    const [continued] = await provider.createFromPreset!(creationTestContext(false), [second]);
 
     expect(unknown).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(blocked).toMatchObject({ ok: false, failureKind: "retryable" });
-    expect(blocked?.message).toContain("前一条同系列任务结果未知");
-    expect(fetchMock).toHaveBeenCalledTimes(callsAfterUnknown);
+    expect(continued).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(continued?.message).not.toContain("前一条同系列任务结果未知");
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
   });
 
   it("creates a new campaign directly even when the preset still contains a template campaign id", async () => {
@@ -2834,7 +2897,7 @@ describe("CookieAdsProvider", () => {
     const result = await pending;
 
     expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(result.message).toContain("禁止自动重试");
+    expect(result.message).toContain("本条创建按失败处理");
   });
 
   it("treats an incomplete terminal copy result as unknown instead of reporting success", async () => {

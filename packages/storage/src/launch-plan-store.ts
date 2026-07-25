@@ -19,7 +19,7 @@ export class LaunchPlanStore {
     return this.store.listLaunchPlanItems(planId, statuses);
   }
 
-  claim(itemId: string, executorId: string, expectedStatus: "pending" | "failed", actor: WriteTaskActor) {
+  claim(itemId: string, executorId: string, expectedStatus: "pending" | "failed" | "unknown", actor: WriteTaskActor) {
     return this.store.claimLaunchPlanItem(itemId, executorId, expectedStatus, actor);
   }
 
@@ -49,6 +49,14 @@ export class LaunchPlanStore {
 
   recover(staleBefore: string): number {
     return this.store.recoverInterruptedLaunchPlanItems(staleBefore);
+  }
+
+  recoverLegacySeriesBlocks() {
+    return this.store.recoverLegacySeriesCoordinationFailures();
+  }
+
+  recoverDefinitiveFailures() {
+    return this.store.recoverDefinitiveLaunchFailures();
   }
 
   refresh(planId: string): MultiAccountLaunchPlanRecord {

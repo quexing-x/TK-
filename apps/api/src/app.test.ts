@@ -1690,7 +1690,7 @@ describe("local API", () => {
     expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
   });
 
-  it("marks a provider success with incomplete IDs as unknown and never retries it", async () => {
+  it("reports a provider result with incomplete IDs as failed", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1706,13 +1706,13 @@ describe("local API", () => {
 
     expect(createFromPreset).toHaveBeenCalledTimes(1);
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
-      status: "unknown",
+      status: "failed",
       attemptCount: 1,
-      errorMessage: expect.stringContaining("不会自动重试"),
+      errorMessage: expect.stringContaining("本条创建按失败处理"),
     });
   });
 
-  it("marks an unclassified provider exception as unknown and never retries it", async () => {
+  it("reports an unclassified provider exception as failed and keeps one-click retry available", async () => {
     const createFromPreset = vi.fn(async () => {
       throw new Error("connection reset after request dispatch");
     });
@@ -1720,52 +1720,97 @@ describe("local API", () => {
 
     await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
     await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
-    const unknownItem = store.listLaunchPlanItems(planId)[0]!;
+    const failedItem = store.listLaunchPlanItems(planId)[0]!;
     const retry = await app.inject({
       method: "POST",
-      url: `/api/launch-plans/${planId}/items/${unknownItem.itemId}/retry`,
+      url: `/api/launch-plans/${planId}/items/${failedItem.itemId}/retry`,
     });
 
-    expect(createFromPreset).toHaveBeenCalledTimes(1);
-    expect(retry.statusCode).toBe(409);
-    expect(retry.json().message).toContain("禁止重试");
+    expect(createFromPreset).toHaveBeenCalledTimes(2);
+    expect(retry.statusCode).toBe(200);
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
-      status: "unknown",
-      attemptCount: 1,
+      status: "failed",
+      attemptCount: 2,
       errorMessage: "connection reset after request dispatch",
     });
   });
 
-  it("does not retry a provider rejection after an earlier creation step was accepted", async () => {
+  it("continues later same-campaign items after a draft-only provider rejection", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
-      mutations.map((mutation): CreationMutationResult => ({
-        ...mutation,
-        ok: false,
-        failureKind: "retryable",
-        retrySafe: false,
-        message: "later TikTok step rejected",
-      })),
+      mutations.map((mutation): CreationMutationResult => mutation.row.rowNumber === 3
+        ? {
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            retrySafe: false,
+            message: "TikTok 明确失败，只留下草稿",
+          }
+        : {
+            ...mutation,
+            ok: true,
+            campaignId: "campaign-created",
+            adGroupId: `group-${mutation.row.rowNumber}`,
+            adId: `ad-${mutation.row.rowNumber}`,
+            message: "created",
+          }),
     );
-    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+    const rows = [apiLaunchRow(2), apiLaunchRow(3), apiLaunchRow(4)].map((row) => ({
+      ...row,
+      campaignName: "same-campaign",
+    }));
+    const planId = await installLaunchTestProvider(createFromPreset, rows);
 
-    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
-    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
-    const unknownItem = store.listLaunchPlanItems(planId)[0]!;
-    const retry = await app.inject({
-      method: "POST",
-      url: `/api/launch-plans/${planId}/items/${unknownItem.itemId}/retry`,
-    });
+    const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const items = store.listLaunchPlanItems(planId);
 
+    expect(executed.statusCode).toBe(200);
     expect(createFromPreset).toHaveBeenCalledTimes(1);
-    expect(retry.statusCode).toBe(409);
-    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
-      status: "unknown",
-      attemptCount: 1,
-      errorMessage: expect.stringContaining("禁止自动重试"),
+    expect(createFromPreset.mock.calls[0]![1]).toHaveLength(3);
+    expect(items.map((item) => item.status)).toEqual(["succeeded", "failed", "succeeded"]);
+    expect(executed.json().plan.executionResults[0]).toMatchObject({
+      createdCount: 2,
+      failedCount: 1,
+      unknownCount: 0,
     });
   });
 
-  it("marks a persistence failure after confirmed creation as unknown", async () => {
+  it("starts different campaign batches concurrently without mixing their rows", async () => {
+    let activeBatches = 0;
+    let maxActiveBatches = 0;
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
+      activeBatches += 1;
+      maxActiveBatches = Math.max(maxActiveBatches, activeBatches);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      activeBatches -= 1;
+      return mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: `campaign-${mutation.row.campaignName}`,
+        adGroupId: `group-${mutation.row.rowNumber}`,
+        adId: `ad-${mutation.row.rowNumber}`,
+        message: "created",
+      }));
+    });
+    const rows = [apiLaunchRow(2), apiLaunchRow(3), apiLaunchRow(4)].map((row, index) => ({
+      ...row,
+      campaignName: `series-${index + 1}`,
+    }));
+    const planId = await installLaunchTestProvider(createFromPreset, rows);
+
+    const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+
+    expect(executed.statusCode).toBe(200);
+    expect(createFromPreset).toHaveBeenCalledTimes(3);
+    expect(createFromPreset.mock.calls.every((call) => call[1].length === 1)).toBe(true);
+    expect(maxActiveBatches).toBeGreaterThan(1);
+    expect(store.listLaunchPlanItems(planId).map((item) => item.status)).toEqual([
+      "succeeded",
+      "succeeded",
+      "succeeded",
+    ]);
+  });
+
+  it("retries only the local transaction after confirmed creation", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1786,9 +1831,9 @@ describe("local API", () => {
 
     expect(createFromPreset).toHaveBeenCalledTimes(1);
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
-      status: "unknown",
+      status: "succeeded",
       attemptCount: 1,
-      errorMessage: "database write interrupted",
+      campaignId: "campaign-created",
     });
   });
 
@@ -1846,7 +1891,55 @@ describe("local API", () => {
     ]);
   });
 
-  it("resolves an unknown item only through an evidence-backed manual verification", async () => {
+  it("retries an unknown launch only after an explicit user request", async () => {
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "campaign-created",
+        adGroupId: "group-created",
+        adId: "ad-created",
+        message: "created",
+      })),
+    );
+    const row = apiLaunchRow(2);
+    const planId = await installLaunchTestProvider(createFromPreset, [row]);
+    const item = store.listLaunchPlanItems(planId)[0]!;
+    store.claimLaunchPlanItem(item.itemId, "interrupted-executor", "pending");
+    const scopeOwner = `interrupted-executor:${item.itemId}`;
+    expect(store.claimLaunchCreationScope(
+      planId,
+      "demo-account",
+      row.campaignName,
+      scopeOwner,
+    )).not.toBeNull();
+    store.markLaunchCreationScopeUncertain(
+      planId,
+      "demo-account",
+      row.campaignName,
+      scopeOwner,
+    );
+    store.completeLaunchPlanItemUnknown(
+      item.itemId,
+      "interrupted-executor",
+      "response lost after dispatch",
+    );
+
+    const retry = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/items/${item.itemId}/retry`,
+    });
+
+    expect(retry.statusCode).toBe(200);
+    expect(createFromPreset).toHaveBeenCalledTimes(1);
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
+      status: "succeeded",
+      attemptCount: 2,
+      campaignId: "campaign-created",
+    });
+  });
+
+  it("removes the launch manual-verification endpoints", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => {
         mutation.onProgress?.({
@@ -1865,47 +1958,20 @@ describe("local API", () => {
     await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
     const item = store.listLaunchPlanItems(planId)[0]!;
 
-    const rejected = await app.inject({
-      method: "POST",
-      url: `/api/launch-plans/${planId}/items/${item.itemId}/verify`,
-      payload: {
-        decision: "confirmed-succeeded",
-        evidence: "TikTok backend checked",
-        note: "",
-        campaignId: null,
-        adGroupId: null,
-        adId: null,
-      },
+    const list = await app.inject({
+      method: "GET",
+      url: `/api/launch-plans/${planId}/items/${item.itemId}/verifications`,
     });
-    const verified = await app.inject({
+    const verify = await app.inject({
       method: "POST",
       url: `/api/launch-plans/${planId}/items/${item.itemId}/verify`,
       payload: {
-        decision: "confirmed-succeeded",
-        evidence: "TikTok backend checked by time and operation identity",
-        note: "manual verification",
-        campaignId: "campaign-confirmed",
-        adGroupId: "group-confirmed",
-        adId: "ad-confirmed",
+        evidence: "removed",
       },
     });
 
-    expect(rejected.statusCode).toBe(409);
-    expect(verified.statusCode).toBe(200);
-    expect(verified.json()).toMatchObject({
-      verification: {
-        previousStatus: "unknown",
-        nextStatus: "succeeded",
-        actorId: "isolated-test",
-      },
-      item: {
-        status: "succeeded",
-        campaignId: "campaign-confirmed",
-        adGroupId: "group-confirmed",
-        adId: "ad-confirmed",
-      },
-    });
-    expect(store.listLaunchPlanItemVerifications(item.itemId)).toHaveLength(1);
+    expect(list.statusCode).toBe(404);
+    expect(verify.statusCode).toBe(404);
   });
 
   it("allows an explicit manual launch when the latest sync is not healthy", async () => {
