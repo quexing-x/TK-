@@ -758,6 +758,26 @@ export class AutomationService {
       );
     } catch (cause) {
       const message = safeMessage(cause);
+      if (
+        connection.status === "ready"
+        && connection.authorizationStatus === "active"
+        && isTransientHealthCheckFailure(cause)
+      ) {
+        this.store.completeProviderHealthCheckIfCurrent(
+          accountId,
+          account.providerKind,
+          connection,
+          {
+            connectionStatus: "ready",
+            message: `连接检测暂时失败，已保留最近验证成功状态：${message}`,
+            authorizationStatus: "active",
+            capabilityVersion: connection.capabilityVersion,
+            capabilities: connection.authorizedCapabilities,
+            expiresAt: connection.authorizationExpiresAt,
+          },
+        );
+        return;
+      }
       this.store.completeProviderHealthCheckIfCurrent(
         accountId,
         account.providerKind,
@@ -1661,6 +1681,20 @@ export class AutomationScheduler {
 
 function safeMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "自动化任务失败。";
+}
+
+function isTransientHealthCheckFailure(cause: unknown): boolean {
+  const name = cause instanceof Error ? cause.name.toLowerCase() : "";
+  const message = safeMessage(cause).toLowerCase();
+  return name === "aborterror"
+    || name === "timeouterror"
+    || message.includes("timed out")
+    || message.includes("timeout")
+    || message.includes("operation was aborted")
+    || message.includes("fetch failed")
+    || message.includes("econnreset")
+    || message.includes("econnrefused")
+    || message.includes("socket hang up");
 }
 
 function renderAppealTemplate(
