@@ -2590,15 +2590,15 @@ async function runCookieDraftChain(
   // ad-group to the existing campaign. Campaign copy is reserved for the
   // explicit templateMode="copy" operation only.
   const verifiedTargetTemplateCampaignId = !credential.creationProfile
-    && !existingCampaignId
     && mutation.originalPosts?.length
     ? selectCompatibleTargetTemplateCampaign(
         campaignEntities,
         preflightEntities,
         mutation,
+        existingCampaignId,
       )
     : undefined;
-  if (!credential.creationProfile && !existingCampaignId && mutation.originalPosts?.length
+  if (!credential.creationProfile && mutation.originalPosts?.length
     && !verifiedTargetTemplateCampaignId) {
     throw new RetryableCreationError(
       "目标账户没有可用于原帖迁移的同类型正式 Campaign，已在发送创建请求前停止。请先在该账户完成一条同类型广告创建。",
@@ -4202,6 +4202,7 @@ function selectCompatibleTargetTemplateCampaign(
   campaigns: ProviderEntity[],
   adGroups: ProviderEntity[],
   mutation: CreationMutation,
+  preferredCampaignId?: string,
 ): string | undefined {
   const campaignIdsWithGroups = new Set(
     adGroups
@@ -4220,6 +4221,8 @@ function selectCompatibleTargetTemplateCampaign(
     return true;
   });
   candidates.sort((left, right) => {
+    if (left.externalId === preferredCampaignId) return -1;
+    if (right.externalId === preferredCampaignId) return 1;
     const leftTime = Date.parse(normalizeProviderEntity(left).createdAt ?? "") || 0;
     const rightTime = Date.parse(normalizeProviderEntity(right).createdAt ?? "") || 0;
     return rightTime - leftTime || right.externalId.localeCompare(left.externalId);

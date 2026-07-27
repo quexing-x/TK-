@@ -1914,6 +1914,69 @@ describe("CookieAdsProvider", () => {
     expect(creativeBody?.body).toMatchObject({ spc_upgrade_mode: 1 });
   });
 
+  it("initializes an account-post migration from the reused formal campaign before adding another ad group", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      const body = url.includes("adgroup/list") && successfulCreationCompleted
+        ? completeListPayload([{
+            campaign_id: "source-campaign",
+            ad_id: "adgroup",
+            ad_name: "group",
+          }])
+        : url.includes("/statistics/op/ad/list") && successfulCreationCompleted
+          ? completeListPayload([{
+              campaign_id: "source-campaign",
+              ad_id: "adgroup",
+              creative_id: "creative",
+              creative_name: "260717:001",
+            }])
+          : url.includes("spark/validate_promote_music")
+        ? { data: { music_info_map: { "target-post": { status: 0 } } }, code: 0 }
+        : url.includes("creative/creative_automation_option")
+          ? { data: { strategy_ids: [], group_strategies: [] }, code: 0 }
+          : url.includes("spark/creative_fix_task/save")
+            ? { data: { task_map: { "target-vid": "spark-task" } }, code: 0 }
+            : url.includes("spark/creative_fix_task/info")
+              ? { data: { task_info_map: { "spark-task": { task_status: 2 } } }, code: 0 }
+              : successfulCreationPayload(url);
+      return jsonResponse(body);
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.campaignName = "source";
+    mutation.row.videoCode = "#must-not-be-resolved";
+    mutation.preset = { ...mutation.preset, objectiveType: 3 };
+    mutation.originalPosts = [{
+      itemId: "target-post",
+      identityId: "target-identity",
+      identityType: 5,
+      identityBcId: "77",
+      vid: "target-vid",
+      videoId: null,
+      displayName: "目标账户原帖",
+      coverUrl: null,
+      promotable: true,
+    }];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result).toMatchObject({ ok: true, campaignId: "source-campaign" });
+    const paths = requested.map((item) => new URL(item.url).pathname);
+    expect(paths).toContain("/mi/api/v4/i18n/creation/campaign_snap/copy/");
+    expect(paths).not.toContain("/api/v4/i18n/creation/campaign_snap/save/");
+    expect(requested.find((item) => item.url.includes("ad_snap/save"))?.body).toMatchObject({
+      campaign_id: "source-campaign",
+      campaign_snap_id: "",
+      campaign_sketch_id: "",
+    });
+    expect(requested.find((item) => item.url.includes("async_creation/create_by_snap"))?.body)
+      .toMatchObject({ campaign_id: "source-campaign", is_partial_publish: true });
+  });
+
   it("does not save a creative when TikTok does not confirm the authorization identity", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {

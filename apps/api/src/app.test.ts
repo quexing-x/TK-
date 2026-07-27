@@ -1937,7 +1937,7 @@ describe("local API", () => {
     });
   });
 
-  it("starts different campaign batches concurrently without mixing their rows", async () => {
+  it("runs different campaign batches serially within one target account", async () => {
     let activeBatches = 0;
     let maxActiveBatches = 0;
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
@@ -1965,7 +1965,7 @@ describe("local API", () => {
     expect(executed.statusCode).toBe(200);
     expect(createFromPreset).toHaveBeenCalledTimes(5);
     expect(createFromPreset.mock.calls.every((call) => call[1].length === 1)).toBe(true);
-    expect(maxActiveBatches).toBe(5);
+    expect(maxActiveBatches).toBe(1);
     expect(store.listLaunchPlanItems(planId).map((item) => item.status))
       .toEqual(Array.from({ length: 5 }, () => "succeeded"));
   });

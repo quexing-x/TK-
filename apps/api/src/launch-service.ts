@@ -212,13 +212,22 @@ export class LaunchService {
     const candidates = allItems.filter((item) => item.status === "pending");
     const groupsByAccount = groupLaunchItemsByAccountAndCampaign(candidates);
     const accountResults = await Promise.all(
-      [...groupsByAccount.values()].map((groups) => Promise.all(
-        groups.map((group) => this.executeSeriesBatch(
-          plan.presetSnapshot!.creationConfig,
-          group,
-          actor,
-        )),
-      )),
+      [...groupsByAccount.values()].map(async (groups) => {
+        const results = [];
+        // A Cookie account has one mutable Ads Manager draft/session context.
+        // Different campaigns for the same account must therefore be created
+        // serially; otherwise one source group can overwrite the draft state
+        // another group is validating or reading back. Separate accounts stay
+        // independent and may still execute in parallel.
+        for (const group of groups) {
+          results.push(await this.executeSeriesBatch(
+            plan.presetSnapshot!.creationConfig,
+            group,
+            actor,
+          ));
+        }
+        return results;
+      }),
     );
     const itemOrder = new Map(candidates.map((item) => [item.itemId, item.itemIndex]));
     const results = accountResults
