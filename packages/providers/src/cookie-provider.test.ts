@@ -55,6 +55,11 @@ describe("CookieAdsProvider", () => {
             code: 0,
             data: {
               external_url: "https://example.com/product",
+              catalog_setup: 0,
+              product_info: {
+                promo_code_infos: [{ code: "", code_type: 2, value: 718, currency: "TWD", include_type: 2, code_id: "source-only" }],
+                is_auto_use: 2,
+              },
               image_list: [{
                 aweme_item_id: "post-1",
                 identity_id: "identity-1",
@@ -78,6 +83,14 @@ describe("CookieAdsProvider", () => {
     expect(requests[1]?.url).toContain("creative_id=creative-1");
     expect(result).toEqual({
       productUrl: "https://example.com/product",
+      catalogSetup: 0,
+      productInfo: {
+        promo_code_infos: [{ code: "", code_type: 2, value: 718, currency: "TWD", include_type: 2 }],
+        is_auto_use: 2,
+        auto_select_toggle: 0,
+        image_infos: [],
+        selling_points_by_types: [],
+      },
       posts: [expect.objectContaining({
         itemId: "post-1",
         identityId: "identity-1",
@@ -1255,7 +1268,7 @@ describe("CookieAdsProvider", () => {
       "/api/v4/i18n/statistics/sketch/ad/list/",
     ]));
     expect(requested.find((item) => item.url.includes("create_by_snap"))?.body)
-      .toMatchObject({ is_status_disabled: false, is_partial_publish: true });
+      .toMatchObject({ is_status_disabled: false, is_partial_publish: false, coming_source_type: 1 });
     expect(requested.find((item) => item.url.includes("creative_snap/save"))?.body).toMatchObject({
       asset_group_sketch_form_data_list: [{ image_list: [{ aweme_item_id: "7663403524864167176" }] }],
     });
@@ -1681,7 +1694,7 @@ describe("CookieAdsProvider", () => {
     expect(requested.find((item) => item.url.includes("ad_snap/save"))?.body)
       .toMatchObject({ campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" });
     expect(requested.find((item) => item.url.includes("create_by_snap"))?.body)
-      .toMatchObject({ is_status_disabled: true, is_partial_publish: true });
+      .toMatchObject({ is_status_disabled: true, is_partial_publish: false, coming_source_type: 1 });
     expect(result[0]).toMatchObject({ campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
   });
 
@@ -1809,10 +1822,19 @@ describe("CookieAdsProvider", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      const body = url.includes("spark/validate_promote_music")
+      const body = url.includes("snap/get_creative_fields_by_ad")
+        ? { code: 0, data: { result_map: {
+            "formal-asset-group": { image_list: [{ aweme_item_id: "target-post" }] },
+          } } }
+        : url.includes("/statistics/op/ad/list") && successfulCreationCompleted
+          ? completeListPayload([])
+          : url.includes("spark/validate_promote_music")
         ? { data: { music_info_map: { "target-post": { status: 0 } } }, code: 0 }
         : url.includes("creative/creative_automation_option")
-          ? { data: { strategy_ids: [], group_strategies: [] }, code: 0 }
+          ? { data: {
+              strategy_ids: ["strategy-video", "strategy-image"],
+              group_strategies: [],
+            }, code: 0 }
           : url.includes("spark/creative_fix_task/save")
             ? { data: { task_map: { "target-vid": "spark-task" } }, code: 0 }
             : url.includes("spark/creative_fix_task/info")
@@ -1821,11 +1843,12 @@ describe("CookieAdsProvider", () => {
       return jsonResponse(body);
     }));
     const mutation = creationTestMutation("none");
+    mutation.preset = { ...mutation.preset, objectiveType: 3 };
     mutation.row.videoCode = "#must-not-be-resolved";
     mutation.originalPosts = [{
       itemId: "target-post",
       identityId: "target-identity",
-      identityType: 2,
+      identityType: 5,
       identityBcId: "77",
       vid: "target-vid",
       videoId: null,
@@ -1833,14 +1856,24 @@ describe("CookieAdsProvider", () => {
       coverUrl: null,
       promotable: true,
     }];
+    mutation.originalProductInfo = {
+      promo_code_infos: [{ code: "", code_type: 2, value: 718, currency: "TWD", include_type: 2 }],
+      is_auto_use: 2,
+      auto_select_toggle: 0,
+      image_infos: [],
+      selling_points_by_types: [],
+    };
+    mutation.originalCatalogSetup = 0;
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
       creationTestContext(false),
       [mutation],
     );
 
-    expect(result).toMatchObject({ ok: true });
+    expect(result).toMatchObject({ ok: true, adId: "formal-asset-group" });
+    expect(result).not.toHaveProperty("warning");
     const paths = requested.map((item) => new URL(item.url).pathname);
+    expect(paths).toContain("/mi/api/v4/i18n/creation/campaign_snap/copy/");
     expect(paths.some((path) => path.includes("/material/tt_video/"))).toBe(false);
     expect(paths.some((path) => path.includes("/upload/"))).toBe(false);
     expect(requested.find((item) => item.url.includes("validate_promote_music"))?.body)
@@ -1848,10 +1881,12 @@ describe("CookieAdsProvider", () => {
         post_list: [{
           item_id: "target-post",
           identity_id: "target-identity",
-          identity_type: 2,
+          identity_type: 5,
           identity_bc_id: "77",
         }],
       });
+    expect(requested.find((item) => item.url.includes("creative_automation_option"))?.body)
+      .toEqual({ identity_type: 5 });
     const creativeBody = requested.find((item) => item.url.includes("creative_snap/save"));
     const asset = (creativeBody?.body.asset_group_sketch_form_data_list as Array<{
       image_list: Array<Record<string, unknown>>;
@@ -1859,9 +1894,24 @@ describe("CookieAdsProvider", () => {
     expect(asset.image_list).toEqual([expect.objectContaining({
       aweme_item_id: "target-post",
       identity_id: "target-identity",
-      identity_type: 2,
+      identity_type: 5,
       identity_bc_id: "77",
     })]);
+    expect(asset).not.toHaveProperty("identity_type");
+    expect(asset).not.toHaveProperty("identity_id");
+    expect(asset).not.toHaveProperty("item_source");
+    expect(asset).not.toHaveProperty("spc_multi_ad_mode");
+    expect(asset).toMatchObject({
+      ad_level2_identity_structure: 1,
+      spc_upgrade_mode: 1,
+      creative_automation_type: 1,
+      catalog_setup: 0,
+      product_info: {
+        promo_code_infos: [{ code: "", code_type: 2, value: 718, currency: "TWD", include_type: 2 }],
+      },
+    });
+    expect(asset).not.toHaveProperty("creative_automation_list");
+    expect(creativeBody?.body).toMatchObject({ spc_upgrade_mode: 1 });
   });
 
   it("does not save a creative when TikTok does not confirm the authorization identity", async () => {
@@ -2315,6 +2365,17 @@ describe("CookieAdsProvider", () => {
       const url = String(input);
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ url, body });
+      if (url.includes("ad_snap/save")) {
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap" } });
+      }
+      if (url.includes("ad_snap/bulk_check")) {
+        return jsonResponse({ code: 0, data: {
+          ad_snap_check_report_map: { "ad-snap": { success: true, ad_snap_id: "ad-snap" } },
+        } });
+      }
+      if (url.includes("creative_snap/save")) {
+        return jsonResponse({ code: 0, data: { creative_snap_id: "creative-snap" } });
+      }
       return jsonResponse(successfulCreationPayload(url));
     }));
     const mutation = creationTestMutation("none");
@@ -2340,11 +2401,92 @@ describe("CookieAdsProvider", () => {
     expect(adSave?.body.ad_sketch_form_data).toMatchObject({
       ad_name: "group",
       pricing: 1,
+      bid: "",
+      objective_type: 1,
+      inventory_flow: [1],
+      inventory_flow_type: 1,
+      classify: 1,
+      language_list: [],
+      gender: 0,
+      age: [],
+      ac: [],
+      ad_tag_v2: [],
+      video_actions_v2: [],
+      zipcode_ids: [],
+      week_schedule: [[], [], [], [], [], [], []],
     });
     const creativeSave = requested.find((item) => item.url.includes("creative_snap/save"));
     expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<Record<string, unknown>>)[0]).toMatchObject({
       creative_name: "260717:001",
       identity_type: 1,
+    });
+  });
+
+  it("normalizes the verified oCPM bidding tuple when initialized draft defaults differ", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body });
+      if (url.includes("campaign_snap/save")) {
+        return jsonResponse({ code: 0, data: { campaign_snap_id: "campaign-snap" } });
+      }
+      if (url.includes("campaign_snap/check")) {
+        return jsonResponse({ code: 0, data: { success: true, fake_campaign_id: "campaign-sketch" } });
+      }
+      if (url.includes("ad_snap/save")) {
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap" } });
+      }
+      if (url.includes("ad_snap/bulk_check")) {
+        return jsonResponse({ code: 0, data: {
+          ad_snap_check_report_map: { "ad-snap": { success: true, ad_snap_id: "ad-snap" } },
+        } });
+      }
+      if (url.includes("creative_snap/save")) {
+        return jsonResponse({ code: 0, data: { creative_snap_id: "creative-snap" } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const context = creationTestContext(true);
+    if (context.credential.kind !== "cookie" || !context.credential.creationProfile) {
+      throw new Error("test setup requires a cookie creation profile");
+    }
+    const profileAd = context.credential.creationProfile!.adGroupPayload.ad_sketch_form_data as Record<string, unknown>;
+    Object.assign(profileAd, {
+      pricing: 9,
+      bid: "",
+      cpa_bid: "7",
+      smart_bid_type: 0,
+      bid_type_detail: 0,
+      bid_display_mode: 0,
+      deep_bid_type: 0,
+      deep_cpabid: "0",
+      optimization_source: 0,
+      roas_bid: "0",
+      cpa_skip_first_phrase: 1,
+      flow_control_mode: 1,
+    });
+    const mutation = creationTestMutation("none");
+    mutation.row.bid = 7;
+    mutation.preset = { ...mutation.preset, pricing: 9 };
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(context, [mutation]);
+
+    expect(result).toMatchObject({ ok: true });
+    const adSave = requested.find((item) => item.url.includes("ad_snap/save"));
+    expect(adSave?.body.ad_sketch_form_data).toMatchObject({
+      pricing: 9,
+      bid: "0",
+      cpa_bid: "7",
+      smart_bid_type: 0,
+      bid_type_detail: 0,
+      bid_display_mode: 0,
+      deep_bid_type: 0,
+      deep_cpabid: "0",
+      optimization_source: 0,
+      roas_bid: "0",
+      cpa_skip_first_phrase: 1,
+      flow_control_mode: 1,
     });
   });
 
@@ -2459,7 +2601,7 @@ describe("CookieAdsProvider", () => {
     const published = requested[7]?.body.ad_and_creative_snap_info_list as Array<Record<string, unknown>>;
     expect(published).toHaveLength(2);
     expect(published.map((item) => item.ad_snap_id)).toEqual(["ad-snap-1", "ad-snap-2"]);
-    expect(requested[7]?.body).toMatchObject({ is_partial_publish: true, is_status_disabled: true });
+    expect(requested[7]?.body).toMatchObject({ is_partial_publish: false, is_status_disabled: true, coming_source_type: 1 });
   });
 
   it("refuses copy creation when the explicitly requested source campaign is missing", async () => {
@@ -2711,7 +2853,7 @@ describe("CookieAdsProvider", () => {
     expect(result?.message).toContain("不会自动重试");
   });
 
-  it("persists the campaign snap evidence before a missing sketch id becomes unknown", async () => {
+  it("uses campaign_snap/check fake_campaign_id when save omits the campaign sketch id", async () => {
     const progress: Array<Parameters<NonNullable<CreationMutation["onProgress"]>>[0]> = [];
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -2729,13 +2871,17 @@ describe("CookieAdsProvider", () => {
       [mutation],
     );
 
-    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result).toMatchObject({ ok: true });
     expect(progress).toContainEqual({
       phase: "campaign_draft",
       evidence: { campaignSnapId: "partial-campaign-snap" },
     });
-    expect(fetchMock).toHaveBeenCalledTimes(6);
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("ad_snap/save"))).toBe(false);
+    expect(progress).toContainEqual({
+      phase: "campaign_draft",
+      evidence: { campaignSnapId: "partial-campaign-snap", campaignSketchId: "campaign-sketch" },
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("campaign_snap/check"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("ad_snap/save"))).toBe(true);
   });
 
   it("rejects a copy-derived creation profile in none mode before dispatch", async () => {
@@ -3540,7 +3686,7 @@ function successfulCreationPayload(url: string): Record<string, unknown> {
       : []),
   ], pagination: { page: 1, page_count: 1 } } };
   if (url.includes("adgroup/list")) return { code: 0, data: { table: [
-    { campaign_id: "source-campaign", campaign_name: "source", campaign_status: "disabled" },
+    { campaign_id: "source-campaign", ad_id: "source-adgroup", ad_name: "source-group", campaign_name: "source", campaign_status: "disabled" },
     ...(successfulCreationCompleted
       ? [{ campaign_id: "campaign", ad_id: "adgroup", ad_name: "group", ad_status: "enabled" }]
       : []),
@@ -3552,7 +3698,7 @@ function successfulCreationPayload(url: string): Record<string, unknown> {
     new_campaign_snap_info_item: { campaign_snap_id: "campaign-snap", campaign_snap_form_data: { campaign_name: "source", campaign_snap_id: "campaign-snap", objective_type: 9 } },
     new_campaign_sketch_id: "campaign-sketch",
     new_ad_snap_info_item_list: [{ ad_snap_id: "ad-snap", ad_snap_form_data: { ad_name: "source", budget: "1", image_list: [] } }],
-    new_ad_and_creative_snap_info_item_map: { "ad-snap": [{ creative_snap_id: "creative-snap", asset_group_creative_snap_form_data: { creative_name: "source", external_url: "https://example.com", image_list: [{ aweme_item_id: "video" }] } }] },
+    new_ad_and_creative_snap_info_item_map: { "ad-snap": [{ creative_snap_id: "creative-snap", asset_group_creative_snap_form_data: { creative_name: "source", external_url: "https://example.com", creative_automation_type: 1, spc_upgrade_mode: 1, image_list: [{ aweme_item_id: "video" }] } }] },
     new_ad_and_creative_sketch_ids_map: { "ad-sketch": ["creative-sketch"] },
   } };
   if (url.includes("campaign_snap/save")) return { code: 0, data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" } };

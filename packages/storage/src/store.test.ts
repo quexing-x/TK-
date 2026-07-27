@@ -1678,6 +1678,14 @@ describe("AutomationStore", () => {
     });
     const pending = store.listLaunchPlanItems(plan.id)[0]!;
     store.claimLaunchPlanItem(pending.itemId, "terminated-executor", "pending");
+    store.updateLaunchPlanItemProgress(pending.itemId, "terminated-executor", {
+      phase: "creative_draft",
+      evidence: {
+        campaignSketchId: "owned-campaign-sketch",
+        adGroupSketchId: "owned-ad-sketch",
+        creativeSketchId: "owned-creative-sketch",
+      },
+    });
     const firstScopeOwner = `terminated-executor:${pending.itemId}`;
     expect(store.claimLaunchCreationScope(
       plan.id,
@@ -1706,6 +1714,11 @@ describe("AutomationStore", () => {
     expect(store.claimLaunchPlanItem(pending.itemId, "new-executor", "unknown")).toMatchObject({
       status: "running",
       attemptCount: 2,
+      evidence: {
+        campaignSketchId: "owned-campaign-sketch",
+        adGroupSketchId: "owned-ad-sketch",
+        creativeSketchId: "owned-creative-sketch",
+      },
     });
     expect(store.claimLaunchCreationScope(
       plan.id,
@@ -2266,6 +2279,8 @@ function createLaunchCopyPreview(
       adGroupName: "源广告组",
       posts: [post],
       productUrl: "https://source.example/product",
+      productInfo: null,
+      catalogSetup: null,
       structuralHash: hash([post]),
       fetchedAt: new Date().toISOString(),
     };

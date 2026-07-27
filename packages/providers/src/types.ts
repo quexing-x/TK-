@@ -12,6 +12,7 @@ import type {
   LaunchCreationProgress,
   ProviderCapability,
   LaunchOriginalPost,
+  LaunchProductInfo,
 } from "@tk-auto/core";
 
 export type { ProviderCapability } from "@tk-auto/core";
@@ -69,6 +70,10 @@ export interface CreationMutation {
    * migration. When present the provider must use these records directly and
    * must not resolve video codes, upload media, or authorize Spark posts. */
   originalPosts?: LaunchOriginalPost[];
+  /** Product metadata frozen from the source creative. Provider-specific asset
+   * ids are stripped before it crosses advertiser accounts. */
+  originalProductInfo?: LaunchProductInfo;
+  originalCatalogSetup?: 0 | 1;
   /** Read-only recovery for a previously unknown dispatch. The provider must
    * query remote state and must not save or publish another draft. */
   reconcileOnly?: boolean;
@@ -92,6 +97,9 @@ export interface CreationMutationResult extends CreationMutation {
   /** False when an earlier accepted mutation makes replaying the whole
    * operation unsafe even though the final rejection is explicit. */
   retrySafe?: boolean;
+  /** True only when read-only reconciliation positively proved that neither a
+   * formal object nor this task's draft exists remotely. */
+  reconciliationVerifiedAbsent?: boolean;
 }
 
 export class RetryableCreationError extends Error {
@@ -127,7 +135,7 @@ export interface OriginalPostMigrationProvider extends ProviderContract {
   readAdGroupOriginalPosts(
     context: ProviderContext,
     input: { campaignId: string; adGroupId: string },
-  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null }>;
+  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null; productInfo: LaunchProductInfo | null; catalogSetup: 0 | 1 | null }>;
   readAccessibleOriginalPosts(
     context: ProviderContext,
     sourcePosts: LaunchOriginalPost[],

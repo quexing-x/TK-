@@ -3290,13 +3290,14 @@ export class AutomationStore {
         .prepare(
           `UPDATE launch_plan_items
            SET status = 'running', attempt_count = attempt_count + 1,
-               attempt_id = ?, phase = 'validation', evidence_json = '{}',
+               attempt_id = ?, phase = 'validation',
+               evidence_json = CASE WHEN ? = 'unknown' THEN evidence_json ELSE '{}' END,
                claimed_by = ?, claimed_at = ?, completed_at = NULL,
                error_message = NULL, sync_warning = NULL, updated_at = ?
            WHERE item_id = ? AND status = ?
            RETURNING *`,
         )
-        .get(attemptId, executorId, now, now, itemId, expectedStatus) as SqlRow | undefined;
+        .get(attemptId, expectedStatus, executorId, now, now, itemId, expectedStatus) as SqlRow | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -3319,7 +3320,7 @@ export class AutomationStore {
           attempt_id, item_id, operation_id, correlation_id, attempt_number,
           actor_id, actor_name, actor_kind, phase, status, evidence_json,
           error_message, created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'validation', 'running', '{}', NULL, ?, ?, NULL)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'validation', 'running', ?, NULL, ?, ?, NULL)`,
       ).run(
         attemptId,
         itemId,
@@ -3329,6 +3330,7 @@ export class AutomationStore {
         actor.id,
         actor.name,
         actor.kind,
+        String(row.evidence_json ?? "{}"),
         now,
         now,
       );

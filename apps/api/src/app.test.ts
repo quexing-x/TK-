@@ -1816,6 +1816,7 @@ describe("local API", () => {
             ok: false,
             failureKind: "retryable",
             retrySafe: true,
+            reconciliationVerifiedAbsent: true,
             message: "Cookie 正式列表和草稿列表均确认本条未创建",
           }
         : {
@@ -1842,6 +1843,40 @@ describe("local API", () => {
       status: "failed",
       attemptCount: 2,
       errorMessage: "Cookie 正式列表和草稿列表均确认本条未创建",
+    });
+  });
+
+  it("keeps an unknown item unknown when read-only reconciliation is inconclusive", async () => {
+    const createFromPreset = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => mutation.reconcileOnly
+        ? {
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            retrySafe: true,
+            message: "adgroup/list timed out during read-only reconciliation",
+          }
+        : {
+            ...mutation,
+            ok: false,
+            failureKind: "unknown",
+            retrySafe: false,
+            message: "response lost after publish",
+          }),
+    );
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const unknownItem = store.listLaunchPlanItems(planId)[0]!;
+    await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/items/${unknownItem.itemId}/retry`,
+    });
+
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
+      status: "unknown",
+      attemptCount: 2,
+      errorMessage: "adgroup/list timed out during read-only reconciliation",
     });
   });
 
@@ -2601,6 +2636,8 @@ describe("local API", () => {
             promotable: true,
           }],
           productUrl: "https://source.example/product",
+          productInfo: null,
+          catalogSetup: null,
         };
       },
       readAccessibleOriginalPosts: async (_context, sourcePosts) => sourcePosts.flatMap((sourcePost) =>

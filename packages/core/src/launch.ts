@@ -63,6 +63,24 @@ export const LaunchOriginalPostSchema = z.object({
 });
 export type LaunchOriginalPost = z.infer<typeof LaunchOriginalPostSchema>;
 
+export const LaunchProductInfoSchema = z.object({
+  promo_code_infos: z.array(z.object({
+    code: z.string().default(""),
+    code_type: z.number().int(),
+    value: z.number(),
+    currency: z.string().min(1),
+    include_type: z.number().int(),
+  })).max(50).default([]),
+  is_auto_use: z.number().int().default(2),
+  auto_select_toggle: z.number().int().default(0),
+  image_infos: z.array(z.unknown()).max(50).default([]),
+  selling_points_by_types: z.array(z.object({
+    text: z.string().min(1),
+    material_tag: z.number().int(),
+  })).max(100).default([]),
+});
+export type LaunchProductInfo = z.infer<typeof LaunchProductInfoSchema>;
+
 export const LaunchSourceSnapshotSchema = z.object({
   accountId: z.string().min(1),
   campaignId: z.string().min(1),
@@ -71,6 +89,8 @@ export const LaunchSourceSnapshotSchema = z.object({
   adGroupName: z.string().min(1),
   posts: z.array(LaunchOriginalPostSchema).min(1).max(500),
   productUrl: z.string().url().nullable(),
+  productInfo: LaunchProductInfoSchema.nullable().default(null),
+  catalogSetup: z.number().int().min(0).max(1).nullable().default(null),
   structuralHash: z.string().min(1),
   fetchedAt: z.string().datetime(),
 });

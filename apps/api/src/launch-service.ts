@@ -132,6 +132,8 @@ export class LaunchService {
         adGroupName: adGroup.name,
         posts: sourcePosts,
         productUrl: sourceDetail.productUrl,
+        productInfo: sourceDetail.productInfo,
+        catalogSetup: sourceDetail.catalogSetup,
         structuralHash: originalPostsHash(sourcePosts),
         fetchedAt: new Date().toISOString(),
       });
@@ -365,6 +367,12 @@ export class LaunchService {
         ...(refreshedPosts.has(item.itemId)
           ? { originalPosts: refreshedPosts.get(item.itemId)! }
           : {}),
+        ...(item.sourceSnapshot?.productInfo
+          ? { originalProductInfo: item.sourceSnapshot.productInfo }
+          : {}),
+        ...(item.sourceSnapshot?.catalogSetup === 0 || item.sourceSnapshot?.catalogSetup === 1
+          ? { originalCatalogSetup: item.sourceSnapshot.catalogSetup }
+          : {}),
         operationId: item.operationId,
         attemptId: item.attemptId!,
         correlationId: item.correlationId,
@@ -411,7 +419,9 @@ export class LaunchService {
           const unknown = !created
             || created.ok
             || created.failureKind === "unknown"
-            || created.retrySafe === false;
+            || created.retrySafe === false
+            || (reconcileOnlyItemIds.has(item.itemId)
+              && created.reconciliationVerifiedAbsent !== true);
           if (unknown) this.tasks.unknown(item.itemId, executorId, message);
           else this.tasks.fail(item.itemId, executorId, message);
           outputs.push({
@@ -585,8 +595,10 @@ export class LaunchService {
     const expectedIds = item.sourceSnapshot.posts.map((post) => post.itemId);
     const currentPosts = sourceDetail.posts;
     if (currentPosts.some((post) => !post.promotable)
-      || originalPostsHash(currentPosts) !== item.sourceSnapshot.structuralHash) {
-      throw new Error("源广告组帖子在预览后已变化，请重新生成迁移预览。");
+      || originalPostsHash(currentPosts) !== item.sourceSnapshot.structuralHash
+      || JSON.stringify(sourceDetail.productInfo) !== JSON.stringify(item.sourceSnapshot.productInfo)
+      || sourceDetail.catalogSetup !== item.sourceSnapshot.catalogSetup) {
+      throw new Error("源广告组帖子在预览后已变化，或商品信息已更新，请重新生成迁移预览。");
     }
     const targetAccount = this.store.getAccount(item.accountId);
     if (!targetAccount) throw new Error("原帖迁移的目标账户不存在。");

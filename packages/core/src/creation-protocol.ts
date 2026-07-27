@@ -14,7 +14,7 @@ export type TikTokCreationStep = (typeof TikTokCreationSteps)[number];
 
 /** Provider-owned source markers used by TikTok for a fresh draft publish. */
 export const TikTokCreationPublishSource = {
-  coming_source_type: 6,
+  coming_source_type: 1,
   sketch_publish_source: 1,
 } as const;
 
@@ -68,10 +68,7 @@ export function buildPublishInput(
   initialStatus: "enabled" | "disabled",
 ) {
   const value = DisabledPublishInputSchema.parse(input);
-  // Publish only the explicitly supplied snap list. TikTok accounts can retain
-  // unrelated unfinished drafts; a full-draft-tree publish may otherwise pull
-  // those objects into this batch.
-  return { campaign_id: "", campaign_snap_id: value.campaignSnapId, campaign_sketch_id: value.campaignSketchId, ad_and_creative_snap_info_list: value.adAndCreativeSnapInfoList, ...TikTokCreationPublishSource, is_status_disabled: initialStatus === "disabled", is_partial_publish: true };
+  return { campaign_id: "", campaign_snap_id: value.campaignSnapId, campaign_sketch_id: value.campaignSketchId, ad_and_creative_snap_info_list: value.adAndCreativeSnapInfoList, ...TikTokCreationPublishSource, is_status_disabled: initialStatus === "disabled", is_partial_publish: false };
 }
 
 export class CreationPresetIncompleteError extends Error {
@@ -112,6 +109,8 @@ export function buildDraftPayloads(
   const required = requiredCreationFields(config);
   if (required.length > 0) throw new CreationPresetIncompleteError(required);
   const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
+  const smartPlus = config.objectiveType === 3;
+  const allAgeRanges = [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]];
   return {
     campaign: {
       campaign_sketch_form_data: {
@@ -124,17 +123,60 @@ export function buildDraftPayloads(
         budget_mode: config.campaignBudgetMode,
         budget: "0",
         industry_types: [],
+        ...(smartPlus ? {
+          app_campaign_type: 0,
+          ba_campaign_type: 0,
+          bid_align_type: 0,
+          brand_campaign_type: 0,
+          brand_catalog_toggle: 0,
+          campaign_app_profile_page_type: 0,
+          cbo_uniform_bid: 0,
+          dedicate_type: 0,
+          ecomm_type: 0,
+          has_selected_traffic_smart_plus: false,
+          lead_catalog_toggle: 0,
+          redesign_campaign_type: 1,
+          rewarding_game_attestation: 0,
+          rf_campaign_type: 0,
+          rta_bid_type: 0,
+          search_campaign_type: 0,
+          skan4_campaign_structure_type: 0,
+          skan_campaign_type: 0,
+          universal_type: 1,
+          universal_type_default_on: false,
+          sales_destination: 3,
+          virtual_objective_type: 1,
+          vertical_market_campaign_type: 0,
+          web_all_in_one_catalog: 2,
+          spc_automation_type: 1,
+          spc_simulated_mode: 0,
+          auto_creation_product_type: 1,
+          spc_upgrade_mode: 1,
+          spc_multi_ad_mode: 1,
+          support_traffic_smart_plus: true,
+          traffic_catalog_toggle: 0,
+          bid: "0",
+          cpa_bid: "0",
+          budget_optimize_switch: 0,
+          budget_auto_adjust: { is_enabled: 0, initial_budget: "0", strategy: 0 },
+        } : {}),
       },
       is_from_startup: false,
       with_sketch: true,
-      is_skip_check_fields: false,
+      // Ads Manager defers the complete Smart+ tree validation until the
+      // campaign/ad/creative snaps have all been saved. Validating this first
+      // isolated form strips newer automation fields such as dynamic budget.
+      is_skip_check_fields: smartPlus,
     },
     adGroup: {
       campaign_id: "",
       with_sketch: true,
-      is_skip_check_fields: false,
+      is_skip_check_fields: smartPlus,
+      ...(smartPlus && config.identityType !== 5 ? { spc_upgrade_mode: 1 } : {}),
       ad_sketch_form_data: {
         origin_ad_id: 0,
+        coming_source_type: 1,
+        sketch_publish_source: 1,
         ad_name: row.adGroupName,
         ad_snap_id: "",
         ad_sketch_id: "",
@@ -144,13 +186,108 @@ export function buildDraftPayloads(
         budget_mode: config.adBudgetMode,
         budget: String(row.dailyBudget),
         pricing: config.pricing,
+        // For oCPM, the cost cap belongs to cpa_bid. `bid` is the legacy CPM
+        // field and must stay empty; sending the CPA value in both fields makes
+        // TikTok reject the form as a non-oCPM pricing tuple.
+        bid: config.pricing === 9 ? "0" : row.bid === null ? "" : String(row.bid),
         cpa_bid: row.bid === null ? "" : String(row.bid),
+        smart_bid_type: 0,
+        bid_type_detail: 0,
+        bid_display_mode: 0,
+        deep_bid_type: 0,
+        deep_cpabid: "0",
+        optimization_source: 0,
+        roas_bid: "0",
+        cpa_skip_first_phrase: 1,
+        objective_type: config.objectiveType,
         optimize_goal: config.optimizeGoal,
         external_action: config.externalAction,
         ad_ref_pixel_id: config.pixelId ?? "",
-        automated_targeting: config.smartTargeting ? 1 : 0,
+        automated_targeting: config.objectiveType === 3 ? 0 : config.smartTargeting ? 1 : 0,
         country: config.countryCodes,
-        platform: config.placementIds,
+        // TikTok uses `platform` for OS targeting (0 = all), while placement
+        // selection belongs to `inventory_flow`.
+        platform: [0],
+        inventory_flow: config.placementIds,
+        inventory_flow_type: 1,
+        search_delivery_type: 5,
+        classify: 1,
+        promotion_website_type: 0,
+        external_type: 102,
+        app_type: 0,
+        flow_control_mode: 1,
+        language_list: [],
+        gender: 0,
+        age: [],
+        ac: [],
+        ad_tag_v2: [],
+        android_osv: "",
+        ios_osv: "",
+        launch_price: [],
+        device_models: [],
+        targeting_expansion: { expansion_enabled: false, expansion_types: [] },
+        carriers: [],
+        flow_package_include: [],
+        flow_package_exclude: [],
+        device_type: 0,
+        retargeting_tags: [],
+        retargeting_tags_exclude: [],
+        zipcode_ids: [],
+        province: [],
+        city: [],
+        districts: [],
+        particle_locations: config.countryCodes,
+        include_custom_actions: [],
+        exclude_custom_actions: [],
+        interest_keywords_i18n: [],
+        interest_keywords_lang_i18n: [],
+        in_market_tags: [],
+        spending_power_v2: [],
+        household_income: [],
+        contextual_tags: [],
+        action_categories_v2: [],
+        action_days_v2: [],
+        action_scenes_v2: [],
+        video_actions_v2: [],
+        daily_retention_ratio: 0,
+        ios14_quota_type: 1,
+        suitability_non_garm_category: [],
+        anti_discrimination: 0,
+        exclude_age_under_eighteen: 0,
+        duration_time_range: 0,
+        attribution_window_click: 7,
+        attribution_window_view: 1,
+        attribution_statistic_type: 2,
+        statistic_type: 0,
+        dc_postback_mode: 0,
+        attribution_model: 1,
+        smart_interest_behavior: smartPlus ? 3 : 0,
+        smart_audience: smartPlus ? 3 : 0,
+        smart_age: smartPlus ? 3 : 0,
+        smart_gender: smartPlus ? 3 : 0,
+        custom_audience_tag_relation: 0,
+        suggestion_audience_toggle: smartPlus ? 3 : 0,
+        limited_audience: { age: smartPlus ? allAgeRanges : [] },
+        ad_ref_onsite_event_source_type: 0,
+        auto_pull_toggle: 0,
+        ttms_account_id: "",
+        creative_material_mode: 6,
+        ...(smartPlus ? {
+          spc_targeting_switch: 0,
+          ...(config.identityType !== 5 ? { spc_upgrade_mode: 1 } : {}),
+          spc_multi_ad_mode: 1,
+        } : {}),
+        budget_auto_adjust: smartPlus
+          ? {
+              is_enabled: 2,
+              initial_budget: "0",
+              strategy: 1,
+              increase_percentage: 20,
+              max_increase_times: 10,
+              auto_reset_next_day: false,
+            }
+          : { is_enabled: 0, initial_budget: "0", strategy: 0 },
+        week_schedule: [[], [], [], [], [], [], []],
       },
     },
     creative: {
@@ -168,6 +305,50 @@ export function buildDraftPayloads(
         call_to_action_id: config.callToActionId,
         is_comment_disable: config.commentDisabled ? 1 : 0,
         is_share_disable: config.shareDisabled ? 1 : 0,
+        ...(smartPlus ? {
+          creative_material_mode: 6,
+          creative_automation_type: 1,
+          is_smart_creative: false,
+          // Campaign/ad-group SPC is mode 1, while a finalized manual Spark
+          // creative is mode 0. Propagating the campaign mode into the creative
+          // triggers uaa_campaign_automation_inconsistent_error.
+          ...(config.identityType === 5 ? {} : { spc_upgrade_mode: 0 }),
+          ...(config.identityType === 5 ? {} : { spc_multi_ad_mode: 0 }),
+          auto_pull_by_destination_toggle: 2,
+          auto_pull_by_aigc_toggle: 2,
+          aigc_approval_auto_pull_toggle: 2,
+          auto_pull_toggle: 0,
+          auto_open: 0,
+          utm_auto_switch: 1,
+          // No catalog/product metadata is migrated with an account post.
+          // Advertising `catalog_setup=1` with an empty product_info makes the
+          // creative automation tuple internally inconsistent at publish time.
+          catalog_setup: 0,
+          catalog_authorized_bc: "0",
+          spp_rebrand_catalog_switch: 0,
+          product_info_type: 1,
+          product_info: {
+            promo_code_infos: [],
+            is_auto_use: 2,
+            auto_select_toggle: 0,
+            image_infos: [],
+            selling_points_by_types: [],
+          },
+          auto_follow_up_list: [],
+          auto_selected_vids: [],
+          struct_version: 1,
+          need_create_cta_id: true,
+          call_to_action_id: "",
+          call_to_action_asset_list: [{
+            asset_ids: [202046, 201641],
+            asset_content: "立即下单",
+            asset_content_key: "order_now",
+            asset_source: 0,
+            cta_content: "立即下单",
+            material_id: "202046_201641",
+          }],
+          featured_with_three_auto_enabled_in_copy: false,
+        } : {}),
       }],
     },
   };
@@ -223,19 +404,214 @@ function applyCreationConfigOverrides(
   asset: Record<string, unknown>,
   config: CreationPresetConfig,
 ) {
+  const smartPlus = config.objectiveType === 3;
+  const allAgeRanges = [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]];
   campaignForm.objective_type = config.objectiveType;
   campaignForm.buying_type = config.buyingType;
   campaignForm.budget_mode = config.campaignBudgetMode;
+  if (smartPlus) {
+    Object.assign(campaignForm, {
+      app_campaign_type: 0,
+      ba_campaign_type: 0,
+      bid_align_type: 0,
+      brand_campaign_type: 0,
+      brand_catalog_toggle: 0,
+      campaign_app_profile_page_type: 0,
+      cbo_uniform_bid: 0,
+      dedicate_type: 0,
+      ecomm_type: 0,
+      has_selected_traffic_smart_plus: false,
+      lead_catalog_toggle: 0,
+      redesign_campaign_type: 1,
+      rewarding_game_attestation: 0,
+      rf_campaign_type: 0,
+      rta_bid_type: 0,
+      search_campaign_type: 0,
+      skan4_campaign_structure_type: 0,
+      skan_campaign_type: 0,
+      universal_type: 1,
+      universal_type_default_on: false,
+      sales_destination: 3,
+      virtual_objective_type: 1,
+      vertical_market_campaign_type: 0,
+      web_all_in_one_catalog: 2,
+      spc_automation_type: 1,
+      spc_simulated_mode: 0,
+      auto_creation_product_type: 1,
+      spc_upgrade_mode: 1,
+      spc_multi_ad_mode: 1,
+      support_traffic_smart_plus: true,
+      traffic_catalog_toggle: 0,
+      bid: "0",
+      cpa_bid: "0",
+      budget_optimize_switch: 0,
+      budget_auto_adjust: { is_enabled: 0, initial_budget: "0", strategy: 0 },
+    });
+  }
   adForm.budget_mode = config.adBudgetMode;
+  adForm.coming_source_type = 1;
+  adForm.sketch_publish_source = 1;
   adForm.pricing = config.pricing;
   adForm.optimize_goal = config.optimizeGoal;
   adForm.external_action = config.externalAction;
+  if (config.pricing === 9) adForm.bid = "0";
+  adForm.smart_bid_type = 0;
+  adForm.bid_type_detail = 0;
+  adForm.bid_display_mode = 0;
+  adForm.deep_bid_type = 0;
+  adForm.deep_cpabid = "0";
+  adForm.optimization_source = 0;
+  adForm.roas_bid = "0";
+  adForm.cpa_skip_first_phrase = 1;
+  adForm.budget_auto_adjust = smartPlus
+    ? {
+        is_enabled: 2,
+        initial_budget: "0",
+        strategy: 1,
+        increase_percentage: 20,
+        max_increase_times: 10,
+        auto_reset_next_day: false,
+      }
+    : { is_enabled: 0, initial_budget: "0", strategy: 0 };
   adForm.ad_ref_pixel_id = config.pixelId ?? "";
-  adForm.automated_targeting = config.smartTargeting ? 1 : 0;
+  adForm.automated_targeting = config.objectiveType === 3 ? 0 : config.smartTargeting ? 1 : 0;
+  if (smartPlus) {
+    Object.assign(adForm, {
+      age: [],
+      exclude_age_under_eighteen: 0,
+      limited_audience: { age: allAgeRanges },
+      smart_interest_behavior: 3,
+      smart_audience: 3,
+      smart_age: 3,
+      smart_gender: 3,
+      suggestion_audience_toggle: 3,
+      spc_targeting_switch: 0,
+      spc_upgrade_mode: 1,
+      spc_multi_ad_mode: 1,
+    });
+  }
   if (config.countryCodes.length > 0) adForm.country = [...config.countryCodes];
-  if (config.placementIds.length > 0) adForm.platform = [...config.placementIds];
+  if (config.placementIds.length > 0) {
+    adForm.inventory_flow = [...config.placementIds];
+  }
+  adForm.platform = [0];
+  if (adForm.week_schedule === undefined) {
+    adForm.week_schedule = [[], [], [], [], [], [], []];
+  }
+  if (adForm.language_list === undefined) {
+    adForm.language_list = [];
+  }
+  const neutralAdDefaults: Record<string, unknown> = {
+    gender: 0,
+    age: [],
+    ac: [],
+    ad_tag_v2: [],
+    android_osv: "",
+    ios_osv: "",
+    launch_price: [],
+    device_models: [],
+    targeting_expansion: { expansion_enabled: false, expansion_types: [] },
+    carriers: [],
+    flow_package_include: [],
+    flow_package_exclude: [],
+    device_type: 0,
+    retargeting_tags: [],
+    retargeting_tags_exclude: [],
+    zipcode_ids: [],
+    province: [],
+    city: [],
+    districts: [],
+    particle_locations: [...config.countryCodes],
+    include_custom_actions: [],
+    exclude_custom_actions: [],
+    interest_keywords_i18n: [],
+    interest_keywords_lang_i18n: [],
+    in_market_tags: [],
+    spending_power_v2: [],
+    household_income: [],
+    contextual_tags: [],
+    action_categories_v2: [],
+    action_days_v2: [],
+    action_scenes_v2: [],
+    video_actions_v2: [],
+    daily_retention_ratio: 0,
+    ios14_quota_type: 1,
+    suitability_non_garm_category: [],
+    anti_discrimination: 0,
+    exclude_age_under_eighteen: 1,
+    duration_time_range: 0,
+    attribution_window_click: 7,
+    attribution_window_view: 1,
+    attribution_statistic_type: 2,
+    statistic_type: 0,
+    dc_postback_mode: 0,
+    attribution_model: 1,
+    smart_interest_behavior: 0,
+    smart_audience: 0,
+    smart_age: 0,
+    smart_gender: 0,
+    custom_audience_tag_relation: 0,
+    suggestion_audience_toggle: 0,
+    limited_audience: { age: [[18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
+    ad_ref_onsite_event_source_type: 0,
+    auto_pull_toggle: 0,
+    ttms_account_id: "",
+    creative_material_mode: 6,
+    inventory_flow_type: 1,
+    search_delivery_type: 5,
+    classify: 1,
+    promotion_website_type: 0,
+    external_type: 102,
+    app_type: 0,
+    flow_control_mode: 1,
+  };
+  for (const [key, value] of Object.entries(neutralAdDefaults)) {
+    if (adForm[key] === undefined) adForm[key] = value;
+  }
+  if (adForm.bid === undefined) adForm.bid = adForm.cpa_bid ?? "";
+  if (adForm.objective_type === undefined) adForm.objective_type = config.objectiveType;
   asset.identity_type = config.identityType;
   asset.identity_id = config.identityId;
+  if (smartPlus) {
+    Object.assign(asset, {
+      creative_material_mode: 6,
+      creative_automation_type: 1,
+      is_smart_creative: false,
+      spc_upgrade_mode: config.identityType === 5 ? 1 : 0,
+      ...(config.identityType === 5 ? {} : { spc_multi_ad_mode: 0 }),
+      auto_pull_by_destination_toggle: 2,
+      auto_pull_by_aigc_toggle: 2,
+      aigc_approval_auto_pull_toggle: 2,
+      auto_pull_toggle: 0,
+      auto_open: 0,
+      utm_auto_switch: 1,
+      catalog_setup: 0,
+      catalog_authorized_bc: "0",
+      spp_rebrand_catalog_switch: 0,
+      product_info_type: 1,
+      product_info: {
+        promo_code_infos: [],
+        is_auto_use: 2,
+        auto_select_toggle: 0,
+        image_infos: [],
+        selling_points_by_types: [],
+      },
+      auto_follow_up_list: [],
+      auto_selected_vids: [],
+      struct_version: 1,
+      need_create_cta_id: true,
+      call_to_action_id: "",
+      call_to_action_asset_list: [{
+        asset_ids: [202046, 201641],
+        asset_content: "立即下单",
+        asset_content_key: "order_now",
+        asset_source: 0,
+        cta_content: "立即下单",
+        material_id: "202046_201641",
+      }],
+      featured_with_three_auto_enabled_in_copy: false,
+    });
+  }
   if (asset.need_create_cta_id === true) {
     const ctaAssets = asset.call_to_action_asset_list;
     if (!Array.isArray(ctaAssets) || ctaAssets.length < 1 || ctaAssets.length > 3) {

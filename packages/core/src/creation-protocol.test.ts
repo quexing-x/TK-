@@ -14,8 +14,8 @@ describe("creation protocol", () => {
   it("uses the confirmed four-step draft chain and makes the initial state explicit", () => {
     expect(TikTokCreationSteps).toEqual(["campaign_snap/save", "ad_snap/save", "creative_snap/save", "async_creation/create_by_snap"]);
     const input = { campaignSnapId: "campaign-snap", campaignSketchId: "campaign-sketch", adAndCreativeSnapInfoList: [{ ad_snap_id: "ad-snap" }] };
-    expect(buildPublishInput(input, "disabled")).toMatchObject({ campaign_id: "", is_status_disabled: true, is_partial_publish: true, coming_source_type: 6, sketch_publish_source: 1 });
-    expect(buildPublishInput(input, "enabled")).toMatchObject({ campaign_id: "", is_status_disabled: false, is_partial_publish: true, coming_source_type: 6, sketch_publish_source: 1 });
+    expect(buildPublishInput(input, "disabled")).toMatchObject({ campaign_id: "", is_status_disabled: true, is_partial_publish: false, coming_source_type: 1, sketch_publish_source: 1 });
+    expect(buildPublishInput(input, "enabled")).toMatchObject({ campaign_id: "", is_status_disabled: false, is_partial_publish: false, coming_source_type: 1, sketch_publish_source: 1 });
   });
 
   it("derives each fixed creation path from the two-cURL session without retaining credentials", () => {
@@ -47,6 +47,7 @@ describe("creation protocol", () => {
     expect(payloads.campaign.campaign_sketch_form_data.campaign_name).toBe("夏季系列");
     expect(payloads.campaign.campaign_sketch_form_data.industry_types).toEqual([]);
     expect(payloads.adGroup.ad_sketch_form_data.budget).toBe("100");
+    expect(payloads.adGroup.ad_sketch_form_data.inventory_flow).toEqual([1]);
     expect(payloads.adGroup.ad_sketch_form_data.start_time).toBe("2026-07-16 16:00:00");
     expect(payloads.adGroup.ad_sketch_form_data.end_time).toBe("2036-07-16 16:00:00");
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
@@ -78,7 +79,88 @@ describe("creation protocol", () => {
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       identity_type: 0,
       identity_id: "",
-      call_to_action_id: "0",
+      call_to_action_id: "",
+    });
+  });
+
+  it("builds a current Smart+ oCPM form without under-18, dynamic-budget, or first-phase conflicts", () => {
+    const payloads = buildDraftPayloads({
+      rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
+      videoCode: "video", productUrl: "https://example.com", region: "TW",
+      dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+    }, {
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
+      identityType: 2, identityId: "identity", callToActionId: "0",
+      countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
+      commentDisabled: false, shareDisabled: false,
+    });
+
+    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({
+      dedicate_type: 0,
+      app_campaign_type: 0,
+      rf_campaign_type: 0,
+      brand_campaign_type: 0,
+      spc_automation_type: 1,
+      spc_upgrade_mode: 1,
+      spc_multi_ad_mode: 1,
+      budget_auto_adjust: { is_enabled: 0, initial_budget: "0", strategy: 0 },
+    });
+    expect(payloads.campaign.is_skip_check_fields).toBe(true);
+    expect(payloads.adGroup).toMatchObject({
+      spc_upgrade_mode: 1,
+      is_skip_check_fields: true,
+      ad_sketch_form_data: {
+        coming_source_type: 1,
+        sketch_publish_source: 1,
+        pricing: 9,
+        bid: "0",
+        cpa_bid: "7",
+        smart_bid_type: 0,
+        optimization_source: 0,
+        cpa_skip_first_phrase: 1,
+        exclude_age_under_eighteen: 0,
+        age: [],
+        limited_audience: { age: [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
+        smart_age: 3,
+        smart_audience: 3,
+        smart_gender: 3,
+        budget_auto_adjust: {
+          is_enabled: 2,
+          initial_budget: "0",
+          strategy: 1,
+          increase_percentage: 20,
+          max_increase_times: 10,
+          auto_reset_next_day: false,
+        },
+      },
+    });
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
+      spc_upgrade_mode: 1,
+      spc_multi_ad_mode: 1,
+    });
+    expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
+      creative_material_mode: 6,
+      creative_automation_type: 1,
+      is_smart_creative: false,
+      spc_upgrade_mode: 0,
+      spc_multi_ad_mode: 0,
+      auto_pull_by_destination_toggle: 2,
+      auto_pull_by_aigc_toggle: 2,
+      aigc_approval_auto_pull_toggle: 2,
+      auto_pull_toggle: 0,
+      catalog_setup: 0,
+      product_info_type: 1,
+      product_info: {
+        promo_code_infos: [],
+        is_auto_use: 2,
+        auto_select_toggle: 0,
+        image_infos: [],
+        selling_points_by_types: [],
+      },
+      need_create_cta_id: true,
+      call_to_action_id: "",
+      call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
     });
   });
 
@@ -107,7 +189,7 @@ describe("creation protocol", () => {
       smartTargeting: false, commentDisabled: true, shareDisabled: true,
     });
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ objective_type: 1, buying_type: 2, budget_mode: 3 });
-    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 4, pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [11] });
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 4, pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [0], inventory_flow: [11] });
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ identity_type: 8, identity_id: "identity", call_to_action_id: "SHOP_NOW", is_comment_disable: 1, is_share_disable: 1 });
   });
 

@@ -5,6 +5,7 @@ import {
   type ProviderConnection,
   type ProviderKind,
   type LaunchOriginalPost,
+  type LaunchProductInfo,
 } from "@tk-auto/core";
 import { CookieAdsProvider } from "./cookie-provider.js";
 import { OfficialApiAdsProvider } from "./official-api-provider.js";
@@ -150,7 +151,7 @@ export class ProviderRegistry {
     kind: ProviderKind,
     context: ProviderContext,
     input: { campaignId: string; adGroupId: string },
-  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null }> {
+  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null; productInfo: LaunchProductInfo | null; catalogSetup: 0 | 1 | null }> {
     const provider = this.get(kind);
     if (!provider.readAdGroupOriginalPosts) {
       throw new Error(`${provider.displayName} 暂不支持读取广告组原帖。`);
