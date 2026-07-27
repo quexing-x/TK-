@@ -890,7 +890,17 @@ describe("AutomationStore", () => {
       launchRows: preview.launchRows,
       copyTargetConfigs: targetConfigs,
     });
-    expect(store.listLaunchPlanItems(plan.id)).toHaveLength(4);
+    const items = store.listLaunchPlanItems(plan.id);
+    expect(items).toHaveLength(4);
+    expect(items.map((item) => [
+      item.sourceSnapshot?.adGroupId,
+      item.targetPostMapping?.sourceAdGroupId,
+    ])).toEqual([
+      [sourceAdGroupIds[0], sourceAdGroupIds[0]],
+      [sourceAdGroupIds[0], sourceAdGroupIds[0]],
+      [sourceAdGroupIds[1], sourceAdGroupIds[1]],
+      [sourceAdGroupIds[1], sourceAdGroupIds[1]],
+    ]);
   });
 
   it("freezes the reviewed preset content before a copy plan is confirmed", () => {

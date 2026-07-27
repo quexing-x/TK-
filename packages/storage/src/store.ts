@@ -4165,7 +4165,7 @@ export class AutomationStore {
             JSON.stringify(itemLaunchRow),
             templateMode,
             null,
-            preview ? JSON.stringify(preview.sourceSnapshot) : null,
+            previewItem ? JSON.stringify(previewItem.sourceSnapshot) : null,
             targetPostMapping ? JSON.stringify(targetPostMapping) : null,
             idempotencyKey,
             operationId,

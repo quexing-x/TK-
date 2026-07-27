@@ -2334,6 +2334,7 @@ describe("CookieAdsProvider", () => {
     expect(campaignSave?.body.campaign_sketch_form_data).toMatchObject({
       campaign_name: "campaign",
       objective_type: 1,
+      industry_types: [],
     });
     const adSave = requested.find((item) => item.url.includes("ad_snap/save"));
     expect(adSave?.body.ad_sketch_form_data).toMatchObject({

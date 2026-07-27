@@ -123,6 +123,7 @@ export function buildDraftPayloads(
         buying_type: config.buyingType,
         budget_mode: config.campaignBudgetMode,
         budget: "0",
+        industry_types: [],
       },
       is_from_startup: false,
       with_sketch: true,
@@ -213,6 +214,7 @@ export function buildProfileDraftPayloads(
   if (customConfig && requiredCreationFields(customConfig).length === 0) {
     applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig);
   }
+  if (campaignForm.industry_types === undefined) campaignForm.industry_types = [];
   return { campaign, adGroup, creative };
 }
 function applyCreationConfigOverrides(

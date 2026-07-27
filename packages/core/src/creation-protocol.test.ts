@@ -45,6 +45,7 @@ describe("creation protocol", () => {
     });
 
     expect(payloads.campaign.campaign_sketch_form_data.campaign_name).toBe("夏季系列");
+    expect(payloads.campaign.campaign_sketch_form_data.industry_types).toEqual([]);
     expect(payloads.adGroup.ad_sketch_form_data.budget).toBe("100");
     expect(payloads.adGroup.ad_sketch_form_data.start_time).toBe("2026-07-16 16:00:00");
     expect(payloads.adGroup.ad_sketch_form_data.end_time).toBe("2036-07-16 16:00:00");
@@ -88,7 +89,7 @@ describe("creation protocol", () => {
       creativePayload: { asset_group_sketch_form_data_list: [{ creative_name: "old", external_url: "https://old.example", creative_snap_id: "captured-creative-snap", creative_sketch_id: "captured-creative-sketch", image_list: [{ aweme_item_id: "old-video", identity_id: "kept" }] }] },
       publishPayload: {},
     }, { rowNumber: 2, campaignName: "new campaign", adGroupName: "new group", adName: "260716:001", videoCode: "new-video", productUrl: "https://example.com/product", region: "US", dailyBudget: 25, bid: 2.5, startAt: null, endAt: null, initialStatus: "disabled" });
-    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ campaign_name: "new campaign", campaign_id: "", objective_type: 9 });
+    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ campaign_name: "new campaign", campaign_id: "", objective_type: 9, industry_types: [] });
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ ad_name: "new group", budget: "25", cpa_bid: "2.5", identity_only: "kept", origin_ad_id: 0, ad_snap_id: "", ad_sketch_id: "", by_ad_sketch_id: "" });
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: "https://example.com/product", creative_snap_id: "", creative_sketch_id: "", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
   });
