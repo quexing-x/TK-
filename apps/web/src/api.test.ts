@@ -266,7 +266,7 @@ describe("web API client", () => {
     vi.stubGlobal("fetch", fetchMock);
     const input = {
       sourceAccountId: "source-account",
-      sourceAdId: "source-ad",
+      sourceAdGroupId: "source-ad",
       targetAccountIds: ["target-account"],
       launchPresetId: "preset-1",
       launchRows: [{

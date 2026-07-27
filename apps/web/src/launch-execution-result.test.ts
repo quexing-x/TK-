@@ -12,7 +12,7 @@ const accounts = [{ id: "account-1", displayName: "测试账户" }] as AccountCo
 const plan = {} as LaunchExecutionResult["plan"];
 
 describe("launch item result presentation", () => {
-  it("shows one source option per ad group using only the ad-group name", () => {
+  it("shows one distinguishable source option per ad group", () => {
     const entities = [
       { entityType: "ad-group", externalId: "group-2", name: "蓝牙音响组", ignored: false },
       { entityType: "ad-group", externalId: "group-1", name: "K歌耳机组", ignored: false },
@@ -26,8 +26,8 @@ describe("launch item result presentation", () => {
     const options = buildSourceAdGroupOptions(entities);
     expect(options).toHaveLength(2);
     expect(options).toEqual(expect.arrayContaining([
-      { sourceAdId: "ad-1", adGroupId: "group-1", name: "K歌耳机组" },
-      { sourceAdId: "ad-2", adGroupId: "group-2", name: "蓝牙音响组" },
+      expect.objectContaining({ adGroupId: "group-1", name: "K歌耳机组", campaignName: "未识别系列" }),
+      expect.objectContaining({ adGroupId: "group-2", name: "蓝牙音响组", campaignName: "未识别系列" }),
     ]));
   });
 

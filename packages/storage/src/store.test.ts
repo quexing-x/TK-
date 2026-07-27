@@ -3,7 +3,8 @@ import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createDefaultAutomationSwitches, defaultAutomationFeatureSettings } from "@tk-auto/core";
+import { createHash } from "node:crypto";
+import { createDefaultAutomationSwitches, defaultAutomationFeatureSettings, type LaunchCopyPreviewInput, type LaunchOriginalPost } from "@tk-auto/core";
 import { AutomationStore } from "./store.js";
 import { MigrationRunner } from "./migration-runner.js";
 import {
@@ -546,7 +547,7 @@ describe("AutomationStore", () => {
       const plan = first.createMultiAccountLaunchPlan({
         mode: "single",
         sourceAccountId: "demo-account",
-        sourceAdId: null,
+        sourceAdGroupId: null,
         targetAccountIds: ["demo-account"],
         launchPresetId: "default-launch-preset",
         launchRows: [launchItemRow(2)],
@@ -584,7 +585,7 @@ describe("AutomationStore", () => {
     const plan = original.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -638,7 +639,7 @@ describe("AutomationStore", () => {
     saveTargetAsset(store, target.id, "video-001");
     const input = {
       sourceAccountId: "demo-account",
-      sourceAdId: "ad-1",
+      sourceAdGroupId: "ad-1",
       targetAccountIds: [target.id],
       launchPresetId: "default-launch-preset",
       launchRows: [{
@@ -656,7 +657,7 @@ describe("AutomationStore", () => {
         initialStatus: "disabled" as const,
       }],
     };
-    const preview = store.createLaunchCopyPreview(input);
+    const preview = createLaunchCopyPreview(store, input);
     const plan = store.createMultiAccountLaunchPlan({
       mode: "copy",
       ...input,
@@ -667,8 +668,10 @@ describe("AutomationStore", () => {
     expect(store.listLaunchPlanItems(plan.id)[0]).toMatchObject({
       templateMode: "none",
       templateCampaignId: null,
-      sourceSnapshot: { adId: "ad-1", campaignId: "campaign-template" },
-      targetAssetMapping: { targetVideoCode: "video-001" },
+      sourceSnapshot: { adGroupId: "ad-1", campaignId: "campaign-template" },
+      targetPostMapping: {
+        posts: [expect.objectContaining({ itemId: "post-ad-1" })],
+      },
       idempotencyKey: expect.any(String),
     });
   });
@@ -684,7 +687,7 @@ describe("AutomationStore", () => {
     saveTargetAsset(store, target.id, "video-001");
     const input = {
       sourceAccountId: "demo-account",
-      sourceAdId: "ad-sheet",
+      sourceAdGroupId: "ad-sheet",
       targetAccountIds: [target.id],
       launchPresetId: "default-launch-preset",
       launchRows: [{
@@ -702,7 +705,7 @@ describe("AutomationStore", () => {
         initialStatus: "disabled" as const,
       }],
     };
-    const preview = store.createLaunchCopyPreview(input);
+    const preview = createLaunchCopyPreview(store, input);
     const plan = store.createMultiAccountLaunchPlan({
       mode: "copy",
       ...input,
@@ -725,7 +728,7 @@ describe("AutomationStore", () => {
       clientRequestId: "11111111-1111-4111-8111-111111111111",
       mode: "multi" as const,
       sourceAccountId: target.id,
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: [target.id],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -753,16 +756,16 @@ describe("AutomationStore", () => {
     saveTargetAsset(store, target.id, "different-video");
     const input = {
       sourceAccountId: "demo-account",
-      sourceAdId: "source-for-missing-asset",
+      sourceAdGroupId: "source-for-missing-asset",
       targetAccountIds: [target.id],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
     };
 
-    const preview = store.createLaunchCopyPreview(input);
+    const preview = createLaunchCopyPreview(store, input, { missingAccountIds: [target.id] });
 
     expect(preview.safeToCreate).toBe(false);
-    expect(preview.blockers.join(" ")).toContain("无法证明该账户素材库可用");
+    expect(preview.blockers.join(" ")).toContain("无法使用帖子");
     expect(() => store.createMultiAccountLaunchPlan({
       ...input,
       mode: "copy",
@@ -770,14 +773,67 @@ describe("AutomationStore", () => {
     })).toThrow("差异预览仍有阻断项");
   });
 
-  it("limits a copy preview to three account-by-row tasks", () => {
-    expect(() => store.createLaunchCopyPreview({
+  it("limits a copy preview to 100 generated ad groups", () => {
+    const accountIds = ["target-a", "target-b", "target-c", "target-d", "target-e", "target-f"];
+    expect(() => createLaunchCopyPreview(store, {
       sourceAccountId: "demo-account",
-      sourceAdId: "source-ad",
-      targetAccountIds: ["target-a", "target-b"],
+      sourceAdGroupId: "source-ad",
+      targetAccountIds: accountIds,
       launchPresetId: "default-launch-preset",
-      launchRows: [launchItemRow(2), launchItemRow(3)],
-    })).toThrow("1–3 个逐项任务");
+      launchRows: [],
+      targetConfigs: accountIds.map((accountId) => ({
+        accountId,
+        quantity: 20,
+        dailyBudget: 100,
+        bid: null,
+        startAtRule: "absolute" as const,
+        startAt: null,
+      })),
+    })).toThrow("单次迁移最多创建 100 个广告组");
+  });
+
+  it("expands each target configuration into frozen original-post migration items", () => {
+    const target = store.createAccount({
+      displayName: "逐账户配置目标",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    saveCopySource(store, "source-configured-copy", "source-video");
+    saveTargetAsset(store, target.id, "target-video");
+    const targetConfigs = [{
+      accountId: target.id,
+      quantity: 2,
+      dailyBudget: 345,
+      bid: 6.7,
+      startAtRule: "next-six" as const,
+      startAt: null,
+    }];
+    const preview = createLaunchCopyPreview(store, {
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: "source-configured-copy",
+      targetAccountIds: [target.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [],
+      targetConfigs,
+    });
+
+    expect(preview.safeToCreate).toBe(true);
+    expect(preview.items).toHaveLength(2);
+    expect(preview.items.every((item) => item.launchRow.dailyBudget === 345 && item.launchRow.bid === 6.7)).toBe(true);
+    expect(preview.items.every((item) => item.launchRow.startAt !== null)).toBe(true);
+
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "copy",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: "source-configured-copy",
+      copyPreviewId: preview.id,
+      targetAccountIds: [target.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: preview.launchRows,
+      copyTargetConfigs: targetConfigs,
+    });
+    expect(store.listLaunchPlanItems(plan.id)).toHaveLength(2);
   });
 
   it("freezes the reviewed preset content before a copy plan is confirmed", () => {
@@ -793,12 +849,12 @@ describe("AutomationStore", () => {
       .find((preset) => preset.id === "default-launch-preset")!;
     const input = {
       sourceAccountId: "demo-account",
-      sourceAdId: "source-preset-snapshot",
+      sourceAdGroupId: "source-preset-snapshot",
       targetAccountIds: [target.id],
       launchPresetId: originalPreset.id,
       launchRows: [launchItemRow(2)],
     };
-    const preview = store.createLaunchCopyPreview(input);
+    const preview = createLaunchCopyPreview(store, input);
 
     store.updateLaunchPreset(originalPreset.id, {
       name: originalPreset.name,
@@ -827,7 +883,7 @@ describe("AutomationStore", () => {
       .toBe(originalPreset.creationConfig.objectiveType);
   });
 
-  it("uses one copy preview as the idempotency boundary and detects source drift", () => {
+  it("uses one copy preview as the idempotency boundary and detects frozen evidence corruption", () => {
     const target = store.createAccount({
       displayName: "幂等目标账户",
       accountType: "standard",
@@ -838,12 +894,12 @@ describe("AutomationStore", () => {
     saveTargetAsset(store, target.id, "video-2");
     const input = {
       sourceAccountId: "demo-account",
-      sourceAdId: "source-idempotent",
+      sourceAdGroupId: "source-idempotent",
       targetAccountIds: [target.id],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
     };
-    const preview = store.createLaunchCopyPreview(input);
+    const preview = createLaunchCopyPreview(store, input);
 
     const first = store.createMultiAccountLaunchPlan({ ...input, mode: "copy", copyPreviewId: preview.id });
     const second = store.createMultiAccountLaunchPlan({ ...input, mode: "copy", copyPreviewId: preview.id });
@@ -855,9 +911,15 @@ describe("AutomationStore", () => {
       launchRows: [{ ...input.launchRows[0]!, campaignName: "changed-after-preview" }],
     })).toThrow("表格内容在预览后已变化");
 
-    saveCopySource(store, "source-idempotent", "changed-source-video");
+    const database = (store as unknown as { db: DatabaseSync }).db;
+    const item = store.listLaunchPlanItems(first.id)[0]!;
+    database.prepare("UPDATE launch_plan_items SET source_snapshot_json = ? WHERE item_id = ?")
+      .run(JSON.stringify({
+        ...item.sourceSnapshot,
+        posts: item.sourceSnapshot!.posts.map((post) => ({ ...post, vid: "tampered" })),
+      }), item.itemId);
     expect(() => store.validateLaunchCopyItem(store.listLaunchPlanItems(first.id)[0]!))
-      .toThrow("源广告结构在预览后已变化");
+      .toThrow("源广告组原帖快照校验失败");
   });
 
   it("keeps legacy plans with no imported rows readable after an upgrade", () => {
@@ -874,7 +936,43 @@ describe("AutomationStore", () => {
       );
 
     expect(store.listMultiAccountLaunchPlans().find((plan) => plan.id === "legacy-empty-plan"))
-      .toMatchObject({ sourceAdId: null, launchRows: [] });
+      .toMatchObject({ sourceAdGroupId: null, launchRows: [] });
+  });
+
+  it("keeps historical video-code copy items readable but permanently blocks dispatch", () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    });
+    const database = (store as unknown as { db: DatabaseSync }).db;
+    database.prepare(
+      "UPDATE launch_plan_items SET source_snapshot_json = ?, target_asset_mapping_json = ? WHERE plan_id = ?",
+    ).run(
+      JSON.stringify({
+        accountId: "demo-account",
+        adId: "legacy-source-ad",
+        videoCode: "legacy-video-code",
+      }),
+      JSON.stringify({
+        accountId: "demo-account",
+        sourceVideoCode: "legacy-video-code",
+        targetVideoCode: "legacy-video-code",
+        evidenceAdId: "legacy-target-ad",
+      }),
+      plan.id,
+    );
+
+    const item = store.listLaunchPlanItems(plan.id)[0]!;
+    expect(item).toMatchObject({
+      legacyCopyUnsupported: true,
+      sourceSnapshot: null,
+      targetPostMapping: null,
+    });
+    expect(() => store.validateLaunchCopyItem(item)).toThrow("旧版视频代码复制流程已停用");
   });
 
   it("atomically claims a status write task and allows only failed tasks to retry", () => {
@@ -991,35 +1089,6 @@ describe("AutomationStore", () => {
       .toEqual(["g2"]);
   });
 
-  it("refuses to create a copy plan when the source ad has no stable campaign id", () => {
-    store.saveReadOnlySync(
-      "demo-account",
-      "cookie",
-      [{ entityType: "ad", externalId: "ad-without-campaign", payload: { ad_name: "源广告" } }],
-      {
-        startedAt: new Date().toISOString(),
-        finishedAt: new Date().toISOString(),
-        counts: { campaign: 0, "ad-group": 0, ad: 1 },
-        warnings: [],
-        quality: healthySyncQuality(new Date().toISOString()),
-      },
-    );
-    const target = store.createAccount({
-      displayName: "目标账户",
-      accountType: "standard",
-      enabled: true,
-      providerKind: "cookie",
-    });
-
-    expect(() => store.createLaunchCopyPreview({
-      sourceAccountId: "demo-account",
-      sourceAdId: "ad-without-campaign",
-      targetAccountIds: [target.id],
-      launchPresetId: "default-launch-preset",
-      launchRows: [launchItemRow(2)],
-    })).toThrow("稳定的 Campaign ID");
-  });
-
   it("blocks only executable legacy plans and preserves completed or cancelled history", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-launch-migration-"));
     const databasePath = join(directory, "automation.db");
@@ -1028,7 +1097,7 @@ describe("AutomationStore", () => {
     const input = {
       mode: "single" as const,
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1292,7 +1361,7 @@ describe("AutomationStore", () => {
     });
     const input = {
       mode: "multi" as const,
-      sourceAccountId: target.id, sourceAdId: null, targetAccountIds: [target.id], launchPresetId: preset.id,
+      sourceAccountId: target.id, sourceAdGroupId: null, targetAccountIds: [target.id], launchPresetId: preset.id,
       launchRows: [{ rowNumber: 2, campaignName: "系列", adGroupName: "组", videoCode: "v-1", productUrl: "https://example.com/p", adName: "client-provided", region: "wrong", dailyBudget: 1, bid: 99, startAt: null, endAt: null, initialStatus: "enabled" as const }],
     };
     const first = store.createMultiAccountLaunchPlan(input);
@@ -1327,7 +1396,7 @@ describe("AutomationStore", () => {
       const plan = store.createMultiAccountLaunchPlan({
         mode: "single",
         sourceAccountId: "demo-account",
-        sourceAdId: null,
+        sourceAdGroupId: null,
         targetAccountIds: ["demo-account"],
         launchPresetId: preset.id,
         launchRows: [launchItemRow(2)],
@@ -1375,13 +1444,13 @@ describe("AutomationStore", () => {
       });
       const input = {
         sourceAccountId: "demo-account",
-        sourceAdId: "source-relative-preview",
+        sourceAdGroupId: "source-relative-preview",
         targetAccountIds: [east.id, west.id],
         launchPresetId: preset.id,
         launchRows: [launchItemRow(2)],
       };
 
-      const preview = store.createLaunchCopyPreview(input);
+      const preview = createLaunchCopyPreview(store, input);
       const reviewedTimes = Object.fromEntries(
         preview.items.map((item) => [item.accountId, item.launchRow.startAt]),
       );
@@ -1454,7 +1523,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "multi",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account", second.id],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2), launchItemRow(3)],
@@ -1473,7 +1542,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1508,7 +1577,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2), launchItemRow(3)],
@@ -1535,7 +1604,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1583,7 +1652,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2), launchItemRow(3)],
@@ -1611,7 +1680,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [row],
@@ -1657,7 +1726,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1711,7 +1780,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1742,7 +1811,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1759,7 +1828,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1838,7 +1907,7 @@ describe("AutomationStore", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: [launchItemRow(2)],
@@ -1916,7 +1985,7 @@ describe("AutomationStore", () => {
       const plan = first.createMultiAccountLaunchPlan({
         mode: "single",
         sourceAccountId: "demo-account",
-        sourceAdId: null,
+        sourceAdGroupId: null,
         targetAccountIds: ["demo-account"],
         launchPresetId: "default-launch-preset",
         launchRows: [launchItemRow(2)],
@@ -2091,6 +2160,61 @@ function launchItemRow(rowNumber: number) {
     endAt: null,
     initialStatus: "disabled" as const,
   };
+}
+
+function createLaunchCopyPreview(
+  store: AutomationStore,
+  input: LaunchCopyPreviewInput,
+  options: { missingAccountIds?: string[] } = {},
+) {
+  const post: LaunchOriginalPost = {
+    itemId: `post-${input.sourceAdGroupId}`,
+    identityId: "source-identity",
+    identityType: 2,
+    identityBcId: "0",
+    vid: `source-vid-${input.sourceAdGroupId}`,
+    videoId: null,
+    displayName: "源原帖",
+    coverUrl: null,
+    promotable: true,
+  };
+  const hash = (posts: LaunchOriginalPost[]) => createHash("sha256")
+    .update(JSON.stringify(posts.map((item) => ({
+      itemId: item.itemId,
+      identityId: item.identityId,
+      identityType: item.identityType,
+      identityBcId: item.identityBcId,
+      vid: item.vid,
+      videoId: item.videoId,
+      promotable: item.promotable,
+    }))))
+    .digest("hex");
+  const sourceSnapshot = {
+    accountId: input.sourceAccountId,
+    campaignId: "campaign-template",
+    campaignName: "源系列",
+    adGroupId: input.sourceAdGroupId,
+    adGroupName: "源广告组",
+    posts: [post],
+    productUrl: "https://source.example/product",
+    structuralHash: hash([post]),
+    fetchedAt: new Date().toISOString(),
+  };
+  const missing = new Set(options.missingAccountIds ?? []);
+  const mappings = input.targetAccountIds.map((accountId) => {
+    const posts = missing.has(accountId) ? [] : [{
+      ...post,
+      identityId: `target-identity-${accountId}`,
+      vid: `target-vid-${accountId}`,
+    }];
+    return {
+      accountId,
+      posts,
+      evidenceHash: hash(posts),
+      verifiedAt: new Date().toISOString(),
+    };
+  });
+  return store.createLaunchCopyPreview(input, sourceSnapshot, mappings);
 }
 
 function saveCopySource(

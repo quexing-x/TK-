@@ -9,6 +9,11 @@ import {
   type CreationPresetConfig,
   type LaunchConfigurationRow,
   type LaunchCreationProgress,
+  type LaunchCopyPreviewInput,
+  type LaunchCopyPreviewRecord,
+  type LaunchOriginalPost,
+  type LaunchSourceSnapshot,
+  type LaunchTargetPostMapping,
   type WriteTaskActor,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -71,6 +76,95 @@ export class LaunchService {
     // Only an expired lease is treated as interrupted; progress callbacks renew
     // claimedAt while the provider chain advances.
     this.recoverExpiredLeases();
+  }
+
+  async createCopyPreview(input: LaunchCopyPreviewInput): Promise<LaunchCopyPreviewRecord> {
+    const sourceAccount = this.store.getAccount(input.sourceAccountId);
+    if (!sourceAccount) throw new Error("源广告账户不存在。");
+    const sourceConnection = this.store.getProviderConnection(
+      input.sourceAccountId,
+      sourceAccount.providerKind,
+    );
+    if (!sourceConnection || sourceConnection.status !== "ready") {
+      throw new Error(`源账户“${sourceAccount.displayName}”未通过连接检测。`);
+    }
+    this.providers.requireAccountCapability(
+      sourceAccount.id,
+      sourceAccount.providerKind,
+      sourceConnection,
+      "read-ad-groups",
+    );
+    const managed = this.store.listCurrentManagedEntities(sourceAccount.id, sourceAccount.providerKind);
+    const adGroup = managed.find(
+      (entity) => entity.entityType === "ad-group" && entity.externalId === input.sourceAdGroupId,
+    );
+    if (!adGroup?.parentCampaignId) {
+      throw new Error("源广告组不存在或缺少稳定的 Campaign ID，请先同步源账户。");
+    }
+    const campaign = managed.find(
+      (entity) => entity.entityType === "campaign"
+        && entity.externalId === adGroup.parentCampaignId,
+    );
+    if (!campaign) throw new Error("源广告组所属推广系列不在当前同步快照中。");
+    const sourceContext = await this.loadProviderContext(sourceAccount.id, sourceAccount.providerKind);
+    const sourceDetail = await this.providers.readAdGroupOriginalPosts(
+      sourceAccount.providerKind,
+      sourceContext,
+      { campaignId: campaign.externalId, adGroupId: adGroup.externalId },
+    );
+    const sourcePosts = sourceDetail.posts.filter((post) => post.promotable);
+    if (sourcePosts.length !== sourceDetail.posts.length || sourcePosts.length === 0) {
+      throw new Error("源广告组包含不可推广或已失效的帖子，无法迁移。");
+    }
+    if (sourcePosts.length > 500) {
+      throw new Error(`源广告组有 ${sourcePosts.length} 条帖子，超过单次迁移上限 500 条。`);
+    }
+    const fetchedAt = new Date().toISOString();
+    const sourceSnapshot: LaunchSourceSnapshot = {
+      accountId: sourceAccount.id,
+      campaignId: campaign.externalId,
+      campaignName: campaign.name,
+      adGroupId: adGroup.externalId,
+      adGroupName: adGroup.name,
+      posts: sourcePosts,
+      productUrl: sourceDetail.productUrl,
+      structuralHash: originalPostsHash(sourcePosts),
+      fetchedAt,
+    };
+    const targetPostMappings: LaunchTargetPostMapping[] = await Promise.all(
+      [...new Set(input.targetAccountIds)].map(async (accountId) => {
+        const account = this.store.getAccount(accountId);
+        if (!account) throw new Error(`目标账户 ${accountId} 不存在。`);
+        const connection = this.store.getProviderConnection(account.id, account.providerKind);
+        if (!connection || connection.status !== "ready") {
+          throw new Error(`目标账户“${account.displayName}”未通过连接检测。`);
+        }
+        this.providers.requireAccountCapability(
+          account.id,
+          account.providerKind,
+          connection,
+          "create-campaigns",
+        );
+        try {
+          const context = await this.loadProviderContext(account.id, account.providerKind);
+          const posts = await this.providers.readAccessibleOriginalPosts(
+            account.providerKind,
+            context,
+            sourcePosts,
+          );
+          return {
+            accountId,
+            posts,
+            evidenceHash: originalPostsHash(posts),
+            verifiedAt: new Date().toISOString(),
+          };
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          throw new Error(`目标账户“${account.displayName}”原帖检查失败：${message}`);
+        }
+      }),
+    );
+    return this.store.createLaunchCopyPreview(input, sourceSnapshot, targetPostMappings);
   }
 
   async execute(
@@ -205,14 +299,8 @@ export class LaunchService {
         first.accountId,
         account.providerKind,
         connection,
-        first.templateMode === "copy" ? "copy-ads" : "create-campaigns",
+        "create-campaigns",
       );
-      const latestSync = this.store.getLatestReadOnlySync(first.accountId, account.providerKind);
-      if (first.templateMode === "copy" && (!latestSync || latestSync.quality.status !== "healthy")) {
-        throw new Error(
-          `目标账户同步数据不是 healthy，批量创建已阻止（当前：${latestSync?.quality.status ?? "none"}）。`,
-        );
-      }
       for (const item of claimed) {
         this.store.validateLaunchCopyItem(item);
         if (!item.attemptId) throw new Error("创建任务缺少 attemptId，禁止调用 Provider。");
@@ -222,8 +310,10 @@ export class LaunchService {
       }
       const context = await this.loadProviderContext(first.accountId, account.providerKind);
       const connectionFingerprint = creationConnectionFingerprint(connection);
+      const refreshedPosts = new Map<string, LaunchOriginalPost[]>();
       for (const item of claimed) {
-        await this.refreshLaunchCopyEvidence(item, context);
+        const posts = await this.refreshLaunchCopyEvidence(item, context);
+        if (posts) refreshedPosts.set(item.itemId, posts);
       }
       for (const item of claimed) this.store.validateLaunchCopyItem(item);
 
@@ -249,7 +339,7 @@ export class LaunchService {
           first.accountId,
           currentAccount.providerKind,
           dispatchConnection,
-          first.templateMode === "copy" ? "copy-ads" : "create-campaigns",
+          "create-campaigns",
         );
         if (!claimed.every((item) => this.launchStore.renew(item.itemId, executorId))) {
           throw new Error("创建批次执行权已变化，当前请求未发送。");
@@ -262,6 +352,9 @@ export class LaunchService {
         initialStatus: item.launchRow.initialStatus,
         templateMode: item.templateMode,
         ...(item.templateCampaignId ? { templateCampaignId: item.templateCampaignId } : {}),
+        ...(refreshedPosts.has(item.itemId)
+          ? { originalPosts: refreshedPosts.get(item.itemId)! }
+          : {}),
         operationId: item.operationId,
         attemptId: item.attemptId!,
         correlationId: item.correlationId,
@@ -450,39 +543,55 @@ export class LaunchService {
   private async refreshLaunchCopyEvidence(
     item: LaunchPlanItemRecord,
     targetContext: ProviderContext,
-  ): Promise<void> {
-    if (!item.sourceSnapshot && !item.targetAssetMapping) return;
-    if (!item.sourceSnapshot || !item.targetAssetMapping) {
-      throw new Error("复制迁移任务缺少冻结的源快照或目标素材映射。");
+  ): Promise<LaunchOriginalPost[] | undefined> {
+    if (!item.sourceSnapshot && !item.targetPostMapping) return undefined;
+    if (!item.sourceSnapshot || !item.targetPostMapping) {
+      throw new Error("原帖迁移任务缺少冻结的源帖子或目标帖子证据。");
     }
-    const accountIds = [...new Set([
-      item.sourceSnapshot.accountId,
-      item.accountId,
-    ])];
-    for (const accountId of accountIds) {
-      const account = this.store.getAccount(accountId);
-      if (!account) throw new Error("复制迁移的源账户或目标账户不存在。");
-      const connection = this.store.getProviderConnection(accountId, account.providerKind);
-      if (!connection || connection.status !== "ready") {
-        throw new Error(`账户“${account.displayName}”未通过连接验证，已阻止复制迁移。`);
-      }
-      this.providers.requireAccountCapability(
-        accountId,
-        account.providerKind,
-        connection,
-        "read-campaigns",
-      );
-      const context = accountId === item.accountId
-        ? targetContext
-        : await this.loadProviderContext(accountId, account.providerKind);
-      const sync = await this.providers.syncReadOnly(account.providerKind, context);
-      this.store.saveReadOnlySync(accountId, account.providerKind, sync.entities, sync.result);
-      if (sync.result.quality.status !== "healthy") {
-        throw new Error(
-          `账户“${account.displayName}”最终同步质量为 ${sync.result.quality.status}，已阻止复制迁移。`,
-        );
-      }
+    const sourceAccount = this.store.getAccount(item.sourceSnapshot.accountId);
+    if (!sourceAccount) throw new Error("原帖迁移的源账户不存在。");
+    const sourceConnection = this.store.getProviderConnection(
+      sourceAccount.id,
+      sourceAccount.providerKind,
+    );
+    if (!sourceConnection || sourceConnection.status !== "ready") {
+      throw new Error(`源账户“${sourceAccount.displayName}”未通过连接验证。`);
     }
+    this.providers.requireAccountCapability(
+      sourceAccount.id,
+      sourceAccount.providerKind,
+      sourceConnection,
+      "read-ad-groups",
+    );
+    const sourceContext = await this.loadProviderContext(sourceAccount.id, sourceAccount.providerKind);
+    const sourceDetail = await this.providers.readAdGroupOriginalPosts(
+      sourceAccount.providerKind,
+      sourceContext,
+      {
+        campaignId: item.sourceSnapshot.campaignId,
+        adGroupId: item.sourceSnapshot.adGroupId,
+      },
+    );
+    const expectedIds = item.sourceSnapshot.posts.map((post) => post.itemId);
+    const currentPosts = sourceDetail.posts;
+    if (currentPosts.some((post) => !post.promotable)
+      || originalPostsHash(currentPosts) !== item.sourceSnapshot.structuralHash) {
+      throw new Error("源广告组帖子在预览后已变化，请重新生成迁移预览。");
+    }
+    const targetAccount = this.store.getAccount(item.accountId);
+    if (!targetAccount) throw new Error("原帖迁移的目标账户不存在。");
+    const targetPosts = await this.providers.readAccessibleOriginalPosts(
+      targetAccount.providerKind,
+      targetContext,
+      item.sourceSnapshot.posts,
+    );
+    if (targetPosts.length !== expectedIds.length
+      || targetPosts.some((post, index) => post.itemId !== expectedIds[index] || !post.promotable)) {
+      const available = new Set(targetPosts.map((post) => post.itemId));
+      const missing = expectedIds.filter((itemId) => !available.has(itemId));
+      throw new Error(`目标账户无法继续使用帖子：${missing.join("、") || "帖子状态已变化"}。`);
+    }
+    return targetPosts;
   }
 
   private async loadProviderContext(
@@ -824,6 +933,18 @@ function creationConnectionFingerprint(
     credentialRef: connection.credentialRef,
     settings: connection.settings,
   })).digest("hex");
+}
+
+function originalPostsHash(posts: LaunchOriginalPost[]): string {
+  return createHash("sha256").update(JSON.stringify(posts.map((post) => ({
+    itemId: post.itemId,
+    identityId: post.identityId,
+    identityType: post.identityType,
+    identityBcId: post.identityBcId,
+    vid: post.vid,
+    videoId: post.videoId,
+    promotable: post.promotable,
+  })))).digest("hex");
 }
 
 function safeError(cause: unknown): string {

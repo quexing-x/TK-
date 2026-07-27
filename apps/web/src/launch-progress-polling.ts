@@ -8,7 +8,7 @@ export function createLaunchProgressPoller(
   refresh: () => void,
   schedule: (callback: () => void, delayMs: number) => number = window.setInterval,
   cancel: (timer: number) => void = window.clearInterval,
-  intervalMs = 750,
+  intervalMs = 2_000,
 ): LaunchProgressPoller {
   let timer: number | null = null;
   return {

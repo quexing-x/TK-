@@ -11,6 +11,7 @@ import {
   type CapturedCookieRequest,
   type ProviderEntity,
   type SyncEntityType,
+  type LaunchOriginalPost,
 } from "@tk-auto/core";
 import type {
   AdsProvider,
@@ -120,6 +121,164 @@ export class CookieAdsProvider implements AdsProvider {
       status: "ready",
       message: `Cookie 会话验证成功（${request.method} 只读请求）。`,
     };
+  }
+
+  async readAdGroupOriginalPosts(
+    context: ProviderContext,
+    input: { campaignId: string; adGroupId: string },
+  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null }> {
+    const { credential, sessionRequest } = originalPostReadSession(context);
+    const sidebar = await requestCreationStep(
+      "sidebar/brief_info_list",
+      () => creationPathRequest(
+        sessionRequest,
+        "/api/v4/i18n/creation/sidebar/brief_info_list/",
+        { campaign_id: input.campaignId },
+      ),
+      credential,
+      { semantics: "preflight-read" },
+    );
+    const creativeId = findAssetGroupCreativeId(sidebar.data, input.adGroupId);
+    if (!creativeId) {
+      throw new RetryableCreationError(
+        `源广告组 ${input.adGroupId} 没有可读取的创意详情，请刷新源账户后重试。`,
+      );
+    }
+    const detail = await requestCreationStep(
+      "creative/procedural_detail",
+      () => creationPathGetRequest(
+        sessionRequest,
+        "/mi/api/v3/i18n/perf/creative/procedural_detail/",
+        { creative_id: creativeId, creative_material_mode: "6" },
+      ),
+      credential,
+      { semantics: "preflight-read" },
+    );
+    const data = isRecord(detail.data) ? detail.data : {};
+    const imageList = Array.isArray(data.image_list) ? data.image_list : [];
+    const posts = uniqueOriginalPosts(imageList.flatMap(parseOriginalPost));
+    if (posts.length === 0) {
+      throw new RetryableCreationError("源广告组没有可迁移的 TikTok 原帖。");
+    }
+    const productUrl = firstStringByKeys(data, new Set([
+      "external_url",
+      "product_url",
+      "landing_page_url",
+    ]));
+    return { posts, productUrl: productUrl && isHttpUrlValue(productUrl) ? productUrl : null };
+  }
+
+  async readAccessibleOriginalPosts(
+    context: ProviderContext,
+    sourcePosts: LaunchOriginalPost[],
+  ): Promise<LaunchOriginalPost[]> {
+    if (sourcePosts.length === 0) return [];
+    const { credential, sessionRequest } = originalPostReadSession(context);
+    const identities: Array<Record<string, unknown>> = [];
+    let identityCursor = "0";
+    let identityPage = 1;
+    let identityQueryMode = 8;
+    let identityPaginationComplete = false;
+    for (let page = 0; page < 50; page += 1) {
+      const response = await requestCreationStep(
+        "spark/identity/list",
+        () => creationPathRequest(
+          sessionRequest,
+          "/api/v4/i18n/creation/spark/identity/list/",
+          {
+            cursor: identityCursor,
+            page: identityPage,
+            limit: 20,
+            is_warm_up: page === 0,
+            mix_mode: 5,
+            identity_query_mode: identityQueryMode,
+          },
+        ),
+        credential,
+        { semantics: "preflight-read" },
+      );
+      const data = isRecord(response.data) ? response.data : {};
+      const rows = Array.isArray(data.identity_list)
+        ? data.identity_list.filter(isRecord)
+        : [];
+      identities.push(...rows.filter((row) => row.can_use_video_list !== false));
+      if (data.has_more !== true) {
+        identityPaginationComplete = true;
+        break;
+      }
+      identityCursor = nonEmptyId(data.cursor) ?? identityCursor;
+      identityPage = typeof data.next_page === "number" ? data.next_page : identityPage + 1;
+      identityQueryMode = typeof data.next_query_mode === "number"
+        ? data.next_query_mode
+        : identityQueryMode;
+    }
+    if (!identityPaginationComplete) {
+      throw new RetryableCreationError(
+        "目标账户绑定身份超过 1000 个，无法在安全分页上限内完成原帖核对。",
+      );
+    }
+    if (identities.length === 0) return [];
+
+    const identityList = identities.flatMap((identity) => {
+      const identityId = nonEmptyId(identity.identity_id);
+      const identityType = numericValue(identity.identity_type);
+      if (!identityId || identityType === null) return [];
+      return [{
+        identity_id: identityId,
+        identity_type: identityType,
+        identity_bc_id: nonEmptyId(identity.identity_bc_id) ?? "0",
+      }];
+    });
+    const identityByKey = new Map(identityList.map((identity) => [
+      `${identity.identity_id}:${identity.identity_type}`,
+      identity,
+    ]));
+    const requests = sourcePosts.flatMap((post) => {
+      const identity = identityByKey.get(`${post.identityId}:${post.identityType}`);
+      if (!identity) return [];
+      return [{
+        itemId: post.itemId,
+        identity,
+        body: {
+          aweme_item_ids: [post.itemId],
+          identity_id: identity.identity_id,
+          identity_type: identity.identity_type,
+          identity_bc_id: identity.identity_bc_id,
+          item_source: 2,
+        },
+      }];
+    });
+    const found = new Map<string, LaunchOriginalPost>();
+    for (let offset = 0; offset < requests.length; offset += 50) {
+      const batch = requests.slice(offset, offset + 50);
+      const response = await requestCreationStep(
+        "material/native_item_infos",
+        () => creationPathRequest(
+          sessionRequest,
+          "/mi/api/v4/i18n/creation/material/native_item_infos/",
+          { item_req_list: batch.map((item) => item.body) },
+        ),
+        credential,
+        { semantics: "preflight-read" },
+      );
+      const data = isRecord(response.data) ? response.data : {};
+      const itemInfoMap = isRecord(data.item_info_map) ? data.item_info_map : {};
+      for (const request of batch) {
+        const itemInfo = itemInfoMap[request.itemId];
+        if (!isRecord(itemInfo)) continue;
+        const [post] = parseOriginalPost({
+          ...itemInfo,
+          identity_id: request.identity.identity_id,
+          identity_type: request.identity.identity_type,
+          identity_bc_id: request.identity.identity_bc_id,
+        });
+        if (post?.promotable) found.set(post.itemId, post);
+      }
+    }
+    return sourcePosts.flatMap((sourcePost) => {
+      const post = found.get(sourcePost.itemId);
+      return post ? [post] : [];
+    });
   }
 
   async appeal(context: ProviderContext, mutations: import("./types.js").AppealMutation[]) {
@@ -1568,6 +1727,7 @@ async function createCookieDraftBatch(
       creativeSketchRows,
     };
     const authorizationCodes = reconcileOnly ? [] : [...new Set(mutations.flatMap((mutation) => {
+      if (mutation.originalPosts?.length) return [];
       const codes = splitVideoCodes(mutation.row.videoCode);
       return (codes.length > 0 ? codes : [mutation.row.videoCode])
         .filter((code) => code.startsWith("#"));
@@ -1610,12 +1770,20 @@ async function createCookieDraftBatch(
     try {
       ready.push({
         mutation,
-        resolvedVideos: await resolveTikTokVideos(
-          mutation,
-          sessionRequest,
-          credential,
-          library,
-        ),
+        resolvedVideos: mutation.originalPosts?.length
+          ? mutation.originalPosts.map((post) => ({
+              itemId: post.itemId,
+              identityId: post.identityId,
+              identityType: post.identityType,
+              ...(post.identityBcId ? { identityBcId: post.identityBcId } : {}),
+              vid: post.vid,
+            }))
+          : await resolveTikTokVideos(
+              mutation,
+              sessionRequest,
+              credential,
+              library,
+            ),
       });
     } catch (cause) {
       failures.push(creationFailureResult(mutation, cause, dispatchState));
@@ -1901,7 +2069,8 @@ function materialSkippedWarning(
   mutation: CreationMutation,
   draftStillExists = false,
 ): string {
-  const materialCount = Math.max(1, splitVideoCodes(mutation.row.videoCode).length);
+  const materialCount = mutation.originalPosts?.length
+    ?? Math.max(1, splitVideoCodes(mutation.row.videoCode).length);
   return `素材提示：广告组已创建成功，但 TikTok 未生成广告“${mutation.row.adName}”；已跳过 ${materialCount} 条素材${draftStillExists ? "，远端仍可见素材草稿" : ""}。`;
 }
 
@@ -2842,6 +3011,8 @@ interface ResolvedVideo {
   /** Authorized creator identity (core_user_id from the material library); the
    * ad uses it as identity_type=2 / identity_id for a Spark post. */
   identityId?: string;
+  identityType?: number;
+  identityBcId?: string;
   /** Underlying video material id (video_info.vid); a Spark post must be
    * registered by vid via spark/creative_fix_task before the creative saves. */
   vid?: string;
@@ -3002,7 +3173,8 @@ async function prepareSparkPosts(
   const postList = sparkVideos.map((video) => ({
     item_id: video.itemId,
     identity_id: video.identityId,
-    identity_type: 2,
+    identity_type: video.identityType ?? 2,
+    ...(video.identityBcId ? { identity_bc_id: video.identityBcId } : {}),
   }));
   await requestAdvisoryCreationStep(
     "spark/validate_promote_music",
@@ -3109,7 +3281,11 @@ function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unkn
     aweme_item_id: video.itemId,
     item_source: 2,
     media_tag: 0,
-    ...(video.identityId ? { identity_type: 2, identity_id: video.identityId } : {}),
+    ...(video.identityId ? {
+      identity_type: video.identityType ?? 2,
+      identity_id: video.identityId,
+      ...(video.identityBcId ? { identity_bc_id: video.identityBcId } : {}),
+    } : {}),
   }));
 }
 
@@ -3886,6 +4062,133 @@ function requireObjectField(value: Record<string, unknown>, key: string): Record
   const field = value[key];
   if (!isRecord(field)) throw new Error(`创建模板缺少 ${key}。`);
   return field;
+}
+
+function originalPostReadSession(context: ProviderContext): {
+  credential: ParsedCookieCredential;
+  sessionRequest: CapturedCookieRequest;
+} {
+  CookieConnectionSettingsSchema.parse(context.settings);
+  const credential = CookieCredentialInputSchema.parse(context.credential);
+  const sessionRequest = credential.requestTemplates?.find(
+    (item) => item.target === "ad-group" && !item.derived,
+  );
+  if (!sessionRequest) {
+    throw new RetryableCreationError(
+      "缺少广告组列表 cURL，无法建立原帖读取会话。",
+    );
+  }
+  return { credential, sessionRequest };
+}
+
+function findAssetGroupCreativeId(value: unknown, adGroupId: string): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = findAssetGroupCreativeId(item, adGroupId);
+      if (result) return result;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  const candidateId = nonEmptyId(value.id) ?? nonEmptyId(value.ad_id);
+  if (candidateId === adGroupId && Array.isArray(value.asset_group_brief_info_item_list)) {
+    for (const item of value.asset_group_brief_info_item_list) {
+      if (!isRecord(item)) continue;
+      const id = nonEmptyId(item.id);
+      if (id) return id;
+    }
+  }
+  for (const child of Object.values(value)) {
+    const result = findAssetGroupCreativeId(child, adGroupId);
+    if (result) return result;
+  }
+  return null;
+}
+
+function parseOriginalPost(value: unknown): LaunchOriginalPost[] {
+  if (!isRecord(value)) return [];
+  const postInfo = isRecord(value.post_info) ? value.post_info : value;
+  const itemId = nonEmptyId(postInfo.item_id) ?? nonEmptyId(postInfo.aweme_item_id);
+  const identityId = nonEmptyId(postInfo.identity_id);
+  const identityType = numericValue(postInfo.identity_type);
+  const videoInfo = isRecord(postInfo.video_info) ? postInfo.video_info : {};
+  const authCodeInfo = isRecord(postInfo.auth_code_info) ? postInfo.auth_code_info : {};
+  const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(postInfo.vid);
+  if (!itemId || !identityId || identityType === null || !vid) return [];
+  const status = numericValue(postInfo.status);
+  const authCodeStatus = numericValue(postInfo.auth_code_status)
+    ?? numericValue(authCodeInfo.auth_code_status)
+    ?? numericValue(authCodeInfo.ad_auth_status);
+  const promotable = postInfo.can_preview !== false
+    && postInfo.is_ccoc_ban !== true
+    && (status === null || status >= 0)
+    && (authCodeStatus === null || authCodeStatus >= 0);
+  const coverUrl = nonEmptyString(videoInfo.cover_url)
+    ?? nonEmptyString(videoInfo.cover_uri)
+    ?? null;
+  return [{
+    itemId,
+    identityId,
+    identityType,
+    identityBcId: nonEmptyId(postInfo.identity_bc_id) ?? null,
+    vid,
+    videoId: nonEmptyId(videoInfo.video_id) ?? null,
+    displayName: nonEmptyString(postInfo.title)
+      ?? nonEmptyString(postInfo.text)
+      ?? nonEmptyString(postInfo.nick_name)
+      ?? null,
+    coverUrl: coverUrl && isHttpUrlValue(coverUrl) ? coverUrl : null,
+    promotable,
+  }];
+}
+
+function uniqueOriginalPosts(posts: LaunchOriginalPost[]): LaunchOriginalPost[] {
+  const unique = new Map<string, LaunchOriginalPost>();
+  for (const post of posts) if (!unique.has(post.itemId)) unique.set(post.itemId, post);
+  return [...unique.values()];
+}
+
+function numericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function firstStringByKeys(value: unknown, keys: ReadonlySet<string>): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = firstStringByKeys(item, keys);
+      if (result) return result;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  for (const [key, child] of Object.entries(value)) {
+    if (keys.has(key)) {
+      const result = nonEmptyString(child);
+      if (result) return result;
+    }
+  }
+  for (const child of Object.values(value)) {
+    const result = firstStringByKeys(child, keys);
+    if (result) return result;
+  }
+  return null;
+}
+
+function isHttpUrlValue(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 

@@ -634,7 +634,7 @@ describe("local API", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account", other.id],
       launchPresetId: "default-launch-preset",
       launchRows: [apiLaunchRow(2)],
@@ -839,7 +839,7 @@ describe("local API", () => {
       payload: {
         sourceAccountId: "demo-account",
         mode: "single",
-        sourceAdId: null,
+        sourceAdGroupId: null,
         targetAccountIds: [target.id],
         launchPresetId: "default-launch-preset",
         launchRows: [{
@@ -957,7 +957,7 @@ describe("local API", () => {
     });
 
     const created = await app.inject({ method: "POST", url: "/api/launch-plans", payload: {
-      mode: "multi", sourceAccountId: "demo-account", sourceAdId: null,
+      mode: "multi", sourceAccountId: "demo-account", sourceAdGroupId: null,
       targetAccountIds: ["demo-account", second.id], launchPresetId: "default-launch-preset",
       launchRows: [{ rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "same-video-code", productUrl: "https://example.com/product", region: "US", dailyBudget: 1, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }],
     } });
@@ -2241,7 +2241,11 @@ describe("local API", () => {
     expect(createFromPreset).toHaveBeenCalledTimes(1);
     expect(createFromPreset.mock.calls[0]?.[1][0]).toMatchObject({
       templateMode: "none",
-      row: { videoCode: "video-2" },
+      originalPosts: [expect.objectContaining({
+        itemId: "post-1",
+        identityId: expect.stringContaining("target-identity"),
+        vid: expect.stringContaining("target-vid"),
+      })],
     });
     expect(createFromPreset.mock.calls[0]?.[1][0]).not.toHaveProperty("templateCampaignId");
   });
@@ -2268,7 +2272,7 @@ describe("local API", () => {
       url: "/api/launch-plans",
       payload: { ...fixture.input, mode: "copy", copyPreviewId: preview.json().id },
     });
-    fixture.setRemoteSourceVideoCode("changed-source-video");
+    fixture.setRemoteSourceVideoCode("changed-source-post");
 
     const execution = await app.inject({
       method: "POST",
@@ -2277,7 +2281,7 @@ describe("local API", () => {
 
     expect(execution.statusCode).toBe(200);
     expect(execution.json().results[0]).toMatchObject({ status: "failed" });
-    expect(execution.json().results[0].message).toContain("源广告结构在预览后已变化");
+    expect(execution.json().results[0].message).toContain("源广告组帖子在预览后已变化");
     expect(createFromPreset).not.toHaveBeenCalled();
   });
 
@@ -2303,7 +2307,7 @@ describe("local API", () => {
       url: "/api/launch-plans",
       payload: { ...fixture.input, mode: "copy", copyPreviewId: preview.json().id },
     });
-    fixture.setRemoteTargetVideoCode("different-target-video");
+    fixture.setRemoteTargetVideoCode("different-target-post");
 
     const execution = await app.inject({
       method: "POST",
@@ -2312,7 +2316,7 @@ describe("local API", () => {
 
     expect(execution.statusCode).toBe(200);
     expect(execution.json().results[0]).toMatchObject({ status: "failed" });
-    expect(execution.json().results[0].message).toContain("目标账户素材证据在预览后已失效");
+    expect(execution.json().results[0].message).toContain("目标账户无法继续使用帖子");
     expect(createFromPreset).not.toHaveBeenCalled();
   });
 
@@ -2484,7 +2488,7 @@ describe("local API", () => {
     return store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: rows,
@@ -2499,7 +2503,7 @@ describe("local API", () => {
   ): Promise<{
     input: {
       sourceAccountId: string;
-      sourceAdId: string;
+      sourceAdGroupId: string;
       targetAccountIds: string[];
       launchPresetId: string;
       launchRows: ReturnType<typeof apiLaunchRow>[];
@@ -2517,9 +2521,9 @@ describe("local API", () => {
       initialStatus: "disabled",
       creationConfig: apiCreationConfig(),
     });
-    saveApiCopySource(store, "source-ad", "source-video");
-    let remoteSourceVideoCode = "source-video";
-    let remoteTargetVideoCode = "video-2";
+    saveApiCopySource(store, "source-ad", "post-1");
+    let remoteSourceVideoCode = "post-1";
+    let remoteTargetVideoCode = "post-1";
     let creationDispatched = false;
     store.saveProviderConnectionSettings("demo-account", {
       kind: "cookie", advertiserId: "copy-source", healthUrl: "",
@@ -2536,7 +2540,7 @@ describe("local API", () => {
     store.updateProviderAuthorization("demo-account", "cookie", {
       status: "active",
       capabilityVersion: "copy-test-v1",
-      capabilities: ["read-campaigns", "create-campaigns", "copy-ads"],
+      capabilities: ["read-campaigns", "read-ad-groups", "create-campaigns"],
     });
     const target = store.createAccount({
       displayName: "copy target",
@@ -2578,8 +2582,41 @@ describe("local API", () => {
       kind: "cookie",
       displayName: "copy test provider",
       capabilityVersion: "copy-test-v1",
-      capabilities: new Set(["read-campaigns", "create-campaigns", "copy-ads"]),
+      capabilities: new Set(["read-campaigns", "read-ad-groups", "create-campaigns"]),
       checkHealth: async () => ({ ok: true, status: "ready", message: "ready" }),
+      readAdGroupOriginalPosts: async (_context, input) => {
+        if (input.campaignId !== "source-campaign" || input.adGroupId !== "source-group") {
+          throw new Error("wrong source group");
+        }
+        return {
+          posts: [{
+            itemId: remoteSourceVideoCode,
+            identityId: "source-identity",
+            identityType: 2,
+            identityBcId: "0",
+            vid: `source-vid-${remoteSourceVideoCode}`,
+            videoId: null,
+            displayName: "source post",
+            coverUrl: null,
+            promotable: true,
+          }],
+          productUrl: "https://source.example/product",
+        };
+      },
+      readAccessibleOriginalPosts: async (_context, sourcePosts) => sourcePosts.flatMap((sourcePost) =>
+        sourcePost.itemId === remoteTargetVideoCode
+          ? [{
+              itemId: sourcePost.itemId,
+              identityId: "target-identity",
+              identityType: 2,
+              identityBcId: "0",
+              vid: `target-vid-${sourcePost.itemId}`,
+              videoId: null,
+              displayName: "target post",
+              coverUrl: null,
+              promotable: true,
+            }]
+          : []),
       syncReadOnly: async (context) => {
         const refreshedAt = new Date().toISOString();
         if (context.accountId === "demo-account") {
@@ -2653,7 +2690,7 @@ describe("local API", () => {
     return {
       input: {
         sourceAccountId: "demo-account",
-        sourceAdId: "source-ad",
+        sourceAdGroupId: "source-group",
         targetAccountIds: [target.id],
         launchPresetId: "default-launch-preset",
         launchRows: [apiLaunchRow(2)],

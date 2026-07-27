@@ -595,7 +595,7 @@ export async function createApp(
   app.post("/api/launch-plans/copy-preview", async (request, reply) => {
     try {
       return reply.status(201).send(
-        dependencies.store.createLaunchCopyPreview(
+        await launchService.createCopyPreview(
           LaunchCopyPreviewInputSchema.parse(request.body),
         ),
       );
@@ -1222,7 +1222,7 @@ export async function createApp(
     const { accountId } = AccountParamsSchema.parse(request.params);
     const account = dependencies.store.getAccount(accountId);
     if (!account) return reply.status(404).send({ message: "账号不存在。" });
-    return dependencies.store.listManagedEntities(
+    return dependencies.store.listCurrentManagedEntities(
       accountId,
       account.providerKind,
     );

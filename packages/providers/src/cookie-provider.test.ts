@@ -4,6 +4,33 @@ import type { CreationMutation, ProviderContext } from "./types.js";
 
 let successfulCreationCompleted = false;
 
+function originalPostContext(): ProviderContext {
+  return {
+    accountId: "test-account",
+    timezone: "Asia/Taipei",
+    settings: {
+      kind: "cookie",
+      advertiserId: "654321",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    },
+    credential: {
+      kind: "cookie",
+      cookie: "sessionid=test-cookie",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [{
+        target: "ad-group",
+        url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=654321",
+        method: "POST",
+        body: "{}",
+        contentType: "application/json",
+      }],
+    },
+  };
+}
+
 afterEach(() => {
   successfulCreationCompleted = false;
   vi.unstubAllGlobals();
@@ -11,6 +38,190 @@ afterEach(() => {
 });
 
 describe("CookieAdsProvider", () => {
+  it("reads original posts from a two-level ad group through its procedural creative", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+      const payload = url.includes("sidebar/brief_info_list")
+        ? {
+            code: 0,
+            data: { campaign_brief_info: { ad_brief_info_list: [{
+              id: "group-1",
+              asset_group_brief_info_item_list: [{ id: "creative-1" }],
+            }] } },
+          }
+        : {
+            code: 0,
+            data: {
+              external_url: "https://example.com/product",
+              image_list: [{
+                aweme_item_id: "post-1",
+                identity_id: "identity-1",
+                identity_type: 2,
+                identity_bc_id: "0",
+                title: "原帖一",
+                video_info: { vid: "vid-1", video_id: "video-1" },
+              }],
+            },
+          };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+    const result = await new CookieAdsProvider().readAdGroupOriginalPosts!(
+      originalPostContext(),
+      { campaignId: "campaign-1", adGroupId: "group-1" },
+    );
+    expect(requests[0]).toMatchObject({ body: { campaign_id: "campaign-1" } });
+    expect(requests[1]?.url).toContain("creative_id=creative-1");
+    expect(result).toEqual({
+      productUrl: "https://example.com/product",
+      posts: [expect.objectContaining({
+        itemId: "post-1",
+        identityId: "identity-1",
+        identityType: 2,
+        identityBcId: "0",
+        vid: "vid-1",
+      })],
+    });
+  });
+
+  it("revalidates exact item ids against a target identity in bounded batches", async () => {
+    const nativeBodies: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      let payload: Record<string, unknown>;
+      if (url.includes("spark/identity/list")) {
+        payload = { code: 0, data: { has_more: false, identity_list: [{
+          identity_id: "target-identity",
+          identity_type: 2,
+          identity_bc_id: "77",
+          can_use_video_list: true,
+        }] } };
+      } else {
+        nativeBodies.push(JSON.parse(String(init?.body)));
+        payload = { code: 0, data: {
+          item_info_map: {
+            "post-2": { item_id: "post-2", video_info: { vid: "target-vid-2" } },
+            "post-1": { item_id: "post-1", video_info: { vid: "target-vid-1" } },
+          },
+        } };
+      }
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+    const posts = await new CookieAdsProvider().readAccessibleOriginalPosts!(
+      originalPostContext(),
+      ["post-1", "post-2"].map((itemId) => ({
+        itemId,
+        identityId: "target-identity",
+        identityType: 2,
+        identityBcId: "0",
+        vid: `source-${itemId}`,
+        videoId: null,
+        displayName: null,
+        coverUrl: null,
+        promotable: true,
+      })),
+    );
+    expect(nativeBodies).toEqual([{ item_req_list: [
+      expect.objectContaining({ aweme_item_ids: ["post-1"], identity_bc_id: "77" }),
+      expect.objectContaining({ aweme_item_ids: ["post-2"], identity_bc_id: "77" }),
+    ] }]);
+    expect(posts.map((post) => post.itemId)).toEqual(["post-1", "post-2"]);
+    expect(posts.every((post) => post.identityId === "target-identity")).toBe(true);
+  });
+
+  it("keeps large post sets bounded instead of loading or dispatching them as one request", async () => {
+    const batchSizes: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("spark/identity/list")) {
+        return new Response(JSON.stringify({ code: 0, data: {
+          has_more: false,
+          identity_list: [{
+            identity_id: "target-identity",
+            identity_type: 2,
+            identity_bc_id: "0",
+            can_use_video_list: true,
+          }],
+        } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      const body = JSON.parse(String(init?.body)) as { item_req_list: Array<{ aweme_item_ids: string[] }> };
+      batchSizes.push(body.item_req_list.length);
+      const itemInfoMap = Object.fromEntries(body.item_req_list.map((request) => {
+        const itemId = request.aweme_item_ids[0]!;
+        return [itemId, { item_id: itemId, video_info: { vid: `target-${itemId}` } }];
+      }));
+      return new Response(JSON.stringify({ code: 0, data: { item_info_map: itemInfoMap } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+    const sourcePosts = Array.from({ length: 120 }, (_, index) => ({
+      itemId: `post-${index}`,
+      identityId: "target-identity",
+      identityType: 2,
+      identityBcId: "0",
+      vid: `source-${index}`,
+      videoId: null,
+      displayName: null,
+      coverUrl: null,
+      promotable: true,
+    }));
+    const posts = await new CookieAdsProvider().readAccessibleOriginalPosts!(
+      originalPostContext(),
+      sourcePosts,
+    );
+    expect(batchSizes).toEqual([50, 50, 20]);
+    expect(posts).toHaveLength(120);
+  });
+
+  it("fails clearly instead of looping or silently truncating an excessive identity list", async () => {
+    let identityRequests = 0;
+    let nativeRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("spark/identity/list")) {
+        identityRequests += 1;
+        return jsonResponse({
+          code: 0,
+          data: {
+            has_more: true,
+            cursor: String(identityRequests),
+            next_page: identityRequests + 1,
+            next_query_mode: 8,
+            identity_list: [],
+          },
+        });
+      }
+      nativeRequests += 1;
+      return jsonResponse({ code: 0, data: { item_info_map: {} } });
+    }));
+    const sourcePost = {
+      itemId: "post-1",
+      identityId: "identity-1",
+      identityType: 2,
+      identityBcId: "0",
+      vid: "source-vid",
+      videoId: null,
+      displayName: null,
+      coverUrl: null,
+      promotable: true,
+    };
+
+    await expect(new CookieAdsProvider().readAccessibleOriginalPosts!(
+      originalPostContext(),
+      [sourcePost],
+    )).rejects.toThrow("安全分页上限");
+    expect(identityRequests).toBe(50);
+    expect(nativeRequests).toBe(0);
+  });
+
   it("reuses the ad-group status session to delete a disabled ad group without another cURL", async () => {
     const sentBodies: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -1591,6 +1802,66 @@ describe("CookieAdsProvider", () => {
     expect(requested.some((item) =>
       new URL(item.url).pathname === "/api/v4/i18n/creation/creative_snap/check/"
     )).toBe(false);
+  });
+
+  it("creates from verified target-account posts without video-code lookup or authorization fallback", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      const body = url.includes("spark/validate_promote_music")
+        ? { data: { music_info_map: { "target-post": { status: 0 } } }, code: 0 }
+        : url.includes("creative/creative_automation_option")
+          ? { data: { strategy_ids: [], group_strategies: [] }, code: 0 }
+          : url.includes("spark/creative_fix_task/save")
+            ? { data: { task_map: { "target-vid": "spark-task" } }, code: 0 }
+            : url.includes("spark/creative_fix_task/info")
+              ? { data: { task_info_map: { "spark-task": { task_status: 2 } } }, code: 0 }
+              : successfulCreationPayload(url);
+      return jsonResponse(body);
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#must-not-be-resolved";
+    mutation.originalPosts = [{
+      itemId: "target-post",
+      identityId: "target-identity",
+      identityType: 2,
+      identityBcId: "77",
+      vid: "target-vid",
+      videoId: null,
+      displayName: "目标账户原帖",
+      coverUrl: null,
+      promotable: true,
+    }];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    const paths = requested.map((item) => new URL(item.url).pathname);
+    expect(paths.some((path) => path.includes("/material/tt_video/"))).toBe(false);
+    expect(paths.some((path) => path.includes("/upload/"))).toBe(false);
+    expect(requested.find((item) => item.url.includes("validate_promote_music"))?.body)
+      .toMatchObject({
+        post_list: [{
+          item_id: "target-post",
+          identity_id: "target-identity",
+          identity_type: 2,
+          identity_bc_id: "77",
+        }],
+      });
+    const creativeBody = requested.find((item) => item.url.includes("creative_snap/save"));
+    const asset = (creativeBody?.body.asset_group_sketch_form_data_list as Array<{
+      image_list: Array<Record<string, unknown>>;
+    }>)[0]!;
+    expect(asset.image_list).toEqual([expect.objectContaining({
+      aweme_item_id: "target-post",
+      identity_id: "target-identity",
+      identity_type: 2,
+      identity_bc_id: "77",
+    })]);
   });
 
   it("does not save a creative when TikTok does not confirm the authorization identity", async () => {

@@ -11,6 +11,7 @@ import type {
   LaunchCreationEvidence,
   LaunchCreationProgress,
   ProviderCapability,
+  LaunchOriginalPost,
 } from "@tk-auto/core";
 
 export type { ProviderCapability } from "@tk-auto/core";
@@ -64,6 +65,10 @@ export interface CreationMutation {
   correlationId?: string;
   batchCampaignId?: string;
   batchAdGroupNames?: string[];
+  /** Frozen posts resolved in the target advertiser account for an original-post
+   * migration. When present the provider must use these records directly and
+   * must not resolve video codes, upload media, or authorize Spark posts. */
+  originalPosts?: LaunchOriginalPost[];
   /** Read-only recovery for a previously unknown dispatch. The provider must
    * query remote state and must not save or publish another draft. */
   reconcileOnly?: boolean;
@@ -116,6 +121,17 @@ export interface ProviderContract {
 
 export interface ReadProvider extends ProviderContract {
   syncReadOnly(context: ProviderContext): Promise<ProviderSyncOutput>;
+}
+
+export interface OriginalPostMigrationProvider extends ProviderContract {
+  readAdGroupOriginalPosts(
+    context: ProviderContext,
+    input: { campaignId: string; adGroupId: string },
+  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null }>;
+  readAccessibleOriginalPosts(
+    context: ProviderContext,
+    sourcePosts: LaunchOriginalPost[],
+  ): Promise<LaunchOriginalPost[]>;
 }
 
 export interface StatusMutationProvider extends ProviderContract {
@@ -186,6 +202,7 @@ export interface DeleteAdGroupProvider extends ProviderContract {
 
 export type AdsProvider = ProviderContract
   & Partial<ReadProvider>
+  & Partial<OriginalPostMigrationProvider>
   & Partial<StatusMutationProvider>
   & Partial<CreationProvider>
   & Partial<TemplateCopyProvider>

@@ -564,6 +564,14 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
 .copy-preview-actions { margin: 14px 18px; display: flex; align-items: center; gap: 12px; }
 .copy-preview-actions small { color: #718095; line-height: 1.5; }
 .copy-preview-result { margin-top: 14px; }
+.migration-target-configs { display: grid; gap: 12px; margin-top: 14px; }
+.migration-target-configs > article { border: 1px solid var(--line); border-radius: 10px; padding: 13px; background: var(--surface-raised); }
+.migration-target-configs > article > header { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.migration-target-configs > article > header small { color: #718095; }
+.migration-confirmation { display: grid; gap: 12px; }
+.migration-source-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; }
+.migration-source-summary details small { display: block; padding: 4px 0; overflow-wrap: anywhere; }
+.migration-confirmation td small { display: block; color: #718095; margin-top: 3px; }
 .sheet-dropzone:hover { border-color: #18bcb7; background: #f2fffe; }
 .sheet-dropzone svg { color: #0ba5a0; }
 .sheet-dropzone strong { font-size: 12px; }

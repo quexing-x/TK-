@@ -12,6 +12,7 @@ const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 export async function readLaunchSpreadsheet(
   file: File,
   preset: LaunchPresetInput,
+  options: { requireVideoCode?: boolean } = {},
 ): Promise<LaunchSheetImportResult> {
   const extension = file.name.split(".").pop()?.toLowerCase();
   let table: unknown[][];
@@ -33,10 +34,12 @@ export async function readLaunchSpreadsheet(
   } else {
     throw new Error("仅支持 .xlsx 或 .csv 文件。");
   }
-  return parseLaunchSheetTable(table, preset);
+  return parseLaunchSheetTable(table, preset, new Date(), undefined, options);
 }
 
-export async function downloadLaunchTemplate(): Promise<void> {
+export async function downloadLaunchTemplate(
+  options: { originalPostMigration?: boolean } = {},
+): Promise<void> {
   const { Workbook } = await loadExcelJs();
   const workbook = new Workbook();
   const input = workbook.addWorksheet("批量创建", { views: [{ state: "frozen", ySplit: 1 }] });
@@ -47,7 +50,12 @@ export async function downloadLaunchTemplate(): Promise<void> {
 
   const example = workbook.addWorksheet("填写示例");
   example.addRow(launchSheetColumns.map((column) => column.label));
-  example.addRow(["夏季促销系列", "夏季广告组", "视频代码_001；视频代码_002", "https://example.com/product"]);
+  example.addRow([
+    "夏季促销系列",
+    "夏季广告组",
+    options.originalPostMigration ? "" : "视频代码_001；视频代码_002",
+    "https://example.com/product",
+  ]);
   example.columns = [{ width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }];
   styleHeader(example.getRow(1));
 
@@ -57,7 +65,9 @@ export async function downloadLaunchTemplate(): Promise<void> {
     ["规则", "说明"],
     ["推广系列名称", "必填。同一行拆分出的多个视频代码共用此系列名称。"],
     ["广告组名称", "必填。同一行拆分出的多个视频代码共用此广告组名称。"],
-    ["视频代码", "必填。可填写一个代码，或用中文分号（；）、英文分号（;）或换行分隔多个代码；多个代码作为同一广告组的素材。视频必须已存在于每个目标账户自己的素材库。"],
+    ["视频代码", options.originalPostMigration
+      ? "原帖迁移无需填写。系统直接读取源广告组帖子，并按 item_id 核对目标账户。"
+      : "普通创建必填。可填写一个代码，或用中文分号（；）、英文分号（;）或换行分隔多个代码；多个代码作为同一广告组的素材。"],
     ["产品 URL", "必填。必须以 http:// 或 https:// 开头；同一行拆分出的多个广告共用此 URL。"],
     ["广告预设", "预算、出价、创建/结束时间和初始状态统一从所选广告预设读取，无需写入表格。"],
     ["自动命名", "广告名称由软件自动生成：YYMMDD:XXX，例如 260716:001。"],
@@ -71,7 +81,9 @@ export async function downloadLaunchTemplate(): Promise<void> {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "TK广告批量创建模板.xlsx";
+  anchor.download = options.originalPostMigration
+    ? "TK广告原帖迁移模板.xlsx"
+    : "TK广告批量创建模板.xlsx";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();

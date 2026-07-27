@@ -4,6 +4,7 @@ import {
   type ProviderCapability,
   type ProviderConnection,
   type ProviderKind,
+  type LaunchOriginalPost,
 } from "@tk-auto/core";
 import { CookieAdsProvider } from "./cookie-provider.js";
 import { OfficialApiAdsProvider } from "./official-api-provider.js";
@@ -143,6 +144,30 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持读取广告数据。`);
     }
     return provider.syncReadOnly(context);
+  }
+
+  readAdGroupOriginalPosts(
+    kind: ProviderKind,
+    context: ProviderContext,
+    input: { campaignId: string; adGroupId: string },
+  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null }> {
+    const provider = this.get(kind);
+    if (!provider.readAdGroupOriginalPosts) {
+      throw new Error(`${provider.displayName} 暂不支持读取广告组原帖。`);
+    }
+    return provider.readAdGroupOriginalPosts(context, input);
+  }
+
+  readAccessibleOriginalPosts(
+    kind: ProviderKind,
+    context: ProviderContext,
+    sourcePosts: LaunchOriginalPost[],
+  ): Promise<LaunchOriginalPost[]> {
+    const provider = this.get(kind);
+    if (!provider.readAccessibleOriginalPosts) {
+      throw new Error(`${provider.displayName} 暂不支持读取账户帖子。`);
+    }
+    return provider.readAccessibleOriginalPosts(context, sourcePosts);
   }
 
   changeStatus(

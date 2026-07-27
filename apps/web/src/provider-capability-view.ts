@@ -16,7 +16,7 @@ export function canUseCopySource(
   profile: AccountProviderCapabilities | undefined,
 ): boolean {
   return hasProviderCapability(profile, "read-campaigns")
-    && hasProviderCapability(profile, "read-ads");
+    && hasProviderCapability(profile, "read-ad-groups");
 }
 
 export function canUseLaunchTarget(
