@@ -2285,6 +2285,47 @@ describe("local API", () => {
     expect(createFromPreset.mock.calls[0]?.[1][0]).not.toHaveProperty("templateCampaignId");
   });
 
+  it("accepts object-specific original-post asset readback when the ordinary ad list is empty", async () => {
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "new-campaign",
+        adGroupId: "new-group",
+        adId: "new-asset-group",
+        message: "created and verified",
+      })),
+    );
+    const fixture = await installCopyLaunchProvider(createFromPreset, true);
+    const preview = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans/copy-preview",
+      payload: fixture.input,
+    });
+    const plan = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans",
+      payload: { ...fixture.input, mode: "copy", copyPreviewId: preview.json().id },
+    });
+
+    const execution = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${plan.json().id}/execute`,
+    });
+
+    expect(execution.statusCode).toBe(200);
+    expect(execution.json().results[0]).toMatchObject({
+      status: "succeeded",
+      syncWarning: null,
+      created: [expect.objectContaining({ adId: "new-asset-group" })],
+    });
+    expect(store.listLaunchPlanItems(plan.json().id)[0]).toMatchObject({
+      status: "succeeded",
+      adId: "new-asset-group",
+      syncWarning: null,
+    });
+  });
+
   it("blocks a copy item before provider dispatch when the frozen source drifts", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
@@ -2535,6 +2576,7 @@ describe("local API", () => {
       context: ProviderContext,
       mutations: CreationMutation[],
     ) => Promise<CreationMutationResult[]>,
+    ordinaryAdListEmptyAfterCreation = false,
   ): Promise<{
     input: {
       sourceAccountId: string;
@@ -2686,7 +2728,9 @@ describe("local API", () => {
           ? [
             { entityType: "campaign" as const, externalId: "new-campaign", payload: {} },
             { entityType: "ad-group" as const, externalId: "new-group", payload: {} },
-            { entityType: "ad" as const, externalId: "new-ad", payload: {} },
+            ...(!ordinaryAdListEmptyAfterCreation
+              ? [{ entityType: "ad" as const, externalId: "new-ad", payload: {} }]
+              : []),
           ]
           : [{
             entityType: "ad" as const,
@@ -2701,7 +2745,9 @@ describe("local API", () => {
             counts: creationDispatched
               ? { campaign: 1, "ad-group": 1, ad: 1 }
               : { campaign: 0, "ad-group": 0, ad: 1 },
-            warnings: [],
+            warnings: creationDispatched && ordinaryAdListEmptyAfterCreation
+              ? ["ad 响应成功，但暂未识别到列表数据。"]
+              : [],
             quality: testSyncQuality(refreshedAt),
           },
         };

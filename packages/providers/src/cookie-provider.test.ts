@@ -1487,6 +1487,48 @@ describe("CookieAdsProvider", () => {
     expect(requestedPaths.some((path) => path.includes("/creation/"))).toBe(false);
   });
 
+  it("does not treat a tracked ad draft id with a different name as the current task draft", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname.includes("/statistics/sketch/ad/list")) {
+        return jsonResponse(completeListPayload([{
+          ad_sketch_id: "tracked-ad-draft",
+          ad_sketch_name: "template-group",
+        }]));
+      }
+      if (pathname.includes("/statistics/sketch/")) return jsonResponse(emptySketchListPayload());
+      if (pathname.includes("/statistics/op/campaign/list")) {
+        return jsonResponse(completeListPayload([{ campaign_id: "campaign", campaign_name: "campaign" }]));
+      }
+      if (pathname.includes("/statistics/op/")) return jsonResponse(completeListPayload([]));
+      throw new Error(`unexpected request: ${pathname}`);
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.reconcileOnly = true;
+    mutation.reconcileEvidence = {
+      resolvedAdGroupName: "group",
+      providerRequestId: null,
+      campaignSnapId: null,
+      campaignSketchId: null,
+      adGroupSnapId: "tracked-ad-snap",
+      adGroupSketchId: "tracked-ad-draft",
+      creativeSnapId: null,
+      creativeSketchId: null,
+      asyncRequestId: null,
+    };
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "retryable",
+      retrySafe: true,
+    });
+  });
+
   it("creates one ad-group with several ads from a multi-code cell", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     let creativeSaves = 0;
@@ -1966,8 +2008,14 @@ describe("CookieAdsProvider", () => {
 
     expect(result).toMatchObject({ ok: true, campaignId: "source-campaign" });
     const paths = requested.map((item) => new URL(item.url).pathname);
-    expect(paths).toContain("/mi/api/v4/i18n/creation/campaign_snap/copy/");
+    expect(paths).toContain("/api/v4/i18n/creation/ad_snap/copy/");
+    expect(paths).not.toContain("/mi/api/v4/i18n/creation/campaign_snap/copy/");
     expect(paths).not.toContain("/api/v4/i18n/creation/campaign_snap/save/");
+    expect(requested.find((item) => item.url.includes("ad_snap/copy"))?.body).toMatchObject({
+      existing_campaign_id: "source-campaign",
+      copy_ad_id_to_existing_campaign: true,
+      ad_params: [{ ad_id: "source-adgroup", name_list: ["group"] }],
+    });
     expect(requested.find((item) => item.url.includes("ad_snap/save"))?.body).toMatchObject({
       campaign_id: "source-campaign",
       campaign_snap_id: "",
@@ -3757,6 +3805,26 @@ function successfulCreationPayload(url: string): Record<string, unknown> {
   if (url.includes("/statistics/op/ad/list")) return { code: 0, data: { table: successfulCreationCompleted
     ? [{ campaign_id: "campaign", ad_id: "adgroup", creative_id: "creative", creative_name: "260717:001", creative_status: "enabled" }]
     : [], pagination: { page: 1, page_count: 1 } } };
+  if (url.includes("ad_snap/copy")) return { code: 0, data: {
+    all_copy_result: { ad_and_creative_copy_result_list: [{
+      new_ad_snap_info_item: {
+        ad_snap_id: "ad-snap",
+        ad_snap_form_data: { ad_name: "source-group", budget: "1", image_list: [] },
+      },
+      new_ad_sketch_id: "ad-sketch",
+      new_creative_snap_info_item_list: [{
+        creative_snap_id: "creative-snap",
+        asset_group_creative_snap_form_data: {
+          creative_name: "source",
+          external_url: "https://example.com",
+          creative_automation_type: 1,
+          spc_upgrade_mode: 1,
+          image_list: [{ aweme_item_id: "video" }],
+        },
+      }],
+      new_creative_sketch_ids: ["creative-sketch"],
+    }] },
+  } };
   if (url.includes("campaign_snap/copy")) return { code: 0, data: {
     new_campaign_snap_info_item: { campaign_snap_id: "campaign-snap", campaign_snap_form_data: { campaign_name: "source", campaign_snap_id: "campaign-snap", objective_type: 9 } },
     new_campaign_sketch_id: "campaign-sketch",

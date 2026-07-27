@@ -480,7 +480,7 @@ export class LaunchService {
       }
 
       if (successes.length > 0) {
-        let commonSyncWarning: string | null = null;
+        let commonSyncWarnings: string[] = [];
         let syncResult: ReadOnlySyncResult | null = null;
         let syncEntities: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>["entities"] = [];
         let syncCompleted = false;
@@ -491,35 +491,47 @@ export class LaunchService {
           this.store.saveReadOnlySync(first.accountId, account.providerKind, sync.entities, sync.result);
           syncCompleted = true;
           if (sync.result.quality.status !== "healthy" || sync.result.warnings.length > 0) {
-            commonSyncWarning = [
-              commonSyncWarning,
+            commonSyncWarnings = [
               ...(sync.result.quality.status !== "healthy"
                 ? [`创建后同步质量为 ${sync.result.quality.status}`]
                 : []),
               ...sync.result.warnings,
-            ].filter(Boolean).join("；");
+            ];
           }
         } catch (cause) {
-          commonSyncWarning = [commonSyncWarning, safeError(cause)].filter(Boolean).join("；");
+          commonSyncWarnings.push(safeError(cause));
           this.store.updateProviderStatus(
             first.accountId,
             account.providerKind,
             "failed",
-            `创建后同步异常：${commonSyncWarning}`,
+            `创建后同步异常：${commonSyncWarnings.join("；")}`,
           );
         }
         for (const success of successes) {
+          // Original-post migration resolves its published asset-group id via
+          // get_creative_fields_by_ad before the provider reports success.
+          // That asset group is not guaranteed to appear in the ordinary ad
+          // statistics list, so an empty ad list must not invalidate the
+          // stronger object-specific readback evidence.
+          const originalPostAssetVerified = Boolean(
+            success.item.sourceSnapshot && success.created.adId,
+          );
+          const itemSyncWarnings = commonSyncWarnings.filter((warning) =>
+            !(originalPostAssetVerified
+              && warning === "ad 响应成功，但暂未识别到列表数据。"),
+          );
           const missing = [
             ["campaign", success.created.campaignId] as const,
             ["ad-group", success.created.adGroupId] as const,
             ...(success.created.adId ? [["ad", success.created.adId] as const] : []),
           ].filter(([entityType, externalId]) =>
             syncCompleted
+            && !(originalPostAssetVerified && entityType === "ad")
             && !syncEntities.some((entity) => entity.entityType === entityType && entity.externalId === externalId),
           );
           const itemWarning = [
             success.output.syncWarning,
-            commonSyncWarning,
+            ...itemSyncWarnings,
             ...(missing.length > 0 ? [`创建后未回读到：${missing.map(([type]) => type).join("、")}`] : []),
           ].filter(Boolean).join("；") || null;
           try {

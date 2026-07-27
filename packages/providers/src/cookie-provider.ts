@@ -2134,10 +2134,16 @@ function reconciliationDraftExists(
       ? mutation.reconcileEvidence?.adGroupSketchId
       : mutation.reconcileEvidence?.creativeSketchId;
   if (trackedId) {
-    const ids = kind === "campaign"
-      ? baseline.campaignSketchIds
-      : kind === "ad" ? baseline.adSketchIds : baseline.creativeSketchIds;
-    return ids.has(trackedId);
+    const rows = kind === "campaign"
+      ? baseline.campaignSketchRows
+      : kind === "ad" ? baseline.adSketchRows : baseline.creativeSketchRows;
+    const idKeys = kind === "campaign"
+      ? ["campaign_sketch_id"]
+      : kind === "ad" ? ["ad_sketch_id"] : ["creative_sketch_id"];
+    return rows.some((row) =>
+      idKeys.some((key) => nonEmptyId(row[key]) === trackedId)
+      && sketchRowName(row, kind) === legacyName,
+    );
   }
   // Legacy unknown tasks did not persist sketch ids. Name matching is kept only
   // for those records; new tasks always use their exact tracked evidence.
@@ -2589,9 +2595,9 @@ async function runCookieDraftChain(
   // campaign draft; exact-name matches skip that save and attach a fresh
   // ad-group to the existing campaign. Campaign copy is reserved for the
   // explicit templateMode="copy" operation only.
-  const verifiedTargetTemplateCampaignId = !credential.creationProfile
+  const verifiedTargetTemplate = !credential.creationProfile
     && mutation.originalPosts?.length
-    ? selectCompatibleTargetTemplateCampaign(
+    ? selectCompatibleTargetTemplate(
         campaignEntities,
         preflightEntities,
         mutation,
@@ -2599,24 +2605,33 @@ async function runCookieDraftChain(
       )
     : undefined;
   if (!credential.creationProfile && mutation.originalPosts?.length
-    && !verifiedTargetTemplateCampaignId) {
+    && !verifiedTargetTemplate) {
     throw new RetryableCreationError(
       "目标账户没有可用于原帖迁移的同类型正式 Campaign，已在发送创建请求前停止。请先在该账户完成一条同类型广告创建。",
     );
   }
   const initializationTemplateCampaignId = copyOnly
     ? mutation.templateCampaignId
-    : verifiedTargetTemplateCampaignId;
+    : verifiedTargetTemplate?.campaignId;
   const initializedIds = initializationTemplateCampaignId
-    ? await initializeProfileDraftIds(
-        sessionRequest,
-        credential,
-        mutation,
-        dispatchState,
-        campaignEntities,
-        initializationTemplateCampaignId,
-        copyOnly,
-      )
+    ? existingCampaignId && !copyOnly && verifiedTargetTemplate
+      ? await initializeExistingCampaignDraftIds(
+          sessionRequest,
+          credential,
+          mutation,
+          dispatchState,
+          verifiedTargetTemplate.adGroupId,
+          existingCampaignId,
+        )
+      : await initializeProfileDraftIds(
+          sessionRequest,
+          credential,
+          mutation,
+          dispatchState,
+          campaignEntities,
+          initializationTemplateCampaignId,
+          copyOnly,
+        )
     : null;
   if (initializedIds) {
     applyCopiedDraftForms(drafts, initializedIds, !copyOnly, existingCampaignId);
@@ -3680,6 +3695,40 @@ async function initializeProfileDraftIds(
   return copiedDraftIds(copied);
 }
 
+async function initializeExistingCampaignDraftIds(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutation: CreationMutation,
+  dispatchState: CreationDispatchState,
+  templateAdGroupId: string,
+  existingCampaignId: string,
+): Promise<InitializedDraftIds> {
+  const profile = credential.creationProfile;
+  const riskInfo = profile && isRecord(profile.publishPayload.risk_info)
+    ? profile.publishPayload.risk_info
+    : profile && isRecord(profile.campaignPayload.risk_info)
+      ? profile.campaignPayload.risk_info
+      : {};
+  const copied = await requestCreationStep(
+    "ad_snap/copy",
+    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/copy/", {
+      with_sketch: true,
+      resp_with_detail: true,
+      with_creative: true,
+      is_batch_copy: true,
+      ad_params: [{ ad_id: templateAdGroupId, name_list: [mutation.row.adGroupName] }],
+      copy_ad_id_to_existing_campaign: true,
+      is_manual_upgrade_to_splusplus: false,
+      converter_mode: 0,
+      existing_campaign_id: existingCampaignId,
+      risk_info: riskInfo,
+    }),
+    credential,
+    { semantics: "mutation", dispatchState },
+  );
+  return copiedExistingCampaignDraftIds(copied);
+}
+
 /** Normalize the provider-owned legacy source field at the credential edge. */
 export function resolveTemplateCampaignId(
   credential: ProviderContext["credential"],
@@ -4198,12 +4247,69 @@ function responseIdKeys(value: unknown, prefix = ""): string[] {
   });
 }
 
-function selectCompatibleTargetTemplateCampaign(
+function copiedExistingCampaignDraftIds(payload: Record<string, unknown>): InitializedDraftIds {
+  const data = isRecord(payload.data) ? payload.data : undefined;
+  const allCopy = data && isRecord(data.all_copy_result) ? data.all_copy_result : undefined;
+  const list = allCopy && Array.isArray(allCopy.ad_and_creative_copy_result_list)
+    ? allCopy.ad_and_creative_copy_result_list.filter(isRecord)
+    : [];
+  const item = list.length === 1 ? list[0] : undefined;
+  const adItem = item && isRecord(item.new_ad_snap_info_item)
+    ? item.new_ad_snap_info_item
+    : undefined;
+  const adSnapId = adItem ? nonEmptyId(adItem.ad_snap_id) : undefined;
+  const adSketchId = item ? nonEmptyId(item.new_ad_sketch_id) : undefined;
+  const adForm = adItem && isRecord(adItem.ad_snap_form_data)
+    ? adItem.ad_snap_form_data
+    : undefined;
+  const creativeItems = item && Array.isArray(item.new_creative_snap_info_item_list)
+    ? item.new_creative_snap_info_item_list.filter(isRecord)
+    : [];
+  const creativeItem = creativeItems.length === 1 ? creativeItems[0] : undefined;
+  const creativeSnapId = creativeItem ? nonEmptyId(creativeItem.creative_snap_id) : undefined;
+  const creativeForm = creativeItem && isRecord(creativeItem.asset_group_creative_snap_form_data)
+    ? creativeItem.asset_group_creative_snap_form_data
+    : undefined;
+  const creativeSketchIds = item && Array.isArray(item.new_creative_sketch_ids)
+    ? item.new_creative_sketch_ids
+    : [];
+  const creativeSketchId = nonEmptyId(creativeSketchIds[0]);
+  if (!adSnapId || !adSketchId || !adForm || !creativeSnapId || !creativeSketchId || !creativeForm) {
+    throw new UnknownCreationStateError(
+      "TikTok 现有系列广告组初始化响应缺少广告组或创意的 snap/sketch/form 数据。",
+    );
+  }
+  return {
+    campaignSnapId: "",
+    campaignSketchId: "",
+    adSnapId,
+    adSketchId,
+    creativeSnapId,
+    creativeSketchId,
+    campaignForm: {},
+    adForm,
+    creativeForm,
+    publishItems: [{
+      ad_id: "",
+      ad_snap_id: adSnapId,
+      ad_sketch_id: adSketchId,
+      creative_snap_info_list: [{
+        creative_id: "",
+        creative_snap_id: creativeSnapId,
+        creative_sketch_id: creativeSketchId,
+        need_publish: true,
+      }],
+      need_publish: true,
+    }],
+  };
+}
+
+function selectCompatibleTargetTemplate(
   campaigns: ProviderEntity[],
   adGroups: ProviderEntity[],
   mutation: CreationMutation,
   preferredCampaignId?: string,
-): string | undefined {
+): { campaignId: string; adGroupId: string } | undefined {
   const campaignIdsWithGroups = new Set(
     adGroups
       .map((entity) => normalizeProviderEntity(entity).parentCampaignId)
@@ -4227,7 +4333,18 @@ function selectCompatibleTargetTemplateCampaign(
     const rightTime = Date.parse(normalizeProviderEntity(right).createdAt ?? "") || 0;
     return rightTime - leftTime || right.externalId.localeCompare(left.externalId);
   });
-  return candidates[0]?.externalId;
+  const campaignId = candidates[0]?.externalId;
+  if (!campaignId) return undefined;
+  const templateAdGroup = adGroups
+    .filter((entity) => normalizeProviderEntity(entity).parentCampaignId === campaignId)
+    .sort((left, right) => {
+      const leftTime = Date.parse(normalizeProviderEntity(left).createdAt ?? "") || 0;
+      const rightTime = Date.parse(normalizeProviderEntity(right).createdAt ?? "") || 0;
+      return rightTime - leftTime || right.externalId.localeCompare(left.externalId);
+    })[0];
+  return templateAdGroup
+    ? { campaignId, adGroupId: templateAdGroup.externalId }
+    : undefined;
 }
 
 function providerEntityNumber(entity: ProviderEntity, key: string): number | undefined {
