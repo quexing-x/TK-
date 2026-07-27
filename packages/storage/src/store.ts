@@ -80,6 +80,7 @@ import {
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
   automaticName,
+  automaticAdGroupName,
   resolveLaunchStartAt,
   resolveMigrationStartAt,
   defaultCreationPresetConfig,
@@ -3726,10 +3727,14 @@ export class AutomationStore {
 
   createLaunchCopyPreview(
     input: LaunchCopyPreviewInput,
-    sourceSnapshot: LaunchSourceSnapshot,
+    sourceSnapshotInput: LaunchSourceSnapshot | LaunchSourceSnapshot[],
     targetPostMappings: LaunchTargetPostMapping[],
   ): LaunchCopyPreviewRecord {
     const request = LaunchCopyPreviewInputSchema.parse(input);
+    const sourceSnapshots = Array.isArray(sourceSnapshotInput) ? sourceSnapshotInput : [sourceSnapshotInput];
+    const sourceAdGroupIds = [...new Set(request.sourceAdGroupIds?.length
+      ? request.sourceAdGroupIds
+      : [request.sourceAdGroupId])];
     const targetAccountIds = [...new Set(request.targetAccountIds)];
     if (targetAccountIds.includes(request.sourceAccountId)) {
       throw new Error("复制迁移的目标账户必须不同于源账户。");
@@ -3743,9 +3748,9 @@ export class AutomationStore {
         throw new Error("目标账户与逐账户迁移配置不一致，请重新配置。");
       }
     }
-    const requestedTaskCount = targetConfigs.length > 0
+    const requestedTaskCount = (targetConfigs.length > 0
       ? targetConfigs.reduce((sum, item) => sum + item.quantity, 0)
-      : targetAccountIds.length * request.launchRows.length;
+      : targetAccountIds.length * request.launchRows.length) * sourceSnapshots.length;
     if (requestedTaskCount > 100) {
       throw new Error("单次迁移最多创建 100 个广告组，请分批操作。");
     }
@@ -3762,12 +3767,17 @@ export class AutomationStore {
       initialStatus: preset.initialStatus,
       creationConfig: preset.creationConfig,
     };
-    if (sourceSnapshot.accountId !== request.sourceAccountId
-      || sourceSnapshot.adGroupId !== request.sourceAdGroupId) {
+    const sourceSnapshotIds = sourceSnapshots.map((snapshot) => snapshot.adGroupId);
+    if (sourceSnapshots.length !== sourceAdGroupIds.length
+      || new Set(sourceSnapshotIds).size !== sourceSnapshotIds.length
+      || sourceSnapshots.some((snapshot, index) => snapshot.accountId !== request.sourceAccountId
+        || snapshot.adGroupId !== sourceAdGroupIds[index])) {
       throw new Error("源广告组原帖快照与预览请求不一致。");
     }
-    if (jsonHash(sourceSnapshot.posts.map(postEvidenceHashValue)) !== sourceSnapshot.structuralHash) {
-      throw new Error("源广告组原帖快照校验失败。");
+    for (const snapshot of sourceSnapshots) {
+      if (jsonHash(snapshot.posts.map(postEvidenceHashValue)) !== snapshot.structuralHash) {
+        throw new Error(`源广告组“${snapshot.adGroupName}”原帖快照校验失败。`);
+      }
     }
     const now = new Date();
     const existingPlans = this.listMultiAccountLaunchPlans(10_000);
@@ -3784,40 +3794,56 @@ export class AutomationStore {
       if (!connection || connection.status !== "ready") {
         blockers.push(`目标账户“${account.displayName}”未通过连接检测。`);
       }
-      const targetPostMapping = targetPostMappings.find((mapping) => mapping.accountId === accountId);
-      const targetByItemId = new Map(targetPostMapping?.posts.map((post) => [post.itemId, post]));
-      const missingItemIds = sourceSnapshot.posts
-        .map((post) => post.itemId)
-        .filter((itemId) => !targetByItemId.has(itemId));
-      if (!targetPostMapping || missingItemIds.length > 0) {
-        blockers.push(
-          `目标账户“${account.displayName}”无法使用帖子：${missingItemIds.join("、") || "帖子证据缺失"}。`,
-        );
-        continue;
-      }
-      if (targetPostMapping.evidenceHash
-        !== jsonHash(targetPostMapping.posts.map(postEvidenceHashValue))) {
-        blockers.push(`目标账户“${account.displayName}”的帖子证据校验失败。`);
-        continue;
-      }
       const config = targetConfigs.find((item) => item.accountId === accountId);
-      if (config && !sourceSnapshot.productUrl) {
-        blockers.push(`源广告组未读取到产品 URL，无法为目标账户“${account.displayName}”创建广告组。`);
-        continue;
-      }
-      const accountLaunchRows = config
-        ? buildMigrationLaunchRows(sourceSnapshot, config, preset, existingPlans, now, account.timezone)
-        : applyPresetToLaunchRows(request.launchRows, preset, existingPlans, now, account.timezone);
-      accountLaunchRows.forEach((row, itemIndex) => {
-        items.push({
-          accountId,
-          itemIndex,
-          launchRow: row,
-          sourceSnapshot,
-          targetPostMapping,
-          differences: copyDifferences(sourceSnapshot, row),
+      const reservedAdGroupNames = new Set<string>();
+      for (const sourceSnapshot of sourceSnapshots) {
+        const targetPostMapping = targetPostMappings.find((mapping) =>
+          mapping.accountId === accountId
+          && (mapping.sourceAdGroupId === sourceSnapshot.adGroupId
+            || (sourceSnapshots.length === 1 && mapping.sourceAdGroupId === null)),
+        );
+        const targetByItemId = new Map(targetPostMapping?.posts.map((post) => [post.itemId, post]));
+        const missingItemIds = sourceSnapshot.posts
+          .map((post) => post.itemId)
+          .filter((itemId) => !targetByItemId.has(itemId));
+        if (!targetPostMapping || missingItemIds.length > 0) {
+          blockers.push(
+            `目标账户“${account.displayName}”无法使用帖子（源组“${sourceSnapshot.adGroupName}”）：${missingItemIds.join("、") || "帖子证据缺失"}。`,
+          );
+          continue;
+        }
+        if (targetPostMapping.evidenceHash
+          !== jsonHash(targetPostMapping.posts.map(postEvidenceHashValue))) {
+          blockers.push(`目标账户“${account.displayName}”的源组“${sourceSnapshot.adGroupName}”帖子证据校验失败。`);
+          continue;
+        }
+        if (config && !sourceSnapshot.productUrl) {
+          blockers.push(`源广告组“${sourceSnapshot.adGroupName}”未读取到产品 URL，无法为目标账户“${account.displayName}”创建。`);
+          continue;
+        }
+        const accountLaunchRows = config
+          ? buildMigrationLaunchRows(
+            sourceSnapshot,
+            config,
+            preset,
+            existingPlans,
+            reservedAdGroupNames,
+            now,
+            account.timezone,
+          )
+          : applyPresetToLaunchRows(request.launchRows, preset, existingPlans, now, account.timezone);
+        const firstItemIndex = items.filter((item) => item.accountId === accountId).length;
+        accountLaunchRows.forEach((row, sourceItemIndex) => {
+          items.push({
+            accountId,
+            itemIndex: firstItemIndex + sourceItemIndex,
+            launchRow: row,
+            sourceSnapshot,
+            targetPostMapping,
+            differences: copyDifferences(sourceSnapshot, row),
+          });
         });
-      });
+      }
     }
     if (items.some((item) => item.launchRow.initialStatus === "enabled")) {
       warnings.push("本次迁移包含创建后立即开启的广告；请在差异预览中再次核对预算和发布时间。");
@@ -3826,7 +3852,8 @@ export class AutomationStore {
     const preview = LaunchCopyPreviewRecordSchema.parse({
       id: randomUUID(),
       sourceAccountId: request.sourceAccountId,
-      sourceAdGroupId: request.sourceAdGroupId,
+      sourceAdGroupId: sourceAdGroupIds[0]!,
+      sourceAdGroupIds,
       targetAccountIds,
       targetConfigs,
       launchPresetId: request.launchPresetId,
@@ -3834,7 +3861,8 @@ export class AutomationStore {
       presetSnapshotHash: jsonHash(presetSnapshot),
       inputHash: copyPreviewInputHash({
         sourceAccountId: request.sourceAccountId,
-        sourceAdGroupId: request.sourceAdGroupId,
+        sourceAdGroupId: sourceAdGroupIds[0]!,
+        sourceAdGroupIds,
         targetAccountIds,
         launchPresetId: request.launchPresetId,
         launchRows: request.launchRows,
@@ -3846,7 +3874,8 @@ export class AutomationStore {
         launchRow: item.launchRow,
       }))),
       launchRows: items.map((item) => item.launchRow),
-      sourceSnapshot,
+      sourceSnapshot: sourceSnapshots[0]!,
+      sourceSnapshots,
       items,
       blockers: [...new Set(blockers)],
       warnings,
@@ -3854,6 +3883,30 @@ export class AutomationStore {
       expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
       createdAt,
     });
+    if (preview.safeToCreate) {
+      const existingRow = this.db.prepare(
+        `SELECT preview_json FROM launch_copy_previews
+         WHERE input_hash = ? AND safe_to_create = 1
+           AND consumed_plan_id IS NULL AND expires_at > ?
+         ORDER BY created_at DESC LIMIT 1`,
+      ).get(preview.inputHash, createdAt) as SqlRow | undefined;
+      if (existingRow) {
+        try {
+          const existing = LaunchCopyPreviewRecordSchema.safeParse(
+            JSON.parse(String(existingRow.preview_json)),
+          );
+          if (existing.success
+            && existing.data.presetSnapshotHash === preview.presetSnapshotHash
+            && existing.data.launchRowsHash === preview.launchRowsHash
+            && jsonHash(existing.data.sourceSnapshots.map((item) => item.structuralHash))
+              === jsonHash(preview.sourceSnapshots.map((item) => item.structuralHash))) {
+            return existing.data;
+          }
+        } catch {
+          // Ignore a damaged stale preview and persist the newly validated one.
+        }
+      }
+    }
     this.db.prepare(
       `INSERT INTO launch_copy_previews (
         id, source_account_id, source_ad_id, input_hash, preview_json,
@@ -3933,6 +3986,7 @@ export class AutomationStore {
       mode: plan.mode,
       sourceAccountId: plan.sourceAccountId,
       sourceAdGroupId: plan.sourceAdGroupId,
+      sourceAdGroupIds: plan.sourceAdGroupIds,
       copyPreviewId: plan.copyPreviewId,
       targetAccountIds: [...new Set(plan.targetAccountIds)],
       launchPresetId: plan.launchPresetId,
@@ -3971,6 +4025,7 @@ export class AutomationStore {
       const inputHash = copyPreviewInputHash({
         sourceAccountId: plan.sourceAccountId,
         sourceAdGroupId: plan.sourceAdGroupId ?? "",
+        sourceAdGroupIds: plan.sourceAdGroupIds,
         targetAccountIds: normalizedTargets,
         launchPresetId: plan.launchPresetId,
         launchRows: preview.targetConfigs.length > 0 ? [] : plan.launchRows,
@@ -4040,7 +4095,11 @@ export class AutomationStore {
           preview?.id ?? null,
           plan.sourceAccountId,
           plan.sourceAdGroupId ?? "__new__",
-          preview?.sourceSnapshot.adGroupName ?? "从零创建",
+          preview
+            ? preview.sourceSnapshots.length > 1
+              ? `${preview.sourceSnapshot.adGroupName} 等 ${preview.sourceSnapshots.length} 个源广告组`
+              : preview.sourceSnapshot.adGroupName
+            : "从零创建",
           JSON.stringify(targetAccountIds),
           "YYMMDD:XXX",
           toSqlBoolean(launchRows.every((row) => row.initialStatus === "disabled")),
@@ -6518,6 +6577,7 @@ function mapDatabaseBackup(row: SqlRow): DatabaseBackupRecord {
 function copyPreviewInputHash(input: {
   sourceAccountId: string;
   sourceAdGroupId: string;
+  sourceAdGroupIds?: string[];
   targetAccountIds: string[];
   launchPresetId: string;
   launchRows: LaunchCopyPreviewInput["launchRows"];
@@ -6526,6 +6586,7 @@ function copyPreviewInputHash(input: {
   return jsonHash({
     sourceAccountId: input.sourceAccountId,
     sourceAdGroupId: input.sourceAdGroupId,
+    sourceAdGroupIds: [...new Set(input.sourceAdGroupIds?.length ? input.sourceAdGroupIds : [input.sourceAdGroupId])].sort(),
     targetAccountIds: [...new Set(input.targetAccountIds)].sort(),
     launchPresetId: input.launchPresetId,
     launchRows: input.launchRows,
@@ -6538,14 +6599,31 @@ function buildMigrationLaunchRows(
   config: LaunchMigrationTargetConfig,
   preset: LaunchPresetRecord,
   existingPlans: MultiAccountLaunchPlanRecord[],
+  reservedAdGroupNames: Set<string>,
   now: Date,
   timeZone: string,
 ) {
   if (!source.productUrl) return [];
+  const resolvedStartAt = resolveMigrationStartAt(config.startAtRule, config.startAt, now, timeZone);
+  const deliveryAt = resolvedStartAt ? new Date(resolvedStartAt) : now;
+  const generatedPrefix = automaticAdGroupName(source.adGroupName, deliveryAt, 0, timeZone).replace(/1$/, "");
+  let nextIndex = 0;
+  for (const plan of existingPlans) {
+    for (const row of plan.launchRows) {
+      if (!row.adGroupName.startsWith(generatedPrefix)) continue;
+      const serial = Number(row.adGroupName.slice(generatedPrefix.length));
+      if (Number.isInteger(serial) && serial > nextIndex) nextIndex = serial;
+    }
+  }
+  for (const name of reservedAdGroupNames) {
+    if (!name.startsWith(generatedPrefix)) continue;
+    const serial = Number(name.slice(generatedPrefix.length));
+    if (Number.isInteger(serial) && serial > nextIndex) nextIndex = serial;
+  }
   const baseRows = Array.from({ length: config.quantity }, (_, index) => ({
     rowNumber: index + 2,
     campaignName: source.campaignName,
-    adGroupName: source.adGroupName,
+    adGroupName: automaticAdGroupName(source.adGroupName, deliveryAt, nextIndex + index, timeZone),
     adName: automaticName(now, index + 1),
     videoCode: "",
     productUrl: source.productUrl as string,
@@ -6556,12 +6634,14 @@ function buildMigrationLaunchRows(
     endAt: preset.endAt,
     initialStatus: preset.initialStatus,
   }));
-  return applyPresetToLaunchRows(baseRows, preset, existingPlans, now, timeZone).map((row) => ({
+  const rows = applyPresetToLaunchRows(baseRows, preset, existingPlans, now, timeZone).map((row) => ({
     ...row,
     dailyBudget: config.dailyBudget,
     bid: config.bid,
-    startAt: resolveMigrationStartAt(config.startAtRule, config.startAt, now, timeZone),
+    startAt: resolvedStartAt,
   }));
+  rows.forEach((row) => reservedAdGroupNames.add(row.adGroupName));
+  return rows;
 }
 
 function copyDifferences(

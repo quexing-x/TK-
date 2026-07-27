@@ -3,6 +3,7 @@ import {
   ProviderCredentialInputSchema,
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
+  stripAutomaticAdGroupNameSuffixes,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
@@ -95,42 +96,46 @@ export class LaunchService {
       "read-ad-groups",
     );
     const managed = this.store.listCurrentManagedEntities(sourceAccount.id, sourceAccount.providerKind);
-    const adGroup = managed.find(
-      (entity) => entity.entityType === "ad-group" && entity.externalId === input.sourceAdGroupId,
-    );
-    if (!adGroup?.parentCampaignId) {
-      throw new Error("源广告组不存在或缺少稳定的 Campaign ID，请先同步源账户。");
-    }
-    const campaign = managed.find(
-      (entity) => entity.entityType === "campaign"
-        && entity.externalId === adGroup.parentCampaignId,
-    );
-    if (!campaign) throw new Error("源广告组所属推广系列不在当前同步快照中。");
     const sourceContext = await this.loadProviderContext(sourceAccount.id, sourceAccount.providerKind);
-    const sourceDetail = await this.providers.readAdGroupOriginalPosts(
-      sourceAccount.providerKind,
-      sourceContext,
-      { campaignId: campaign.externalId, adGroupId: adGroup.externalId },
-    );
-    const sourcePosts = sourceDetail.posts.filter((post) => post.promotable);
-    if (sourcePosts.length !== sourceDetail.posts.length || sourcePosts.length === 0) {
-      throw new Error("源广告组包含不可推广或已失效的帖子，无法迁移。");
+    const sourceAdGroupIds = [...new Set(input.sourceAdGroupIds?.length
+      ? input.sourceAdGroupIds
+      : [input.sourceAdGroupId])];
+    const sourceSnapshots: LaunchSourceSnapshot[] = [];
+    for (const sourceAdGroupId of sourceAdGroupIds) {
+      const adGroup = managed.find(
+        (entity) => entity.entityType === "ad-group" && entity.externalId === sourceAdGroupId,
+      );
+      if (!adGroup?.parentCampaignId) {
+        throw new Error(`源广告组 ${sourceAdGroupId} 不存在或缺少稳定的 Campaign ID，请先同步源账户。`);
+      }
+      const campaign = managed.find(
+        (entity) => entity.entityType === "campaign" && entity.externalId === adGroup.parentCampaignId,
+      );
+      if (!campaign) throw new Error(`源广告组“${adGroup.name}”所属推广系列不在当前同步快照中。`);
+      const sourceDetail = await this.providers.readAdGroupOriginalPosts(
+        sourceAccount.providerKind,
+        sourceContext,
+        { campaignId: campaign.externalId, adGroupId: adGroup.externalId },
+      );
+      const sourcePosts = sourceDetail.posts.filter((post) => post.promotable);
+      if (sourcePosts.length !== sourceDetail.posts.length || sourcePosts.length === 0) {
+        throw new Error(`源广告组“${adGroup.name}”包含不可推广或已失效的帖子，无法迁移。`);
+      }
+      if (sourcePosts.length > 500) {
+        throw new Error(`源广告组“${adGroup.name}”有 ${sourcePosts.length} 条帖子，超过单组上限 500 条。`);
+      }
+      sourceSnapshots.push({
+        accountId: sourceAccount.id,
+        campaignId: campaign.externalId,
+        campaignName: campaign.name,
+        adGroupId: adGroup.externalId,
+        adGroupName: adGroup.name,
+        posts: sourcePosts,
+        productUrl: sourceDetail.productUrl,
+        structuralHash: originalPostsHash(sourcePosts),
+        fetchedAt: new Date().toISOString(),
+      });
     }
-    if (sourcePosts.length > 500) {
-      throw new Error(`源广告组有 ${sourcePosts.length} 条帖子，超过单次迁移上限 500 条。`);
-    }
-    const fetchedAt = new Date().toISOString();
-    const sourceSnapshot: LaunchSourceSnapshot = {
-      accountId: sourceAccount.id,
-      campaignId: campaign.externalId,
-      campaignName: campaign.name,
-      adGroupId: adGroup.externalId,
-      adGroupName: adGroup.name,
-      posts: sourcePosts,
-      productUrl: sourceDetail.productUrl,
-      structuralHash: originalPostsHash(sourcePosts),
-      fetchedAt,
-    };
     const targetPostMappings: LaunchTargetPostMapping[] = await Promise.all(
       [...new Set(input.targetAccountIds)].map(async (accountId) => {
         const account = this.store.getAccount(accountId);
@@ -147,24 +152,29 @@ export class LaunchService {
         );
         try {
           const context = await this.loadProviderContext(account.id, account.providerKind);
-          const posts = await this.providers.readAccessibleOriginalPosts(
-            account.providerKind,
-            context,
-            sourcePosts,
-          );
-          return {
-            accountId,
-            posts,
-            evidenceHash: originalPostsHash(posts),
-            verifiedAt: new Date().toISOString(),
-          };
+          const mappings: LaunchTargetPostMapping[] = [];
+          for (const snapshot of sourceSnapshots) {
+            const posts = await this.providers.readAccessibleOriginalPosts(
+              account.providerKind,
+              context,
+              snapshot.posts,
+            );
+            mappings.push({
+              accountId,
+              sourceAdGroupId: snapshot.adGroupId,
+              posts,
+              evidenceHash: originalPostsHash(posts),
+              verifiedAt: new Date().toISOString(),
+            });
+          }
+          return mappings;
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : String(cause);
           throw new Error(`目标账户“${account.displayName}”原帖检查失败：${message}`);
         }
       }),
-    );
-    return this.store.createLaunchCopyPreview(input, sourceSnapshot, targetPostMappings);
+    ).then((mappings) => mappings.flat());
+    return this.store.createLaunchCopyPreview(input, sourceSnapshots, targetPostMappings);
   }
 
   async execute(
@@ -898,30 +908,7 @@ function groupLaunchItemsByAccountAndCampaign(
  * ordinary model numbers such as `2024` are preserved.
  */
 export function stripGeneratedAdGroupNameSuffixes(sourceName: string): string {
-  const original = sourceName.trim();
-  let current = original;
-  while (current) {
-    const indexed = current.match(/^(.*?)-(\d{4})-([1-9]\d*)$/);
-    if (indexed && indexed[1]?.trim() && isValidMonthDay(indexed[2]!)) {
-      current = indexed[1].replace(/-+$/, "").trim();
-      continue;
-    }
-    const dated = current.match(/^(.*?)-?(\d{4})$/);
-    if (dated && dated[1]?.trim() && isValidMonthDay(dated[2]!)) {
-      current = dated[1].replace(/-+$/, "").trim();
-      continue;
-    }
-    break;
-  }
-  return current || original;
-}
-
-function isValidMonthDay(value: string): boolean {
-  const month = Number(value.slice(0, 2));
-  const day = Number(value.slice(2));
-  if (!Number.isInteger(month) || month < 1 || month > 12) return false;
-  const lastDay = new Date(Date.UTC(2000, month, 0)).getUTCDate();
-  return Number.isInteger(day) && day >= 1 && day <= lastDay;
+  return stripAutomaticAdGroupNameSuffixes(sourceName);
 }
 
 function creationConnectionFingerprint(

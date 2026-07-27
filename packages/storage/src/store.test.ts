@@ -822,6 +822,19 @@ describe("AutomationStore", () => {
     expect(preview.items).toHaveLength(2);
     expect(preview.items.every((item) => item.launchRow.dailyBudget === 345 && item.launchRow.bid === 6.7)).toBe(true);
     expect(preview.items.every((item) => item.launchRow.startAt !== null)).toBe(true);
+    expect(new Set(preview.items.map((item) => item.launchRow.adGroupName)).size).toBe(2);
+    expect(preview.items.map((item) => item.launchRow.adGroupName)).toEqual([
+      expect.stringMatching(/^源广告组-\d{4}-1$/),
+      expect.stringMatching(/^源广告组-\d{4}-2$/),
+    ]);
+    expect(createLaunchCopyPreview(store, {
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: "source-configured-copy",
+      targetAccountIds: [target.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [],
+      targetConfigs,
+    }).id).toBe(preview.id);
 
     const plan = store.createMultiAccountLaunchPlan({
       mode: "copy",
@@ -834,6 +847,50 @@ describe("AutomationStore", () => {
       copyTargetConfigs: targetConfigs,
     });
     expect(store.listLaunchPlanItems(plan.id)).toHaveLength(2);
+  });
+
+  it("multiplies each target quantity across multiple selected source ad groups", () => {
+    const target = store.createAccount({
+      displayName: "多源迁移目标",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    const sourceAdGroupIds = ["source-multi-a", "source-multi-b"];
+    saveTargetAsset(store, target.id, "target-video");
+    const targetConfigs = [{
+      accountId: target.id,
+      quantity: 2,
+      dailyBudget: 200,
+      bid: null,
+      startAtRule: "absolute" as const,
+      startAt: null,
+    }];
+    const input = {
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: sourceAdGroupIds[0]!,
+      sourceAdGroupIds,
+      targetAccountIds: [target.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [],
+      targetConfigs,
+    };
+
+    const preview = createLaunchCopyPreview(store, input);
+    expect(preview.sourceSnapshots).toHaveLength(2);
+    expect(preview.items).toHaveLength(4);
+    expect(new Set(preview.items.map((item) => item.launchRow.adGroupName)).size).toBe(4);
+    expect(preview.items.filter((item) => item.sourceSnapshot.adGroupId === sourceAdGroupIds[0])).toHaveLength(2);
+    expect(preview.items.filter((item) => item.sourceSnapshot.adGroupId === sourceAdGroupIds[1])).toHaveLength(2);
+
+    const plan = store.createMultiAccountLaunchPlan({
+      ...input,
+      mode: "copy",
+      copyPreviewId: preview.id,
+      launchRows: preview.launchRows,
+      copyTargetConfigs: targetConfigs,
+    });
+    expect(store.listLaunchPlanItems(plan.id)).toHaveLength(4);
   });
 
   it("freezes the reviewed preset content before a copy plan is confirmed", () => {
@@ -2167,17 +2224,6 @@ function createLaunchCopyPreview(
   input: LaunchCopyPreviewInput,
   options: { missingAccountIds?: string[] } = {},
 ) {
-  const post: LaunchOriginalPost = {
-    itemId: `post-${input.sourceAdGroupId}`,
-    identityId: "source-identity",
-    identityType: 2,
-    identityBcId: "0",
-    vid: `source-vid-${input.sourceAdGroupId}`,
-    videoId: null,
-    displayName: "源原帖",
-    coverUrl: null,
-    promotable: true,
-  };
   const hash = (posts: LaunchOriginalPost[]) => createHash("sha256")
     .update(JSON.stringify(posts.map((item) => ({
       itemId: item.itemId,
@@ -2189,32 +2235,41 @@ function createLaunchCopyPreview(
       promotable: item.promotable,
     }))))
     .digest("hex");
-  const sourceSnapshot = {
-    accountId: input.sourceAccountId,
-    campaignId: "campaign-template",
-    campaignName: "源系列",
-    adGroupId: input.sourceAdGroupId,
-    adGroupName: "源广告组",
-    posts: [post],
-    productUrl: "https://source.example/product",
-    structuralHash: hash([post]),
-    fetchedAt: new Date().toISOString(),
-  };
-  const missing = new Set(options.missingAccountIds ?? []);
-  const mappings = input.targetAccountIds.map((accountId) => {
-    const posts = missing.has(accountId) ? [] : [{
-      ...post,
-      identityId: `target-identity-${accountId}`,
-      vid: `target-vid-${accountId}`,
-    }];
+  const sourceIds = input.sourceAdGroupIds?.length ? input.sourceAdGroupIds : [input.sourceAdGroupId];
+  const sourceSnapshots = sourceIds.map((sourceId, index) => {
+    const post: LaunchOriginalPost = {
+      itemId: `post-${sourceId}`,
+      identityId: "source-identity",
+      identityType: 2,
+      identityBcId: "0",
+      vid: `source-vid-${sourceId}`,
+      videoId: null,
+      displayName: "源原帖",
+      coverUrl: null,
+      promotable: true,
+    };
     return {
-      accountId,
-      posts,
-      evidenceHash: hash(posts),
-      verifiedAt: new Date().toISOString(),
+      accountId: input.sourceAccountId,
+      campaignId: sourceIds.length === 1 ? "campaign-template" : `campaign-template-${index}`,
+      campaignName: sourceIds.length === 1 ? "源系列" : `源系列${index + 1}`,
+      adGroupId: sourceId,
+      adGroupName: "源广告组",
+      posts: [post],
+      productUrl: "https://source.example/product",
+      structuralHash: hash([post]),
+      fetchedAt: new Date().toISOString(),
     };
   });
-  return store.createLaunchCopyPreview(input, sourceSnapshot, mappings);
+  const missing = new Set(options.missingAccountIds ?? []);
+  const mappings = input.targetAccountIds.flatMap((accountId) => sourceSnapshots.map((snapshot) => {
+    const posts = missing.has(accountId) ? [] : snapshot.posts.map((post) => ({
+      ...post,
+      identityId: `target-identity-${accountId}`,
+      vid: `target-vid-${accountId}-${snapshot.adGroupId}`,
+    }));
+    return { accountId, sourceAdGroupId: snapshot.adGroupId, posts, evidenceHash: hash(posts), verifiedAt: new Date().toISOString() };
+  }));
+  return store.createLaunchCopyPreview(input, sourceSnapshots, mappings);
 }
 
 function saveCopySource(

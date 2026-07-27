@@ -104,7 +104,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [sourceAccountId, setSourceAccountId] = useState(accounts[0]?.id ?? "");
   const [targetIds, setTargetIds] = useState<string[]>([]);
   const [sourceAdGroups, setSourceAdGroups] = useState<SourceAdGroupOption[]>([]);
-  const [sourceAdGroupId, setSourceAdGroupId] = useState("");
+  const [sourceAdGroupIds, setSourceAdGroupIds] = useState<string[]>([]);
   const [copyPreview, setCopyPreview] = useState<LaunchCopyPreviewRecord | null>(null);
   const [copyTargetConfigs, setCopyTargetConfigs] = useState<LaunchMigrationTargetConfig[]>([]);
   const [sourceGroupQuery, setSourceGroupQuery] = useState("");
@@ -129,6 +129,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const terminalPlanNotificationsReady = useRef(false);
   const notifiedTerminalPlanIds = useRef(new Set<string>());
+  const copyPreviewInFlight = useRef(false);
 
   const selectedPreset = presets.find((item) => item.id === presetId) ?? null;
   const importedCampaignCount = sheet
@@ -203,21 +204,21 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     const query = sourceGroupQuery.trim().toLocaleLowerCase();
     return query ? sourceAdGroups.filter((group) => `${group.campaignName} ${group.name} ${group.adGroupId}`.toLocaleLowerCase().includes(query)) : sourceAdGroups;
   }, [sourceAdGroups, sourceGroupQuery]);
-  const selectedSourceGroup = sourceAdGroups.find((group) => group.adGroupId === sourceAdGroupId) ?? null;
+  const selectedSourceGroups = sourceAdGroups.filter((group) => sourceAdGroupIds.includes(group.adGroupId));
   const selectedAccountIds = launchMode === "single" ? (sourceAccountId ? [sourceAccountId] : []) : targetIds;
   const notReadyAccountIds = selectedAccountIds.filter((accountId) =>
     connections[accountId]?.status !== "ready"
     || !canUseLaunchTarget(accountCapabilities[accountId], launchMode === "copy" ? "copy" : "create"),
   );
   const copySourceReady = launchMode !== "copy" || copySources.some((account) => account.id === sourceAccountId);
-  const copyTaskCount = copyTargetConfigs.reduce((sum, item) => sum + item.quantity, 0);
+  const copyTaskCount = copyTargetConfigs.reduce((sum, item) => sum + item.quantity, 0) * sourceAdGroupIds.length;
   const copyConfigsValid = targetIds.length > 0
     && copyTargetConfigs.length === targetIds.length
     && copyTargetConfigs.every((item) => targetIds.includes(item.accountId) && item.quantity >= 1 && item.dailyBudget > 0);
   const canPreviewCopy = Boolean(
     launchMode === "copy"
       && sourceAccountId
-      && sourceAdGroupId
+      && sourceAdGroupIds.length > 0
       && targetIds.length > 0
       && copyTaskCount >= 1
       && copyTaskCount <= 100
@@ -228,6 +229,9 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       && copyConfigsValid,
   );
   const previewValid = Boolean(copyPreview?.safeToCreate && copyPreview.blockers.length === 0 && previewSecondsLeft > 0);
+  const previewSources = copyPreview
+    ? copyPreview.sourceSnapshots.length > 0 ? copyPreview.sourceSnapshots : [copyPreview.sourceSnapshot]
+    : [];
   const contentReady = launchMode === "copy" ? previewValid : Boolean(sheet && sheet.errors.length === 0 && sheet.rows.length > 0);
   const canSave = Boolean(canManageLaunchPresets && canDispatchLaunch && selectedAccountIds.length > 0 && notReadyAccountIds.length === 0 && copySourceReady && presetId && selectedPresetLaunchReady && contentReady);
   const publishBlockers = [
@@ -239,7 +243,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     presetId && !selectedPresetLaunchReady ? "当前预设参数映射尚未完成，请先在高级自定义中补全。" : null,
     launchMode !== "copy" && !sheet ? "请导入创建信息表。" : null,
     launchMode !== "copy" && sheet && sheet.errors.length > 0 ? "请先修正导入表错误。" : null,
-    launchMode === "copy" && !sourceAdGroupId ? "请选择源广告组。" : null,
+    launchMode === "copy" && sourceAdGroupIds.length === 0 ? "请选择至少一个源广告组。" : null,
     launchMode === "copy" && !copySourceReady ? "源账户缺少广告读取能力，请重新检测接入。" : null,
     launchMode === "copy" && !copyConfigsValid ? "请完整填写每个目标账户的创建数量、预算、出价和创建时间。" : null,
     launchMode === "copy" && copyTaskCount > 100 ? "单次迁移最多创建 100 个广告组，请分批操作。" : null,
@@ -330,20 +334,20 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   useEffect(() => {
     if (launchMode !== "copy" || !sourceAccountId) {
       setSourceAdGroups([]);
-      setSourceAdGroupId("");
+      setSourceAdGroupIds([]);
       return;
     }
     void api.getManagedEntities(sourceAccountId)
       .then((entities) => {
         const groups = buildSourceAdGroupOptions(entities);
         setSourceAdGroups(groups);
-        setSourceAdGroupId((current) => groups.some((group) => group.adGroupId === current) ? current : "");
+        setSourceAdGroupIds((current) => current.filter((id) => groups.some((group) => group.adGroupId === id)));
       })
       .catch((cause) => onError(messageOf(cause)));
   }, [launchMode, onError, sourceAccountId]);
   useEffect(() => {
     setCopyPreview(null);
-  }, [launchMode, presetId, sheet, sourceAccountId, sourceAdGroupId, targetIds, copyTargetConfigs]);
+  }, [launchMode, presetId, sheet, sourceAccountId, sourceAdGroupIds, targetIds, copyTargetConfigs]);
   useEffect(() => {
     setSheet(null);
     setFileName("");
@@ -446,6 +450,11 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
         }]
       : current.filter((item) => item.accountId !== accountId));
   };
+  const setSourceGroupSelected = (adGroupId: string, selected: boolean) => {
+    setSourceAdGroupIds((current) => selected
+      ? [...new Set([...current, adGroupId])].slice(0, 20)
+      : current.filter((id) => id !== adGroupId));
+  };
   const updateTargetConfig = (accountId: string, patch: Partial<LaunchMigrationTargetConfig>) => {
     const normalizedPatch = patch.startAtRule === "absolute" && !("startAt" in patch)
       ? { ...patch, startAt: new Date(Date.now() + 60 * 60_000).toISOString() }
@@ -453,12 +462,15 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     setCopyTargetConfigs((current) => current.map((item) => item.accountId === accountId ? { ...item, ...normalizedPatch } : item));
   };
   const generateCopyPreview = async () => {
-    if (launchMode !== "copy" || !sourceAdGroupId || !presetId || targetIds.length === 0) return;
+    if (launchMode !== "copy" || sourceAdGroupIds.length === 0 || !presetId || targetIds.length === 0) return;
+    if (copyPreviewInFlight.current || previewValid) return;
+    copyPreviewInFlight.current = true;
     try {
       setBusy(true);
       const preview = await api.createLaunchCopyPreview({
         sourceAccountId,
-        sourceAdGroupId,
+        sourceAdGroupId: sourceAdGroupIds[0]!,
+        sourceAdGroupIds,
         targetAccountIds: targetIds,
         launchPresetId: presetId,
         launchRows: [],
@@ -467,7 +479,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       setCopyPreview(preview);
       onError(preview.safeToCreate ? null : preview.blockers[0] ?? "复制差异预览存在阻断项。");
     } catch (cause) { onError(messageOf(cause)); }
-    finally { setBusy(false); }
+    finally { copyPreviewInFlight.current = false; setBusy(false); }
   };
   const savePlan = async () => {
     if (!canSave || (launchMode !== "copy" && !sheet)) return;
@@ -479,7 +491,8 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
         clientRequestId: planRequestId,
         mode: launchMode,
         sourceAccountId: launchMode === "copy" ? sourceAccountId : selectedAccountIds[0] ?? sourceAccountId,
-        sourceAdGroupId: launchMode === "copy" ? sourceAdGroupId : null,
+        sourceAdGroupId: launchMode === "copy" ? sourceAdGroupIds[0] ?? null : null,
+        sourceAdGroupIds: launchMode === "copy" ? sourceAdGroupIds : [],
         copyPreviewId: launchMode === "copy" ? copyPreview?.id ?? null : null,
         targetAccountIds: selectedAccountIds,
         launchPresetId: presetId,
@@ -564,10 +577,10 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     </div><div className="form-grid">
       {targets.length === 0 ? <div className="launch-target-empty"><CircleX size={18} /><div><strong>暂时没有可发布账户</strong><span>人工真实创建只要求接入检测通过且具备创建权限；自动化开关和执行模式不再阻止手动发布。</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button">去完善账户</button></div> : <>
         {launchMode === "single" && <label className="field"><span>创建账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>仅显示已授权创建能力的账户。</small></label>}
-        {launchMode === "copy" && <><label className="field"><span>源广告账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>源账户需要具备推广系列和广告组读取能力。</small></label><label className="field"><span>搜索源广告组</span><input placeholder="搜索系列名、广告组名或 ID" value={sourceGroupQuery} onChange={(event) => setSourceGroupQuery(event.target.value)} /><select size={Math.min(8, Math.max(2, visibleSourceAdGroups.length))} value={sourceAdGroupId} onChange={(event) => setSourceAdGroupId(event.target.value)}><option value="">请选择当前同步广告组</option>{visibleSourceAdGroups.map((group) => <option key={group.adGroupId} value={group.adGroupId}>{group.campaignName} / {group.name} / …{group.adGroupId.slice(-6)}</option>)}</select><small>{sourceAdGroups.length} 个当前广告组；支持两层广告组，预览时实时读取原帖。</small></label></>}
+        {launchMode === "copy" && <><label className="field"><span>源广告账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>源账户需要具备推广系列和广告组读取能力。</small></label><div className="field wide source-ad-group-picker"><span>源广告组（可多选，最多 20 个）</span><div className="target-account-toolbar"><input placeholder="搜索系列名、广告组名或 ID" value={sourceGroupQuery} onChange={(event) => setSourceGroupQuery(event.target.value)} /><span>已选 {sourceAdGroupIds.length} / {sourceAdGroups.length}</span><button className="secondary-button compact-button" onClick={() => visibleSourceAdGroups.forEach((group) => setSourceGroupSelected(group.adGroupId, true))} type="button">全选当前结果</button><button className="secondary-button compact-button" onClick={() => setSourceAdGroupIds([])} type="button">清空</button></div><div className="source-ad-group-options">{visibleSourceAdGroups.length === 0 ? <p className="target-account-empty">没有匹配的当前广告组。</p> : visibleSourceAdGroups.map((group) => <label key={group.adGroupId}><input checked={sourceAdGroupIds.includes(group.adGroupId)} disabled={!sourceAdGroupIds.includes(group.adGroupId) && sourceAdGroupIds.length >= 20} onChange={(event) => setSourceGroupSelected(group.adGroupId, event.target.checked)} type="checkbox" /><span>{group.campaignName} / {group.name}</span><small>ID …{group.adGroupId.slice(-6)} · {new Date(group.syncedAt).toLocaleString("zh-CN", { hour12: false })}</small></label>)}</div><small>列表右下角可拖动调整高度；每个源组都会按目标账户数量分别创建。</small></div></>}
         {launchMode !== "single" && <div className="field wide target-account-selector"><span>{launchMode === "copy" ? "目标账户（必须已绑定同一个 TikTok 身份）" : "发布账户（可多选）"}</span><div className="target-account-toolbar"><input aria-label="搜索可用发布账户" placeholder="搜索已接入账户" value={accountQuery} onChange={(event) => setAccountQuery(event.target.value)} /><span>已选 {targetIds.length} / {availableTargets.length}</span><button className="secondary-button compact-button" onClick={() => visibleTargets.forEach((account) => setTargetSelected(account.id, true))} type="button">全选当前结果</button><button className="secondary-button compact-button" onClick={() => { setTargetIds([]); setCopyTargetConfigs([]); }} type="button">清空</button></div><div className="target-account-grid">{visibleTargets.length === 0 ? <p className="target-account-empty">没有匹配的可用账户。</p> : visibleTargets.map((account) => <label key={account.id}><input checked={targetIds.includes(account.id)} onChange={(event) => setTargetSelected(account.id, event.target.checked)} type="checkbox" /><span>{account.displayName}</span><small>已接入 · {account.providerKind === "cookie" ? "Cookie" : "Marketing API"}</small></label>)}</div>{launchMode === "copy" && copyTargetConfigs.length > 0 && <div className="migration-target-configs">{copyTargetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); return <article key={config.accountId}><header><strong>{account?.displayName ?? config.accountId}</strong><small>账户时区：{account?.timezone ?? "UTC"}</small></header><div className="form-grid"><label className="field"><span>创建广告组数量</span><input min="1" max="20" type="number" value={config.quantity} onChange={(event) => updateTargetConfig(config.accountId, { quantity: Math.max(1, Math.min(20, Number(event.target.value) || 1)) })} /></label><label className="field"><span>每日预算</span><input min="0.01" step="0.01" type="number" value={config.dailyBudget} onChange={(event) => updateTargetConfig(config.accountId, { dailyBudget: Number(event.target.value) })} /></label><label className="field"><span>出价（留空为自动）</span><input min="0" step="0.01" type="number" value={config.bid ?? ""} onChange={(event) => updateTargetConfig(config.accountId, { bid: event.target.value === "" ? null : Number(event.target.value) })} /></label><label className="field"><span>创建时间</span><select value={config.startAtRule === "absolute" ? (config.startAt ? "custom" : "immediate") : config.startAtRule} onChange={(event) => { const value = event.target.value; updateTargetConfig(config.accountId, value === "immediate" ? { startAtRule: "absolute", startAt: null } : value === "custom" ? { startAtRule: "absolute" } : { startAtRule: value as "next-six" | "tonight", startAt: null }); }}><option value="immediate">立即投放</option><option value="next-six">最近未来 06:00</option><option value="tonight">当天 24:00</option><option value="custom">自定义定时</option></select>{config.startAtRule === "absolute" && config.startAt !== null && <input type="datetime-local" value={toLocalInput(config.startAt)} onChange={(event) => updateTargetConfig(config.accountId, { startAt: toIso(event.target.value) })} />}<small>06:00 按账户时区取下一个尚未到达的早上。</small></label></div></article>; })}</div>}</div>}
       </>}
-    </div>{launchMode === "copy" && selectedSourceGroup && <div className="creation-template-note"><strong>已选源广告组</strong><span>{selectedSourceGroup.campaignName} / {selectedSourceGroup.name} / …{selectedSourceGroup.adGroupId.slice(-6)} · 同步于 {new Date(selectedSourceGroup.syncedAt).toLocaleString("zh-CN", { hour12: false })}</span></div>}</div>
+    </div>{launchMode === "copy" && selectedSourceGroups.length > 0 && <div className="creation-template-note"><strong>已选 {selectedSourceGroups.length} 个源广告组</strong><span>{selectedSourceGroups.map((group) => `${group.campaignName} / ${group.name}`).join("；")}</span></div>}</div>
 
     <div className="panel launch-readiness-panel"><div className="panel-heading"><div><span className="panel-icon"><CheckCircle2 size={18} /></span><div><h2>创建检查</h2><p>账户、源广告组、目标配置和原帖预览全部通过后才允许发布。</p></div></div><span className={canSave ? "status active" : "status warning"}>{canSave ? "可创建" : "待完善"}</span></div><div className="sheet-rule-grid">
       <article><strong>数据读取与启停</strong><span>{selectedAccountIds.length === 0 ? "请选择要发布的账户。" : notReadyAccountIds.length === 0 ? `已选 ${selectedAccountIds.length} 个账户均已通过连接检测。` : `有 ${notReadyAccountIds.length} 个已选账户连接异常。`}</span></article>
@@ -577,7 +590,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <article><strong>{launchMode === "copy" ? "迁移确认" : "导入信息"}</strong><span>{launchMode === "copy" ? copyPreview?.safeToCreate ? `原帖和逐账户配置已冻结，共 ${copyPreview.items.length} 个广告组。` : "选择源广告组并生成最终确认预览。" : sheet?.errors.length === 0 && sheet.rows.length ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组。` : "导入表只需填写系列名称、广告组名称、视频代码和产品 URL。"}</span></article>
     </div></div>
 
-    <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
+    {launchMode !== "copy" && <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
       <label className="field"><span>预设名称</span><input value={presetForm.name} onChange={(event) => setPresetForm((value) => ({ ...value, name: event.target.value }))} /></label>
       <label className="field"><span>投放地区</span><input placeholder="例如：US、美国、US/CA" value={presetForm.region} onChange={(event) => setPresetForm((value) => ({ ...value, region: event.target.value }))} /></label>
       <label className="field"><span>广告组日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.dailyBudget} onChange={(event) => setPresetForm((value) => ({ ...value, dailyBudget: Number(event.target.value) }))} /></label>
@@ -586,7 +599,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <label className="field"><span>初始状态</span><select value={presetForm.initialStatus} onChange={(event) => setPresetForm((value) => ({ ...value, initialStatus: event.target.value as LaunchPresetInput["initialStatus"] }))}><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
     </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、出价和时间等业务参数。</span></div>{!canManageLaunchPresets && <div className="preset-save-feedback warning"><strong>当前账号无预设管理权限</strong><span>登录角色为“{auth.status.user?.role ?? "未知"}”，无法保存广告预设；请切换至开发者、管理员或操作员账号。</span></div>}{presetFeedback && <div className={`preset-save-feedback ${presetFeedback.tone}`}><strong>{presetFeedback.title}</strong><span>{presetFeedback.lines[0]}</span></div>}<div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets} onClick={() => void savePreset()} title={canManageLaunchPresets ? undefined : "需要 launch:manage 权限"} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(freshPreset()); setPresetFeedback(null); }} type="button">取消编辑</button>}</div>
       <div className="table-wrap"><table><thead><tr><th>预设</th><th>地区</th><th>预算</th><th>出价</th><th>创建时间</th><th>初始状态</th><th>操作</th></tr></thead><tbody>{presets.map((preset) => <tr key={preset.id}><td>{preset.name}</td><td>{preset.region}</td><td>{preset.dailyBudget}</td><td>{preset.bid ?? "自动"}</td><td>{preset.startAtRule === "tonight" ? "当天 24:00（每日自动）" : preset.startAtRule === "tomorrow-morning" ? "次日 06:00（每日自动）" : preset.startAt ? new Date(preset.startAt).toLocaleString() : "立即"}</td><td>{preset.initialStatus === "enabled" ? "开启" : "关闭"}</td><td><button disabled={busy} onClick={() => editPreset(preset)} type="button">编辑</button> <button disabled={busy} onClick={() => void removePreset(preset.id)} type="button">删除</button></td></tr>)}</tbody></table></div>
-    </div>
+    </div>}
 
     <details className="panel creation-config-panel"><summary><span><Settings2 size={18} /></span><div><strong>高级自定义参数</strong><small>真实创建映射随预设保存；日常投放无需展开</small></div><em className={advancedExecutionReady ? "status active" : "status warning"}>{advancedExecutionReady ? "参数映射完整" : "参数映射不完整"}</em></summary><div className="creation-config-body"><div className="creation-template-note"><strong>{advancedExecutionReady ? "当前预设参数映射完整" : "当前预设尚未完成参数映射"}</strong><span>{advancedExecutionReady ? "创建时使用当前账户 Cookie 会话并覆盖下列业务参数。" : "请按参数对照补全真实创建需要的业务映射；账户内部系列 ID 不作为跨账户必填项。"}</span></div><div className="creation-config-reference"><div><strong>参数</strong><strong>来源 / 获取位置</strong></div><div><span>营销目标、购买方式、预算方式</span><span>TikTok Ads Manager 新建推广系列页</span></div><div><span>计费方式、优化目标、转化事件、像素</span><span>广告组设置与事件管理器</span></div><div><span>广告身份、行动号召</span><span>广告创建页的身份与创意设置</span></div><div><span>地区与版位代码</span><span>广告组定向设置</span></div></div><button className="secondary-button creation-guide-button" onClick={() => { window.location.hash = "#manual"; }} type="button">查看完整参数对照与获取方式</button><div className="form-grid">
       <label className="field"><span>营销目标</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.objectiveType ?? ""} onChange={(event) => updateCreationConfig({ objectiveType: nullableInteger(event.target.value) })} /></label>
@@ -609,8 +622,8 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <div className="sheet-rule-grid"><article><strong>1. 选择广告预设</strong><span>{selectedPreset ? `当前：${selectedPreset.name} · ${selectedPreset.region}` : "请先选择预设。"}</span></article><article><strong>2. {launchMode === "copy" ? "配置目标账户" : "填写创建设置"}</strong><span>{launchMode === "copy" ? `已配置 ${copyTargetConfigs.length} 个账户，共创建 ${copyTaskCount} 个广告组。` : "填写系列名称、广告组名称、视频代码和产品 URL。"}</span></article><article><strong>3. {launchMode === "copy" ? "原帖自动读取" : "多视频代码"}</strong><span>{launchMode === "copy" ? "逐账户核对 item_id；目标账户必须绑定同一个 TikTok 身份。" : "同一单元格可用 `；`、`;` 或换行分隔多个代码，作为同一广告组的多个素材。"}</span></article><article><strong>4. 最终确认</strong><span>{launchMode === "copy" ? "预览冻结数量、预算、出价、时区和最终创建时间，15 分钟内有效。" : "广告名称自动生成后进入后台队列。"}</span></article></div>
       <label className="field" style={{ margin: "0 18px 12px" }}><span>本次使用的广告预设</span><select value={presetId} onChange={(event) => { setPresetId(event.target.value); setSheet(null); }}><option value="">请选择预设</option>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label>
       {launchMode !== "copy" && <><button className="sheet-dropzone" disabled={busy || !selectedPreset} onClick={() => fileInput.current?.click()} type="button"><Upload size={22} /><strong>{fileName || "选择 .xlsx / .csv 文件"}</strong><span>{selectedPreset ? "导入不会立即创建广告。" : "请先选择广告预设。"}</span></button><input ref={fileInput} accept=".xlsx,.csv" hidden onChange={(event) => void importFile(event.target.files?.[0])} type="file" />{sheet && <div className="sheet-result"><div className="sheet-summary"><span className={sheet.errors.length === 0 ? "status active" : "status danger"}>{sheet.errors.length === 0 ? <CheckCircle2 size={14} /> : <X size={14} />}{sheet.errors.length === 0 ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组` : `${sheet.errors.length} 个错误`}</span></div>{sheet.errors.length > 0 && <IssueList issues={sheet.errors} />}{sheet.rows.length > 0 && <div className="table-wrap"><table className="sheet-preview-table"><thead><tr><th>来源行</th><th>推广系列</th><th>广告组</th><th>视频代码</th><th>产品 URL</th><th>广告名称</th><th>预算</th><th>出价</th></tr></thead><tbody>{sheet.rows.slice(0, 100).map((row) => <tr key={`${row.rowNumber}-${row.videoCode}`}><td>{row.rowNumber}</td><td>{row.campaignName}</td><td>{row.adGroupName}</td><td>{row.videoCode}</td><td><small>{row.productUrl}</small></td><td>{row.adName}</td><td>{row.dailyBudget}</td><td>{row.bid ?? "自动"}</td></tr>)}</tbody></table></div>}</div>}</>}
-      {launchMode === "copy" && <div className="copy-preview-actions"><button className="secondary-button" disabled={busy || !canPreviewCopy} onClick={() => void generateCopyPreview()} type="button">检查原帖并生成迁移预览</button><small>实时读取源广告组，并逐个目标账户核对全部 item_id；预览 15 分钟内有效。</small></div>}
-      {copyPreview && <div className={copyPreview.safeToCreate ? "creation-template-note copy-preview-result migration-confirmation" : "sheet-issues warning copy-preview-result"}><strong>{copyPreview.safeToCreate ? `最终确认 · ${copyPreview.sourceSnapshot.posts.length} 帖 · ${copyPreview.items.length} 个广告组` : "原帖检查存在阻断项"}</strong><span className={previewSecondsLeft > 0 ? "status warning" : "status danger"}>预览有效期：{formatCountdown(previewSecondsLeft)}</span>{copyPreview.blockers.length > 0 && <ul>{copyPreview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}{copyPreview.warnings.length > 0 && <ul>{copyPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}{copyPreview.safeToCreate && <><div className="migration-source-summary"><strong>{copyPreview.sourceSnapshot.campaignName} / {copyPreview.sourceSnapshot.adGroupName}</strong><span>源广告组 ID：{copyPreview.sourceSnapshot.adGroupId}</span><span>产品 URL：{copyPreview.sourceSnapshot.productUrl ?? "未读取"}</span><span>原帖匹配：{copyPreview.sourceSnapshot.posts.length}/{copyPreview.sourceSnapshot.posts.length}</span><details><summary>查看前 5 条原帖</summary>{copyPreview.sourceSnapshot.posts.slice(0, 5).map((post) => <small key={post.itemId}>{post.displayName ?? post.itemId} · item_id：{post.itemId}</small>)}</details></div><div className="table-wrap"><table><thead><tr><th>目标账户</th><th>数量</th><th>预算 / 出价</th><th>最终创建时间</th><th>原帖核对</th></tr></thead><tbody>{copyPreview.targetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); const item = copyPreview.items.find((candidate) => candidate.accountId === config.accountId); return <tr key={config.accountId}><td>{account?.displayName ?? config.accountId}<small>{account?.timezone ?? "UTC"}</small></td><td>{config.quantity}</td><td>{config.dailyBudget} / {config.bid ?? "自动"}</td><td>{item?.launchRow.startAt ? formatInTimeZone(item.launchRow.startAt, account?.timezone ?? "UTC") : "立即"}</td><td>{item ? `${item.targetPostMapping.posts.length}/${copyPreview.sourceSnapshot.posts.length} 已匹配` : "未完成"}</td></tr>; })}</tbody></table></div></>}</div>}
+      {launchMode === "copy" && <div className="copy-preview-actions"><button className="secondary-button" disabled={busy || !canPreviewCopy || previewValid} onClick={() => void generateCopyPreview()} type="button">{previewValid ? "迁移预览已生成" : busy ? "正在检查原帖…" : "检查原帖并生成迁移预览"}</button><small>{previewValid ? "配置未变化时复用当前预览；修改任一配置后才会重新检查。" : "实时读取源广告组，并逐个目标账户核对全部 item_id；预览 15 分钟内有效。"}</small></div>}
+      {copyPreview && <div className={copyPreview.safeToCreate ? "creation-template-note copy-preview-result migration-confirmation" : "sheet-issues warning copy-preview-result"}><strong>{copyPreview.safeToCreate ? `最终确认 · ${previewSources.length} 个源组 · ${previewSources.reduce((sum, source) => sum + source.posts.length, 0)} 帖 · ${copyPreview.items.length} 个广告组` : "原帖检查存在阻断项"}</strong><span className={previewSecondsLeft > 0 ? "status warning" : "status danger"}>预览有效期：{formatCountdown(previewSecondsLeft)}</span>{copyPreview.blockers.length > 0 && <ul>{copyPreview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}{copyPreview.warnings.length > 0 && <ul>{copyPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}{copyPreview.safeToCreate && <><div className="migration-source-list">{previewSources.map((source) => <div className="migration-source-summary" key={source.adGroupId}><strong>{source.campaignName} / {source.adGroupName}</strong><span>源广告组 ID：{source.adGroupId}</span><span>产品 URL：{source.productUrl ?? "未读取"}</span><span>原帖：{source.posts.length} 条</span><details><summary>查看前 5 条原帖</summary>{source.posts.slice(0, 5).map((post) => <small key={post.itemId}>{post.displayName ?? post.itemId} · item_id：{post.itemId}</small>)}</details></div>)}</div><div className="table-wrap"><table><thead><tr><th>目标账户</th><th>总数量</th><th>预算 / 出价</th><th>自动生成广告组名称</th><th>最终创建时间</th><th>原帖核对</th></tr></thead><tbody>{copyPreview.targetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); const accountItems = copyPreview.items.filter((candidate) => candidate.accountId === config.accountId); const firstItem = accountItems[0]; const matchedPosts = new Map(accountItems.flatMap((item) => item.targetPostMapping.posts.map((post) => [post.itemId, post]))).size; const expectedPosts = previewSources.reduce((sum, source) => sum + source.posts.length, 0); return <tr key={config.accountId}><td>{account?.displayName ?? config.accountId}<small>{account?.timezone ?? "UTC"}</small></td><td>{config.quantity} × {previewSources.length} = {accountItems.length}</td><td>{config.dailyBudget} / {config.bid ?? "自动"}</td><td>{accountItems.slice(0, 4).map((item) => <small key={`${item.sourceSnapshot.adGroupId}-${item.itemIndex}`}>{item.launchRow.adGroupName}</small>)}{accountItems.length > 4 && <small>另 {accountItems.length - 4} 个…</small>}</td><td>{firstItem?.launchRow.startAt ? formatInTimeZone(firstItem.launchRow.startAt, account?.timezone ?? "UTC") : "立即"}</td><td>{matchedPosts}/{expectedPosts} 已匹配</td></tr>; })}</tbody></table></div></>}</div>}
       {publishBlockers.length > 0 && <div className="sheet-issues warning publish-blockers" id="publish-blockers"><strong>暂不能发布</strong><ul>{publishBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}
       <div className="launch-dispatch-mode"><strong>执行方式</strong><label><input checked={dispatchMode === "queue"} name="launch-dispatch-mode" onChange={() => setDispatchMode("queue")} type="radio" /> 后台队列（默认）</label><label><input checked={dispatchMode === "immediate"} name="launch-dispatch-mode" onChange={() => setDispatchMode("immediate")} type="radio" /> 立即执行（显示逐项阶段）</label></div><div className="form-actions"><button aria-describedby={publishBlockers.length > 0 ? "publish-blockers" : undefined} className="primary-button" disabled={busy || !canSave} title={publishBlockers[0]} onClick={() => void savePlan()} type="button">{dispatchMode === "immediate" ? "确认并立即创建" : launchMode === "single" ? "创建并发布" : launchMode === "copy" ? "确认配置并加入迁移队列" : "向所选账户发布"}{launchMode === "copy" ? `（${copyTaskCount} 个广告组）` : sheet?.rows.length ? `（${sheet.rows.length} 条 × ${selectedAccountIds.length} 个账户）` : ""}</button></div>
       {executionFeedback && <div className={executionFeedback.tone === "success" ? "creation-template-note" : `sheet-issues ${executionFeedback.tone}`}><strong>{executionFeedback.title}</strong><ul>{executionFeedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul></div>}
