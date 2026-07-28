@@ -246,7 +246,7 @@ export async function createApp(
     ) {
       return reply.status(423).send({
         error: "SYSTEM_PAUSED",
-        message: "软件总开关已关闭，后台检测和广告操作均已暂停。",
+        message: "自动化总开关已关闭，后台自动化已暂停。",
       });
     }
   });
@@ -655,12 +655,6 @@ export async function createApp(
     if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
     }
-    const hasDispatchableItems = dependencies.store
-      .listLaunchPlanItems(planId)
-      .some((item) => item.status === "pending");
-    if (hasDispatchableItems && !dependencies.store.getSystemRuntimeState().enabled) {
-      return reply.status(409).send({ message: "软件总开关已关闭，批量创建写入已暂停。请重新开启后再立即执行。" });
-    }
     const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
     if (!readiness.ready) {
       return reply.status(409).send({ message: `广告预设缺少 ${readiness.missingFieldCount} 项真实创建参数，不能执行。` });
@@ -680,9 +674,6 @@ export async function createApp(
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
     if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
-    }
-    if (!dependencies.store.getSystemRuntimeState().enabled) {
-      return reply.status(409).send({ message: "软件总开关已关闭，批量创建写入已暂停。请重新开启后再次确认并加入队列。" });
     }
     const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
     if (!readiness.ready) {
@@ -1608,12 +1599,7 @@ function isPublicApi(method: string, rawUrl: string): boolean {
 function isRuntimeOperation(method: string, rawUrl: string): boolean {
   if (!isMutation(method)) return false;
   const path = rawUrl.split("?", 1)[0] ?? rawUrl;
-  return (
-    path.endsWith("/automation/run") ||
-    path.endsWith("/entities/status") ||
-    path.endsWith("/sync") ||
-    path.endsWith("/test")
-  );
+  return path.endsWith("/automation/run");
 }
 
 export function requiredPermission(

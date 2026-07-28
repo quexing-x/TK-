@@ -49,9 +49,9 @@ export class LaunchWorker {
         try {
           await this.launchService.execute(queued.planId, queued.actor);
         } catch {
-          // A mutable local safety gate (for example the master switch) can
-          // reject a queued plan before any provider call. Leave it pending so
-          // the worker can safely resume after that gate is restored.
+          // A mutable creation precondition can reject a queued plan before
+          // any provider call. Persisted pending work remains available for a
+          // later explicit retry after that condition is corrected.
         }
       }
     } catch {

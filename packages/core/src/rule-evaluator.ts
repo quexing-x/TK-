@@ -25,14 +25,34 @@ export function filterEntitiesToRecentWindow(
   const cutoff = now.getTime() - lookbackHours * 60 * 60 * 1_000;
   const futureTolerance = now.getTime() + 5 * 60 * 1_000;
   const adGroupCreatedAt = new Map<string, number>();
+  const eligibleAdGroups = new Set<string>();
 
   for (const entity of entities) {
     if (entity.entityType !== "ad-group") continue;
     const createdAt = extractEntityCreatedAt(entity.payload);
-    if (createdAt !== null) adGroupCreatedAt.set(entity.externalId, createdAt);
+    if (createdAt === null) continue;
+    adGroupCreatedAt.set(entity.externalId, createdAt);
+    const normalized = normalizeProviderEntity(entity);
+    const spend = normalized.metrics.spend;
+    if (
+      createdAt <= futureTolerance &&
+      (
+        createdAt >= cutoff ||
+        (normalized.status === "enabled" && spend !== null && spend > 0)
+      )
+    ) {
+      eligibleAdGroups.add(entity.externalId);
+    }
   }
 
   const filtered = entities.filter((entity) => {
+    if (entity.entityType === "ad-group") {
+      return eligibleAdGroups.has(entity.externalId);
+    }
+    if (entity.entityType === "ad") {
+      const adGroupId = getAdGroupId(entity);
+      if (adGroupId && eligibleAdGroups.has(adGroupId)) return true;
+    }
     const createdAt = entity.entityType === "ad"
       ? adGroupCreatedAt.get(getAdGroupId(entity) ?? "") ??
         extractAdGroupCreatedAt(entity.payload)

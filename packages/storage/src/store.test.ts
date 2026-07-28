@@ -301,33 +301,38 @@ describe("AutomationStore", () => {
     rmSync(directory, { recursive: true, force: true });
   }, 15_000);
 
-  it("migrates existing accounts to direct automatic execution", () => {
+  it("removes legacy account modes while preserving run audit intent", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-"));
     const databasePath = join(directory, "automation.db");
     const firstStore = new AutomationStore(databasePath);
     firstStore.seed();
+    firstStore.createAutomationRun("demo-account", "cookie", "manual", true);
     firstStore.close();
 
     const legacyDatabase = new DatabaseSync(databasePath);
-    legacyDatabase
-      .prepare("UPDATE accounts SET execution_mode = 'automatic'")
-      .run();
-    legacyDatabase
-      .prepare(
-        "DELETE FROM schema_migrations WHERE migration_key = 'safe-manual-approval-execution-v1'",
-      )
-      .run();
-    legacyDatabase
-      .prepare(
-        "DELETE FROM schema_migrations WHERE migration_key = 'direct-automation-default-v1'",
-      )
-      .run();
+    legacyDatabase.exec(
+      "ALTER TABLE accounts ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'observe' CHECK (length(execution_mode) > 0)",
+    );
+    legacyDatabase.exec("ALTER TABLE automation_runs DROP COLUMN automatic");
+    legacyDatabase.exec(
+      "ALTER TABLE automation_runs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'observe'",
+    );
+    legacyDatabase.prepare(
+      "UPDATE automation_runs SET execution_mode = 'automatic'",
+    ).run();
+    legacyDatabase.prepare(
+      "DELETE FROM schema_migrations WHERE migration_key = 'remove-account-execution-mode-v1'",
+    ).run();
     legacyDatabase.close();
 
     const reopenedStore = new AutomationStore(databasePath);
-    expect(reopenedStore.getAccount("demo-account")?.executionMode).toBe(
-      "automatic",
-    );
+    expect(reopenedStore.listAutomationRuns("demo-account")[0]?.automatic).toBe(true);
+    const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
+    expect(migratedDatabase.prepare("PRAGMA table_info(accounts)").all())
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "execution_mode" })]));
+    expect(migratedDatabase.prepare("PRAGMA table_info(automation_runs)").all())
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "execution_mode" })]));
+    migratedDatabase.close();
     reopenedStore.close();
     rmSync(directory, { recursive: true, force: true });
   });
@@ -402,7 +407,6 @@ describe("AutomationStore", () => {
     });
 
     expect(account.accountType).toBe("agency");
-    expect(account.executionMode).toBe("automatic");
     expect(store.listGlobalThresholds()).toHaveLength(6);
     expect(store.getAutomationSwitches(account.id)).toMatchObject({
       manageCampaignStatus: true,
@@ -786,6 +790,7 @@ describe("AutomationStore", () => {
         quantity: 20,
         dailyBudget: 100,
         bid: null,
+        initialStatus: "enabled" as const,
         startAtRule: "absolute" as const,
         startAt: null,
       })),
@@ -801,11 +806,14 @@ describe("AutomationStore", () => {
     });
     saveCopySource(store, "source-configured-copy", "source-video");
     saveTargetAsset(store, target.id, "target-video");
+    const defaultPreset = store.listLaunchPresets().find((item) => item.id === "default-launch-preset")!;
+    store.updateLaunchPreset(defaultPreset.id, { ...defaultPreset, initialStatus: "disabled" });
     const targetConfigs = [{
       accountId: target.id,
       quantity: 2,
       dailyBudget: 345,
       bid: 6.7,
+      initialStatus: "enabled" as const,
       startAtRule: "next-six" as const,
       startAt: null,
     }];
@@ -820,6 +828,8 @@ describe("AutomationStore", () => {
 
     expect(preview.safeToCreate).toBe(true);
     expect(preview.items).toHaveLength(2);
+    expect(preview.targetConfigs[0]?.initialStatus).toBe("enabled");
+    expect(preview.items.every((item) => item.launchRow.initialStatus === "enabled")).toBe(true);
     expect(preview.items.every((item) => item.launchRow.dailyBudget === 345 && item.launchRow.bid === 6.7)).toBe(true);
     expect(preview.items.every((item) => item.launchRow.startAt !== null)).toBe(true);
     expect(new Set(preview.items.map((item) => item.launchRow.adGroupName)).size).toBe(2);
@@ -863,6 +873,7 @@ describe("AutomationStore", () => {
       quantity: 2,
       dailyBudget: 200,
       bid: null,
+      initialStatus: "enabled" as const,
       startAtRule: "absolute" as const,
       startAt: null,
     }];

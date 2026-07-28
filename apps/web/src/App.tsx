@@ -413,17 +413,17 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         </div>
 
         <button
-          aria-label={bootstrap.systemRuntime.enabled ? "系统运行中，点击暂停" : "系统已暂停，点击恢复"}
+          aria-label={bootstrap.systemRuntime.enabled ? "自动化运行中，点击暂停" : "自动化已暂停，点击恢复"}
           className={bootstrap.systemRuntime.enabled ? "system-master active" : "system-master paused"}
           disabled={runtimeBusy || !auth.status.permissions.includes("system:control")}
           onClick={() => void toggleSystemRuntime()}
-          title={bootstrap.systemRuntime.enabled ? "系统运行中，点击暂停" : "系统已暂停，点击恢复"}
+          title={bootstrap.systemRuntime.enabled ? "自动化运行中，点击暂停" : "自动化已暂停，点击恢复"}
           type="button"
         >
           <span className="system-master-light" />
           <span>
-            <strong>{bootstrap.systemRuntime.enabled ? "系统运行中" : "系统已暂停"}</strong>
-            <small>{bootstrap.systemRuntime.enabled ? "后台程序、开机自启、检测、定时与启停已启用" : "后台程序与开机自启已关闭"}</small>
+            <strong>{bootstrap.systemRuntime.enabled ? "自动化运行中" : "自动化已暂停"}</strong>
+            <small>{bootstrap.systemRuntime.enabled ? "后台检测、定时规则与自动启停已启用" : "自动任务已暂停；广告创建与人工操作不受影响"}</small>
           </span>
           <span className={bootstrap.systemRuntime.enabled ? "master-switch checked" : "master-switch"}><i /></span>
         </button>
@@ -479,7 +479,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)}><CommandPaletteItems query={commandQuery} selectedIndex={commandIndex} onQueryChange={setCommandQuery} onSelectedIndexChange={setCommandIndex} items={navItems.filter((item) => item.key !== "overview" && canAccessNavigationItem(item.key, auth.status.permissions))} onSelect={(item) => { navigateTo(item.key); setCommandOpen(false); }} /></CommandPalette>}
           </div>
           <span className={bootstrap.systemRuntime.enabled ? "runtime-chip active" : "runtime-chip paused"}>
-            <i />{bootstrap.systemRuntime.enabled ? "稳定运行" : "已暂停"}
+            <i />{bootstrap.systemRuntime.enabled ? "自动化运行中" : "自动化已暂停"}
           </span>
           <button
             aria-label={bootstrap.systemRuntime.enabled ? "关闭全局自动化" : "开启全局自动化"}
@@ -1509,19 +1509,19 @@ function AllAccountsAdsView({
     <section className="page-stack all-accounts-ads-page">
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最近 48 小时同步的广告组；可直接执行启停和人工接管。</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最新健康同步中仍存在的广告组；可直接执行启停和人工接管。</p></div></div>
           <div className="row-actions">
             <select aria-label="广告组状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
               <option value="enabled">已开启</option>
               <option value="disabled">已关闭</option>
-              <option value="all">全部状态（48 小时）</option>
+              <option value="all">全部当前状态</option>
             </select>
             <small className="inline-protection-note">每 30 秒更新展示</small>
           </div>
         </div>
         <div className="table-wrap"><table>
           <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
-          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>最近 48 小时暂无符合当前状态的广告组。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
+          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>最新健康同步中暂无符合当前状态的广告组。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
             <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
@@ -1889,7 +1889,7 @@ function AutomationPage({
               ? `熔断已触发：${circuitState.circuit.lastError ?? "未知错误"}`
               : latest?.failureCount
                 ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
-                : "总开关+账户自动化+automatic 模式+熔断未触发即直接执行，无需额外授权。"}
+                : "全局自动化和账户自动化均开启、且 Provider 写入保护未触发时，按规则直接执行。"}
           </p>
         </section>
 

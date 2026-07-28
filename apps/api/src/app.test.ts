@@ -511,7 +511,7 @@ describe("local API", () => {
     });
   });
 
-  it("persists the explicit account automation mode", async () => {
+  it("persists the account automation switch", async () => {
     const response = await app.inject({
       method: "PUT",
       url: "/api/accounts/demo-account/settings",
@@ -520,15 +520,11 @@ describe("local API", () => {
         accountType: "standard",
         enabled: false,
         providerKind: "cookie",
-        executionMode: "automatic",
       },
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      enabled: false,
-      executionMode: "automatic",
-    });
+    expect(response.json()).toMatchObject({ enabled: false });
 
     const run = await app.inject({
       method: "POST",
@@ -819,7 +815,7 @@ describe("local API", () => {
     expect(response.json()).toMatchObject({
       displayName: "第二账户",
       accountType: "agency",
-      executionMode: "automatic",
+      enabled: true,
     });
     expect(store.listAccounts()).toHaveLength(2);
   });
@@ -868,9 +864,6 @@ describe("local API", () => {
 
   it("executes a multi-account creation plan with each account's own Cookie session", async () => {
     const second = store.createAccount({ displayName: "第二测试账户", accountType: "standard", enabled: true, providerKind: "cookie" });
-    for (const accountId of ["demo-account", second.id]) {
-      store.setAccountExecutionMode(accountId, "automatic", "launch test");
-    }
     const creationConfig = {
       objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0,
       pricing: 1, optimizeGoal: 1, externalAction: 1, pixelId: null,
@@ -1001,7 +994,7 @@ describe("local API", () => {
     await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
   });
 
-  it("does not persist a launch queue request while the master switch is off", async () => {
+  it("queues creation while the automation master switch is off", async () => {
     const planId = await installLaunchTestProvider(
       async (_context, mutations) => mutations.map((mutation) => ({ ...mutation, ok: true, campaignId: "c", adGroupId: "g", adId: "a", message: "created" })),
       [apiLaunchRow(2)],
@@ -1010,9 +1003,9 @@ describe("local API", () => {
 
     const queued = await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/queue` });
 
-    expect(queued.statusCode).toBe(409);
-    expect(queued.json().message).toContain("再次确认");
-    expect(store.listQueuedLaunchPlans()).toEqual([]);
+    expect(queued.statusCode).toBe(202);
+    expect(queued.json()).toMatchObject({ queued: true, plan: { id: planId } });
+    await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
   });
 
   it("keeps a queued interrupted worker item visible until lease recovery marks it unknown", async () => {
@@ -1111,6 +1104,53 @@ describe("local API", () => {
       warnings: [],
       quality: testSyncQuality(now),
     });
+  });
+
+  it("excludes entities omitted by the latest healthy sync", async () => {
+    const firstAt = new Date(Date.now() - 60_000).toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [{
+        entityType: "ad-group",
+        externalId: "stale-adgroup",
+        payload: { ad_name: "已关闭广告组", ad_primary_status: "pending" },
+      }],
+      {
+        startedAt: firstAt,
+        finishedAt: firstAt,
+        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        warnings: [],
+        quality: testSyncQuality(firstAt),
+      },
+    );
+
+    const latestAt = new Date().toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [{
+        entityType: "ad-group",
+        externalId: "current-adgroup",
+        payload: { ad_name: "当前广告组", ad_primary_status: "enable" },
+      }],
+      {
+        startedAt: latestAt,
+        finishedAt: latestAt,
+        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        warnings: [],
+        quality: testSyncQuality(latestAt),
+      },
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/entities",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().map((entity: { externalId: string }) => entity.externalId))
+      .toEqual(["current-adgroup"]);
   });
 
   it("returns detection-batch aggregates for analytics", async () => {
@@ -1296,7 +1336,7 @@ describe("local API", () => {
     expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded", attemptCount: 1 });
   });
 
-  it("blocks launch provider writes while the software master switch is off", async () => {
+  it("executes creation while the automation master switch is off", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1315,12 +1355,74 @@ describe("local API", () => {
       url: `/api/launch-plans/${planId}/execute`,
     });
 
-    expect(response.statusCode).toBe(409);
-    expect(createFromPreset).not.toHaveBeenCalled();
-    expect(store.listLaunchPlanItems(planId)[0]?.status).toBe("pending");
+    expect(response.statusCode).toBe(200);
+    expect(createFromPreset).toHaveBeenCalledTimes(1);
+    expect(store.listLaunchPlanItems(planId)[0]?.status).toBe("succeeded");
   });
 
-  it("allows an explicitly requested launch when the account remains in automatic mode", async () => {
+  it("allows a manual status change while the automation master switch is off", async () => {
+    const changeStatus = vi.fn<NonNullable<AdsProvider["changeStatus"]>>(async (_context, mutations) =>
+      mutations.map((mutation) => ({ ...mutation, ok: true, message: "ok" })),
+    );
+    await installLaunchTestProvider(
+      async (_context, mutations) => mutations.map((mutation) => ({
+        ...mutation,
+        ok: true,
+        campaignId: "campaign",
+        adGroupId: "group",
+        adId: "ad",
+        message: "created",
+      })),
+      [apiLaunchRow(2)],
+      async () => {
+        const finishedAt = new Date().toISOString();
+        return {
+          entities: [{
+            entityType: "ad-group" as const,
+            externalId: "adgroup-1",
+            payload: { status: "DISABLE" },
+          }],
+          result: {
+            startedAt: finishedAt,
+            finishedAt,
+            counts: { campaign: 0, "ad-group": 1, ad: 0 },
+            warnings: [],
+            quality: testSyncQuality(finishedAt),
+          },
+        };
+      },
+      undefined,
+      changeStatus,
+    );
+    const syncedAt = new Date().toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [{
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      payload: { status: "ENABLE" },
+    }], {
+      startedAt: syncedAt,
+      finishedAt: syncedAt,
+      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      warnings: [],
+      quality: testSyncQuality(syncedAt),
+    });
+    store.updateSystemRuntimeState({ enabled: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/entities/status",
+      payload: { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    await vi.waitFor(() => expect(changeStatus).toHaveBeenCalledTimes(1));
+    expect(store.listAdOperations("demo-account")[0]).toMatchObject({
+      action: "disable",
+      source: "manual",
+    });
+  });
+
+  it("allows an explicitly requested launch while account automation is disabled", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1332,7 +1434,13 @@ describe("local API", () => {
       })),
     );
     const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
-    store.setAccountExecutionMode("demo-account", "automatic", "manual launch test");
+    const account = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: false,
+      providerKind: account.providerKind,
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -1372,7 +1480,7 @@ describe("local API", () => {
       adId: "ad-created",
       errorMessage: null,
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
@@ -1509,10 +1617,10 @@ describe("local API", () => {
       status: "succeeded",
       syncWarning: expect.stringContaining("创建后未回读到"),
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
-  it("keeps creation succeeded but warns and downgrades on non-healthy readback quality", async () => {
+  it("keeps creation succeeded and account automation unchanged on non-healthy readback quality", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
         ...mutation,
@@ -1556,10 +1664,10 @@ describe("local API", () => {
       status: "succeeded",
       syncWarning: expect.stringContaining("partial"),
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
-  it("downgrades automatic mode when direct connection testing fails", async () => {
+  it("records direct connection test failure without changing account automation", async () => {
     await installLaunchTestProvider(
       async (_context, mutations) => mutations.map((mutation) => ({
         ...mutation,
@@ -1580,7 +1688,7 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       authorizationStatus: "failed",
       capabilityVersion: "launch-test-v1",
@@ -1671,7 +1779,7 @@ describe("local API", () => {
     });
   });
 
-  it("downgrades automatic mode when direct synchronization fails", async () => {
+  it("records direct synchronization failure without changing account automation", async () => {
     await installLaunchTestProvider(
       async (_context, mutations) => mutations.map((mutation) => ({
         ...mutation,
@@ -1691,7 +1799,7 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(500);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
@@ -1728,7 +1836,7 @@ describe("local API", () => {
     });
   });
 
-  it("downgrades automatic mode when direct synchronization is non-healthy without warnings", async () => {
+  it("keeps account automation unchanged when direct synchronization is non-healthy without warnings", async () => {
     const finishedAt = new Date().toISOString();
     await installLaunchTestProvider(
       async (_context, mutations) => mutations.map((mutation) => ({
@@ -1759,7 +1867,7 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
   it("keeps a provider result with incomplete IDs unknown and does not resend it", async () => {
@@ -2473,6 +2581,8 @@ describe("local API", () => {
       status: "ready",
       message: "ready",
     }),
+    changeStatus: NonNullable<AdsProvider["changeStatus"]> = async (_context, mutations) =>
+      mutations.map((mutation) => ({ ...mutation, ok: true, message: "ok" })),
   ): Promise<string> {
     store.updateLaunchPreset("default-launch-preset", {
       name: "创建测试预设",
@@ -2525,7 +2635,6 @@ describe("local API", () => {
       capabilityVersion: "launch-test-v1",
       capabilities: ["read-campaigns", "create-campaigns", "copy-ads", "change-status"],
     });
-    store.setAccountExecutionMode("demo-account", "automatic", "launch test");
     const syncAt = new Date().toISOString();
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: syncAt,
@@ -2541,7 +2650,7 @@ describe("local API", () => {
       capabilities: new Set(["read-campaigns", "create-campaigns", "copy-ads", "change-status"]),
       checkHealth,
       syncReadOnly: resolvedSyncReadOnly,
-      changeStatus: async (_context, mutations) => mutations.map((mutation) => ({ ...mutation, ok: true, message: "ok" })),
+      changeStatus,
       create: async (context, mutations) => {
         const results = await createFromPreset(
           context,
@@ -2642,7 +2751,6 @@ describe("local API", () => {
       capabilityVersion: "copy-test-v1",
       capabilities: ["read-campaigns", "create-campaigns"],
     });
-    store.setAccountExecutionMode(target.id, "automatic", "copy test");
     const syncAt = new Date().toISOString();
     store.saveReadOnlySync(target.id, "cookie", [{
       entityType: "ad",

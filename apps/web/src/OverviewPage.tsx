@@ -105,14 +105,14 @@ export function OverviewPage({
 
   return (
     <section className="overview-page">
-      <section className="overview-runtime-strip" aria-label="系统运行概览">
+      <section className="overview-runtime-strip" aria-label="自动化运行概览">
         <div className={`runtime-orbit ${runtime.enabled ? "active" : "paused"}`}>
           <Activity size={36} strokeWidth={1.8} />
         </div>
         <div className="runtime-copy">
-          <span className="section-kicker">SYSTEM STATUS</span>
-          <h2>{runtime.enabled ? "系统运行中" : "系统已暂停"}</h2>
-          <p>{runtime.enabled ? "检测、决策与任务队列正在按既有规则运行" : "所有后台任务与平台写入均已停止"}</p>
+          <span className="section-kicker">AUTOMATION STATUS</span>
+          <h2>{runtime.enabled ? "自动化运行中" : "自动化已暂停"}</h2>
+          <p>{runtime.enabled ? "自动检测、决策与定时规则正在运行" : "自动任务已暂停；广告创建与人工操作仍可使用"}</p>
         </div>
         <div className="runtime-stat-grid">
           <OverviewStat label="已接入账户" value={String(readyCount)} meta={`共 ${accounts.length} 个`} />
@@ -121,8 +121,8 @@ export function OverviewPage({
           <OverviewStat label="执行记录" value={String(decisions.length)} meta="本地可追溯" />
         </div>
         <div className={`runtime-state-card ${runtime.enabled ? "active" : "paused"}`}>
-          <span>主控状态</span>
-          <strong><i />{runtime.enabled ? "稳定运行" : "安全暂停"}</strong>
+          <span>自动化状态</span>
+          <strong><i />{runtime.enabled ? "正在运行" : "已暂停"}</strong>
           <small>控制入口位于页面右上角</small>
         </div>
       </section>
@@ -186,7 +186,7 @@ export function OverviewPage({
           <div className="connection-health-list">
             <ConnectionHealth icon={<ShieldCheck size={17} />} label="账户接入" detail={`${readyCount}/${accounts.length} 正常`} healthy={readyCount === accounts.length} />
             <ConnectionHealth icon={<Database size={17} />} label="本地数据" detail="读取正常" healthy />
-            <ConnectionHealth icon={<Activity size={17} />} label="任务队列" detail={runtime.enabled ? "运行中" : "已暂停"} healthy={runtime.enabled} />
+            <ConnectionHealth icon={<Activity size={17} />} label="自动任务" detail={runtime.enabled ? "运行中" : "已暂停"} healthy={runtime.enabled} />
           </div>
         </article>
 
