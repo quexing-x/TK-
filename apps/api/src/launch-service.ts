@@ -3,12 +3,18 @@ import {
   ProviderCredentialInputSchema,
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
+  stripAutomaticAdGroupNameSuffixes,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
   type CreationPresetConfig,
   type LaunchConfigurationRow,
   type LaunchCreationProgress,
+  type LaunchCopyPreviewInput,
+  type LaunchCopyPreviewRecord,
+  type LaunchOriginalPost,
+  type LaunchSourceSnapshot,
+  type LaunchTargetPostMapping,
   type WriteTaskActor,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -73,6 +79,106 @@ export class LaunchService {
     this.recoverExpiredLeases();
   }
 
+  async createCopyPreview(input: LaunchCopyPreviewInput): Promise<LaunchCopyPreviewRecord> {
+    const sourceAccount = this.store.getAccount(input.sourceAccountId);
+    if (!sourceAccount) throw new Error("源广告账户不存在。");
+    const sourceConnection = this.store.getProviderConnection(
+      input.sourceAccountId,
+      sourceAccount.providerKind,
+    );
+    if (!sourceConnection || sourceConnection.status !== "ready") {
+      throw new Error(`源账户“${sourceAccount.displayName}”未通过连接检测。`);
+    }
+    this.providers.requireAccountCapability(
+      sourceAccount.id,
+      sourceAccount.providerKind,
+      sourceConnection,
+      "read-ad-groups",
+    );
+    const managed = this.store.listCurrentManagedEntities(sourceAccount.id, sourceAccount.providerKind);
+    const sourceContext = await this.loadProviderContext(sourceAccount.id, sourceAccount.providerKind);
+    const sourceAdGroupIds = [...new Set(input.sourceAdGroupIds?.length
+      ? input.sourceAdGroupIds
+      : [input.sourceAdGroupId])];
+    const sourceSnapshots: LaunchSourceSnapshot[] = [];
+    for (const sourceAdGroupId of sourceAdGroupIds) {
+      const adGroup = managed.find(
+        (entity) => entity.entityType === "ad-group" && entity.externalId === sourceAdGroupId,
+      );
+      if (!adGroup?.parentCampaignId) {
+        throw new Error(`源广告组 ${sourceAdGroupId} 不存在或缺少稳定的 Campaign ID，请先同步源账户。`);
+      }
+      const campaign = managed.find(
+        (entity) => entity.entityType === "campaign" && entity.externalId === adGroup.parentCampaignId,
+      );
+      if (!campaign) throw new Error(`源广告组“${adGroup.name}”所属推广系列不在当前同步快照中。`);
+      const sourceDetail = await this.providers.readAdGroupOriginalPosts(
+        sourceAccount.providerKind,
+        sourceContext,
+        { campaignId: campaign.externalId, adGroupId: adGroup.externalId },
+      );
+      const sourcePosts = sourceDetail.posts.filter((post) => post.promotable);
+      if (sourcePosts.length !== sourceDetail.posts.length || sourcePosts.length === 0) {
+        throw new Error(`源广告组“${adGroup.name}”包含不可推广或已失效的帖子，无法迁移。`);
+      }
+      if (sourcePosts.length > 500) {
+        throw new Error(`源广告组“${adGroup.name}”有 ${sourcePosts.length} 条帖子，超过单组上限 500 条。`);
+      }
+      sourceSnapshots.push({
+        accountId: sourceAccount.id,
+        campaignId: campaign.externalId,
+        campaignName: campaign.name,
+        adGroupId: adGroup.externalId,
+        adGroupName: adGroup.name,
+        posts: sourcePosts,
+        productUrl: sourceDetail.productUrl,
+        productInfo: sourceDetail.productInfo,
+        catalogSetup: sourceDetail.catalogSetup,
+        structuralHash: originalPostsHash(sourcePosts),
+        fetchedAt: new Date().toISOString(),
+      });
+    }
+    const targetPostMappings: LaunchTargetPostMapping[] = await Promise.all(
+      [...new Set(input.targetAccountIds)].map(async (accountId) => {
+        const account = this.store.getAccount(accountId);
+        if (!account) throw new Error(`目标账户 ${accountId} 不存在。`);
+        const connection = this.store.getProviderConnection(account.id, account.providerKind);
+        if (!connection || connection.status !== "ready") {
+          throw new Error(`目标账户“${account.displayName}”未通过连接检测。`);
+        }
+        this.providers.requireAccountCapability(
+          account.id,
+          account.providerKind,
+          connection,
+          "create-campaigns",
+        );
+        try {
+          const context = await this.loadProviderContext(account.id, account.providerKind);
+          const mappings: LaunchTargetPostMapping[] = [];
+          for (const snapshot of sourceSnapshots) {
+            const posts = await this.providers.readAccessibleOriginalPosts(
+              account.providerKind,
+              context,
+              snapshot.posts,
+            );
+            mappings.push({
+              accountId,
+              sourceAdGroupId: snapshot.adGroupId,
+              posts,
+              evidenceHash: originalPostsHash(posts),
+              verifiedAt: new Date().toISOString(),
+            });
+          }
+          return mappings;
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          throw new Error(`目标账户“${account.displayName}”原帖检查失败：${message}`);
+        }
+      }),
+    ).then((mappings) => mappings.flat());
+    return this.store.createLaunchCopyPreview(input, sourceSnapshots, targetPostMappings);
+  }
+
   async execute(
     planId: string,
     actor: WriteTaskActor = { id: "local-user", name: "本地用户", kind: "user" },
@@ -106,13 +212,22 @@ export class LaunchService {
     const candidates = allItems.filter((item) => item.status === "pending");
     const groupsByAccount = groupLaunchItemsByAccountAndCampaign(candidates);
     const accountResults = await Promise.all(
-      [...groupsByAccount.values()].map((groups) => Promise.all(
-        groups.map((group) => this.executeSeriesBatch(
-          plan.presetSnapshot!.creationConfig,
-          group,
-          actor,
-        )),
-      )),
+      [...groupsByAccount.values()].map(async (groups) => {
+        const results = [];
+        // A Cookie account has one mutable Ads Manager draft/session context.
+        // Different campaigns for the same account must therefore be created
+        // serially; otherwise one source group can overwrite the draft state
+        // another group is validating or reading back. Separate accounts stay
+        // independent and may still execute in parallel.
+        for (const group of groups) {
+          results.push(await this.executeSeriesBatch(
+            plan.presetSnapshot!.creationConfig,
+            group,
+            actor,
+          ));
+        }
+        return results;
+      }),
     );
     const itemOrder = new Map(candidates.map((item) => [item.itemId, item.itemIndex]));
     const results = accountResults
@@ -205,14 +320,8 @@ export class LaunchService {
         first.accountId,
         account.providerKind,
         connection,
-        first.templateMode === "copy" ? "copy-ads" : "create-campaigns",
+        "create-campaigns",
       );
-      const latestSync = this.store.getLatestReadOnlySync(first.accountId, account.providerKind);
-      if (first.templateMode === "copy" && (!latestSync || latestSync.quality.status !== "healthy")) {
-        throw new Error(
-          `目标账户同步数据不是 healthy，批量创建已阻止（当前：${latestSync?.quality.status ?? "none"}）。`,
-        );
-      }
       for (const item of claimed) {
         this.store.validateLaunchCopyItem(item);
         if (!item.attemptId) throw new Error("创建任务缺少 attemptId，禁止调用 Provider。");
@@ -222,8 +331,10 @@ export class LaunchService {
       }
       const context = await this.loadProviderContext(first.accountId, account.providerKind);
       const connectionFingerprint = creationConnectionFingerprint(connection);
+      const refreshedPosts = new Map<string, LaunchOriginalPost[]>();
       for (const item of claimed) {
-        await this.refreshLaunchCopyEvidence(item, context);
+        const posts = await this.refreshLaunchCopyEvidence(item, context);
+        if (posts) refreshedPosts.set(item.itemId, posts);
       }
       for (const item of claimed) this.store.validateLaunchCopyItem(item);
 
@@ -249,7 +360,7 @@ export class LaunchService {
           first.accountId,
           currentAccount.providerKind,
           dispatchConnection,
-          first.templateMode === "copy" ? "copy-ads" : "create-campaigns",
+          "create-campaigns",
         );
         if (!claimed.every((item) => this.launchStore.renew(item.itemId, executorId))) {
           throw new Error("创建批次执行权已变化，当前请求未发送。");
@@ -262,6 +373,15 @@ export class LaunchService {
         initialStatus: item.launchRow.initialStatus,
         templateMode: item.templateMode,
         ...(item.templateCampaignId ? { templateCampaignId: item.templateCampaignId } : {}),
+        ...(refreshedPosts.has(item.itemId)
+          ? { originalPosts: refreshedPosts.get(item.itemId)! }
+          : {}),
+        ...(item.sourceSnapshot?.productInfo
+          ? { originalProductInfo: item.sourceSnapshot.productInfo }
+          : {}),
+        ...(item.sourceSnapshot?.catalogSetup === 0 || item.sourceSnapshot?.catalogSetup === 1
+          ? { originalCatalogSetup: item.sourceSnapshot.catalogSetup }
+          : {}),
         operationId: item.operationId,
         attemptId: item.attemptId!,
         correlationId: item.correlationId,
@@ -308,7 +428,9 @@ export class LaunchService {
           const unknown = !created
             || created.ok
             || created.failureKind === "unknown"
-            || created.retrySafe === false;
+            || created.retrySafe === false
+            || (reconcileOnlyItemIds.has(item.itemId)
+              && created.reconciliationVerifiedAbsent !== true);
           if (unknown) this.tasks.unknown(item.itemId, executorId, message);
           else this.tasks.fail(item.itemId, executorId, message);
           outputs.push({
@@ -358,7 +480,7 @@ export class LaunchService {
       }
 
       if (successes.length > 0) {
-        let commonSyncWarning: string | null = null;
+        let commonSyncWarnings: string[] = [];
         let syncResult: ReadOnlySyncResult | null = null;
         let syncEntities: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>["entities"] = [];
         let syncCompleted = false;
@@ -369,35 +491,47 @@ export class LaunchService {
           this.store.saveReadOnlySync(first.accountId, account.providerKind, sync.entities, sync.result);
           syncCompleted = true;
           if (sync.result.quality.status !== "healthy" || sync.result.warnings.length > 0) {
-            commonSyncWarning = [
-              commonSyncWarning,
+            commonSyncWarnings = [
               ...(sync.result.quality.status !== "healthy"
                 ? [`创建后同步质量为 ${sync.result.quality.status}`]
                 : []),
               ...sync.result.warnings,
-            ].filter(Boolean).join("；");
+            ];
           }
         } catch (cause) {
-          commonSyncWarning = [commonSyncWarning, safeError(cause)].filter(Boolean).join("；");
+          commonSyncWarnings.push(safeError(cause));
           this.store.updateProviderStatus(
             first.accountId,
             account.providerKind,
             "failed",
-            `创建后同步异常：${commonSyncWarning}`,
+            `创建后同步异常：${commonSyncWarnings.join("；")}`,
           );
         }
         for (const success of successes) {
+          // Original-post migration resolves its published asset-group id via
+          // get_creative_fields_by_ad before the provider reports success.
+          // That asset group is not guaranteed to appear in the ordinary ad
+          // statistics list, so an empty ad list must not invalidate the
+          // stronger object-specific readback evidence.
+          const originalPostAssetVerified = Boolean(
+            success.item.sourceSnapshot && success.created.adId,
+          );
+          const itemSyncWarnings = commonSyncWarnings.filter((warning) =>
+            !(originalPostAssetVerified
+              && warning === "ad 响应成功，但暂未识别到列表数据。"),
+          );
           const missing = [
             ["campaign", success.created.campaignId] as const,
             ["ad-group", success.created.adGroupId] as const,
             ...(success.created.adId ? [["ad", success.created.adId] as const] : []),
           ].filter(([entityType, externalId]) =>
             syncCompleted
+            && !(originalPostAssetVerified && entityType === "ad")
             && !syncEntities.some((entity) => entity.entityType === entityType && entity.externalId === externalId),
           );
           const itemWarning = [
             success.output.syncWarning,
-            commonSyncWarning,
+            ...itemSyncWarnings,
             ...(missing.length > 0 ? [`创建后未回读到：${missing.map(([type]) => type).join("、")}`] : []),
           ].filter(Boolean).join("；") || null;
           try {
@@ -450,39 +584,57 @@ export class LaunchService {
   private async refreshLaunchCopyEvidence(
     item: LaunchPlanItemRecord,
     targetContext: ProviderContext,
-  ): Promise<void> {
-    if (!item.sourceSnapshot && !item.targetAssetMapping) return;
-    if (!item.sourceSnapshot || !item.targetAssetMapping) {
-      throw new Error("复制迁移任务缺少冻结的源快照或目标素材映射。");
+  ): Promise<LaunchOriginalPost[] | undefined> {
+    if (!item.sourceSnapshot && !item.targetPostMapping) return undefined;
+    if (!item.sourceSnapshot || !item.targetPostMapping) {
+      throw new Error("原帖迁移任务缺少冻结的源帖子或目标帖子证据。");
     }
-    const accountIds = [...new Set([
-      item.sourceSnapshot.accountId,
-      item.accountId,
-    ])];
-    for (const accountId of accountIds) {
-      const account = this.store.getAccount(accountId);
-      if (!account) throw new Error("复制迁移的源账户或目标账户不存在。");
-      const connection = this.store.getProviderConnection(accountId, account.providerKind);
-      if (!connection || connection.status !== "ready") {
-        throw new Error(`账户“${account.displayName}”未通过连接验证，已阻止复制迁移。`);
-      }
-      this.providers.requireAccountCapability(
-        accountId,
-        account.providerKind,
-        connection,
-        "read-campaigns",
-      );
-      const context = accountId === item.accountId
-        ? targetContext
-        : await this.loadProviderContext(accountId, account.providerKind);
-      const sync = await this.providers.syncReadOnly(account.providerKind, context);
-      this.store.saveReadOnlySync(accountId, account.providerKind, sync.entities, sync.result);
-      if (sync.result.quality.status !== "healthy") {
-        throw new Error(
-          `账户“${account.displayName}”最终同步质量为 ${sync.result.quality.status}，已阻止复制迁移。`,
-        );
-      }
+    const sourceAccount = this.store.getAccount(item.sourceSnapshot.accountId);
+    if (!sourceAccount) throw new Error("原帖迁移的源账户不存在。");
+    const sourceConnection = this.store.getProviderConnection(
+      sourceAccount.id,
+      sourceAccount.providerKind,
+    );
+    if (!sourceConnection || sourceConnection.status !== "ready") {
+      throw new Error(`源账户“${sourceAccount.displayName}”未通过连接验证。`);
     }
+    this.providers.requireAccountCapability(
+      sourceAccount.id,
+      sourceAccount.providerKind,
+      sourceConnection,
+      "read-ad-groups",
+    );
+    const sourceContext = await this.loadProviderContext(sourceAccount.id, sourceAccount.providerKind);
+    const sourceDetail = await this.providers.readAdGroupOriginalPosts(
+      sourceAccount.providerKind,
+      sourceContext,
+      {
+        campaignId: item.sourceSnapshot.campaignId,
+        adGroupId: item.sourceSnapshot.adGroupId,
+      },
+    );
+    const expectedIds = item.sourceSnapshot.posts.map((post) => post.itemId);
+    const currentPosts = sourceDetail.posts;
+    if (currentPosts.some((post) => !post.promotable)
+      || originalPostsHash(currentPosts) !== item.sourceSnapshot.structuralHash
+      || JSON.stringify(sourceDetail.productInfo) !== JSON.stringify(item.sourceSnapshot.productInfo)
+      || sourceDetail.catalogSetup !== item.sourceSnapshot.catalogSetup) {
+      throw new Error("源广告组帖子在预览后已变化，或商品信息已更新，请重新生成迁移预览。");
+    }
+    const targetAccount = this.store.getAccount(item.accountId);
+    if (!targetAccount) throw new Error("原帖迁移的目标账户不存在。");
+    const targetPosts = await this.providers.readAccessibleOriginalPosts(
+      targetAccount.providerKind,
+      targetContext,
+      item.sourceSnapshot.posts,
+    );
+    if (targetPosts.length !== expectedIds.length
+      || targetPosts.some((post, index) => post.itemId !== expectedIds[index] || !post.promotable)) {
+      const available = new Set(targetPosts.map((post) => post.itemId));
+      const missing = expectedIds.filter((itemId) => !available.has(itemId));
+      throw new Error(`目标账户无法继续使用帖子：${missing.join("、") || "帖子状态已变化"}。`);
+    }
+    return targetPosts;
   }
 
   private async loadProviderContext(
@@ -789,30 +941,7 @@ function groupLaunchItemsByAccountAndCampaign(
  * ordinary model numbers such as `2024` are preserved.
  */
 export function stripGeneratedAdGroupNameSuffixes(sourceName: string): string {
-  const original = sourceName.trim();
-  let current = original;
-  while (current) {
-    const indexed = current.match(/^(.*?)-(\d{4})-([1-9]\d*)$/);
-    if (indexed && indexed[1]?.trim() && isValidMonthDay(indexed[2]!)) {
-      current = indexed[1].replace(/-+$/, "").trim();
-      continue;
-    }
-    const dated = current.match(/^(.*?)-?(\d{4})$/);
-    if (dated && dated[1]?.trim() && isValidMonthDay(dated[2]!)) {
-      current = dated[1].replace(/-+$/, "").trim();
-      continue;
-    }
-    break;
-  }
-  return current || original;
-}
-
-function isValidMonthDay(value: string): boolean {
-  const month = Number(value.slice(0, 2));
-  const day = Number(value.slice(2));
-  if (!Number.isInteger(month) || month < 1 || month > 12) return false;
-  const lastDay = new Date(Date.UTC(2000, month, 0)).getUTCDate();
-  return Number.isInteger(day) && day >= 1 && day <= lastDay;
+  return stripAutomaticAdGroupNameSuffixes(sourceName);
 }
 
 function creationConnectionFingerprint(
@@ -824,6 +953,18 @@ function creationConnectionFingerprint(
     credentialRef: connection.credentialRef,
     settings: connection.settings,
   })).digest("hex");
+}
+
+function originalPostsHash(posts: LaunchOriginalPost[]): string {
+  return createHash("sha256").update(JSON.stringify(posts.map((post) => ({
+    itemId: post.itemId,
+    identityId: post.identityId,
+    identityType: post.identityType,
+    identityBcId: post.identityBcId,
+    vid: post.vid,
+    videoId: post.videoId,
+    promotable: post.promotable,
+  })))).digest("hex");
 }
 
 function safeError(cause: unknown): string {

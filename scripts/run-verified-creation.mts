@@ -18,6 +18,12 @@ const planId = process.env.TK_CREATION_PLAN_ID?.trim();
 if (!planId) {
   throw new Error("必须通过 TK_CREATION_PLAN_ID 指定软件内已经保存的创建计划。");
 }
+const expectedSourceAccountName = process.env.TK_EXPECTED_SOURCE_ACCOUNT?.trim();
+const expectedSourceAdGroupName = process.env.TK_EXPECTED_SOURCE_AD_GROUP?.trim();
+const expectedTargetAccountName = process.env.TK_EXPECTED_TARGET_ACCOUNT?.trim() ?? "测试";
+if (!expectedSourceAccountName || !expectedSourceAdGroupName) {
+  throw new Error("必须显式指定 TK_EXPECTED_SOURCE_ACCOUNT 和 TK_EXPECTED_SOURCE_AD_GROUP。");
+}
 
 const resolvedDataDirectory = resolve(dataDirectory);
 const store = new AutomationStore(join(resolvedDataDirectory, "tk-automation.db"));
@@ -37,8 +43,15 @@ try {
 
   const [item] = pendingItems;
   const account = item ? store.getAccount(item.accountId) : null;
-  if (!item || !account || account.displayName !== "测试" || account.providerKind !== "cookie") {
-    throw new Error("真实验收仅允许名为“测试”的 Cookie 账户执行。");
+  const sourceAccount = store.getAccount(plan.sourceAccountId);
+  if (!item || !account || account.displayName !== expectedTargetAccountName || account.providerKind !== "cookie") {
+    throw new Error(`真实验收仅允许指定的 Cookie 目标账户“${expectedTargetAccountName}”执行。`);
+  }
+  if (!sourceAccount || sourceAccount.displayName !== expectedSourceAccountName) {
+    throw new Error(`计划源账户不是授权的“${expectedSourceAccountName}”。`);
+  }
+  if (item.sourceSnapshot?.adGroupName !== expectedSourceAdGroupName) {
+    throw new Error(`计划源广告组不是授权的“${expectedSourceAdGroupName}”。`);
   }
   if (item.launchRow.initialStatus !== "disabled") {
     throw new Error("真实验收创建项必须冻结为关闭状态。");

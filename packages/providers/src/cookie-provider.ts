@@ -11,6 +11,9 @@ import {
   type CapturedCookieRequest,
   type ProviderEntity,
   type SyncEntityType,
+  type LaunchOriginalPost,
+  type LaunchProductInfo,
+  type CreationPresetConfig,
 } from "@tk-auto/core";
 import type {
   AdsProvider,
@@ -120,6 +123,170 @@ export class CookieAdsProvider implements AdsProvider {
       status: "ready",
       message: `Cookie 会话验证成功（${request.method} 只读请求）。`,
     };
+  }
+
+  async readAdGroupOriginalPosts(
+    context: ProviderContext,
+    input: { campaignId: string; adGroupId: string },
+  ): Promise<{ posts: LaunchOriginalPost[]; productUrl: string | null; productInfo: LaunchProductInfo | null; catalogSetup: 0 | 1 | null }> {
+    const { credential, sessionRequest } = originalPostReadSession(context);
+    const sidebar = await requestCreationStep(
+      "sidebar/brief_info_list",
+      () => creationPathRequest(
+        sessionRequest,
+        "/api/v4/i18n/creation/sidebar/brief_info_list/",
+        { campaign_id: input.campaignId },
+      ),
+      credential,
+      { semantics: "preflight-read" },
+    );
+    const creativeId = findAssetGroupCreativeId(sidebar.data, input.adGroupId);
+    if (!creativeId) {
+      throw new RetryableCreationError(
+        `源广告组 ${input.adGroupId} 没有可读取的创意详情，请刷新源账户后重试。`,
+      );
+    }
+    const detail = await requestCreationStep(
+      "creative/procedural_detail",
+      () => creationPathGetRequest(
+        sessionRequest,
+        "/mi/api/v3/i18n/perf/creative/procedural_detail/",
+        { creative_id: creativeId, creative_material_mode: "6" },
+      ),
+      credential,
+      { semantics: "preflight-read" },
+    );
+    const data = isRecord(detail.data) ? detail.data : {};
+    const imageList = Array.isArray(data.image_list) ? data.image_list : [];
+    const posts = uniqueOriginalPosts(imageList.flatMap(parseOriginalPost));
+    if (posts.length === 0) {
+      throw new RetryableCreationError("源广告组没有可迁移的 TikTok 原帖。");
+    }
+    const productUrl = firstStringByKeys(data, new Set([
+      "external_url",
+      "product_url",
+      "landing_page_url",
+    ]));
+    const catalogSetupValue = numericValue(data.catalog_setup);
+    return {
+      posts,
+      productUrl: productUrl && isHttpUrlValue(productUrl) ? productUrl : null,
+      productInfo: migrationProductInfo(data.product_info),
+      catalogSetup: catalogSetupValue === 0 || catalogSetupValue === 1 ? catalogSetupValue : null,
+    };
+  }
+
+  async readAccessibleOriginalPosts(
+    context: ProviderContext,
+    sourcePosts: LaunchOriginalPost[],
+  ): Promise<LaunchOriginalPost[]> {
+    if (sourcePosts.length === 0) return [];
+    const { credential, sessionRequest } = originalPostReadSession(context);
+    const identities: Array<Record<string, unknown>> = [];
+    let identityCursor = "0";
+    let identityPage = 1;
+    let identityQueryMode = 8;
+    let identityPaginationComplete = false;
+    for (let page = 0; page < 50; page += 1) {
+      const response = await requestCreationStep(
+        "spark/identity/list",
+        () => creationPathRequest(
+          sessionRequest,
+          "/api/v4/i18n/creation/spark/identity/list/",
+          {
+            cursor: identityCursor,
+            page: identityPage,
+            limit: 20,
+            is_warm_up: page === 0,
+            mix_mode: 5,
+            identity_query_mode: identityQueryMode,
+          },
+        ),
+        credential,
+        { semantics: "preflight-read" },
+      );
+      const data = isRecord(response.data) ? response.data : {};
+      const rows = Array.isArray(data.identity_list)
+        ? data.identity_list.filter(isRecord)
+        : [];
+      identities.push(...rows.filter((row) => row.can_use_video_list !== false));
+      if (data.has_more !== true) {
+        identityPaginationComplete = true;
+        break;
+      }
+      identityCursor = nonEmptyId(data.cursor) ?? identityCursor;
+      identityPage = typeof data.next_page === "number" ? data.next_page : identityPage + 1;
+      identityQueryMode = typeof data.next_query_mode === "number"
+        ? data.next_query_mode
+        : identityQueryMode;
+    }
+    if (!identityPaginationComplete) {
+      throw new RetryableCreationError(
+        "目标账户绑定身份超过 1000 个，无法在安全分页上限内完成原帖核对。",
+      );
+    }
+    if (identities.length === 0) return [];
+
+    const identityList = identities.flatMap((identity) => {
+      const identityId = nonEmptyId(identity.identity_id);
+      const identityType = numericValue(identity.identity_type);
+      if (!identityId || identityType === null) return [];
+      return [{
+        identity_id: identityId,
+        identity_type: identityType,
+        identity_bc_id: nonEmptyId(identity.identity_bc_id) ?? "0",
+      }];
+    });
+    const identityByKey = new Map(identityList.map((identity) => [
+      `${identity.identity_id}:${identity.identity_type}`,
+      identity,
+    ]));
+    const requests = sourcePosts.flatMap((post) => {
+      const identity = identityByKey.get(`${post.identityId}:${post.identityType}`);
+      if (!identity) return [];
+      return [{
+        itemId: post.itemId,
+        identity,
+        body: {
+          aweme_item_ids: [post.itemId],
+          identity_id: identity.identity_id,
+          identity_type: identity.identity_type,
+          identity_bc_id: identity.identity_bc_id,
+          item_source: 2,
+        },
+      }];
+    });
+    const found = new Map<string, LaunchOriginalPost>();
+    for (let offset = 0; offset < requests.length; offset += 50) {
+      const batch = requests.slice(offset, offset + 50);
+      const response = await requestCreationStep(
+        "material/native_item_infos",
+        () => creationPathRequest(
+          sessionRequest,
+          "/mi/api/v4/i18n/creation/material/native_item_infos/",
+          { item_req_list: batch.map((item) => item.body) },
+        ),
+        credential,
+        { semantics: "preflight-read" },
+      );
+      const data = isRecord(response.data) ? response.data : {};
+      const itemInfoMap = isRecord(data.item_info_map) ? data.item_info_map : {};
+      for (const request of batch) {
+        const itemInfo = itemInfoMap[request.itemId];
+        if (!isRecord(itemInfo)) continue;
+        const [post] = parseOriginalPost({
+          ...itemInfo,
+          identity_id: request.identity.identity_id,
+          identity_type: request.identity.identity_type,
+          identity_bc_id: request.identity.identity_bc_id,
+        });
+        if (post?.promotable) found.set(post.itemId, post);
+      }
+    }
+    return sourcePosts.flatMap((sourcePost) => {
+      const post = found.get(sourcePost.itemId);
+      return post ? [post] : [];
+    });
   }
 
   async appeal(context: ProviderContext, mutations: import("./types.js").AppealMutation[]) {
@@ -755,6 +922,7 @@ export class CookieAdsProvider implements AdsProvider {
       publishPayload.campaign_id = input.existingCampaignId;
       publishPayload.campaign_snap_id = "";
       publishPayload.campaign_sketch_id = "";
+      publishPayload.is_partial_publish = true;
       if (scheduledStart && scheduledStart.getTime() <= Date.now()) {
         throw new UnknownCreationStateError("TikTok 原生排期在发布前已到期；草稿已创建，已停止发布并禁止自动重试。");
       }
@@ -1568,6 +1736,7 @@ async function createCookieDraftBatch(
       creativeSketchRows,
     };
     const authorizationCodes = reconcileOnly ? [] : [...new Set(mutations.flatMap((mutation) => {
+      if (mutation.originalPosts?.length) return [];
       const codes = splitVideoCodes(mutation.row.videoCode);
       return (codes.length > 0 ? codes : [mutation.row.videoCode])
         .filter((code) => code.startsWith("#"));
@@ -1610,12 +1779,20 @@ async function createCookieDraftBatch(
     try {
       ready.push({
         mutation,
-        resolvedVideos: await resolveTikTokVideos(
-          mutation,
-          sessionRequest,
-          credential,
-          library,
-        ),
+        resolvedVideos: mutation.originalPosts?.length
+          ? mutation.originalPosts.map((post) => ({
+              itemId: post.itemId,
+              identityId: post.identityId,
+              identityType: post.identityType,
+              ...(post.identityBcId ? { identityBcId: post.identityBcId } : {}),
+              vid: post.vid,
+            }))
+          : await resolveTikTokVideos(
+              mutation,
+              sessionRequest,
+              credential,
+              library,
+            ),
       });
     } catch (cause) {
       failures.push(creationFailureResult(mutation, cause, dispatchState));
@@ -1698,7 +1875,7 @@ async function createCookieDraftBatch(
       publishPayload.campaign_snap_id = "";
       publishPayload.campaign_sketch_id = "";
     }
-    publishPayload.is_partial_publish = true;
+    publishPayload.is_partial_publish = Boolean(first.existingCampaignId);
     for (const item of prepared) item.mutation.onProgress?.({ phase: "publishing", evidence: {} });
     const published = await requestCreationStep(
       "create_by_snap",
@@ -1901,7 +2078,8 @@ function materialSkippedWarning(
   mutation: CreationMutation,
   draftStillExists = false,
 ): string {
-  const materialCount = Math.max(1, splitVideoCodes(mutation.row.videoCode).length);
+  const materialCount = mutation.originalPosts?.length
+    ?? Math.max(1, splitVideoCodes(mutation.row.videoCode).length);
   return `素材提示：广告组已创建成功，但 TikTok 未生成广告“${mutation.row.adName}”；已跳过 ${materialCount} 条素材${draftStillExists ? "，远端仍可见素材草稿" : ""}。`;
 }
 
@@ -1927,6 +2105,7 @@ function retryableReconciliationResult(
     ok: false,
     failureKind: "retryable",
     retrySafe: true,
+    reconciliationVerifiedAbsent: true,
     message: `${message} 本次只执行远端查询，未发送任何新建或发布请求。`,
   };
 }
@@ -1955,10 +2134,16 @@ function reconciliationDraftExists(
       ? mutation.reconcileEvidence?.adGroupSketchId
       : mutation.reconcileEvidence?.creativeSketchId;
   if (trackedId) {
-    const ids = kind === "campaign"
-      ? baseline.campaignSketchIds
-      : kind === "ad" ? baseline.adSketchIds : baseline.creativeSketchIds;
-    return ids.has(trackedId);
+    const rows = kind === "campaign"
+      ? baseline.campaignSketchRows
+      : kind === "ad" ? baseline.adSketchRows : baseline.creativeSketchRows;
+    const idKeys = kind === "campaign"
+      ? ["campaign_sketch_id"]
+      : kind === "ad" ? ["ad_sketch_id"] : ["creative_sketch_id"];
+    return rows.some((row) =>
+      idKeys.some((key) => nonEmptyId(row[key]) === trackedId)
+      && sketchRowName(row, kind) === legacyName,
+    );
   }
   // Legacy unknown tasks did not persist sketch ids. Name matching is kept only
   // for those records; new tasks always use their exact tracked evidence.
@@ -2008,6 +2193,28 @@ async function verifyPublishedCookieBatch(input: {
       input.baseline,
       completedByAdSnapId,
     );
+    await Promise.all(reconciled.ids.map(async (ids, index) => {
+      const prepared = input.prepared[index];
+      if (!ids || ids.adId || !prepared?.mutation.originalPosts?.length) return;
+      try {
+        const assetGroupId = await readPublishedAssetGroupCreativeId(
+          input.sessionRequest,
+          input.credential,
+          ids.adGroupId,
+          prepared.mutation.originalPosts.map((post) => post.itemId),
+        );
+        if (!assetGroupId) return;
+        reconciled.ids[index] = {
+          campaignId: ids.campaignId,
+          adGroupId: ids.adGroupId,
+          adId: assetGroupId,
+        };
+        reconciled.reasons[index] = `广告组“${prepared.row.adGroupName}”及其原帖素材组已在 Cookie 正式接口确认。`;
+      } catch {
+        // The ordinary ad list remains the fallback. A transient read failure
+        // must not turn an already confirmed campaign/ad-group into unknown.
+      }
+    }));
     lastReconciliation = reconciled;
     const allAdGroupsResolved = reconciled.ids.every(Boolean);
     const materialStillPending = reconciled.ids.some((ids) => ids && !ids.adId);
@@ -2378,21 +2585,53 @@ async function runCookieDraftChain(
   const drafts = credential.creationProfile
     ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
     : buildDraftPayloads(creationRow, mutation.preset, timezone);
+  if (!credential.creationProfile) {
+    const targetPixelId = resolveTargetAccountPixelId(preflightEntities, mutation.preset);
+    if (targetPixelId) {
+      requireObjectField(drafts.adGroup, "ad_sketch_form_data").ad_ref_pixel_id = targetPixelId;
+    }
+  }
   // A new launch never copies a campaign. New campaign names save a fresh
   // campaign draft; exact-name matches skip that save and attach a fresh
   // ad-group to the existing campaign. Campaign copy is reserved for the
   // explicit templateMode="copy" operation only.
-  const initializationTemplateCampaignId = copyOnly ? mutation.templateCampaignId : undefined;
-  const initializedIds = initializationTemplateCampaignId
-    ? await initializeProfileDraftIds(
-        sessionRequest,
-        credential,
-        mutation,
-        dispatchState,
+  const verifiedTargetTemplate = !credential.creationProfile
+    && mutation.originalPosts?.length
+    ? selectCompatibleTargetTemplate(
         campaignEntities,
-        initializationTemplateCampaignId,
-        copyOnly,
+        preflightEntities,
+        mutation,
+        existingCampaignId,
       )
+    : undefined;
+  if (!credential.creationProfile && mutation.originalPosts?.length
+    && !verifiedTargetTemplate) {
+    throw new RetryableCreationError(
+      "目标账户没有可用于原帖迁移的同类型正式 Campaign，已在发送创建请求前停止。请先在该账户完成一条同类型广告创建。",
+    );
+  }
+  const initializationTemplateCampaignId = copyOnly
+    ? mutation.templateCampaignId
+    : verifiedTargetTemplate?.campaignId;
+  const initializedIds = initializationTemplateCampaignId
+    ? existingCampaignId && !copyOnly && verifiedTargetTemplate
+      ? await initializeExistingCampaignDraftIds(
+          sessionRequest,
+          credential,
+          mutation,
+          dispatchState,
+          verifiedTargetTemplate.adGroupId,
+          existingCampaignId,
+        )
+      : await initializeProfileDraftIds(
+          sessionRequest,
+          credential,
+          mutation,
+          dispatchState,
+          campaignEntities,
+          initializationTemplateCampaignId,
+          copyOnly,
+        )
     : null;
   if (initializedIds) {
     applyCopiedDraftForms(drafts, initializedIds, !copyOnly, existingCampaignId);
@@ -2418,20 +2657,12 @@ async function runCookieDraftChain(
   if (!existingCampaignId) {
     mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId } });
   }
-  const campaignSketchId = existingCampaignId
+  let campaignSketchId = existingCampaignId
     ? ""
     : batchState?.campaignSketchId
       ?? responseId(campaign, "campaign_sketch_id")
       ?? initializedIds?.campaignSketchId
-      ?? requiredResponseId(campaign, "campaign_sketch_id");
-  if (batchState && !existingCampaignId && !hasSharedCampaignDraft) {
-    batchState.campaignSnapId = campaignSnapId;
-    batchState.campaignSketchId = campaignSketchId;
-    batchState.campaignResponse = campaign;
-  }
-  if (!existingCampaignId) {
-    mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId, campaignSketchId } });
-  }
+      ?? "";
   let checkedFakeCampaignId = "";
   if (!copyOnly && !existingCampaignId) {
     if (batchState?.checkedFakeCampaignId) {
@@ -2445,9 +2676,23 @@ async function runCookieDraftChain(
         credential,
       );
       const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : {};
-      checkedFakeCampaignId = nonEmptyId(campaignData.fake_campaign_id) ?? campaignSketchId;
+      checkedFakeCampaignId = nonEmptyId(campaignData.fake_campaign_id) ?? "";
+      campaignSketchId ||= checkedFakeCampaignId;
       if (batchState) batchState.checkedFakeCampaignId = checkedFakeCampaignId;
     }
+  }
+  if (!existingCampaignId && !campaignSketchId) {
+    throw new UnknownCreationStateError(
+      "campaign_snap/save/check 未返回可用的 campaign_sketch_id / fake_campaign_id，已停止后续发布。",
+    );
+  }
+  if (batchState && !existingCampaignId && !hasSharedCampaignDraft) {
+    batchState.campaignSnapId = campaignSnapId;
+    batchState.campaignSketchId = campaignSketchId;
+    batchState.campaignResponse = campaign;
+  }
+  if (!existingCampaignId) {
+    mutation.onProgress?.({ phase: "campaign_draft", evidence: { campaignSnapId, campaignSketchId } });
   }
 
   if (initializedIds && !existingCampaignId) {
@@ -2474,20 +2719,17 @@ async function runCookieDraftChain(
   const adSnapId = copyOnly && initializedIds ? initializedIds.adSnapId : responseId(adGroup, "ad_snap_id")
     ?? initializedIds?.adSnapId
     ?? requiredResponseId(adGroup, "ad_snap_id");
-  const adSketchId = copyOnly && initializedIds ? initializedIds.adSketchId : responseId(adGroup, "ad_sketch_id")
+  let adSketchId = copyOnly && initializedIds ? initializedIds.adSketchId : responseId(adGroup, "ad_sketch_id")
     ?? initializedIds?.adSketchId
-    ?? requiredResponseId(adGroup, "ad_sketch_id");
-  mutation.onProgress?.({
-    phase: "adgroup_draft",
-    evidence: { adGroupSnapId: adSnapId, adGroupSketchId: adSketchId },
-  });
+    ?? "";
+  let adCheckCandidates = "";
   // TikTok's ad_snap/bulk_check is scoped to a newly saved campaign draft and
   // requires the fake campaign id returned by campaign_snap/check. A formal
   // existing campaign has no such draft id; passing its real id is rejected as
   // stale page information. Reused campaigns continue to the later joint HAR
   // validations, which cover the ad-group and creatives before publish.
   if (!copyOnly && !existingCampaignId) {
-    await requestAdvisoryCreationStep(
+    const bulkCheck = await requestAdvisoryCreationStep(
       "ad_snap/bulk_check",
       () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/bulk_check/", {
         ad_snap_ids: [adSnapId],
@@ -2495,7 +2737,83 @@ async function runCookieDraftChain(
       }),
       credential,
     );
+    const bulkData = bulkCheck && isRecord(bulkCheck.data) ? bulkCheck.data : {};
+    adCheckCandidates = responseIdKeys(bulkCheck).slice(0, 15).join(", ");
+    const reportMap = isRecord(bulkData.ad_snap_check_report_map)
+      ? bulkData.ad_snap_check_report_map
+      : {};
+    const matchingReport = isRecord(reportMap[adSnapId])
+      ? reportMap[adSnapId]
+      : Object.values(reportMap).find(isRecord);
+    adSketchId ||= responseId(bulkCheck, "fake_ad_id")
+      ?? responseId(bulkCheck, "ad_sketch_id")
+      ?? (matchingReport
+        ? nonEmptyId(matchingReport.fake_ad_id) ?? nonEmptyId(matchingReport.ad_sketch_id)
+        : undefined)
+      ?? "";
+    if (!adSketchId
+      && matchingReport
+      && nonEmptyId(matchingReport.ad_snap_id) === adSnapId) {
+      // Current TikTok responses can omit fake_ad_id after a successful check.
+      // In that contract the accepted ad_snap_id is also the draft reference
+      // required by the following creative and publish steps.
+      adSketchId = adSnapId;
+    }
   }
+  if (!adSketchId && !copyOnly) {
+    try {
+      const detailForms = await readAdSnapForms(
+        sessionRequest,
+        credential,
+        dispatchState,
+        [adSnapId],
+      );
+      const detailForm = detailForms.get(adSnapId);
+      if (detailForm) {
+        adSketchId = nonEmptyId(detailForm.ad_sketch_id)
+          ?? nonEmptyId(detailForm.by_ad_sketch_id)
+          ?? "";
+        if (!adCheckCandidates) {
+          adCheckCandidates = responseIdKeys(detailForm).slice(0, 15).join(", ");
+        }
+      }
+    } catch {
+      // Some accounts do not expose a just-saved snap through snap/detail.
+      // The sketch list below is the final read-only resolution path.
+    }
+  }
+  if (!adSketchId && !copyOnly) {
+    const refreshedAdSketchRows = await listAllSketchRows({
+      kind: "ad",
+      sessionRequest,
+      credential,
+      dispatchState,
+      semantics: "preflight-read",
+    });
+    const baselineAdSketchIds = preflight?.baseline.adSketchIds ?? new Set<string>();
+    const exactRows = refreshedAdSketchRows.filter((row) =>
+      nonEmptyId(row.ad_snap_id) === adSnapId
+      || (sketchRowName(row, "ad") === creationRow.adGroupName.trim()
+        && Boolean(nonEmptyId(row.ad_sketch_id))
+        && !baselineAdSketchIds.has(nonEmptyId(row.ad_sketch_id)!)),
+    );
+    const resolvedSketchIds = [...new Set(
+      exactRows.map((row) => nonEmptyId(row.ad_sketch_id)).filter((id): id is string => Boolean(id)),
+    )];
+    if (resolvedSketchIds.length === 1) adSketchId = resolvedSketchIds[0]!;
+    if (!adCheckCandidates) {
+      adCheckCandidates = exactRows.flatMap((row) => responseIdKeys(row)).slice(0, 15).join(", ");
+    }
+  }
+  if (!adSketchId) {
+    throw new UnknownCreationStateError(
+      `ad_snap/save/bulk_check 未返回可用的 ad_sketch_id / fake_ad_id，已停止后续发布。可用字段：${adCheckCandidates || responseIdKeys(adGroup).slice(0, 15).join(", ") || "无"}`,
+    );
+  }
+  mutation.onProgress?.({
+    phase: "adgroup_draft",
+    evidence: { adGroupSnapId: adSnapId, adGroupSketchId: adSketchId },
+  });
   const creativeSnapIdFromAd = initializedIds
     ? initializedIds.creativeSnapId
     : responseId(adGroup, "creative_snap_id");
@@ -2519,6 +2837,14 @@ async function runCookieDraftChain(
   const singleAsset = Array.isArray(creativeAssets) && isRecord(creativeAssets[0])
     ? creativeAssets[0]
     : {};
+  if (mutation.originalProductInfo) {
+    singleAsset.product_info = structuredClone(mutation.originalProductInfo);
+    singleAsset.product_info_type = 1;
+    singleAsset.catalog_setup = mutation.originalCatalogSetup ?? 0;
+  }
+  const usesAccountPostIdentity = resolvedVideos.some(
+    (video) => video.identityType === 5,
+  );
   if (!copyOnly) {
     singleAsset.image_list = buildSparkImageList(resolvedVideos);
     singleAsset.title_list = resolvedVideos.map((video) => ({ title: "", aweme_item_id: video.itemId }));
@@ -2530,9 +2856,17 @@ async function runCookieDraftChain(
       // that per-image identity. The structural fields below (coming_source_type
       // etc.) are what a fresh manual creative sends; without them the check
       // fails with "无法获取 Spark Ads 帖子信息".
-      singleAsset.identity_type = 2;
-      singleAsset.identity_id = "";
-      singleAsset.item_source = 2;
+      if (usesAccountPostIdentity) {
+        delete singleAsset.identity_type;
+        delete singleAsset.identity_id;
+        delete singleAsset.item_source;
+        singleAsset.spc_upgrade_mode = 1;
+        delete singleAsset.spc_multi_ad_mode;
+      } else {
+        singleAsset.identity_type = 2;
+        singleAsset.identity_id = "";
+        singleAsset.item_source = 2;
+      }
       singleAsset.ad_level2_identity_structure = 1;
       Object.assign(singleAsset, TikTokCreationPublishSource);
       singleAsset.creative_material_mode = 6;
@@ -2584,7 +2918,10 @@ async function runCookieDraftChain(
     creativeSketchId = responseId(creative, "creative_sketch_id")
       ?? responseId(creative, "creative_sketch_ids")
       ?? creativeSketchIdFromAd
-      ?? requiredResponseId(creativeDraft, "creative_sketch_id");
+      // Current TikTok save responses can return only creative_snap_id. As
+      // with ad drafts, the accepted snap id is then the reference consumed by
+      // the subsequent check/publish endpoints.
+      ?? creativeSnapId;
   }
   mutation.onProgress?.({
     phase: "creative_draft",
@@ -2632,8 +2969,11 @@ async function runCookieDraftChain(
     publishPayload.campaign_snap_id = "";
     publishPayload.campaign_sketch_id = "";
   }
-  // TikTok 会把同一编辑会话中未指定的草稿一并带入全量发布；这里只发布本任务显式列出的 snap。
-  publishPayload.is_partial_publish = true;
+  // TikTok's fresh-campaign flow validates Smart+ automation at the full
+  // campaign-tree level. Partial publish is reserved for adding an ad group to
+  // an already formal campaign; using it for a new campaign produces false
+  // age, bidding, and automation inconsistency errors at publish time.
+  publishPayload.is_partial_publish = Boolean(existingCampaignId);
   await runAdvisoryDraftSequence(sessionRequest, credential, {
     ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
     ...(checkedFakeCampaignId ? { fakeCampaignId: checkedFakeCampaignId } : {}),
@@ -2842,6 +3182,8 @@ interface ResolvedVideo {
   /** Authorized creator identity (core_user_id from the material library); the
    * ad uses it as identity_type=2 / identity_id for a Spark post. */
   identityId?: string;
+  identityType?: number;
+  identityBcId?: string;
   /** Underlying video material id (video_info.vid); a Spark post must be
    * registered by vid via spark/creative_fix_task before the creative saves. */
   vid?: string;
@@ -3002,7 +3344,8 @@ async function prepareSparkPosts(
   const postList = sparkVideos.map((video) => ({
     item_id: video.itemId,
     identity_id: video.identityId,
-    identity_type: 2,
+    identity_type: video.identityType ?? 2,
+    ...(video.identityBcId ? { identity_bc_id: video.identityBcId } : {}),
   }));
   await requestAdvisoryCreationStep(
     "spark/validate_promote_music",
@@ -3024,7 +3367,7 @@ async function prepareSparkPosts(
     () => creationPathRequest(
       sessionRequest,
       "/api/v4/i18n/creation/creative/creative_automation_option/",
-      { identity_type: 2 },
+      { identity_type: sparkVideos[0]?.identityType ?? 2 },
     ),
     credential,
   );
@@ -3109,7 +3452,11 @@ function buildSparkImageList(videos: ResolvedVideo[]): Array<Record<string, unkn
     aweme_item_id: video.itemId,
     item_source: 2,
     media_tag: 0,
-    ...(video.identityId ? { identity_type: 2, identity_id: video.identityId } : {}),
+    ...(video.identityId ? {
+      identity_type: video.identityType ?? 2,
+      identity_id: video.identityId,
+      ...(video.identityBcId ? { identity_bc_id: video.identityBcId } : {}),
+    } : {}),
   }));
 }
 
@@ -3348,6 +3695,40 @@ async function initializeProfileDraftIds(
   return copiedDraftIds(copied);
 }
 
+async function initializeExistingCampaignDraftIds(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutation: CreationMutation,
+  dispatchState: CreationDispatchState,
+  templateAdGroupId: string,
+  existingCampaignId: string,
+): Promise<InitializedDraftIds> {
+  const profile = credential.creationProfile;
+  const riskInfo = profile && isRecord(profile.publishPayload.risk_info)
+    ? profile.publishPayload.risk_info
+    : profile && isRecord(profile.campaignPayload.risk_info)
+      ? profile.campaignPayload.risk_info
+      : {};
+  const copied = await requestCreationStep(
+    "ad_snap/copy",
+    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/copy/", {
+      with_sketch: true,
+      resp_with_detail: true,
+      with_creative: true,
+      is_batch_copy: true,
+      ad_params: [{ ad_id: templateAdGroupId, name_list: [mutation.row.adGroupName] }],
+      copy_ad_id_to_existing_campaign: true,
+      is_manual_upgrade_to_splusplus: false,
+      converter_mode: 0,
+      existing_campaign_id: existingCampaignId,
+      risk_info: riskInfo,
+    }),
+    credential,
+    { semantics: "mutation", dispatchState },
+  );
+  return copiedExistingCampaignDraftIds(copied);
+}
+
 /** Normalize the provider-owned legacy source field at the credential edge. */
 export function resolveTemplateCampaignId(
   credential: ProviderContext["credential"],
@@ -3464,6 +3845,13 @@ function applyCopiedDraftForms(
   if (applyPresetOverrides) {
     adOverrideKeys.push(
       "budget_mode", "pricing", "optimize_goal", "external_action", "ad_ref_pixel_id",
+      // Pricing is validated by TikTok as one coherent bidding tuple. Keeping
+      // only `pricing`/`cpa_bid` while retaining the freshly initialized
+      // draft's bid-mode defaults can turn a verified oCPM profile into an
+      // internally inconsistent form that is rejected only at publish time.
+      "bid", "smart_bid_type", "bid_type_detail", "bid_display_mode",
+      "deep_bid_type", "deep_cpabid", "optimization_source", "roas_bid",
+      "cpa_skip_first_phrase", "flow_control_mode",
       "automated_targeting", "country", "platform",
     );
   }
@@ -3670,7 +4058,11 @@ async function requestDispatchedCreationJson(
       method: request.method,
       headers,
       redirect: "error",
-      signal: AbortSignal.timeout(15_000),
+      // Creative saves built from a server-copied Smart+ template routinely
+      // take longer than 15 seconds. Keep the request alive long enough to
+      // receive TikTok's authoritative response instead of manufacturing an
+      // avoidable unknown state after the server has already accepted it.
+      signal: AbortSignal.timeout(30_000),
     };
     if (request.method === "POST" && request.body !== undefined) requestInit.body = request.body;
   } catch (cause) {
@@ -3855,6 +4247,206 @@ function responseIdKeys(value: unknown, prefix = ""): string[] {
   });
 }
 
+function copiedExistingCampaignDraftIds(payload: Record<string, unknown>): InitializedDraftIds {
+  const data = isRecord(payload.data) ? payload.data : undefined;
+  const allCopy = data && isRecord(data.all_copy_result) ? data.all_copy_result : undefined;
+  const list = allCopy && Array.isArray(allCopy.ad_and_creative_copy_result_list)
+    ? allCopy.ad_and_creative_copy_result_list.filter(isRecord)
+    : [];
+  const item = list.length === 1 ? list[0] : undefined;
+  const adItem = item && isRecord(item.new_ad_snap_info_item)
+    ? item.new_ad_snap_info_item
+    : undefined;
+  const adSnapId = adItem ? nonEmptyId(adItem.ad_snap_id) : undefined;
+  const adSketchId = item ? nonEmptyId(item.new_ad_sketch_id) : undefined;
+  const adForm = adItem && isRecord(adItem.ad_snap_form_data)
+    ? adItem.ad_snap_form_data
+    : undefined;
+  const creativeItems = item && Array.isArray(item.new_creative_snap_info_item_list)
+    ? item.new_creative_snap_info_item_list.filter(isRecord)
+    : [];
+  const creativeItem = creativeItems.length === 1 ? creativeItems[0] : undefined;
+  const creativeSnapId = creativeItem ? nonEmptyId(creativeItem.creative_snap_id) : undefined;
+  const creativeForm = creativeItem && isRecord(creativeItem.asset_group_creative_snap_form_data)
+    ? creativeItem.asset_group_creative_snap_form_data
+    : undefined;
+  const creativeSketchIds = item && Array.isArray(item.new_creative_sketch_ids)
+    ? item.new_creative_sketch_ids
+    : [];
+  const creativeSketchId = nonEmptyId(creativeSketchIds[0]);
+  if (!adSnapId || !adSketchId || !adForm || !creativeSnapId || !creativeSketchId || !creativeForm) {
+    throw new UnknownCreationStateError(
+      "TikTok 现有系列广告组初始化响应缺少广告组或创意的 snap/sketch/form 数据。",
+    );
+  }
+  return {
+    campaignSnapId: "",
+    campaignSketchId: "",
+    adSnapId,
+    adSketchId,
+    creativeSnapId,
+    creativeSketchId,
+    campaignForm: {},
+    adForm,
+    creativeForm,
+    publishItems: [{
+      ad_id: "",
+      ad_snap_id: adSnapId,
+      ad_sketch_id: adSketchId,
+      creative_snap_info_list: [{
+        creative_id: "",
+        creative_snap_id: creativeSnapId,
+        creative_sketch_id: creativeSketchId,
+        need_publish: true,
+      }],
+      need_publish: true,
+    }],
+  };
+}
+
+function selectCompatibleTargetTemplate(
+  campaigns: ProviderEntity[],
+  adGroups: ProviderEntity[],
+  mutation: CreationMutation,
+  preferredCampaignId?: string,
+): { campaignId: string; adGroupId: string } | undefined {
+  const campaignIdsWithGroups = new Set(
+    adGroups
+      .map((entity) => normalizeProviderEntity(entity).parentCampaignId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const desiredSmartPlus = mutation.preset.objectiveType === 3;
+  const candidates = campaigns.filter((entity) => {
+    if (!campaignIdsWithGroups.has(entity.externalId)) return false;
+    const objectiveType = providerEntityNumber(entity, "objective_type");
+    if (objectiveType !== undefined && objectiveType !== mutation.preset.objectiveType) return false;
+    const universalType = providerEntityNumber(entity, "universal_type");
+    if (universalType !== undefined && (universalType === 1) !== desiredSmartPlus) return false;
+    const normalized = normalizeProviderEntity(entity);
+    if (mutation.preset.campaignBudgetMode === -1 && normalized.campaignBudgetOptimized) return false;
+    return true;
+  });
+  candidates.sort((left, right) => {
+    if (left.externalId === preferredCampaignId) return -1;
+    if (right.externalId === preferredCampaignId) return 1;
+    const leftTime = Date.parse(normalizeProviderEntity(left).createdAt ?? "") || 0;
+    const rightTime = Date.parse(normalizeProviderEntity(right).createdAt ?? "") || 0;
+    return rightTime - leftTime || right.externalId.localeCompare(left.externalId);
+  });
+  const campaignId = candidates[0]?.externalId;
+  if (!campaignId) return undefined;
+  const templateAdGroup = adGroups
+    .filter((entity) => normalizeProviderEntity(entity).parentCampaignId === campaignId)
+    .sort((left, right) => {
+      const leftTime = Date.parse(normalizeProviderEntity(left).createdAt ?? "") || 0;
+      const rightTime = Date.parse(normalizeProviderEntity(right).createdAt ?? "") || 0;
+      return rightTime - leftTime || right.externalId.localeCompare(left.externalId);
+    })[0];
+  return templateAdGroup
+    ? { campaignId, adGroupId: templateAdGroup.externalId }
+    : undefined;
+}
+
+function providerEntityNumber(entity: ProviderEntity, key: string): number | undefined {
+  const statData = isRecord(entity.payload.stat_data) ? entity.payload.stat_data : {};
+  const value = entity.payload[key] ?? statData[key];
+  if (value === undefined || value === null || value === "") return undefined;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+async function readPublishedAssetGroupCreativeId(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  adGroupId: string,
+  expectedPostIds: string[],
+): Promise<string | undefined> {
+  const url = new URL(sessionRequest.url);
+  const advertiserId = url.searchParams.get("aadvid");
+  url.pathname = "/api/v4/i18n/creation/snap/get_creative_fields_by_ad";
+  url.search = "";
+  if (advertiserId) url.searchParams.set("aadvid", advertiserId);
+  url.searchParams.set("ad_id", adGroupId);
+  const payload = await requestCookieJson({
+    ...sessionRequest,
+    target: "ad",
+    url: url.toString(),
+    method: "GET",
+    derived: true,
+  }, credential);
+  const data = isRecord(payload.data) ? payload.data : {};
+  const resultMap = isRecord(data.result_map) ? data.result_map : {};
+  const matches = Object.entries(resultMap).flatMap(([creativeId, raw]) => {
+    const form = decodeJsonStrings(raw);
+    if (!isRecord(form)) return [];
+    const serialized = JSON.stringify(form);
+    return expectedPostIds.every((itemId) => serialized.includes(itemId))
+      ? [creativeId]
+      : [];
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function resolveTargetAccountPixelId(
+  entities: ProviderEntity[],
+  preset: CreationPresetConfig,
+): string | undefined {
+  const counts = new Map<string, number>();
+  for (const entity of entities) {
+    const payload = entity.payload;
+    if (Number(payload.objective_type) !== preset.objectiveType
+      || Number(payload.optimize_goal) !== preset.optimizeGoal
+      || Number(payload.external_action) !== preset.externalAction) {
+      continue;
+    }
+    const pixelId = nonEmptyId(payload.ad_ref_pixel_id);
+    if (pixelId) counts.set(pixelId, (counts.get(pixelId) ?? 0) + 1);
+  }
+  const ranked = [...counts].sort((left, right) => right[1] - left[1]);
+  if (ranked.length === 0) return undefined;
+  if (ranked.length > 1 && ranked[0]![1] === ranked[1]![1]) {
+    throw new RetryableCreationError("目标账户存在多个同等匹配的 Pixel，无法安全确定迁移应使用哪一个。");
+  }
+  return ranked[0]![0];
+}
+
+function migrationProductInfo(value: unknown): LaunchProductInfo | null {
+  if (!isRecord(value)) return null;
+  const promoCodeInfos = Array.isArray(value.promo_code_infos)
+    ? value.promo_code_infos.flatMap((candidate) => {
+        if (!isRecord(candidate)) return [];
+        const codeType = numericValue(candidate.code_type);
+        const amount = numericValue(candidate.value);
+        const includeType = numericValue(candidate.include_type);
+        const currency = typeof candidate.currency === "string" ? candidate.currency.trim() : "";
+        if (codeType === null || amount === null || includeType === null || !currency) return [];
+        return [{
+          code: typeof candidate.code === "string" ? candidate.code : "",
+          code_type: codeType,
+          value: amount,
+          currency,
+          include_type: includeType,
+        }];
+      })
+    : [];
+  const sellingPoints = Array.isArray(value.selling_points_by_types)
+    ? value.selling_points_by_types.flatMap((candidate) => {
+        if (!isRecord(candidate)) return [];
+        const text = typeof candidate.text === "string" ? candidate.text.trim() : "";
+        const materialTag = numericValue(candidate.material_tag);
+        return text && materialTag !== null ? [{ text, material_tag: materialTag }] : [];
+      })
+    : [];
+  if (promoCodeInfos.length === 0 && sellingPoints.length === 0) return null;
+  return {
+    promo_code_infos: promoCodeInfos,
+    is_auto_use: numericValue(value.is_auto_use) ?? 2,
+    auto_select_toggle: numericValue(value.auto_select_toggle) ?? 0,
+    image_infos: [],
+    selling_points_by_types: sellingPoints,
+  };
+}
+
 function responseId(value: unknown, key: string): string | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -3886,6 +4478,133 @@ function requireObjectField(value: Record<string, unknown>, key: string): Record
   const field = value[key];
   if (!isRecord(field)) throw new Error(`创建模板缺少 ${key}。`);
   return field;
+}
+
+function originalPostReadSession(context: ProviderContext): {
+  credential: ParsedCookieCredential;
+  sessionRequest: CapturedCookieRequest;
+} {
+  CookieConnectionSettingsSchema.parse(context.settings);
+  const credential = CookieCredentialInputSchema.parse(context.credential);
+  const sessionRequest = credential.requestTemplates?.find(
+    (item) => item.target === "ad-group" && !item.derived,
+  );
+  if (!sessionRequest) {
+    throw new RetryableCreationError(
+      "缺少广告组列表 cURL，无法建立原帖读取会话。",
+    );
+  }
+  return { credential, sessionRequest };
+}
+
+function findAssetGroupCreativeId(value: unknown, adGroupId: string): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = findAssetGroupCreativeId(item, adGroupId);
+      if (result) return result;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  const candidateId = nonEmptyId(value.id) ?? nonEmptyId(value.ad_id);
+  if (candidateId === adGroupId && Array.isArray(value.asset_group_brief_info_item_list)) {
+    for (const item of value.asset_group_brief_info_item_list) {
+      if (!isRecord(item)) continue;
+      const id = nonEmptyId(item.id);
+      if (id) return id;
+    }
+  }
+  for (const child of Object.values(value)) {
+    const result = findAssetGroupCreativeId(child, adGroupId);
+    if (result) return result;
+  }
+  return null;
+}
+
+function parseOriginalPost(value: unknown): LaunchOriginalPost[] {
+  if (!isRecord(value)) return [];
+  const postInfo = isRecord(value.post_info) ? value.post_info : value;
+  const itemId = nonEmptyId(postInfo.item_id) ?? nonEmptyId(postInfo.aweme_item_id);
+  const identityId = nonEmptyId(postInfo.identity_id);
+  const identityType = numericValue(postInfo.identity_type);
+  const videoInfo = isRecord(postInfo.video_info) ? postInfo.video_info : {};
+  const authCodeInfo = isRecord(postInfo.auth_code_info) ? postInfo.auth_code_info : {};
+  const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(postInfo.vid);
+  if (!itemId || !identityId || identityType === null || !vid) return [];
+  const status = numericValue(postInfo.status);
+  const authCodeStatus = numericValue(postInfo.auth_code_status)
+    ?? numericValue(authCodeInfo.auth_code_status)
+    ?? numericValue(authCodeInfo.ad_auth_status);
+  const promotable = postInfo.can_preview !== false
+    && postInfo.is_ccoc_ban !== true
+    && (status === null || status >= 0)
+    && (authCodeStatus === null || authCodeStatus >= 0);
+  const coverUrl = nonEmptyString(videoInfo.cover_url)
+    ?? nonEmptyString(videoInfo.cover_uri)
+    ?? null;
+  return [{
+    itemId,
+    identityId,
+    identityType,
+    identityBcId: nonEmptyId(postInfo.identity_bc_id) ?? null,
+    vid,
+    videoId: nonEmptyId(videoInfo.video_id) ?? null,
+    displayName: nonEmptyString(postInfo.title)
+      ?? nonEmptyString(postInfo.text)
+      ?? nonEmptyString(postInfo.nick_name)
+      ?? null,
+    coverUrl: coverUrl && isHttpUrlValue(coverUrl) ? coverUrl : null,
+    promotable,
+  }];
+}
+
+function uniqueOriginalPosts(posts: LaunchOriginalPost[]): LaunchOriginalPost[] {
+  const unique = new Map<string, LaunchOriginalPost>();
+  for (const post of posts) if (!unique.has(post.itemId)) unique.set(post.itemId, post);
+  return [...unique.values()];
+}
+
+function numericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function firstStringByKeys(value: unknown, keys: ReadonlySet<string>): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = firstStringByKeys(item, keys);
+      if (result) return result;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  for (const [key, child] of Object.entries(value)) {
+    if (keys.has(key)) {
+      const result = nonEmptyString(child);
+      if (result) return result;
+    }
+  }
+  for (const child of Object.values(value)) {
+    const result = firstStringByKeys(child, keys);
+    if (result) return result;
+  }
+  return null;
+}
+
+function isHttpUrlValue(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 

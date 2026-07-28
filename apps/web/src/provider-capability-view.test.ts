@@ -41,7 +41,7 @@ describe("provider capability presentation", () => {
       ...profile,
       capabilities: [
         ...profile.capabilities,
-        { capability: "read-ads", available: true, reason: "当前账户可用。" },
+        { capability: "read-ad-groups", available: true, reason: "当前账户可用。" },
         { capability: "copy-ads", available: true, reason: "当前账户可用。" },
       ],
     };

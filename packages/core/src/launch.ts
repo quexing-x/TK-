@@ -50,32 +50,63 @@ export const LaunchCreationProgressSchema = z.object({
 });
 export type LaunchCreationProgress = z.infer<typeof LaunchCreationProgressSchema>;
 
+export const LaunchOriginalPostSchema = z.object({
+  itemId: z.string().min(1),
+  identityId: z.string().min(1),
+  identityType: z.number().int(),
+  identityBcId: z.string().min(1).nullable().default(null),
+  vid: z.string().min(1),
+  videoId: z.string().min(1).nullable().default(null),
+  displayName: z.string().min(1).nullable().default(null),
+  coverUrl: z.string().url().nullable().default(null),
+  promotable: z.boolean().default(true),
+});
+export type LaunchOriginalPost = z.infer<typeof LaunchOriginalPostSchema>;
+
+export const LaunchProductInfoSchema = z.object({
+  promo_code_infos: z.array(z.object({
+    code: z.string().default(""),
+    code_type: z.number().int(),
+    value: z.number(),
+    currency: z.string().min(1),
+    include_type: z.number().int(),
+  })).max(50).default([]),
+  is_auto_use: z.number().int().default(2),
+  auto_select_toggle: z.number().int().default(0),
+  image_infos: z.array(z.unknown()).max(50).default([]),
+  selling_points_by_types: z.array(z.object({
+    text: z.string().min(1),
+    material_tag: z.number().int(),
+  })).max(100).default([]),
+});
+export type LaunchProductInfo = z.infer<typeof LaunchProductInfoSchema>;
+
 export const LaunchSourceSnapshotSchema = z.object({
   accountId: z.string().min(1),
   campaignId: z.string().min(1),
   campaignName: z.string().min(1),
   adGroupId: z.string().min(1),
   adGroupName: z.string().min(1),
-  adId: z.string().min(1),
-  adName: z.string().min(1),
-  videoCode: z.string().min(1),
+  posts: z.array(LaunchOriginalPostSchema).min(1).max(500),
   productUrl: z.string().url().nullable(),
+  productInfo: LaunchProductInfoSchema.nullable().default(null),
+  catalogSetup: z.number().int().min(0).max(1).nullable().default(null),
   structuralHash: z.string().min(1),
-  syncedAt: z.string().datetime(),
+  fetchedAt: z.string().datetime(),
 });
 export type LaunchSourceSnapshot = z.infer<typeof LaunchSourceSnapshotSchema>;
 
-export const LaunchTargetAssetMappingSchema = z.object({
+export const LaunchTargetPostMappingSchema = z.object({
   accountId: z.string().min(1),
-  sourceVideoCode: z.string().min(1),
-  targetVideoCode: z.string().min(1),
-  evidenceAdId: z.string().min(1),
-  evidenceSyncedAt: z.string().datetime(),
+  sourceAdGroupId: z.string().min(1).nullable().default(null),
+  posts: z.array(LaunchOriginalPostSchema).min(1).max(500),
+  evidenceHash: z.string().min(1),
+  verifiedAt: z.string().datetime(),
 });
-export type LaunchTargetAssetMapping = z.infer<typeof LaunchTargetAssetMappingSchema>;
+export type LaunchTargetPostMapping = z.infer<typeof LaunchTargetPostMappingSchema>;
 
 export const LaunchCopyDifferenceSchema = z.object({
-  field: z.enum(["campaignName", "adGroupName", "adName", "videoCode", "productUrl"]),
+  field: z.enum(["campaignName", "adGroupName", "productUrl"]),
   sourceValue: z.string().nullable(),
   targetValue: z.string().nullable(),
 });
@@ -86,10 +117,24 @@ export const LaunchCopyPreviewItemSchema = z.object({
   itemIndex: z.number().int().nonnegative(),
   launchRow: z.lazy(() => LaunchConfigurationRowSchema),
   sourceSnapshot: LaunchSourceSnapshotSchema,
-  targetAssetMapping: LaunchTargetAssetMappingSchema,
+  targetPostMapping: LaunchTargetPostMappingSchema,
   differences: z.array(LaunchCopyDifferenceSchema),
 });
 export type LaunchCopyPreviewItem = z.infer<typeof LaunchCopyPreviewItemSchema>;
+
+export const LaunchMigrationStartRuleSchema = z.enum(["absolute", "next-six", "tonight"]);
+export type LaunchMigrationStartRule = z.infer<typeof LaunchMigrationStartRuleSchema>;
+
+/** Per-account settings frozen by the original-post migration confirmation. */
+export const LaunchMigrationTargetConfigSchema = z.object({
+  accountId: z.string().trim().min(1),
+  quantity: z.number().int().min(1).max(20),
+  dailyBudget: z.number().positive().max(100_000_000),
+  bid: z.number().nonnegative().max(100_000_000).nullable(),
+  startAtRule: LaunchMigrationStartRuleSchema,
+  startAt: z.string().datetime().nullable(),
+});
+export type LaunchMigrationTargetConfig = z.infer<typeof LaunchMigrationTargetConfigSchema>;
 
 /** Values TikTok needs in addition to each spreadsheet row.  They are saved
  * once in a preset rather than repeatedly typed into the import sheet. */
@@ -164,7 +209,9 @@ export const LaunchConfigurationRowSchema = z.object({
   // One ad-group row can hold every video code of a "一组多广告" group joined by
   // ";", so this is NOT a single-code field. Cap it to the worst case the sheet
   // already allows: up to 500 ads (see adCount check) × 512 chars per code.
-  videoCode: z.string().trim().min(1).max(262_144),
+  // Empty only for original-post migration. Normal creation validates this
+  // field before a plan is persisted.
+  videoCode: z.string().trim().max(262_144),
   productUrl: z.string().url().max(2_048),
   adGroupName: z.string().trim().min(1).max(512),
   adName: z.string().trim().min(1).max(512),
@@ -181,18 +228,30 @@ export type LaunchConfigurationRow = z.infer<typeof LaunchConfigurationRowSchema
 
 export const LaunchCopyPreviewInputSchema = z.object({
   sourceAccountId: z.string().trim().min(1),
-  sourceAdId: z.string().trim().min(1).max(128),
-  targetAccountIds: z.array(z.string().trim().min(1)).min(1).max(3),
+  sourceAdGroupId: z.string().trim().min(1).max(128),
+  sourceAdGroupIds: z.array(z.string().trim().min(1).max(128)).min(1).max(20).optional(),
+  targetAccountIds: z.array(z.string().trim().min(1)).min(1).max(100),
   launchPresetId: z.string().trim().min(1),
-  launchRows: z.array(LaunchConfigurationRowSchema).min(1).max(3),
+  launchRows: z.array(LaunchConfigurationRowSchema).max(500).default([]),
+  targetConfigs: z.array(LaunchMigrationTargetConfigSchema).max(100).optional(),
+}).superRefine((value, context) => {
+  const targetConfigs = value.targetConfigs ?? [];
+  if (value.launchRows.length === 0 && targetConfigs.length === 0) {
+    context.addIssue({ code: "custom", path: ["targetConfigs"], message: "请配置至少一个目标账户。" });
+  }
+  if (targetConfigs.reduce((sum, item) => sum + item.quantity, 0) > 100) {
+    context.addIssue({ code: "custom", path: ["targetConfigs"], message: "单次迁移最多创建 100 个广告组。" });
+  }
 });
 export type LaunchCopyPreviewInput = z.infer<typeof LaunchCopyPreviewInputSchema>;
 
 export const LaunchCopyPreviewRecordSchema = z.object({
   id: z.string().min(1),
   sourceAccountId: z.string().min(1),
-  sourceAdId: z.string().min(1),
-  targetAccountIds: z.array(z.string().min(1)).min(1).max(3),
+  sourceAdGroupId: z.string().min(1),
+  sourceAdGroupIds: z.array(z.string().min(1)).max(20).default([]),
+  targetAccountIds: z.array(z.string().min(1)).min(1).max(100),
+  targetConfigs: z.array(LaunchMigrationTargetConfigSchema).max(100).default([]),
   launchPresetId: z.string().min(1),
   /** Immutable preset content that the user reviewed.  The final plan must
    * use this snapshot even if the named preset is edited before confirmation. */
@@ -200,9 +259,10 @@ export const LaunchCopyPreviewRecordSchema = z.object({
   presetSnapshotHash: z.string().min(1),
   inputHash: z.string().min(1),
   launchRowsHash: z.string().min(1),
-  launchRows: z.array(LaunchConfigurationRowSchema).min(1).max(3),
+  launchRows: z.array(LaunchConfigurationRowSchema).max(500),
   sourceSnapshot: LaunchSourceSnapshotSchema,
-  items: z.array(LaunchCopyPreviewItemSchema).max(3),
+  sourceSnapshots: z.array(LaunchSourceSnapshotSchema).max(20).default([]),
+  items: z.array(LaunchCopyPreviewItemSchema).max(100),
   blockers: z.array(z.string()),
   warnings: z.array(z.string()),
   safeToCreate: z.boolean(),
@@ -220,7 +280,10 @@ export const LaunchPlanItemRecordSchema = z.object({
   templateMode: LaunchTemplateModeSchema,
   templateCampaignId: z.string().min(1).nullable(),
   sourceSnapshot: LaunchSourceSnapshotSchema.nullable().default(null),
-  targetAssetMapping: LaunchTargetAssetMappingSchema.nullable().default(null),
+  targetPostMapping: LaunchTargetPostMappingSchema.nullable().default(null),
+  /** Historical video-code copy evidence is kept readable after upgrade, but
+   * can never be dispatched through the original-post migration path. */
+  legacyCopyUnsupported: z.boolean().default(false),
   idempotencyKey: z.string().min(1).nullable().default(null),
   status: LaunchPlanItemStatusSchema,
   phase: LaunchCreationPhaseSchema,
@@ -332,6 +395,34 @@ export function resolveLaunchStartAt(
   return date.toISOString();
 }
 
+/** Resolve per-target migration timing in the target account timezone. */
+export function resolveMigrationStartAt(
+  startAtRule: LaunchMigrationStartRule,
+  absoluteStartAt: string | null,
+  now = new Date(),
+  timeZone?: string,
+): string | null {
+  if (startAtRule === "absolute") return absoluteStartAt;
+  if (startAtRule === "tonight") return resolveLaunchStartAt("tonight", null, now, timeZone);
+  if (!timeZone) {
+    const candidate = new Date(now);
+    candidate.setSeconds(0, 0);
+    candidate.setHours(6, 0, 0, 0);
+    if (candidate.getTime() <= now.getTime()) candidate.setDate(candidate.getDate() + 1);
+    return candidate.toISOString();
+  }
+  const parts = dateTimePartsInZone(now, timeZone);
+  const dayOffset = parts.hour < 6 ? 0 : 1;
+  const targetWallClock = Date.UTC(parts.year, parts.month - 1, parts.day + dayOffset, 6, 0, 0);
+  let candidate = targetWallClock;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const actual = dateTimePartsInZone(new Date(candidate), timeZone);
+    const actualWallClock = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
+    candidate += targetWallClock - actualWallClock;
+  }
+  return new Date(candidate).toISOString();
+}
+
 function dateTimePartsInZone(value: Date, timeZone: string): {
   year: number;
   month: number;
@@ -372,6 +463,7 @@ export function parseLaunchSheetTable(
   preset: LaunchPresetInput,
   now = new Date(),
   timeZone?: string,
+  options: { requireVideoCode?: boolean } = {},
 ): LaunchSheetImportResult {
   const errors: LaunchSheetIssue[] = [];
   const warnings: LaunchSheetIssue[] = [];
@@ -410,7 +502,9 @@ export function parseLaunchSheetTable(
     }
     if (!campaignName) addError(errors, rowNumber, "推广系列名称", "请填写推广系列名称。");
     if (!adGroupName) addError(errors, rowNumber, "广告组名称", "请填写广告组名称。");
-    if (!videoCode) addError(errors, rowNumber, "视频代码", "请填写视频代码。");
+    if (options.requireVideoCode !== false && !videoCode) {
+      addError(errors, rowNumber, "视频代码", "请填写视频代码。");
+    }
     if (!isUrl(productUrl)) addError(errors, rowNumber, "产品 URL", "请填写有效的 http 或 https 产品 URL。");
     if (errors.some((issue) => issue.rowNumber === rowNumber)) continue;
     // One sheet row = one ad-group. Several video codes in the cell become
@@ -418,7 +512,7 @@ export function parseLaunchSheetTable(
     // are split into per-ad creatives when the ad-group is created. This is the
     // "一个广告组多条广告" shape — do NOT split into separate ad-groups.
     const videoCodes = splitVideoCodes(videoCode);
-    adCount += videoCodes.length;
+    adCount += Math.max(1, videoCodes.length);
     const name = automaticName(now, serial);
     serial += 1;
     rows.push(LaunchConfigurationRowSchema.parse({
@@ -459,15 +553,59 @@ export function automaticName(now: Date, serial: number): string {
   return `${year}${month}${day}:${String(serial).padStart(3, "0")}`;
 }
 
+/** Remove only suffixes generated by automatic ad-group naming. */
+export function stripAutomaticAdGroupNameSuffixes(sourceName: string): string {
+  const original = sourceName.trim();
+  let current = original;
+  while (current) {
+    const indexed = current.match(/^(.*?)-(\d{4})-([1-9]\d*)$/);
+    if (indexed && indexed[1]?.trim() && isValidMonthDay(indexed[2]!)) {
+      current = indexed[1].replace(/-+$/, "").trim();
+      continue;
+    }
+    const dated = current.match(/^(.*?)-?(\d{4})$/);
+    if (dated && dated[1]?.trim() && isValidMonthDay(dated[2]!)) {
+      current = dated[1].replace(/-+$/, "").trim();
+      continue;
+    }
+    break;
+  }
+  return current || original;
+}
+
+/** Existing expansion-compatible rule: source-MMDD-1, source-MMDD-2, ... */
+export function automaticAdGroupName(
+  sourceName: string,
+  deliveryAt: Date,
+  index: number,
+  timeZone?: string,
+): string {
+  const parts = timeZone ? dateTimePartsInZone(deliveryAt, timeZone) : {
+    month: deliveryAt.getMonth() + 1,
+    day: deliveryAt.getDate(),
+  };
+  const suffix = `${String(parts.month).padStart(2, "0")}${String(parts.day).padStart(2, "0")}`;
+  return `${stripAutomaticAdGroupNameSuffixes(sourceName)}-${suffix}-${index + 1}`;
+}
+
+function isValidMonthDay(value: string): boolean {
+  const month = Number(value.slice(0, 2));
+  const day = Number(value.slice(2, 4));
+  if (!Number.isInteger(month) || !Number.isInteger(day) || month < 1 || month > 12 || day < 1) return false;
+  return day <= new Date(2024, month, 0).getDate();
+}
+
 export const MultiAccountLaunchPlanInputSchema = z.object({
   clientRequestId: z.string().uuid().optional(),
   mode: LaunchModeSchema.default("copy"),
   sourceAccountId: z.string().trim().min(1),
-  sourceAdId: z.string().trim().min(1).max(128).nullable().default(null),
+  sourceAdGroupId: z.string().trim().min(1).max(128).nullable().default(null),
+  sourceAdGroupIds: z.array(z.string().trim().min(1).max(128)).max(20).default([]),
   copyPreviewId: z.string().trim().min(1).nullable().default(null),
   targetAccountIds: z.array(z.string().trim().min(1)).min(1).max(100),
   launchPresetId: z.string().trim().min(1),
   launchRows: z.array(LaunchConfigurationRowSchema).min(1).max(500),
+  copyTargetConfigs: z.array(LaunchMigrationTargetConfigSchema).max(100).default([]),
 });
 export type MultiAccountLaunchPlanInput = z.input<typeof MultiAccountLaunchPlanInputSchema>;
 

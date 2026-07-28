@@ -419,6 +419,33 @@ describe("AutomationService", () => {
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
+  it("preserves the last verified connection state on a transient health-check timeout", async () => {
+    const timeout = new Error("The operation was aborted due to timeout");
+    timeout.name = "TimeoutError";
+    vi.spyOn(provider, "checkHealth").mockRejectedValueOnce(timeout);
+
+    await service.checkAccountConnection("demo-account");
+
+    expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
+      status: "ready",
+      authorizationStatus: "active",
+      lastMessage: expect.stringContaining("timeout"),
+    });
+  });
+
+  it("still invalidates the connection on an explicit non-transient health failure", async () => {
+    vi.spyOn(provider, "checkHealth").mockRejectedValueOnce(
+      new Error("TikTok explicitly rejected the credential"),
+    );
+
+    await service.checkAccountConnection("demo-account");
+
+    expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
+      status: "failed",
+      authorizationStatus: "failed",
+    });
+  });
+
   it("refreshes a stale provider capability contract after a successful background health check", async () => {
     const authorizationExpiresAt = new Date(Date.now() + 60_000).toISOString();
     store.updateProviderAuthorization("demo-account", "cookie", {

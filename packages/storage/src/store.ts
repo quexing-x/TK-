@@ -80,7 +80,9 @@ import {
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
   automaticName,
+  automaticAdGroupName,
   resolveLaunchStartAt,
+  resolveMigrationStartAt,
   defaultCreationPresetConfig,
   MultiAccountLaunchPlanInputSchema,
   MultiAccountLaunchPlanRecordSchema,
@@ -91,7 +93,8 @@ import {
   type LaunchCopyPreviewInput,
   type LaunchCopyPreviewRecord,
   type LaunchSourceSnapshot,
-  type LaunchTargetAssetMapping,
+  type LaunchTargetPostMapping,
+  type LaunchMigrationTargetConfig,
   LaunchPlanItemRecordSchema,
   type LaunchPlanItemRecord,
   type LaunchPlanItemStatus,
@@ -3287,13 +3290,14 @@ export class AutomationStore {
         .prepare(
           `UPDATE launch_plan_items
            SET status = 'running', attempt_count = attempt_count + 1,
-               attempt_id = ?, phase = 'validation', evidence_json = '{}',
+               attempt_id = ?, phase = 'validation',
+               evidence_json = CASE WHEN ? = 'unknown' THEN evidence_json ELSE '{}' END,
                claimed_by = ?, claimed_at = ?, completed_at = NULL,
                error_message = NULL, sync_warning = NULL, updated_at = ?
            WHERE item_id = ? AND status = ?
            RETURNING *`,
         )
-        .get(attemptId, executorId, now, now, itemId, expectedStatus) as SqlRow | undefined;
+        .get(attemptId, expectedStatus, executorId, now, now, itemId, expectedStatus) as SqlRow | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -3316,7 +3320,7 @@ export class AutomationStore {
           attempt_id, item_id, operation_id, correlation_id, attempt_number,
           actor_id, actor_name, actor_kind, phase, status, evidence_json,
           error_message, created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'validation', 'running', '{}', NULL, ?, ?, NULL)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'validation', 'running', ?, NULL, ?, ?, NULL)`,
       ).run(
         attemptId,
         itemId,
@@ -3326,6 +3330,7 @@ export class AutomationStore {
         actor.id,
         actor.name,
         actor.kind,
+        String(row.evidence_json ?? "{}"),
         now,
         now,
       );
@@ -3722,14 +3727,34 @@ export class AutomationStore {
     return result.changes > 0;
   }
 
-  createLaunchCopyPreview(input: LaunchCopyPreviewInput): LaunchCopyPreviewRecord {
+  createLaunchCopyPreview(
+    input: LaunchCopyPreviewInput,
+    sourceSnapshotInput: LaunchSourceSnapshot | LaunchSourceSnapshot[],
+    targetPostMappings: LaunchTargetPostMapping[],
+  ): LaunchCopyPreviewRecord {
     const request = LaunchCopyPreviewInputSchema.parse(input);
+    const sourceSnapshots = Array.isArray(sourceSnapshotInput) ? sourceSnapshotInput : [sourceSnapshotInput];
+    const sourceAdGroupIds = [...new Set(request.sourceAdGroupIds?.length
+      ? request.sourceAdGroupIds
+      : [request.sourceAdGroupId])];
     const targetAccountIds = [...new Set(request.targetAccountIds)];
     if (targetAccountIds.includes(request.sourceAccountId)) {
       throw new Error("复制迁移的目标账户必须不同于源账户。");
     }
-    if (targetAccountIds.length * request.launchRows.length > 3) {
-      throw new Error("复制迁移当前仅允许预览 1–3 个逐项任务，请减少目标账户或表格行数。");
+    const targetConfigs = request.targetConfigs ?? [];
+    if (targetConfigs.length > 0) {
+      const configuredAccountIds = [...new Set(targetConfigs.map((item) => item.accountId))];
+      if (configuredAccountIds.length !== targetConfigs.length
+        || configuredAccountIds.some((accountId) => !targetAccountIds.includes(accountId))
+        || targetAccountIds.some((accountId) => !configuredAccountIds.includes(accountId))) {
+        throw new Error("目标账户与逐账户迁移配置不一致，请重新配置。");
+      }
+    }
+    const requestedTaskCount = (targetConfigs.length > 0
+      ? targetConfigs.reduce((sum, item) => sum + item.quantity, 0)
+      : targetAccountIds.length * request.launchRows.length) * sourceSnapshots.length;
+    if (requestedTaskCount > 100) {
+      throw new Error("单次迁移最多创建 100 个广告组，请分批操作。");
     }
     const preset = this.listLaunchPresets().find((item) => item.id === request.launchPresetId);
     if (!preset) throw new Error("请选择有效的广告预设。");
@@ -3744,29 +3769,22 @@ export class AutomationStore {
       initialStatus: preset.initialStatus,
       creationConfig: preset.creationConfig,
     };
-    const sourceSnapshot = this.resolveLaunchSourceSnapshot(
-      request.sourceAccountId,
-      request.sourceAdId,
-    );
+    const sourceSnapshotIds = sourceSnapshots.map((snapshot) => snapshot.adGroupId);
+    if (sourceSnapshots.length !== sourceAdGroupIds.length
+      || new Set(sourceSnapshotIds).size !== sourceSnapshotIds.length
+      || sourceSnapshots.some((snapshot, index) => snapshot.accountId !== request.sourceAccountId
+        || snapshot.adGroupId !== sourceAdGroupIds[index])) {
+      throw new Error("源广告组原帖快照与预览请求不一致。");
+    }
+    for (const snapshot of sourceSnapshots) {
+      if (jsonHash(snapshot.posts.map(postEvidenceHashValue)) !== snapshot.structuralHash) {
+        throw new Error(`源广告组“${snapshot.adGroupName}”原帖快照校验失败。`);
+      }
+    }
     const now = new Date();
     const existingPlans = this.listMultiAccountLaunchPlans(10_000);
-    const previewTimeZone = this.getAccount(targetAccountIds[0] ?? "")?.timezone ?? "UTC";
-    const launchRows = applyPresetToLaunchRows(
-      request.launchRows,
-      preset,
-      existingPlans,
-      now,
-      previewTimeZone,
-    );
     const blockers: string[] = [];
     const warnings: string[] = [];
-    const sourceAccount = this.getAccount(request.sourceAccountId);
-    const sourceSync = sourceAccount
-      ? this.getLatestReadOnlySync(request.sourceAccountId, sourceAccount.providerKind)
-      : null;
-    if (!sourceSync || sourceSync.quality.status !== "healthy") {
-      blockers.push(`源账户同步数据不是 healthy（当前：${sourceSync?.quality.status ?? "none"}）。`);
-    }
     const items: LaunchCopyPreviewRecord["items"] = [];
     for (const accountId of targetAccountIds) {
       const account = this.getAccount(accountId);
@@ -3778,39 +3796,56 @@ export class AutomationStore {
       if (!connection || connection.status !== "ready") {
         blockers.push(`目标账户“${account.displayName}”未通过连接检测。`);
       }
-      const sync = this.getLatestReadOnlySync(accountId, account.providerKind);
-      if (!sync || sync.quality.status !== "healthy") {
-        blockers.push(`目标账户“${account.displayName}”同步数据不是 healthy（当前：${sync?.quality.status ?? "none"}）。`);
-      }
-      const accountLaunchRows = applyPresetToLaunchRows(
-        request.launchRows,
-        preset,
-        existingPlans,
-        now,
-        account.timezone,
-      );
-      accountLaunchRows.forEach((row, itemIndex) => {
-        const targetAssetMapping = this.findVerifiedTargetAsset(
-          accountId,
-          account.providerKind,
-          sourceSnapshot.videoCode,
-          row.videoCode,
+      const config = targetConfigs.find((item) => item.accountId === accountId);
+      const reservedAdGroupNames = new Set<string>();
+      for (const sourceSnapshot of sourceSnapshots) {
+        const targetPostMapping = targetPostMappings.find((mapping) =>
+          mapping.accountId === accountId
+          && (mapping.sourceAdGroupId === sourceSnapshot.adGroupId
+            || (sourceSnapshots.length === 1 && mapping.sourceAdGroupId === null)),
         );
-        if (!targetAssetMapping) {
+        const targetByItemId = new Map(targetPostMapping?.posts.map((post) => [post.itemId, post]));
+        const missingItemIds = sourceSnapshot.posts
+          .map((post) => post.itemId)
+          .filter((itemId) => !targetByItemId.has(itemId));
+        if (!targetPostMapping || missingItemIds.length > 0) {
           blockers.push(
-            `目标账户“${account.displayName}”的已同步广告中未找到视频代码 ${row.videoCode}；无法证明该账户素材库可用。`,
+            `目标账户“${account.displayName}”无法使用帖子（源组“${sourceSnapshot.adGroupName}”）：${missingItemIds.join("、") || "帖子证据缺失"}。`,
           );
-          return;
+          continue;
         }
-        items.push({
-          accountId,
-          itemIndex,
-          launchRow: row,
-          sourceSnapshot,
-          targetAssetMapping,
-          differences: copyDifferences(sourceSnapshot, row),
+        if (targetPostMapping.evidenceHash
+          !== jsonHash(targetPostMapping.posts.map(postEvidenceHashValue))) {
+          blockers.push(`目标账户“${account.displayName}”的源组“${sourceSnapshot.adGroupName}”帖子证据校验失败。`);
+          continue;
+        }
+        if (config && !sourceSnapshot.productUrl) {
+          blockers.push(`源广告组“${sourceSnapshot.adGroupName}”未读取到产品 URL，无法为目标账户“${account.displayName}”创建。`);
+          continue;
+        }
+        const accountLaunchRows = config
+          ? buildMigrationLaunchRows(
+            sourceSnapshot,
+            config,
+            preset,
+            existingPlans,
+            reservedAdGroupNames,
+            now,
+            account.timezone,
+          )
+          : applyPresetToLaunchRows(request.launchRows, preset, existingPlans, now, account.timezone);
+        const firstItemIndex = items.filter((item) => item.accountId === accountId).length;
+        accountLaunchRows.forEach((row, sourceItemIndex) => {
+          items.push({
+            accountId,
+            itemIndex: firstItemIndex + sourceItemIndex,
+            launchRow: row,
+            sourceSnapshot,
+            targetPostMapping,
+            differences: copyDifferences(sourceSnapshot, row),
+          });
         });
-      });
+      }
     }
     if (items.some((item) => item.launchRow.initialStatus === "enabled")) {
       warnings.push("本次迁移包含创建后立即开启的广告；请在差异预览中再次核对预算和发布时间。");
@@ -3819,26 +3854,61 @@ export class AutomationStore {
     const preview = LaunchCopyPreviewRecordSchema.parse({
       id: randomUUID(),
       sourceAccountId: request.sourceAccountId,
-      sourceAdId: request.sourceAdId,
+      sourceAdGroupId: sourceAdGroupIds[0]!,
+      sourceAdGroupIds,
       targetAccountIds,
+      targetConfigs,
       launchPresetId: request.launchPresetId,
       presetSnapshot,
       presetSnapshotHash: jsonHash(presetSnapshot),
-      inputHash: copyPreviewInputHash({ ...request, targetAccountIds }),
+      inputHash: copyPreviewInputHash({
+        sourceAccountId: request.sourceAccountId,
+        sourceAdGroupId: sourceAdGroupIds[0]!,
+        sourceAdGroupIds,
+        targetAccountIds,
+        launchPresetId: request.launchPresetId,
+        launchRows: request.launchRows,
+        targetConfigs,
+      }),
       launchRowsHash: jsonHash(items.map((item) => ({
         accountId: item.accountId,
         itemIndex: item.itemIndex,
         launchRow: item.launchRow,
       }))),
-      launchRows,
-      sourceSnapshot,
+      launchRows: items.map((item) => item.launchRow),
+      sourceSnapshot: sourceSnapshots[0]!,
+      sourceSnapshots,
       items,
       blockers: [...new Set(blockers)],
       warnings,
-      safeToCreate: blockers.length === 0 && items.length === targetAccountIds.length * launchRows.length,
+      safeToCreate: blockers.length === 0 && items.length === requestedTaskCount,
       expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
       createdAt,
     });
+    if (preview.safeToCreate) {
+      const existingRow = this.db.prepare(
+        `SELECT preview_json FROM launch_copy_previews
+         WHERE input_hash = ? AND safe_to_create = 1
+           AND consumed_plan_id IS NULL AND expires_at > ?
+         ORDER BY created_at DESC LIMIT 1`,
+      ).get(preview.inputHash, createdAt) as SqlRow | undefined;
+      if (existingRow) {
+        try {
+          const existing = LaunchCopyPreviewRecordSchema.safeParse(
+            JSON.parse(String(existingRow.preview_json)),
+          );
+          if (existing.success
+            && existing.data.presetSnapshotHash === preview.presetSnapshotHash
+            && existing.data.launchRowsHash === preview.launchRowsHash
+            && jsonHash(existing.data.sourceSnapshots.map((item) => item.structuralHash))
+              === jsonHash(preview.sourceSnapshots.map((item) => item.structuralHash))) {
+            return existing.data;
+          }
+        } catch {
+          // Ignore a damaged stale preview and persist the newly validated one.
+        }
+      }
+    }
     this.db.prepare(
       `INSERT INTO launch_copy_previews (
         id, source_account_id, source_ad_id, input_hash, preview_json,
@@ -3847,7 +3917,7 @@ export class AutomationStore {
     ).run(
       preview.id,
       preview.sourceAccountId,
-      preview.sourceAdId,
+      preview.sourceAdGroupId,
       preview.inputHash,
       JSON.stringify(preview),
       toSqlBoolean(preview.safeToCreate),
@@ -3883,97 +3953,27 @@ export class AutomationStore {
   }
 
   validateLaunchCopyItem(item: LaunchPlanItemRecord): void {
-    if (!item.sourceSnapshot && !item.targetAssetMapping) return;
-    if (!item.sourceSnapshot || !item.targetAssetMapping) {
-      throw new Error("复制迁移任务缺少冻结的源快照或目标素材映射。");
+    if (item.legacyCopyUnsupported) {
+      throw new Error("旧版视频代码复制流程已停用；请重新创建原帖迁移计划。");
     }
-    const currentSource = this.resolveLaunchSourceSnapshot(
-      item.sourceSnapshot.accountId,
-      item.sourceSnapshot.adId,
-    );
-    if (currentSource.structuralHash !== item.sourceSnapshot.structuralHash) {
-      throw new Error("源广告结构在预览后已变化，请重新生成差异预览。");
+    if (!item.sourceSnapshot && !item.targetPostMapping) return;
+    if (!item.sourceSnapshot || !item.targetPostMapping) {
+      throw new Error("原帖迁移任务缺少冻结的源帖子或目标帖子证据。");
     }
-    const targetAccount = this.getAccount(item.accountId);
-    if (!targetAccount) throw new Error("目标广告账户不存在。");
-    const evidence = this.findVerifiedTargetAsset(
-      item.accountId,
-      targetAccount.providerKind,
-      item.targetAssetMapping.sourceVideoCode,
-      item.targetAssetMapping.targetVideoCode,
-      item.targetAssetMapping.evidenceAdId,
-    );
-    if (!evidence) {
-      throw new Error("目标账户素材证据在预览后已失效，请重新同步并生成差异预览。");
+    if (jsonHash(item.sourceSnapshot.posts.map(postEvidenceHashValue))
+      !== item.sourceSnapshot.structuralHash) {
+      throw new Error("源广告组原帖快照校验失败，请重新生成预览。");
     }
-  }
-
-  private resolveLaunchSourceSnapshot(accountId: string, adId: string): LaunchSourceSnapshot {
-    const account = this.getAccount(accountId);
-    if (!account) throw new Error("源广告账户不存在。");
-    const managed = this.listManagedEntities(accountId, account.providerKind);
-    const ad = managed.find((entity) => entity.entityType === "ad" && entity.externalId === adId);
-    if (!ad) throw new Error("源广告不存在，请先同步源账户数据。");
-    if (!ad.parentCampaignId || !ad.parentAdGroupId) {
-      throw new Error("源广告缺少稳定的 Campaign ID 或 Ad Group ID，禁止按名称定位。");
+    if (jsonHash(item.targetPostMapping.posts.map(postEvidenceHashValue))
+      !== item.targetPostMapping.evidenceHash) {
+      throw new Error("目标账户帖子证据校验失败，请重新生成预览。");
     }
-    const campaign = managed.find(
-      (entity) => entity.entityType === "campaign" && entity.externalId === ad.parentCampaignId,
-    );
-    const adGroup = managed.find(
-      (entity) => entity.entityType === "ad-group" && entity.externalId === ad.parentAdGroupId,
-    );
-    if (!campaign || !adGroup) {
-      throw new Error("源广告的系列或广告组稳定 ID 未出现在当前同步快照中，禁止按名称回退。");
+    const sourceIds = item.sourceSnapshot.posts.map((post) => post.itemId);
+    const targetIds = item.targetPostMapping.posts.map((post) => post.itemId);
+    if (sourceIds.length !== targetIds.length
+      || sourceIds.some((itemId, index) => itemId !== targetIds[index])) {
+      throw new Error("目标账户帖子与源广告组不完整一致，请重新生成预览。");
     }
-    const rawAd = this.listProviderEntities(accountId, account.providerKind).find(
-      (entity) => entity.entityType === "ad" && entity.externalId === adId,
-    );
-    const videoCode = rawAd ? firstNestedString(rawAd.payload, launchVideoCodeKeys) : null;
-    if (!videoCode) throw new Error("源广告快照中没有可验证的视频代码。");
-    const productUrl = rawAd ? firstNestedString(rawAd.payload, launchProductUrlKeys) : null;
-    const structural = {
-      accountId,
-      campaignId: campaign.externalId,
-      campaignName: campaign.name,
-      adGroupId: adGroup.externalId,
-      adGroupName: adGroup.name,
-      adId: ad.externalId,
-      adName: ad.name,
-      videoCode,
-      productUrl: productUrl && isHttpUrl(productUrl) ? productUrl : null,
-    };
-    return {
-      ...structural,
-      structuralHash: jsonHash(structural),
-      syncedAt: ad.syncedAt,
-    };
-  }
-
-  private findVerifiedTargetAsset(
-    accountId: string,
-    kind: ProviderKind,
-    sourceVideoCode: string,
-    targetVideoCode: string,
-    requiredEvidenceAdId?: string,
-  ): LaunchTargetAssetMapping | null {
-    const evidence = this.listProviderEntities(accountId, kind).find(
-      (entity) => entity.entityType === "ad"
-        && (!requiredEvidenceAdId || entity.externalId === requiredEvidenceAdId)
-        && nestedValueMatches(entity.payload, launchVideoCodeKeys, targetVideoCode),
-    );
-    if (!evidence) return null;
-    const syncedAt = this.listManagedEntities(accountId, kind).find(
-      (entity) => entity.entityType === "ad" && entity.externalId === evidence.externalId,
-    )?.syncedAt;
-    if (!syncedAt) return null;
-    return {
-      accountId,
-      sourceVideoCode,
-      targetVideoCode,
-      evidenceAdId: evidence.externalId,
-      evidenceSyncedAt: syncedAt,
-    };
   }
 
   createMultiAccountLaunchPlan(
@@ -3981,14 +3981,19 @@ export class AutomationStore {
     actor: WriteTaskActor = { id: "local-user", name: "本地用户", kind: "user" },
   ): MultiAccountLaunchPlanRecord {
     const plan = MultiAccountLaunchPlanInputSchema.parse(input);
+    if (plan.mode !== "copy" && plan.launchRows.some((row) => !row.videoCode.trim())) {
+      throw new Error("普通创建必须填写视频代码。");
+    }
     const clientRequestHash = jsonHash({
       mode: plan.mode,
       sourceAccountId: plan.sourceAccountId,
-      sourceAdId: plan.sourceAdId,
+      sourceAdGroupId: plan.sourceAdGroupId,
+      sourceAdGroupIds: plan.sourceAdGroupIds,
       copyPreviewId: plan.copyPreviewId,
       targetAccountIds: [...new Set(plan.targetAccountIds)],
       launchPresetId: plan.launchPresetId,
       launchRows: plan.launchRows,
+      copyTargetConfigs: plan.copyTargetConfigs,
     });
     if (plan.clientRequestId) {
       const existing = this.db.prepare(
@@ -4021,10 +4026,12 @@ export class AutomationStore {
       const normalizedTargets = [...new Set(plan.targetAccountIds)];
       const inputHash = copyPreviewInputHash({
         sourceAccountId: plan.sourceAccountId,
-        sourceAdId: plan.sourceAdId ?? "",
+        sourceAdGroupId: plan.sourceAdGroupId ?? "",
+        sourceAdGroupIds: plan.sourceAdGroupIds,
         targetAccountIds: normalizedTargets,
         launchPresetId: plan.launchPresetId,
-        launchRows: plan.launchRows,
+        launchRows: preview.targetConfigs.length > 0 ? [] : plan.launchRows,
+        targetConfigs: plan.copyTargetConfigs,
       });
       if (inputHash !== preview.inputHash) {
         throw new Error("源广告、目标账户、预设或表格内容在预览后已变化，请重新生成预览。");
@@ -4070,7 +4077,7 @@ export class AutomationStore {
         new Date(now),
         this.getAccount(targetAccountIds[0] ?? "")?.timezone ?? "UTC",
       );
-    const taskCount = targetAccountIds.length * launchRows.length;
+    const taskCount = preview ? preview.items.length : targetAccountIds.length * launchRows.length;
     const message =
       `已保存 ${taskCount} 条${plan.mode === "copy" ? "复制迁移" : "创建"}配置；等待创建执行器发布。`;
     this.db.exec("BEGIN IMMEDIATE");
@@ -4089,8 +4096,12 @@ export class AutomationStore {
           clientRequestHash,
           preview?.id ?? null,
           plan.sourceAccountId,
-          plan.sourceAdId ?? "__new__",
-          preview?.sourceSnapshot.adName ?? "从零创建",
+          plan.sourceAdGroupId ?? "__new__",
+          preview
+            ? preview.sourceSnapshots.length > 1
+              ? `${preview.sourceSnapshot.adGroupName} 等 ${preview.sourceSnapshots.length} 个源广告组`
+              : preview.sourceSnapshot.adGroupName
+            : "从零创建",
           JSON.stringify(targetAccountIds),
           "YYMMDD:XXX",
           toSqlBoolean(launchRows.every((row) => row.initialStatus === "disabled")),
@@ -4118,18 +4129,18 @@ export class AutomationStore {
       // target account. A source-account Campaign ID must never be sent to the
       // target account's campaign_snap/copy endpoint.
       const templateMode = "none";
-      for (const accountId of targetAccountIds) {
+      const pendingItems = preview
+        ? preview.items.map((item) => ({ accountId: item.accountId, itemIndex: item.itemIndex, row: item.launchRow, previewItem: item }))
+        : targetAccountIds.flatMap((accountId) => launchRows.map((row, itemIndex) => ({ accountId, itemIndex, row, previewItem: undefined })));
+      for (const pendingItem of pendingItems) {
+        const { accountId, itemIndex, row, previewItem } = pendingItem;
         const accountTimeZone = this.getAccount(accountId)?.timezone ?? "UTC";
-        launchRows.forEach((row, itemIndex) => {
           const itemId = randomUUID();
           const operationId = randomUUID();
           const correlationId = `${id}:${accountId}:${itemIndex}`;
-          const previewItem = preview?.items.find(
-            (item) => item.accountId === accountId && item.itemIndex === itemIndex,
-          );
-          const targetAssetMapping = previewItem?.targetAssetMapping ?? null;
-          if (preview && !targetAssetMapping) {
-            throw new Error("复制迁移预览缺少目标账户素材映射。");
+          const targetPostMapping = previewItem?.targetPostMapping ?? null;
+          if (preview && !targetPostMapping) {
+            throw new Error("原帖迁移预览缺少目标账户帖子证据。");
           }
           const idempotencyKey = jsonHash({
             kind: plan.mode,
@@ -4156,8 +4167,8 @@ export class AutomationStore {
             JSON.stringify(itemLaunchRow),
             templateMode,
             null,
-            preview ? JSON.stringify(preview.sourceSnapshot) : null,
-            targetAssetMapping ? JSON.stringify(targetAssetMapping) : null,
+            previewItem ? JSON.stringify(previewItem.sourceSnapshot) : null,
+            targetPostMapping ? JSON.stringify(targetPostMapping) : null,
             idempotencyKey,
             operationId,
             correlationId,
@@ -4175,7 +4186,6 @@ export class AutomationStore {
             correlationId,
             itemIndex,
           });
-        });
       }
       if (preview) {
         const consumed = this.db.prepare(
@@ -6530,22 +6540,20 @@ function mapScheduledEntityAction(row: SqlRow): ScheduledEntityActionRecord {
   });
 }
 
-const launchVideoCodeKeys = new Set([
-  "aweme_item_id",
-  "video_code",
-  "video_id",
-  "videoCode",
-  "videoId",
-]);
-const launchProductUrlKeys = new Set([
-  "external_url",
-  "product_url",
-  "landing_page_url",
-  "productUrl",
-]);
-
 function jsonHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function postEvidenceHashValue(post: LaunchSourceSnapshot["posts"][number]) {
+  return {
+    itemId: post.itemId,
+    identityId: post.identityId,
+    identityType: post.identityType,
+    identityBcId: post.identityBcId,
+    vid: post.vid,
+    videoId: post.videoId,
+    promotable: post.promotable,
+  };
 }
 
 function fileTimestamp(): string {
@@ -6570,53 +6578,72 @@ function mapDatabaseBackup(row: SqlRow): DatabaseBackupRecord {
 
 function copyPreviewInputHash(input: {
   sourceAccountId: string;
-  sourceAdId: string;
+  sourceAdGroupId: string;
+  sourceAdGroupIds?: string[];
   targetAccountIds: string[];
   launchPresetId: string;
   launchRows: LaunchCopyPreviewInput["launchRows"];
+  targetConfigs?: LaunchMigrationTargetConfig[];
 }): string {
   return jsonHash({
     sourceAccountId: input.sourceAccountId,
-    sourceAdId: input.sourceAdId,
+    sourceAdGroupId: input.sourceAdGroupId,
+    sourceAdGroupIds: [...new Set(input.sourceAdGroupIds?.length ? input.sourceAdGroupIds : [input.sourceAdGroupId])].sort(),
     targetAccountIds: [...new Set(input.targetAccountIds)].sort(),
     launchPresetId: input.launchPresetId,
     launchRows: input.launchRows,
+    targetConfigs: [...(input.targetConfigs ?? [])].sort((left, right) => left.accountId.localeCompare(right.accountId)),
   });
 }
 
-function firstNestedString(value: unknown, keys: ReadonlySet<string>): string | null {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = firstNestedString(item, keys);
-      if (found) return found;
+function buildMigrationLaunchRows(
+  source: LaunchSourceSnapshot,
+  config: LaunchMigrationTargetConfig,
+  preset: LaunchPresetRecord,
+  existingPlans: MultiAccountLaunchPlanRecord[],
+  reservedAdGroupNames: Set<string>,
+  now: Date,
+  timeZone: string,
+) {
+  if (!source.productUrl) return [];
+  const resolvedStartAt = resolveMigrationStartAt(config.startAtRule, config.startAt, now, timeZone);
+  const deliveryAt = resolvedStartAt ? new Date(resolvedStartAt) : now;
+  const generatedPrefix = automaticAdGroupName(source.adGroupName, deliveryAt, 0, timeZone).replace(/1$/, "");
+  let nextIndex = 0;
+  for (const plan of existingPlans) {
+    for (const row of plan.launchRows) {
+      if (!row.adGroupName.startsWith(generatedPrefix)) continue;
+      const serial = Number(row.adGroupName.slice(generatedPrefix.length));
+      if (Number.isInteger(serial) && serial > nextIndex) nextIndex = serial;
     }
-    return null;
   }
-  if (!value || typeof value !== "object") return null;
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (keys.has(key) && typeof child === "string" && child.trim()) return child.trim();
+  for (const name of reservedAdGroupNames) {
+    if (!name.startsWith(generatedPrefix)) continue;
+    const serial = Number(name.slice(generatedPrefix.length));
+    if (Number.isInteger(serial) && serial > nextIndex) nextIndex = serial;
   }
-  for (const child of Object.values(value as Record<string, unknown>)) {
-    const found = firstNestedString(child, keys);
-    if (found) return found;
-  }
-  return null;
-}
-
-function nestedValueMatches(
-  value: unknown,
-  keys: ReadonlySet<string>,
-  expected: string,
-): boolean {
-  if (Array.isArray(value)) {
-    return value.some((item) => nestedValueMatches(item, keys, expected));
-  }
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  if (Object.entries(record).some(
-    ([key, child]) => keys.has(key) && String(child).trim() === expected,
-  )) return true;
-  return Object.values(record).some((child) => nestedValueMatches(child, keys, expected));
+  const baseRows = Array.from({ length: config.quantity }, (_, index) => ({
+    rowNumber: index + 2,
+    campaignName: source.campaignName,
+    adGroupName: automaticAdGroupName(source.adGroupName, deliveryAt, nextIndex + index, timeZone),
+    adName: automaticName(now, index + 1),
+    videoCode: "",
+    productUrl: source.productUrl as string,
+    region: preset.region,
+    dailyBudget: config.dailyBudget,
+    bid: config.bid,
+    startAt: null,
+    endAt: preset.endAt,
+    initialStatus: preset.initialStatus,
+  }));
+  const rows = applyPresetToLaunchRows(baseRows, preset, existingPlans, now, timeZone).map((row) => ({
+    ...row,
+    dailyBudget: config.dailyBudget,
+    bid: config.bid,
+    startAt: resolvedStartAt,
+  }));
+  rows.forEach((row) => reservedAdGroupNames.add(row.adGroupName));
+  return rows;
 }
 
 function copyDifferences(
@@ -6626,22 +6653,11 @@ function copyDifferences(
   const pairs = [
     ["campaignName", source.campaignName, row.campaignName],
     ["adGroupName", source.adGroupName, row.adGroupName],
-    ["adName", source.adName, row.adName],
-    ["videoCode", source.videoCode, row.videoCode],
     ["productUrl", source.productUrl, row.productUrl],
   ] as const;
   return pairs.flatMap(([field, sourceValue, targetValue]) =>
     sourceValue === targetValue ? [] : [{ field, sourceValue, targetValue }],
   );
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
@@ -6650,7 +6666,7 @@ function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
     ...(row.client_request_id ? { clientRequestId: row.client_request_id } : {}),
     copyPreviewId: row.copy_preview_id ?? null,
     sourceAccountId: row.source_account_id,
-    sourceAdId: row.source_ad_id === "__new__" ? null : row.source_ad_id,
+    sourceAdGroupId: row.source_ad_id === "__new__" ? null : row.source_ad_id,
     sourceAdName: row.source_ad_name,
     mode: row.launch_mode ?? "copy",
     targetAccountIds: JSON.parse(String(row.target_account_ids_json)),
@@ -6669,6 +6685,13 @@ function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
 }
 
 function mapLaunchPlanItem(row: SqlRow): LaunchPlanItemRecord {
+  const sourceEvidence = row.source_snapshot_json
+    ? JSON.parse(String(row.source_snapshot_json))
+    : null;
+  const targetEvidence = row.target_asset_mapping_json
+    ? JSON.parse(String(row.target_asset_mapping_json))
+    : null;
+  const legacyCopyUnsupported = isLegacyCopyEvidence(sourceEvidence, targetEvidence);
   return LaunchPlanItemRecordSchema.parse({
     itemId: row.item_id,
     planId: row.plan_id,
@@ -6677,12 +6700,9 @@ function mapLaunchPlanItem(row: SqlRow): LaunchPlanItemRecord {
     launchRow: JSON.parse(String(row.launch_row_json)),
     templateMode: row.template_mode,
     templateCampaignId: row.template_campaign_id ?? null,
-    sourceSnapshot: row.source_snapshot_json
-      ? JSON.parse(String(row.source_snapshot_json))
-      : null,
-    targetAssetMapping: row.target_asset_mapping_json
-      ? JSON.parse(String(row.target_asset_mapping_json))
-      : null,
+    sourceSnapshot: legacyCopyUnsupported ? null : sourceEvidence,
+    targetPostMapping: legacyCopyUnsupported ? null : targetEvidence,
+    legacyCopyUnsupported,
     idempotencyKey: row.idempotency_key || null,
     status: row.status,
     phase: row.phase ?? "validation",
@@ -6707,6 +6727,22 @@ function mapLaunchPlanItem(row: SqlRow): LaunchPlanItemRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+}
+
+function isLegacyCopyEvidence(sourceEvidence: unknown, targetEvidence: unknown): boolean {
+  const source = sourceEvidence && typeof sourceEvidence === "object"
+    ? sourceEvidence as Record<string, unknown>
+    : null;
+  const target = targetEvidence && typeof targetEvidence === "object"
+    ? targetEvidence as Record<string, unknown>
+    : null;
+  if (Array.isArray(source?.posts) || Array.isArray(target?.posts)) return false;
+  return typeof source?.adId === "string"
+    || typeof source?.videoCode === "string"
+    || typeof source?.syncedAt === "string"
+    || typeof target?.targetVideoCode === "string"
+    || typeof target?.sourceVideoCode === "string"
+    || typeof target?.evidenceAdId === "string";
 }
 
 function mapLaunchPlanItemAttempt(row: SqlRow): LaunchPlanItemAttemptRecord {

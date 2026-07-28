@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, LaunchCopyPreviewInputSchema, parseLaunchSheetTable, resolveLaunchStartAt } from "./launch.js";
+import { automaticName, LaunchCopyPreviewInputSchema, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
 
 describe("resolveLaunchStartAt", () => {
   const now = new Date("2026-07-23T09:15:00.000Z");
@@ -17,6 +17,17 @@ describe("resolveLaunchStartAt", () => {
     // July 24 00:00 and 06:00 (UTC+8), independent of the test machine zone.
     expect(tonight).toBe("2026-07-23T16:00:00.000Z");
     expect(morning).toBe("2026-07-23T22:00:00.000Z");
+  });
+});
+
+describe("resolveMigrationStartAt", () => {
+  it("uses the nearest future 06:00 in the target account timezone", () => {
+    expect(resolveMigrationStartAt("next-six", null, new Date("2026-07-26T16:30:00.000Z"), "Asia/Taipei"))
+      .toBe("2026-07-26T22:00:00.000Z"); // July 27 00:30 -> July 27 06:00
+    expect(resolveMigrationStartAt("next-six", null, new Date("2026-07-26T15:30:00.000Z"), "Asia/Taipei"))
+      .toBe("2026-07-26T22:00:00.000Z"); // July 26 23:30 -> July 27 06:00
+    expect(resolveMigrationStartAt("next-six", null, new Date("2026-07-26T23:00:00.000Z"), "Asia/Taipei"))
+      .toBe("2026-07-27T22:00:00.000Z"); // July 27 07:00 -> July 28 06:00
   });
 });
 
@@ -56,6 +67,24 @@ describe("parseLaunchSheetTable", () => {
     const result = parseLaunchSheetTable([["推广系列名称", "广告组名称"], ["夏季系列", "夏季广告组"]], preset);
     expect(result.rows).toEqual([]);
     expect(result.errors.map((issue) => issue.field)).toContain("视频代码");
+  });
+
+  it("allows an empty video-code cell only for original-post migration", () => {
+    const table = [
+      ["推广系列名称", "广告组名称", "视频代码", "产品 URL"],
+      ["迁移系列", "迁移广告组", "", "https://example.com/product"],
+    ];
+    const normal = parseLaunchSheetTable(table, preset);
+    const migration = parseLaunchSheetTable(
+      table,
+      preset,
+      new Date("2026-07-16T09:00:00.000Z"),
+      undefined,
+      { requireVideoCode: false },
+    );
+    expect(normal.errors.map((issue) => issue.field)).toContain("视频代码");
+    expect(migration.errors).toEqual([]);
+    expect(migration.rows[0]?.videoCode).toBe("");
   });
 
   it("keeps several video codes in one cell as one ad-group of several ads", () => {
@@ -155,24 +184,26 @@ describe("parseLaunchSheetTable", () => {
     expect(automaticName(new Date("2026-07-16T09:00:00.000Z"), 7)).toBe("260716:007");
   });
 
-  it("caps one copy preview at three controlled target accounts and rows", () => {
+  it("caps one copy preview at 100 generated ad groups", () => {
     const row = parseLaunchSheetTable(
       [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["系列", "组", "video-1", "https://example.com/product"]],
       preset,
     ).rows[0]!;
     expect(() => LaunchCopyPreviewInputSchema.parse({
       sourceAccountId: "source",
-      sourceAdId: "source-ad",
-      targetAccountIds: ["a", "b", "c", "d"],
-      launchPresetId: "preset",
-      launchRows: [row],
-    })).toThrow();
-    expect(() => LaunchCopyPreviewInputSchema.parse({
-      sourceAccountId: "source",
-      sourceAdId: "source-ad",
+      sourceAdGroupId: "source-ad",
       targetAccountIds: ["a"],
       launchPresetId: "preset",
-      launchRows: [row, row, row, row],
+      launchRows: [],
+      targetConfigs: [{ accountId: "a", quantity: 20, dailyBudget: 100, bid: null, startAtRule: "absolute", startAt: null }],
+    })).not.toThrow();
+    expect(() => LaunchCopyPreviewInputSchema.parse({
+      sourceAccountId: "source",
+      sourceAdGroupId: "source-ad",
+      targetAccountIds: ["a", "b", "c", "d", "e", "f"],
+      launchPresetId: "preset",
+      launchRows: [row],
+      targetConfigs: ["a", "b", "c", "d", "e", "f"].map((accountId) => ({ accountId, quantity: 20, dailyBudget: 100, bid: null, startAtRule: "absolute", startAt: null })),
     })).toThrow();
   });
 });

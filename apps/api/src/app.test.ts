@@ -634,7 +634,7 @@ describe("local API", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account", other.id],
       launchPresetId: "default-launch-preset",
       launchRows: [apiLaunchRow(2)],
@@ -839,7 +839,7 @@ describe("local API", () => {
       payload: {
         sourceAccountId: "demo-account",
         mode: "single",
-        sourceAdId: null,
+        sourceAdGroupId: null,
         targetAccountIds: [target.id],
         launchPresetId: "default-launch-preset",
         launchRows: [{
@@ -957,7 +957,7 @@ describe("local API", () => {
     });
 
     const created = await app.inject({ method: "POST", url: "/api/launch-plans", payload: {
-      mode: "multi", sourceAccountId: "demo-account", sourceAdId: null,
+      mode: "multi", sourceAccountId: "demo-account", sourceAdGroupId: null,
       targetAccountIds: ["demo-account", second.id], launchPresetId: "default-launch-preset",
       launchRows: [{ rowNumber: 2, campaignName: "测试系列", adGroupName: "测试广告组", adName: "260716:001", videoCode: "same-video-code", productUrl: "https://example.com/product", region: "US", dailyBudget: 1, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }],
     } });
@@ -1816,6 +1816,7 @@ describe("local API", () => {
             ok: false,
             failureKind: "retryable",
             retrySafe: true,
+            reconciliationVerifiedAbsent: true,
             message: "Cookie 正式列表和草稿列表均确认本条未创建",
           }
         : {
@@ -1842,6 +1843,40 @@ describe("local API", () => {
       status: "failed",
       attemptCount: 2,
       errorMessage: "Cookie 正式列表和草稿列表均确认本条未创建",
+    });
+  });
+
+  it("keeps an unknown item unknown when read-only reconciliation is inconclusive", async () => {
+    const createFromPreset = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => mutation.reconcileOnly
+        ? {
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            retrySafe: true,
+            message: "adgroup/list timed out during read-only reconciliation",
+          }
+        : {
+            ...mutation,
+            ok: false,
+            failureKind: "unknown",
+            retrySafe: false,
+            message: "response lost after publish",
+          }),
+    );
+    const planId = await installLaunchTestProvider(createFromPreset, [apiLaunchRow(2)]);
+
+    await app.inject({ method: "POST", url: `/api/launch-plans/${planId}/execute` });
+    const unknownItem = store.listLaunchPlanItems(planId)[0]!;
+    await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/items/${unknownItem.itemId}/retry`,
+    });
+
+    expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({
+      status: "unknown",
+      attemptCount: 2,
+      errorMessage: "adgroup/list timed out during read-only reconciliation",
     });
   });
 
@@ -1902,7 +1937,7 @@ describe("local API", () => {
     });
   });
 
-  it("starts different campaign batches concurrently without mixing their rows", async () => {
+  it("runs different campaign batches serially within one target account", async () => {
     let activeBatches = 0;
     let maxActiveBatches = 0;
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
@@ -1930,7 +1965,7 @@ describe("local API", () => {
     expect(executed.statusCode).toBe(200);
     expect(createFromPreset).toHaveBeenCalledTimes(5);
     expect(createFromPreset.mock.calls.every((call) => call[1].length === 1)).toBe(true);
-    expect(maxActiveBatches).toBe(5);
+    expect(maxActiveBatches).toBe(1);
     expect(store.listLaunchPlanItems(planId).map((item) => item.status))
       .toEqual(Array.from({ length: 5 }, () => "succeeded"));
   });
@@ -2241,9 +2276,54 @@ describe("local API", () => {
     expect(createFromPreset).toHaveBeenCalledTimes(1);
     expect(createFromPreset.mock.calls[0]?.[1][0]).toMatchObject({
       templateMode: "none",
-      row: { videoCode: "video-2" },
+      originalPosts: [expect.objectContaining({
+        itemId: "post-1",
+        identityId: expect.stringContaining("target-identity"),
+        vid: expect.stringContaining("target-vid"),
+      })],
     });
     expect(createFromPreset.mock.calls[0]?.[1][0]).not.toHaveProperty("templateCampaignId");
+  });
+
+  it("accepts object-specific original-post asset readback when the ordinary ad list is empty", async () => {
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => ({
+        ...mutation,
+        ok: true,
+        campaignId: "new-campaign",
+        adGroupId: "new-group",
+        adId: "new-asset-group",
+        message: "created and verified",
+      })),
+    );
+    const fixture = await installCopyLaunchProvider(createFromPreset, true);
+    const preview = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans/copy-preview",
+      payload: fixture.input,
+    });
+    const plan = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans",
+      payload: { ...fixture.input, mode: "copy", copyPreviewId: preview.json().id },
+    });
+
+    const execution = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${plan.json().id}/execute`,
+    });
+
+    expect(execution.statusCode).toBe(200);
+    expect(execution.json().results[0]).toMatchObject({
+      status: "succeeded",
+      syncWarning: null,
+      created: [expect.objectContaining({ adId: "new-asset-group" })],
+    });
+    expect(store.listLaunchPlanItems(plan.json().id)[0]).toMatchObject({
+      status: "succeeded",
+      adId: "new-asset-group",
+      syncWarning: null,
+    });
   });
 
   it("blocks a copy item before provider dispatch when the frozen source drifts", async () => {
@@ -2268,7 +2348,7 @@ describe("local API", () => {
       url: "/api/launch-plans",
       payload: { ...fixture.input, mode: "copy", copyPreviewId: preview.json().id },
     });
-    fixture.setRemoteSourceVideoCode("changed-source-video");
+    fixture.setRemoteSourceVideoCode("changed-source-post");
 
     const execution = await app.inject({
       method: "POST",
@@ -2277,7 +2357,7 @@ describe("local API", () => {
 
     expect(execution.statusCode).toBe(200);
     expect(execution.json().results[0]).toMatchObject({ status: "failed" });
-    expect(execution.json().results[0].message).toContain("源广告结构在预览后已变化");
+    expect(execution.json().results[0].message).toContain("源广告组帖子在预览后已变化");
     expect(createFromPreset).not.toHaveBeenCalled();
   });
 
@@ -2303,7 +2383,7 @@ describe("local API", () => {
       url: "/api/launch-plans",
       payload: { ...fixture.input, mode: "copy", copyPreviewId: preview.json().id },
     });
-    fixture.setRemoteTargetVideoCode("different-target-video");
+    fixture.setRemoteTargetVideoCode("different-target-post");
 
     const execution = await app.inject({
       method: "POST",
@@ -2312,7 +2392,7 @@ describe("local API", () => {
 
     expect(execution.statusCode).toBe(200);
     expect(execution.json().results[0]).toMatchObject({ status: "failed" });
-    expect(execution.json().results[0].message).toContain("目标账户素材证据在预览后已失效");
+    expect(execution.json().results[0].message).toContain("目标账户无法继续使用帖子");
     expect(createFromPreset).not.toHaveBeenCalled();
   });
 
@@ -2484,7 +2564,7 @@ describe("local API", () => {
     return store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
-      sourceAdId: null,
+      sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
       launchRows: rows,
@@ -2496,10 +2576,11 @@ describe("local API", () => {
       context: ProviderContext,
       mutations: CreationMutation[],
     ) => Promise<CreationMutationResult[]>,
+    ordinaryAdListEmptyAfterCreation = false,
   ): Promise<{
     input: {
       sourceAccountId: string;
-      sourceAdId: string;
+      sourceAdGroupId: string;
       targetAccountIds: string[];
       launchPresetId: string;
       launchRows: ReturnType<typeof apiLaunchRow>[];
@@ -2517,9 +2598,9 @@ describe("local API", () => {
       initialStatus: "disabled",
       creationConfig: apiCreationConfig(),
     });
-    saveApiCopySource(store, "source-ad", "source-video");
-    let remoteSourceVideoCode = "source-video";
-    let remoteTargetVideoCode = "video-2";
+    saveApiCopySource(store, "source-ad", "post-1");
+    let remoteSourceVideoCode = "post-1";
+    let remoteTargetVideoCode = "post-1";
     let creationDispatched = false;
     store.saveProviderConnectionSettings("demo-account", {
       kind: "cookie", advertiserId: "copy-source", healthUrl: "",
@@ -2536,7 +2617,7 @@ describe("local API", () => {
     store.updateProviderAuthorization("demo-account", "cookie", {
       status: "active",
       capabilityVersion: "copy-test-v1",
-      capabilities: ["read-campaigns", "create-campaigns", "copy-ads"],
+      capabilities: ["read-campaigns", "read-ad-groups", "create-campaigns"],
     });
     const target = store.createAccount({
       displayName: "copy target",
@@ -2578,8 +2659,43 @@ describe("local API", () => {
       kind: "cookie",
       displayName: "copy test provider",
       capabilityVersion: "copy-test-v1",
-      capabilities: new Set(["read-campaigns", "create-campaigns", "copy-ads"]),
+      capabilities: new Set(["read-campaigns", "read-ad-groups", "create-campaigns"]),
       checkHealth: async () => ({ ok: true, status: "ready", message: "ready" }),
+      readAdGroupOriginalPosts: async (_context, input) => {
+        if (input.campaignId !== "source-campaign" || input.adGroupId !== "source-group") {
+          throw new Error("wrong source group");
+        }
+        return {
+          posts: [{
+            itemId: remoteSourceVideoCode,
+            identityId: "source-identity",
+            identityType: 2,
+            identityBcId: "0",
+            vid: `source-vid-${remoteSourceVideoCode}`,
+            videoId: null,
+            displayName: "source post",
+            coverUrl: null,
+            promotable: true,
+          }],
+          productUrl: "https://source.example/product",
+          productInfo: null,
+          catalogSetup: null,
+        };
+      },
+      readAccessibleOriginalPosts: async (_context, sourcePosts) => sourcePosts.flatMap((sourcePost) =>
+        sourcePost.itemId === remoteTargetVideoCode
+          ? [{
+              itemId: sourcePost.itemId,
+              identityId: "target-identity",
+              identityType: 2,
+              identityBcId: "0",
+              vid: `target-vid-${sourcePost.itemId}`,
+              videoId: null,
+              displayName: "target post",
+              coverUrl: null,
+              promotable: true,
+            }]
+          : []),
       syncReadOnly: async (context) => {
         const refreshedAt = new Date().toISOString();
         if (context.accountId === "demo-account") {
@@ -2612,7 +2728,9 @@ describe("local API", () => {
           ? [
             { entityType: "campaign" as const, externalId: "new-campaign", payload: {} },
             { entityType: "ad-group" as const, externalId: "new-group", payload: {} },
-            { entityType: "ad" as const, externalId: "new-ad", payload: {} },
+            ...(!ordinaryAdListEmptyAfterCreation
+              ? [{ entityType: "ad" as const, externalId: "new-ad", payload: {} }]
+              : []),
           ]
           : [{
             entityType: "ad" as const,
@@ -2627,7 +2745,9 @@ describe("local API", () => {
             counts: creationDispatched
               ? { campaign: 1, "ad-group": 1, ad: 1 }
               : { campaign: 0, "ad-group": 0, ad: 1 },
-            warnings: [],
+            warnings: creationDispatched && ordinaryAdListEmptyAfterCreation
+              ? ["ad 响应成功，但暂未识别到列表数据。"]
+              : [],
             quality: testSyncQuality(refreshedAt),
           },
         };
@@ -2653,7 +2773,7 @@ describe("local API", () => {
     return {
       input: {
         sourceAccountId: "demo-account",
-        sourceAdId: "source-ad",
+        sourceAdGroupId: "source-group",
         targetAccountIds: [target.id],
         launchPresetId: "default-launch-preset",
         launchRows: [apiLaunchRow(2)],
