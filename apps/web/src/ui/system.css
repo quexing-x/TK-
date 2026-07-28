@@ -1265,6 +1265,41 @@ td strong { color: var(--ink); }
 .launch-preset-panel > .form-grid > .field {
   align-self: start;
 }
+.selected-preset-summary {
+  margin: 0 18px 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.selected-preset-summary > strong {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--ink);
+}
+.selected-preset-summary > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.selected-preset-summary > div > span {
+  display: grid;
+  gap: 3px;
+  color: var(--ink);
+  font-weight: 700;
+}
+.selected-preset-summary small {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 500;
+}
+.selected-preset-summary > p {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  color: var(--ink-soft);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
 .launch-page .table-panel { margin-top: 32px; }
 
 .task-center-page > .panel { box-shadow: none; }

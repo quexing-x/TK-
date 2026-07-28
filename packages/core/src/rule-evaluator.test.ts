@@ -25,7 +25,7 @@ function campaign(id: string, createdAt: string): ProviderEntity {
   };
 }
 
-function adGroup(campaignId: string, createdAt?: string): ProviderEntity {
+function adGroup(campaignId: string, createdAt?: string, spend = 3): ProviderEntity {
   return {
     entityType: "ad-group",
     externalId: `group-${campaignId}`,
@@ -37,7 +37,7 @@ function adGroup(campaignId: string, createdAt?: string): ProviderEntity {
       row_data: {
         campaign_id: campaignId,
         time_attr_convert_cnt: 0,
-        stat_cost: 3,
+        stat_cost: spend,
         cpc: 0.4,
         time_attr_on_web_cart: 0,
       },
@@ -106,6 +106,35 @@ describe("48 hour ad-group window", () => {
     const result = filterEntitiesToRecentWindow([child], now);
 
     expect(result.entities).toHaveLength(0);
+  });
+
+  it("keeps an old ad group and its ads when it has spend today", () => {
+    const oldGroup = adGroup("reactivated", "2026-07-12T04:00:00.000Z");
+    const child = ad(oldGroup.externalId);
+
+    const result = filterEntitiesToRecentWindow([oldGroup, child], now);
+
+    expect(result.entities).toEqual([oldGroup, child]);
+    expect(result.excludedCount).toBe(0);
+  });
+
+  it("still excludes an old ad group without spend today", () => {
+    const oldGroup = adGroup("inactive", "2026-07-12T04:00:00.000Z", 0);
+
+    const result = filterEntitiesToRecentWindow([oldGroup], now);
+
+    expect(result.entities).toHaveLength(0);
+    expect(result.excludedCount).toBe(1);
+  });
+
+  it("excludes a closed old ad group even when it has spend today", () => {
+    const oldGroup = adGroup("closed", "2026-07-12T04:00:00.000Z");
+    oldGroup.payload.ad_primary_status = "disable";
+
+    const result = filterEntitiesToRecentWindow([oldGroup], now);
+
+    expect(result.entities).toHaveLength(0);
+    expect(result.excludedCount).toBe(1);
   });
 });
 

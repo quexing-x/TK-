@@ -5,7 +5,7 @@
 ## 安全边界
 
 - 服务监听局域网地址 `0.0.0.0:3180`，仅用于受控的局域网测试；不会自行开放公网端口。
-- 每次启动都会关闭软件总开关；测试人员必须在界面中明确开启后，自动化才可能执行。
+- 每次启动都会关闭全局自动化；测试人员必须在界面中明确开启后，自动化才可能执行。
 - 测试数据库、会话、DPAPI 凭据与正式桌面版隔离。
 - 账号密码只保存于根目录 `.env.login-test` 和当前 Windows 用户可解密的 `private/login-test-credentials.dpapi`，均被 Git 忽略，禁止发送到聊天或提交到仓库。
 - 如通过 HTTPS 反向代理访问，设置 `TK_AUTO_LOGIN_TEST_SECURE_COOKIES=true`，Cookie 会启用 `Secure`、`HttpOnly`、`SameSite=Strict`。

@@ -61,6 +61,7 @@ class FakeProvider implements AdsProvider {
   adGroupCpa: number | null = null;
   adGroupCpc = 1.5;
   adGroupCarts = 0;
+  adGroupSpend = 20;
   scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   syncCount = 0;
@@ -101,7 +102,7 @@ class FakeProvider implements AdsProvider {
         start_time: this.scheduledStartAt,
         row_data: {
           campaign_id: "campaign-1",
-          stat_cost: "20",
+          stat_cost: String(this.adGroupSpend),
           cpc: String(this.adGroupCpc),
           click_cnt: "10",
           time_attr_convert_cnt: String(this.adGroupConversions),
@@ -370,7 +371,6 @@ describe("AutomationService", () => {
       enabled: account.enabled,
       providerKind: account.providerKind,
     });
-    store.setAccountExecutionMode("demo-account", "automatic", "test-setup");
     const initialSync = await provider.syncReadOnly();
     store.saveReadOnlySync(
       "demo-account",
@@ -396,6 +396,29 @@ describe("AutomationService", () => {
     );
   });
 
+  it("evaluates an old ad group when it has spend today", async () => {
+    provider.campaignCreatedAt = new Date(Date.now() - 72 * 60 * 60_000).toISOString();
+
+    const run = await service.runAccount("demo-account", "preview");
+
+    expect(run.candidateCount).toBe(1);
+    expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      status: "preview",
+    });
+  });
+
+  it("does not evaluate a closed old ad group with residual spend today", async () => {
+    provider.campaignCreatedAt = new Date(Date.now() - 72 * 60 * 60_000).toISOString();
+    provider.adGroupStatus = "disable";
+
+    const run = await service.runAccount("demo-account", "preview");
+
+    expect(run.candidateCount).toBe(0);
+    expect(store.listAutomationDecisions("demo-account")).toHaveLength(0);
+  });
+
   it("explains which account needs connection verification before a preview", async () => {
     store.updateProviderStatus("demo-account", "cookie", "failed", "expired");
 
@@ -406,7 +429,7 @@ describe("AutomationService", () => {
     });
   });
 
-  it("downgrades automatic mode when connection health is not ready", async () => {
+  it("records a failed connection health check without changing account automation", async () => {
     vi.spyOn(provider, "checkHealth").mockResolvedValue({
       ok: false,
       status: "failed",
@@ -415,7 +438,7 @@ describe("AutomationService", () => {
 
     await service.checkAccountConnection("demo-account");
 
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
   });
 
@@ -473,13 +496,13 @@ describe("AutomationService", () => {
     });
   });
 
-  it("downgrades automatic mode when provider data synchronization fails", async () => {
+  it("records provider synchronization failure without changing account automation", async () => {
     provider.shouldSyncFail = true;
 
     const run = await service.runAccount("demo-account", "scheduler");
 
     expect(run.status).toBe("failed");
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       status: "failed",
       lastMessage: "Cookie 已失效或数据同步异常：sync unavailable",
@@ -494,7 +517,7 @@ describe("AutomationService", () => {
 
     expect(run.candidateCount).toBe(1);
     expect(provider.mutations).toHaveLength(0);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
       status: "preview",
       dataQualityStatus: "partial",
@@ -509,17 +532,16 @@ describe("AutomationService", () => {
 
     expect(run.candidateCount).toBe(0);
     expect(provider.mutations).toHaveLength(0);
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
-  it("rechecks stored quality at the write boundary after automatic mode is re-enabled", async () => {
+  it("rechecks stored quality at the manual write boundary", async () => {
     provider.qualityStatus = "partial";
     const partial = await provider.syncReadOnly();
     const partialAt = new Date(Date.now() + 1_000).toISOString();
     partial.result.startedAt = partialAt;
     partial.result.finishedAt = partialAt;
     store.saveReadOnlySync("demo-account", "cookie", partial.entities, partial.result);
-    store.setAccountExecutionMode("demo-account", "automatic", "attempted bypass");
 
     await expect(service.changeStatusManually("demo-account", {
       entityType: "ad-group",
@@ -539,7 +561,7 @@ describe("AutomationService", () => {
     });
 
     expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
     expect(store.listAdOperations("demo-account")[0]).toMatchObject({
       status: "unknown",
@@ -547,12 +569,12 @@ describe("AutomationService", () => {
     });
   });
 
-  it("allows a manual status write while the account uses manual approval", async () => {
+  it("allows a manual status write while account automation is disabled", async () => {
     const account = store.getAccount("demo-account")!;
     store.updateAccountSettings("demo-account", {
       displayName: account.displayName,
       accountType: account.accountType,
-      enabled: true,
+      enabled: false,
       providerKind: account.providerKind,
     });
 
@@ -764,7 +786,7 @@ describe("AutomationService", () => {
   it("directly closes matched ad groups for automatic accounts", async () => {
     const run = await service.runAccount("demo-account", "manual");
 
-    expect(run).toMatchObject({ executionMode: "automatic", actionCount: 1, successCount: 1, failureCount: 0 });
+    expect(run).toMatchObject({ automatic: true, actionCount: 1, successCount: 1, failureCount: 0 });
     expect(provider.mutations).toEqual([{ entityType: "ad-group", externalId: "adgroup-1", action: "disable" }]);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
       status: "succeeded",
@@ -800,10 +822,10 @@ describe("AutomationService", () => {
       status: "ready",
       lastMessage: "ready",
     });
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
-  it("downgrades an account after three consecutive provider write failures", async () => {
+  it("opens the provider circuit after three write failures without changing account automation", async () => {
     provider.shouldFail = true;
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -814,11 +836,16 @@ describe("AutomationService", () => {
       });
     }
 
-    expect(store.getAccount("demo-account")?.executionMode).toBe("automatic");
+    expect(store.getAccount("demo-account")?.enabled).toBe(true);
+    expect(store.getProviderWriteCircuit("demo-account", "cookie")).toMatchObject({
+      consecutiveFailures: 3,
+      openedAt: expect.any(String),
+    });
   });
 
   it("does not evaluate campaigns older than 48 hours", async () => {
     provider.campaignCreatedAt = new Date(Date.now() - 49 * 60 * 60 * 1_000).toISOString();
+    provider.adGroupSpend = 0;
 
     const run = await service.runAccount("demo-account", "preview");
 
@@ -853,7 +880,7 @@ describe("AutomationService", () => {
       candidateCount: 1,
     });
     await expect(service.runAccount("demo-account", "manual")).rejects.toThrow(
-      "软件总开关已关闭",
+      "全局自动化已关闭",
     );
     const scheduler = new AutomationScheduler(store, service);
     await scheduler.tick();
@@ -861,9 +888,7 @@ describe("AutomationService", () => {
     expect(store.listPollCycles()).toHaveLength(0);
   });
 
-  it("keeps automatic accounts in direct execution mode", async () => {
-    store.setAccountExecutionMode("demo-account", "automatic", "test");
-
+  it("executes account automation directly when automation is enabled", async () => {
     const run = await service.runAccount("demo-account", "manual");
 
     expect(run.candidateCount).toBe(1);
@@ -883,7 +908,7 @@ describe("AutomationService", () => {
     expect(provider.mutations).toHaveLength(0);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
       status: "failed",
-      errorMessage: expect.stringContaining("软件总开关"),
+      errorMessage: expect.stringContaining("全局自动化"),
     });
   });
 
@@ -1134,11 +1159,17 @@ describe("AutomationService", () => {
     expect(provider.deletions).toEqual([]);
   });
 
-  it("does not submit an automatic appeal while the account is in observe mode", async () => {
+  it("does not submit an automatic appeal while account automation is disabled", async () => {
     provider.scenario = "appeal";
     const synced = await provider.syncReadOnly();
     store.saveReadOnlySync("demo-account", "cookie", synced.entities, synced.result);
-    store.setAccountExecutionMode("demo-account", "observe", "test");
+    const account = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: false,
+      providerKind: account.providerKind,
+    });
 
     await service.runScheduledAppeals("demo-account", new Date("2026-07-20T17:00:00.000Z"));
 

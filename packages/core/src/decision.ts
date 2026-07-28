@@ -38,7 +38,7 @@ export interface AutomationRunRecord {
   accountId: string;
   providerKind: "cookie" | "official-api";
   trigger: AutomationTrigger;
-  executionMode: "observe" | "manual-approval" | "automatic";
+  automatic: boolean;
   status: AutomationRunStatus;
   startedAt: string;
   finishedAt: string | null;

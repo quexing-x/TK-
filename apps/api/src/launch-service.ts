@@ -191,10 +191,6 @@ export class LaunchService {
     if (!plan) throw new Error("投放计划不存在。");
     if (plan.status === "cancelled") throw new Error("投放计划已取消。");
     if (plan.status === "completed") return { plan, results: [] };
-    if (!this.store.getSystemRuntimeState().enabled) {
-      throw new Error("软件总开关已关闭，批量创建写入已暂停。");
-    }
-
     const allItems = this.launchStore.listItems(planId);
     if (allItems.length === 0) {
       throw new Error("旧版计划没有逐项执行记录；为避免重复创建，请重新导入并创建计划。");
@@ -249,9 +245,6 @@ export class LaunchService {
     results: LaunchExecutionItemResult[];
   }> {
     this.recoverExpiredLeases();
-    if (!this.store.getSystemRuntimeState().enabled) {
-      throw new Error("软件总开关已关闭，批量创建写入已暂停。");
-    }
     const plan = this.launchStore.getPlan(planId);
     if (!plan) throw new Error("投放计划不存在。");
     if (plan.status === "cancelled") throw new Error("投放计划已取消。");
@@ -339,9 +332,6 @@ export class LaunchService {
       for (const item of claimed) this.store.validateLaunchCopyItem(item);
 
       const validateBeforeDispatch = () => {
-        if (!this.store.getSystemRuntimeState().enabled) {
-          throw new Error("软件总开关已关闭，批量创建写入已暂停。");
-        }
         const currentAccount = this.store.getAccount(first.accountId);
         if (!currentAccount || currentAccount.providerKind !== account.providerKind) {
           throw new Error("目标账户配置已变化，批量创建已阻止。");

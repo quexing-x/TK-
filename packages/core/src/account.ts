@@ -3,12 +3,6 @@ import { z } from "zod";
 export const ProviderKindSchema = z.enum(["cookie", "official-api"]);
 export type ProviderKind = z.infer<typeof ProviderKindSchema>;
 
-export const ExecutionModeSchema = z.enum([
-  "observe",
-  "manual-approval",
-  "automatic",
-]);
-export type ExecutionMode = z.infer<typeof ExecutionModeSchema>;
 export const AccountTypeSchema = z.enum(["standard", "agency", "shop"]);
 export type AccountType = z.infer<typeof AccountTypeSchema>;
 
@@ -22,7 +16,6 @@ export const AccountConfigSchema = z.object({
   timezone: z.string().trim().min(1),
   pollingIntervalMinutes: z.number().int().min(1).max(1440),
   maxActionsPerRun: z.number().int().min(1).max(100),
-  executionMode: ExecutionModeSchema,
   updatedAt: z.string().datetime(),
 });
 

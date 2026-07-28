@@ -113,7 +113,6 @@ export class AutomationService {
     if (
       !account
       || !account.enabled
-      || account.executionMode !== "automatic"
       || !this.store.getSystemRuntimeState().enabled
       || !settings.enabled
     ) return;
@@ -168,7 +167,6 @@ export class AutomationService {
       !settings.enabled
       || !settings.onlyDisabled
       || !account?.enabled
-      || account.executionMode !== "automatic"
       || !this.store.getSystemRuntimeState().enabled
     ) return;
     const localTime = timePartsInTimeZone(asOf, account.timezone);
@@ -305,7 +303,6 @@ export class AutomationService {
       !this.autoCopyRunner
       || !copy.autoCopyEnabled
       || !account?.enabled
-      || account.executionMode !== "automatic"
       || !this.store.getSystemRuntimeState().enabled
     ) return;
     const localTime = timePartsInTimeZone(asOf, account.timezone);
@@ -444,7 +441,7 @@ export class AutomationService {
     trigger: AutomationTrigger,
   ): Promise<AutomationRunRecord> {
     if (trigger !== "preview" && !this.store.getSystemRuntimeState().enabled) {
-      throw new Error("软件总开关已关闭，自动化检测和执行均已暂停。");
+      throw new Error("全局自动化已关闭，自动化检测和执行均已暂停。");
     }
     if (this.runningAccounts.has(accountId)) {
       throw new AutomationBusyError("该账户已有检测任务正在运行。");
@@ -457,19 +454,17 @@ export class AutomationService {
 
     this.runningAccounts.add(accountId);
     const writeCircuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
-    // 自动执行的唯一授权链：非预览 + 账户自动化开启 + automatic 模式 + 熔断未开。
-    // 软件总开关已在方法入口校验。不再有独立的「低风险自动化」二次授权门槛。
+    // 自动执行的唯一授权链：非预览 + 全局自动化开启 + 账户自动化开启 + Provider 写入保护未触发。
+    // 广告创建和人工启停不使用这条授权链。
     const automaticRun =
       trigger !== "preview" &&
       account.enabled &&
-      account.executionMode === "automatic" &&
       !writeCircuit?.openedAt;
-    const executionMode = automaticRun ? "automatic" as const : "observe" as const;
     const run = this.store.createAutomationRun(
       accountId,
       account.providerKind,
       trigger,
-      executionMode,
+      automaticRun,
     );
 
     try {
@@ -825,9 +820,6 @@ export class AutomationService {
     input: ManualStatusInput,
     actor: WriteTaskActor = { id: "local-user", name: "local-user", kind: "user" },
   ): AdOperationRecord {
-    if (!this.store.getSystemRuntimeState().enabled) {
-      throw new Error("System automation is paused.");
-    }
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("Account does not exist.");
     const connection = this.store.getProviderConnection(accountId, account.providerKind);
@@ -1071,9 +1063,6 @@ export class AutomationService {
     existingTask?: AdOperationRecord,
     successMessage?: string,
   ): Promise<{ result: StatusMutationResult; task: AdOperationRecord }> {
-    if (!this.store.getSystemRuntimeState().enabled) {
-      throw new WriteBlockedBeforeDispatchError("软件总开关已关闭，广告启停操作已暂停。");
-    }
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
     const connection = this.store.getProviderConnection(
@@ -1413,9 +1402,6 @@ export class AutomationService {
     accountId: string,
     requireAutomatic: boolean,
   ): void {
-    if (!this.store.getSystemRuntimeState().enabled) {
-      throw new WriteBlockedBeforeDispatchError("软件总开关已关闭，真实广告写入已暂停。");
-    }
     const account = this.store.getAccount(accountId);
     if (!account) throw new WriteBlockedBeforeDispatchError("账号不存在。");
     const latestSync = this.store.getLatestReadOnlySync(accountId, account.providerKind);
@@ -1428,13 +1414,13 @@ export class AutomationService {
     if (latestSync.quality.status !== "healthy") {
       throw new WriteBlockedBeforeDispatchError(`同步数据为 ${latestSync.quality.status}，状态写入已阻止。`);
     }
-    if (!account.enabled) {
-      throw new WriteBlockedBeforeDispatchError("账户未启用，真实 Provider 写入已阻止。");
-    }
-    if (requireAutomatic && account.executionMode !== "automatic") {
-      throw new WriteBlockedBeforeDispatchError("账户没有明确启用 automatic 模式，真实 Provider 写入已阻止。");
-    }
     if (requireAutomatic) {
+      if (!this.store.getSystemRuntimeState().enabled) {
+        throw new WriteBlockedBeforeDispatchError("全局自动化已关闭，自动状态写入已暂停。");
+      }
+      if (!account.enabled) {
+        throw new WriteBlockedBeforeDispatchError("账户自动化已关闭，自动状态写入已阻止。");
+      }
       const circuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
       if (circuit?.openedAt) {
         throw new WriteBlockedBeforeDispatchError("Provider 连续写入失败熔断仍处于开启状态，请人工检查并重置后再试。");

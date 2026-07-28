@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, LaunchCopyPreviewInputSchema, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
+import { automaticName, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
 
 describe("resolveLaunchStartAt", () => {
   const now = new Date("2026-07-23T09:15:00.000Z");
@@ -28,6 +28,19 @@ describe("resolveMigrationStartAt", () => {
       .toBe("2026-07-26T22:00:00.000Z"); // July 26 23:30 -> July 27 06:00
     expect(resolveMigrationStartAt("next-six", null, new Date("2026-07-26T23:00:00.000Z"), "Asia/Taipei"))
       .toBe("2026-07-27T22:00:00.000Z"); // July 27 07:00 -> July 28 06:00
+  });
+});
+
+describe("LaunchMigrationTargetConfigSchema", () => {
+  it("defaults original-post migration to enabled for old and new clients", () => {
+    expect(LaunchMigrationTargetConfigSchema.parse({
+      accountId: "target",
+      quantity: 1,
+      dailyBudget: 100,
+      bid: null,
+      startAtRule: "absolute",
+      startAt: null,
+    }).initialStatus).toBe("enabled");
   });
 });
 

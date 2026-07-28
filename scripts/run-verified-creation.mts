@@ -90,18 +90,13 @@ try {
     entity && entity.status !== "disabled",
   );
   if (missingHierarchy || unsafeHierarchy.length > 0 || result.syncWarning) {
-    store.setAccountExecutionMode(
-      account.id,
-      "manual-approval",
-      "真实创建后的关闭状态回读未通过，已自动熔断写入；禁止直接重试。",
-    );
     if (missingHierarchy) {
-      throw new Error("创建已确认，但未从最新同步数据回读到完整的系列、广告组和广告；禁止直接重试。");
+      throw new Error("创建已确认，但未从最新同步数据回读到完整的系列、广告组和广告；本任务禁止直接重试。");
     }
     if (unsafeHierarchy.length > 0) {
-      throw new Error("创建已确认，但系列、广告组或广告未确认保持关闭；已熔断写入，禁止直接重试。");
+      throw new Error("创建已确认，但系列、广告组或广告未确认保持关闭；本任务禁止直接重试。");
     }
-    throw new Error(`创建已确认，但回读存在警告：${result.syncWarning}；已熔断写入，禁止直接重试。`);
+    throw new Error(`创建已确认，但回读存在警告：${result.syncWarning}；本任务禁止直接重试。`);
   }
 
   console.log("真实创建验收通过：1 个创建项的系列、广告组和广告均已回读并确认保持关闭。");

@@ -131,6 +131,8 @@ export const LaunchMigrationTargetConfigSchema = z.object({
   quantity: z.number().int().min(1).max(20),
   dailyBudget: z.number().positive().max(100_000_000),
   bid: z.number().nonnegative().max(100_000_000).nullable(),
+  // 原帖迁移默认创建后直接投放；旧客户端未传该字段时也按开启处理。
+  initialStatus: LaunchInitialStatusSchema.default("enabled"),
   startAtRule: LaunchMigrationStartRuleSchema,
   startAt: z.string().datetime().nullable(),
 });

@@ -415,8 +415,8 @@ export class AutomationStore {
         `INSERT INTO accounts (
           id, display_name, account_type, enabled, provider_kind, credential_ref,
           timezone, polling_interval_minutes, max_actions_per_run,
-          execution_mode, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         accountId,
@@ -428,7 +428,6 @@ export class AutomationStore {
         "Asia/Shanghai",
         5,
         15,
-        "automatic",
         now,
       );
 
@@ -454,8 +453,8 @@ export class AutomationStore {
         `INSERT INTO accounts (
           id, display_name, account_type, enabled, provider_kind,
           credential_ref, timezone, polling_interval_minutes,
-          max_actions_per_run, execution_mode, updated_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          max_actions_per_run, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -466,7 +465,6 @@ export class AutomationStore {
         "Asia/Shanghai",
         5,
         15,
-        "automatic",
         now,
       );
     this.writeSwitches(id, createDefaultAutomationSwitches(), false);
@@ -551,8 +549,7 @@ export class AutomationStore {
     const result = this.db
       .prepare(
         `UPDATE accounts SET
-          display_name = ?, account_type = ?, enabled = ?, provider_kind = ?,
-          execution_mode = ?, updated_at = ?
+          display_name = ?, account_type = ?, enabled = ?, provider_kind = ?, updated_at = ?
         WHERE id = ?`,
       )
       .run(
@@ -560,7 +557,6 @@ export class AutomationStore {
         settings.accountType,
         toSqlBoolean(settings.enabled),
         settings.providerKind,
-        current.executionMode,
         now,
         accountId,
       );
@@ -571,23 +567,6 @@ export class AutomationStore {
 
     this.writeAudit("local-user", accountId, "account.settings.updated", {
       ...settings,
-    });
-    return this.getAccount(accountId);
-  }
-
-  setAccountExecutionMode(
-    accountId: string,
-    executionMode: AccountConfig["executionMode"],
-    reason: string,
-  ): AccountConfig | null {
-    const now = new Date().toISOString();
-    const result = this.db
-      .prepare("UPDATE accounts SET execution_mode = ?, updated_at = ? WHERE id = ?")
-      .run(executionMode, now, accountId);
-    if (result.changes === 0) return null;
-    this.writeAudit("system", accountId, "account.execution-mode.changed", {
-      executionMode,
-      reason,
     });
     return this.getAccount(accountId);
   }
@@ -4439,7 +4418,7 @@ export class AutomationStore {
     accountId: string,
     kind: ProviderKind,
     trigger: AutomationTrigger,
-    executionMode: AccountConfig["executionMode"],
+    automatic: boolean,
   ): AutomationRunRecord {
     this.assertAccount(accountId);
     const id = randomUUID();
@@ -4447,12 +4426,12 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT INTO automation_runs (
-          id, account_id, provider_kind, trigger, execution_mode, status,
+          id, account_id, provider_kind, trigger, automatic, status,
           started_at, finished_at, candidate_count, action_count,
           success_count, failure_count, error_message
         ) VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, 0, 0, 0, 0, NULL)`,
       )
-      .run(id, accountId, kind, trigger, executionMode, startedAt);
+      .run(id, accountId, kind, trigger, toSqlBoolean(automatic), startedAt);
     return this.getAutomationRun(id) as AutomationRunRecord;
   }
 
@@ -5163,7 +5142,6 @@ export class AutomationStore {
         timezone TEXT NOT NULL,
         polling_interval_minutes INTEGER NOT NULL,
         max_actions_per_run INTEGER NOT NULL DEFAULT 15,
-        execution_mode TEXT NOT NULL CHECK (execution_mode IN ('observe', 'manual-approval', 'automatic')),
         updated_at TEXT NOT NULL
       );
 
@@ -5641,7 +5619,7 @@ export class AutomationStore {
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         provider_kind TEXT NOT NULL,
         trigger TEXT NOT NULL,
-        execution_mode TEXT NOT NULL,
+        automatic INTEGER NOT NULL DEFAULT 0 CHECK (automatic IN (0, 1)),
         status TEXT NOT NULL,
         started_at TEXT NOT NULL,
         finished_at TEXT,
@@ -6098,32 +6076,24 @@ export class AutomationStore {
         )
         .run(new Date().toISOString());
     });
-    this.applyMigration("safe-manual-approval-execution-v1", () => {
-      const now = new Date().toISOString();
-      this.db
-        .prepare("UPDATE accounts SET execution_mode = 'manual-approval', updated_at = ?")
-        .run(now);
-      this.db
-        .prepare(
-          `UPDATE automation_decisions
-           SET status = 'skipped',
-               error_message = COALESCE(error_message, '安全升级已切换为人工批准模式，旧待执行任务已取消。')
-           WHERE status = 'pending'`,
-        )
-        .run();
-    });
-    this.applyMigration("direct-automation-default-v1", () => {
-      const now = new Date().toISOString();
-      this.db.prepare(
-        "UPDATE accounts SET execution_mode = 'automatic', updated_at = ? WHERE execution_mode != 'automatic'",
-      ).run(now);
-      this.db.prepare(
-        `UPDATE automation_decisions
-         SET status = 'skipped',
-             error_message = COALESCE(error_message, '已切换为直接自动执行，过期决策提醒已清除'),
-             executed_at = COALESCE(executed_at, ?)
-         WHERE status IN ('preview', 'pending')`,
-      ).run(now);
+    this.applyMigration("remove-account-execution-mode-v1", () => {
+      const accountColumns = this.db.prepare("PRAGMA table_info(accounts)").all() as SqlRow[];
+      if (accountColumns.some((column) => column.name === "execution_mode")) {
+        this.db.exec("ALTER TABLE accounts DROP COLUMN execution_mode");
+      }
+      const runColumns = this.db.prepare("PRAGMA table_info(automation_runs)").all() as SqlRow[];
+      if (!runColumns.some((column) => column.name === "automatic")) {
+        this.db.exec(
+          "ALTER TABLE automation_runs ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0 CHECK (automatic IN (0, 1))",
+        );
+      }
+      if (runColumns.some((column) => column.name === "execution_mode")) {
+        this.db.exec(
+          `UPDATE automation_runs
+           SET automatic = CASE WHEN execution_mode = 'automatic' THEN 1 ELSE 0 END`,
+        );
+        this.db.exec("ALTER TABLE automation_runs DROP COLUMN execution_mode");
+      }
     });
     this.ensureGlobalDefaults();
   }
@@ -6305,7 +6275,6 @@ function mapAccount(row: SqlRow): AccountConfig {
     timezone: row.timezone,
     pollingIntervalMinutes: Number(row.polling_interval_minutes),
     maxActionsPerRun: Number(row.max_actions_per_run),
-    executionMode: row.execution_mode,
     updatedAt: row.updated_at,
   });
 }
@@ -6358,7 +6327,7 @@ function mapAutomationRun(row: SqlRow): AutomationRunRecord {
     accountId: String(row.account_id),
     providerKind: row.provider_kind as AutomationRunRecord["providerKind"],
     trigger: row.trigger as AutomationRunRecord["trigger"],
-    executionMode: row.execution_mode as AutomationRunRecord["executionMode"],
+    automatic: fromSqlBoolean(row.automatic),
     status: row.status as AutomationRunRecord["status"],
     startedAt: String(row.started_at),
     finishedAt: typeof row.finished_at === "string" ? row.finished_at : null,
@@ -6634,13 +6603,14 @@ function buildMigrationLaunchRows(
     bid: config.bid,
     startAt: null,
     endAt: preset.endAt,
-    initialStatus: preset.initialStatus,
+    initialStatus: config.initialStatus,
   }));
   const rows = applyPresetToLaunchRows(baseRows, preset, existingPlans, now, timeZone).map((row) => ({
     ...row,
     dailyBudget: config.dailyBudget,
     bid: config.bid,
     startAt: resolvedStartAt,
+    initialStatus: config.initialStatus,
   }));
   rows.forEach((row) => reservedAdGroupNames.add(row.adGroupName));
   return rows;
