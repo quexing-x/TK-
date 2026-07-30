@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#eceeea"><title>方向 C · 作业票</title><link rel="stylesheet" href="./styles.css"></head>
+<body>
+  <a class="skip" href="#main">跳到主要内容</a>
+  <header class="bar">
+    <a href="../" class="brand"><b>TK</b><span>广告作业台</span></a>
+    <div class="run-state"><i></i><span>5 个账户可操作</span><small>最近同步 05:56</small></div>
+    <button id="themeToggle" type="button" aria-label="切换为深色主题" aria-pressed="false">切换主题</button>
+  </header>
+  <div class="layout">
+    <nav class="side" aria-label="主导航"><a href="#overview">总览</a><a class="active" href="#migration" aria-current="page">账户迁移</a><a href="#create">创建广告</a><a href="#tasks">任务中心</a><a href="#accounts">账户接入</a></nav>
+    <main id="main">
+      <header class="page-head"><div><span>WORK ORDER / MIGRATION</span><h1>原贴迁移作业票</h1><p>选择 → 设置 → 核对。所有参数在提交前保持可见。</p></div><div class="ticket-no"><small>作业编号</small><strong>WO-0730-006</strong></div></header>
+
+      <section class="status-band" aria-label="账户接入状态">
+        <div class="status-summary"><b>4 / 5</b><span>账户可创建</span></div>
+        <div class="status-item good"><i></i><span><strong>凭据与连接</strong><small>5 个正常</small></span></div>
+        <div class="status-item good"><i></i><span><strong>读取与同步</strong><small>5 个正常</small></span></div>
+        <div class="status-item warn"><i></i><span><strong>创建能力</strong><small>1 个待恢复</small></span></div>
+        <button type="button" data-toast="已使用本地凭据重新检测异常账户">恢复异常账户</button>
+      </section>
+
+      <div class="ticket">
+        <section class="column source" aria-labelledby="source-title">
+          <header><span class="step">A</span><div><h2 id="source-title">装载源广告组</h2><p>可多选，仅显示存在关联帖子的广告组。</p></div></header>
+          <label class="field"><span>来源账户</span><select name="source-account" autocomplete="off"><option>双科-TTN-SG-08-湖哆</option></select></label>
+          <label class="search"><span class="visually-hidden">搜索源广告组</span><input name="source-query" type="search" autocomplete="off" placeholder="例如：SG-0729…"><b>3 已选</b></label>
+          <div class="source-list">
+            <label><input checked type="checkbox"><span><strong>SG-0729-原贴-A</strong><small>ID 1830927 · 3 帖</small></span><em>有效</em></label>
+            <label><input checked type="checkbox"><span><strong>SG-0729-原贴-B</strong><small>ID 1831041 · 2 帖</small></span><em>有效</em></label>
+            <label><input checked type="checkbox"><span><strong>SG-0729-原贴-C</strong><small>ID 1831188 · 3 帖</small></span><em>有效</em></label>
+            <label class="disabled"><input disabled type="checkbox"><span><strong>SG-上传素材-旧组</strong><small>ID 1827760 · 0 帖</small></span><em>无帖子</em></label>
+          </div>
+        </section>
+
+        <section class="column settings" aria-labelledby="settings-title">
+          <header><span class="step">B</span><div><h2 id="settings-title">填写目标参数</h2><p>参数按账户执行，每个源组都会复制。</p></div></header>
+          <fieldset class="targets"><legend>目标账户 <b>2 已选</b></legend>
+            <label><input checked type="checkbox"><span><strong>双科 · SG · 11</strong><small>同一 TK 身份 · 可创建</small></span></label>
+            <label><input checked type="checkbox"><span><strong>双科 · SG · 15</strong><small>同一 TK 身份 · 可创建</small></span></label>
+            <div class="target-row blocked"><input aria-label="双科 SG 18 当前不可选择" disabled type="checkbox"><span><strong>双科 · SG · 18</strong><small>创建能力待恢复</small></span><button type="button" data-toast="正在检测 SG · 18">恢复</button></div>
+          </fieldset>
+          <div class="form-grid">
+            <label class="field"><span>创建数量 / 账户</span><input name="quantity" type="number" min="1" max="20" value="2" inputmode="numeric" autocomplete="off"></label>
+            <label class="field"><span>每日预算 USD</span><input name="budget" type="number" min="0.01" step="0.01" value="50.00" inputmode="decimal" autocomplete="off"></label>
+            <label class="field"><span>出价 USD</span><input name="bid" type="number" min="0" step="0.01" placeholder="留空则自动出价…" inputmode="decimal" autocomplete="off"></label>
+            <label class="field"><span>创建时间</span><select name="start-rule" autocomplete="off"><option>立即投放</option><option>最近未来 06:00</option><option>当天 24:00</option><option>自定义时间</option></select><small>06:00 取账户时区中下一个未来时刻</small></label>
+          </div>
+        </section>
+
+        <section class="column confirm" aria-labelledby="confirm-title">
+          <header><span class="step">C</span><div><h2 id="confirm-title">核对作业票</h2><p>提交后进入后台队列，不依赖自动化开关。</p></div></header>
+          <dl>
+            <div><dt>源广告组</dt><dd>3 组</dd></div><div><dt>关联原贴</dt><dd>8 条</dd></div><div><dt>目标账户</dt><dd>2 户</dd></div><div><dt>每户数量</dt><dd>2 份</dd></div>
+          </dl>
+          <div class="calculation"><span>预计创建</span><strong>12</strong><small>个广告组</small></div>
+          <ul><li><i></i>广告组创建后默认开启</li><li><i></i>不上传新素材，只保留原贴</li><li><i></i>名称按现有自动命名规则生成</li></ul>
+          <label class="confirm-check"><input type="checkbox"><span>我已核对账户、预算和创建时间</span></label>
+          <button class="submit" type="button" disabled>确认并创建 12 个广告组</button>
+          <button class="save" type="button" data-toast="作业票已保存到本机">保存作业票，稍后继续</button>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div><script src="./app.js"></script>
+</body></html>

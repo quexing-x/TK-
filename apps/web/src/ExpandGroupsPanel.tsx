@@ -9,7 +9,7 @@ import type {
   ReadOnlySyncResult,
 } from "@tk-auto/core";
 import { api } from "./api";
-import { hasProviderCapability } from "./provider-capability-view";
+import { accountAccessStatus } from "./provider-capability-view";
 import { useOverlays } from "./ui/overlays";
 
 type ConnectionState = {
@@ -63,11 +63,15 @@ function withinWindow(createdAt: string | null | undefined, filter: TimeFilter, 
 export function ExpandGroupsPanel({
   accounts,
   connectionStates,
+  onConnectionStatesChanged,
+  onManageConnection,
   onError,
   presetHost,
 }: {
   accounts: AccountConfig[];
   connectionStates: ConnectionState[];
+  onConnectionStatesChanged?: (() => Promise<void>) | undefined;
+  onManageConnection?: ((accountId: string) => void) | undefined;
   onError: (message: string | null) => void;
   presetHost?: HTMLElement | null;
 }) {
@@ -87,25 +91,56 @@ export function ExpandGroupsPanel({
   const [visibleAccountIds, setVisibleAccountIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
+  const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
 
   const accountName = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.displayName])),
     [accounts],
   );
 
-  // 可扩组账户：已连接 ready、具备 copy-ads 能力、且最近同步为 healthy。
+  // All surfaces share the same canonical access model. Expanding only uses
+  // the read and copy lanes, but the account's overall state is not redefined.
   const eligibleStates = useMemo(
-    () => connectionStates.filter((state) =>
-      state.connection?.status === "ready"
-      && hasProviderCapability(state.capabilities, "copy-ads")
-      && state.latestSync?.quality.status === "healthy",
-    ),
+    () => connectionStates.filter((state) => {
+      const access = accountAccessStatus(state);
+      return access.readReady && access.copyReady;
+    }),
     [connectionStates],
   );
   const excludedStates = useMemo(
     () => connectionStates.filter((state) => !eligibleStates.includes(state)),
     [connectionStates, eligibleStates],
   );
+
+  const recoverAccount = async (state: ConnectionState) => {
+    const access = accountAccessStatus(state);
+    if (access.recovery === "connect") {
+      onManageConnection?.(state.accountId);
+      return;
+    }
+    setRecoveringAccountIds((current) => [...new Set([...current, state.accountId])]);
+    onError(null);
+    try {
+      if (access.recovery === "recheck") {
+        const connection = state.connection;
+        if (!connection) throw new Error("账户尚未建立接入。");
+        const checked = await api.testConnection(state.accountId, connection.kind);
+        if (checked.status !== "ready") {
+          throw new Error(checked.lastMessage || "本地凭据重新检测失败，请重新接入。");
+        }
+      } else if (access.recovery === "sync") {
+        const connection = state.connection;
+        if (!connection) throw new Error("账户尚未建立接入。");
+        await api.syncReadOnly(state.accountId, connection.kind);
+      }
+      await onConnectionStatesChanged?.();
+      toast("账户状态已重新检测", "success");
+    } catch (cause) {
+      onError(messageOf(cause));
+    } finally {
+      setRecoveringAccountIds((current) => current.filter((id) => id !== state.accountId));
+    }
+  };
 
   const loadAccount = async (accountId: string) => {
     setLoadingAccounts((current) => [...new Set([...current, accountId])]);
@@ -343,7 +378,19 @@ export function ExpandGroupsPanel({
       <label className="expand-filter grow"><span>搜索</span><input placeholder="广告组名称或 ID" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     </div>
 
-    {excludedStates.length > 0 && <p className="expand-excluded-note"><Info size={14} /> <span>{excludedStates.length} 个账户不可扩组（未连接、无复制能力或同步非健康），已隐藏：{excludedStates.map((state) => accountName.get(state.accountId) ?? state.accountId).join("、")}。</span></p>}
+    {excludedStates.length > 0 && <div className="expand-excluded-list">
+      <div className="expand-excluded-summary"><Info size={14} /><span>{excludedStates.length} 个账户当前不可扩组。以下状态与总览、账户管理和接入页使用同一份能力结果。</span></div>
+      {excludedStates.map((state) => {
+        const access = accountAccessStatus(state);
+        const recovering = recoveringAccountIds.includes(state.accountId);
+        return <div className="expand-excluded-account" key={state.accountId}>
+          <span><strong>{accountName.get(state.accountId) ?? state.accountId}</strong><small>{access.blockers[0] ?? "读取或复制能力尚未就绪。"}</small></span>
+          <button className="secondary-button compact-button" disabled={recovering} onClick={() => void recoverAccount(state)} type="button">
+            {recovering ? <><RefreshCcw className="spin" size={13} />检测中</> : access.recovery === "sync" ? "立即同步" : access.recovery === "connect" ? "前往账户接入" : "用本地凭据重新检测"}
+          </button>
+        </div>;
+      })}
+    </div>}
 
     {cboHiddenCount > 0 && <p className="expand-excluded-note"><Info size={14} /> <span>{cboHiddenCount} 个系列预算(CBO)广告组不支持扩组（组预算须与系列一致），已从名单中排除。</span></p>}
 

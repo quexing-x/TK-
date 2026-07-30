@@ -1727,6 +1727,21 @@ describe("local API", () => {
       expect.objectContaining({ capability: "create-campaigns", available: true }),
       expect.objectContaining({ capability: "copy-ads", available: true }),
     ]));
+
+    const matrix = await app.inject({
+      method: "GET",
+      url: "/api/accounts/demo-account/connection-capabilities",
+    });
+    expect(matrix.statusCode).toBe(200);
+    expect(matrix.json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        providerKind: "cookie",
+        capabilityVersion: "launch-test-v1",
+        capabilities: expect.arrayContaining([
+          expect.objectContaining({ capability: "create-campaigns", available: true }),
+        ]),
+      }),
+    ]));
   });
 
   it("does not apply a stale health result after the credential generation changes", async () => {

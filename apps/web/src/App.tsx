@@ -71,6 +71,7 @@ import { LaunchPage } from "./LaunchPage";
 import { MaintenancePage } from "./MaintenancePage";
 import { OverviewPage } from "./OverviewPage";
 import {
+  accountAccessStatus,
   canEnableAccountAutomation,
   hasProviderCapability,
   providerCapabilitySummary,
@@ -295,6 +296,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
   const [commandQuery, setCommandQuery] = useState("");
   const [commandIndex, setCommandIndex] = useState(0);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const capabilityRefreshAttempts = useRef(new Set<string>());
 
   const loadBootstrap = useCallback(async () => {
     try {
@@ -306,6 +308,26 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         current,
       ));
       setError(null);
+      const staleConnections = payload.accountConnectionStates.filter((state) => {
+        const connection = state.connection;
+        if (
+          !connection?.hasCredential
+          || connection.status !== "ready"
+          || connection.capabilityVersion === state.capabilities.capabilityVersion
+        ) return false;
+        const key = `${state.accountId}:${connection.kind}:${state.capabilities.capabilityVersion}`;
+        if (capabilityRefreshAttempts.current.has(key)) return false;
+        capabilityRefreshAttempts.current.add(key);
+        return true;
+      });
+      if (staleConnections.length > 0) {
+        void Promise.allSettled(staleConnections.map((state) =>
+          api.testConnection(state.accountId, state.connection!.kind),
+        )).then(async () => {
+          const refreshed = await api.bootstrap();
+          setBootstrap(refreshed);
+        }).catch((cause) => setError(getErrorMessage(cause)));
+      }
     } catch (cause) {
       setError(getErrorMessage(cause));
     }
@@ -566,6 +588,12 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             )}
             connectionStates={bootstrap.accountConnectionStates}
             preferredAccountId={pageAccountId}
+            onConnectionStatesChanged={loadBootstrap}
+            onManageConnection={(accountId) => {
+              selectAccount(accountId);
+              navigateTo("overview");
+              window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0);
+            }}
             onError={setError}
           />
         ) : page === "ads" ? (
@@ -2107,17 +2135,27 @@ function connectionStateLabel(
     return <span className="status danger">启停能力未建立</span>;
   }
   if (connection.status === "ready") {
-    const readStatus = !latestSync
-      ? <span className="status warning">数据读取：待同步</span>
-      : latestSync.quality.status !== "healthy"
-        ? <span className={`status ${syncQualityPresentation(latestSync.quality.status).tone}`}>
-            数据读取：{syncQualityPresentation(latestSync.quality.status).label}
-          </span>
-        : latestSync.counts["ad-group"] === 0
-        ? <span className="status warning">数据读取：无广告组</span>
-        : <span className="status active">数据读取：已接入</span>;
-    const canCreate = hasProviderCapability(state?.capabilities, "create-campaigns");
-    return <div className="capability-statuses">{readStatus}<span className="status active">启停：已接入</span><span className={canCreate ? "status active" : "status warning"}>创建：{canCreate ? "已接入" : "未就绪"}</span></div>;
+    const access = accountAccessStatus({
+      connection,
+      latestSync: latestSync ?? null,
+      capabilities: state?.capabilities ?? {
+        accountId: connection.accountId,
+        providerKind: kind,
+        providerDisplayName: providerLabel(kind),
+        capabilityVersion: connection.capabilityVersion,
+        authorizationStatus: connection.authorizationStatus,
+        authorizedAt: connection.authorizedAt,
+        authorizationExpiresAt: connection.authorizationExpiresAt,
+        capabilities: [],
+      },
+    });
+    const statusClass = (ready: boolean) => ready ? "status active" : "status warning";
+    return <div className="capability-statuses" title={access.blockers.join("；")}>
+      <span className={statusClass(access.readReady)}>读取：{access.readReady ? "可用" : "未就绪"}</span>
+      <span className={statusClass(access.statusReady)}>启停：{access.statusReady ? "可用" : "未就绪"}</span>
+      <span className={statusClass(access.createReady)}>创建：{access.createReady ? "可用" : "未就绪"}</span>
+      <span className={statusClass(access.copyReady)}>复制：{access.copyReady ? "可用" : "未就绪"}</span>
+    </div>;
   }
   if (connection.status === "failed" && kind === "cookie") {
     return <span className="status danger">Cookie 已失效</span>;

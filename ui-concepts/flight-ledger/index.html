@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4f5f2">
+  <title>方向 A · 航线台账</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="brand" href="../" aria-label="返回设计方向列表"><b>TK</b><span>航线台账</span></a>
+      <nav>
+        <a href="#overview"><i>总</i><span>运行总览</span></a>
+        <a class="active" href="#migration" aria-current="page"><i>迁</i><span>账户迁移</span></a>
+        <a href="#create"><i>建</i><span>批量创建</span></a>
+        <a href="#accounts"><i>户</i><span>账户接入</span></a>
+      </nav>
+      <div class="rail-foot"><span>桌面会话</span><strong>持续有效</strong></div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div><span class="eyebrow">迁移台账 / <span id="ledgerDate">—</span></span><h1>把原贴送到正确的账户</h1></div>
+        <div class="top-actions">
+          <span class="live"><i></i>账户状态已对齐</span>
+          <button class="theme-button" id="themeToggle" type="button" aria-label="切换为深色主题" aria-pressed="false">深色</button>
+        </div>
+      </header>
+
+      <main id="main">
+        <section class="route-board" aria-labelledby="route-title">
+          <header>
+            <div><span class="section-kicker">当前航线</span><h2 id="route-title">源广告组 → 目标账户</h2></div>
+            <button class="quiet-button" type="button" data-toast="已使用本地加密凭据重新检测">重新检测全部</button>
+          </header>
+          <div class="route-line" aria-label="迁移流程">
+            <article class="route-stop complete"><span>01</span><strong>读取源组</strong><small>3 个广告组</small></article>
+            <article class="route-stop complete"><span>02</span><strong>核对原贴</strong><small>共 8 条帖子</small></article>
+            <article class="route-stop current"><span>03</span><strong>设置目标</strong><small>2 个账户</small></article>
+            <article class="route-stop"><span>04</span><strong>确认执行</strong><small>尚未提交</small></article>
+          </div>
+        </section>
+
+        <div class="ledger-layout">
+          <section class="source-panel" aria-labelledby="source-title">
+            <header><div><span class="section-kicker">来源</span><h2 id="source-title">选择广告组</h2></div><span class="count">已选 3</span></header>
+            <label class="search"><span class="sr-only">搜索源广告组</span><input name="source-query" type="search" autocomplete="off" placeholder="例如：SG-湖哆-0729…"></label>
+            <div class="source-list" role="group" aria-label="源广告组列表">
+              <label class="source-row selected"><input checked type="checkbox"><span><strong>SG-湖哆-原贴-0729-A</strong><small>ADG 1830927 · 3 条原贴</small></span><em>可迁移</em></label>
+              <label class="source-row selected"><input checked type="checkbox"><span><strong>SG-湖哆-原贴-0729-B</strong><small>ADG 1831041 · 2 条原贴</small></span><em>可迁移</em></label>
+              <label class="source-row selected"><input checked type="checkbox"><span><strong>SG-湖哆-原贴-测试组</strong><small>ADG 1831188 · 3 条原贴</small></span><em>可迁移</em></label>
+              <label class="source-row"><input type="checkbox"><span><strong>SG-湖哆-素材上传组</strong><small>ADG 1827760 · 无关联帖子</small></span><em class="muted">不可迁移</em></label>
+            </div>
+          </section>
+
+          <section class="target-panel" aria-labelledby="target-title">
+            <header><div><span class="section-kicker">目的地</span><h2 id="target-title">目标账户与参数</h2></div><button class="text-button" type="button" data-select-all>选择全部可用</button></header>
+            <div class="account-strip">
+              <button class="account-chip active" type="button" aria-pressed="true"><span>双科 · SG · 08</span><small>全部能力正常</small></button>
+              <button class="account-chip active" type="button" aria-pressed="true"><span>双科 · SG · 11</span><small>全部能力正常</small></button>
+              <button class="account-chip warning" type="button" aria-pressed="false"><span>双科 · SG · 15</span><small>创建能力待恢复</small></button>
+            </div>
+            <div class="recovery" role="status">
+              <div><strong>SG · 15 暂不可创建</strong><span>Cookie 可读取，但创建契约需要重新检测。</span></div>
+              <button type="button" data-toast="正在使用本地凭据检测 SG · 15">用本地凭据恢复</button>
+            </div>
+            <form class="parameter-grid">
+              <label><span>每账户创建数量</span><input name="quantity" type="number" min="1" max="20" value="3" inputmode="numeric" autocomplete="off"></label>
+              <label><span>每日预算</span><div class="unit-input"><b>USD</b><input name="budget" type="number" min="0.01" step="0.01" value="50.00" inputmode="decimal" autocomplete="off"></div></label>
+              <label><span>出价</span><div class="unit-input"><b>USD</b><input name="bid" type="number" min="0" step="0.01" placeholder="留空则自动出价…" inputmode="decimal" autocomplete="off"></div></label>
+              <label><span>创建时间</span><select name="start-rule" autocomplete="off"><option>立即投放</option><option>最近未来 06:00</option><option>当天 24:00</option><option>自定义时间</option></select><small>按目标账户时区计算</small></label>
+            </form>
+          </section>
+        </div>
+
+        <section class="manifest" aria-labelledby="manifest-title">
+          <header><div><span class="section-kicker">出发清单</span><h2 id="manifest-title">本次将创建 18 个广告组</h2></div><span class="manifest-total">3 源组 × 2 账户 × 3 份</span></header>
+          <div class="manifest-table"><table aria-label="迁移确认摘要"><thead><tr><th>目标账户</th><th>原贴</th><th>预算</th><th>开始时间</th><th>创建后状态</th></tr></thead><tbody><tr><th scope="row">双科 · SG · 08</th><td>8 条</td><td>USD 50 / 日</td><td>立即</td><td class="on">开启</td></tr><tr><th scope="row">双科 · SG · 11</th><td>8 条</td><td>USD 50 / 日</td><td>立即</td><td class="on">开启</td></tr></tbody></table></div>
+          <footer><p><strong>提交前核对：</strong>只迁移关联同一 TikTok 身份的原贴，不上传新素材。</p><button class="primary-button" type="button" data-toast="已打开最终确认页">进入确认页 <span>→</span></button></footer>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js"></script>
+</body>
+</html>

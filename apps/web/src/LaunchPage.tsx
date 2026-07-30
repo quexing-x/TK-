@@ -4,7 +4,12 @@ import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTem
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
-import { canUseCopySource, canUseLaunchTarget } from "./provider-capability-view";
+import {
+  accountAccessStatus,
+  canUseCopySource,
+  canUseLaunchTarget,
+  type AccountAccessStatus,
+} from "./provider-capability-view";
 import { createLaunchProgressPoller } from "./launch-progress-polling";
 import { ExpandGroupsPanel } from "./ExpandGroupsPanel";
 import { useOverlays } from "./ui/overlays";
@@ -28,6 +33,7 @@ type LaunchAccountReadiness = {
   account: AccountConfig;
   ready: boolean;
   checks: Array<{ label: string; passed: boolean }>;
+  access: AccountAccessStatus | null;
 };
 
 export interface SourceAdGroupOption {
@@ -73,15 +79,31 @@ function isLaunchExecutionReady(
 
 function launchAccountReadiness(
   account: AccountConfig,
+  state: ConnectionState | undefined,
   connection: ProviderConnection | null | undefined,
   capabilities: AccountProviderCapabilities | undefined,
   mode: "create" | "copy",
 ): LaunchAccountReadiness {
+  const access = state
+    ? accountAccessStatus({
+        ...state,
+        connection: connection ?? state.connection,
+        capabilities: capabilities ?? state.capabilities,
+      })
+    : null;
   const checks = [
-    { label: "接入检测通过", passed: connection?.status === "ready" },
-    { label: "具备创建权限", passed: canUseLaunchTarget(capabilities, mode) },
+    {
+      label: "接入检测通过",
+      passed: access?.connectionReady ?? connection?.status === "ready",
+    },
+    {
+      label: mode === "copy" ? "具备原贴迁移权限" : "具备创建权限",
+      passed: access
+        ? mode === "copy" ? access.copyReady : access.createReady
+        : canUseLaunchTarget(capabilities, mode),
+    },
   ];
-  return { account, checks, ready: checks.every((check) => check.passed) };
+  return { account, checks, ready: checks.every((check) => check.passed), access };
 }
 
 const freshPreset = (): LaunchPresetInput => ({
@@ -96,7 +118,7 @@ const freshPreset = (): LaunchPresetInput => ({
   creationConfig: defaultCreationPresetConfig,
 });
 
-export function LaunchPage({ accounts, accountCapabilities, connectionStates, preferredAccountId, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; connectionStates: ConnectionState[]; preferredAccountId: string; onError: (message: string | null) => void }) {
+export function LaunchPage({ accounts, accountCapabilities, connectionStates, preferredAccountId, onConnectionStatesChanged, onManageConnection, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; connectionStates: ConnectionState[]; preferredAccountId: string; onConnectionStatesChanged?: () => Promise<void>; onManageConnection?: (accountId: string) => void; onError: (message: string | null) => void }) {
   const auth = useAuth();
   const { toast, confirm } = useOverlays();
   const [launchMode, setLaunchMode] = useState<LaunchMode>("single");
@@ -125,6 +147,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [executionFeedback, setExecutionFeedback] = useState<LaunchFeedback | null>(null);
   const [presetFeedback, setPresetFeedback] = useState<LaunchFeedback | null>(null);
   const [expandPresetHost, setExpandPresetHost] = useState<HTMLDivElement | null>(null);
+  const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const terminalPlanNotificationsReady = useRef(false);
@@ -181,11 +204,12 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const accountReadiness = useMemo(
     () => accounts.map((account) => launchAccountReadiness(
       account,
+      connectionStates.find((state) => state.accountId === account.id),
       connections[account.id],
       accountCapabilities[account.id],
       launchMode === "copy" ? "copy" : "create",
     )),
-    [accountCapabilities, accounts, connections, launchMode],
+    [accountCapabilities, accounts, connections, connectionStates, launchMode],
   );
   const unreadyAccountCount = accountReadiness.filter((item) => !item.ready).length;
   const sourceAccounts = launchMode === "copy" ? copySources : createTargets;
@@ -283,6 +307,40 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     setPlanItems(nextPlanItems);
     setPresetId((current) => current && nextPresets.some((item) => item.id === current) ? current : (nextPresets[0]?.id ?? ""));
     onError(null);
+  };
+  const recoverLaunchAccount = async (
+    accountId: string,
+    access: AccountAccessStatus | null,
+  ) => {
+    if (!access || access.recovery === "connect") {
+      onManageConnection?.(accountId);
+      return;
+    }
+    const state = connectionStates.find((item) => item.accountId === accountId);
+    const connection = connections[accountId] ?? state?.connection;
+    if (!connection) {
+      onManageConnection?.(accountId);
+      return;
+    }
+    setRecoveringAccountIds((current) => [...new Set([...current, accountId])]);
+    onError(null);
+    try {
+      if (access.recovery === "recheck") {
+        const checked = await api.testConnection(accountId, connection.kind);
+        if (checked.status !== "ready") {
+          throw new Error(checked.lastMessage || "本地凭据重新检测失败，请重新接入。");
+        }
+      } else if (access.recovery === "sync") {
+        await api.syncReadOnly(accountId, connection.kind);
+      }
+      await onConnectionStatesChanged?.();
+      await load();
+      toast("账户状态已恢复，当前选择已保留", "success");
+    } catch (cause) {
+      onError(messageOf(cause));
+    } finally {
+      setRecoveringAccountIds((current) => current.filter((id) => id !== accountId));
+    }
   };
   const refreshProgress = async () => {
     const [nextPlans, queuedPlanIds] = await Promise.all([
@@ -570,11 +628,18 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       </aside>
 
       <main className="launch-workspace">
-        {launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onError={onError} presetHost={expandPresetHost} /> : <>
+        {launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onConnectionStatesChanged={onConnectionStatesChanged} onManageConnection={onManageConnection} onError={onError} presetHost={expandPresetHost} /> : <>
 
     <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "以源广告组为迁移载体，为每个目标账户独立配置创建数量和投放参数。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
-      {accounts.length === 0 ? <p className="launch-account-empty">先在“用户管理”添加广告账户并完成接入，随后可回到此处选择发布账户。</p> : <div className="launch-account-readiness-grid">{accountReadiness.map(({ account, checks, ready }) => <article className={ready ? "launch-account-readiness ready" : "launch-account-readiness"} key={account.id}><header><div><strong>{account.displayName}</strong><span>{account.providerKind === "cookie" ? "Cookie 接入" : "Marketing API"}</span></div><em className={ready ? "status active" : "status warning"}>{ready ? "可发布" : "待完善"}</em></header><div>{checks.map((check) => <span className={check.passed ? "passed" : "missing"} key={check.label}>{check.passed ? <CircleCheck size={14} /> : <CircleX size={14} />}{check.label}</span>)}</div></article>)}</div>}
+      {accounts.length === 0 ? <p className="launch-account-empty">先在“用户管理”添加广告账户并完成接入，随后可回到此处选择发布账户。</p> : <div className="launch-account-readiness-grid">{accountReadiness.map(({ account, checks, ready, access }) => {
+        const recovering = recoveringAccountIds.includes(account.id);
+        return <article className={ready ? "launch-account-readiness ready" : "launch-account-readiness"} key={account.id}>
+          <header><div><strong>{account.displayName}</strong><span>{account.providerKind === "cookie" ? "Cookie 接入" : "Marketing API"}</span></div><em className={ready ? "status active" : "status warning"}>{ready ? "可发布" : "待完善"}</em></header>
+          <div>{checks.map((check) => <span className={check.passed ? "passed" : "missing"} key={check.label}>{check.passed ? <CircleCheck size={14} /> : <CircleX size={14} />}{check.label}</span>)}</div>
+          {!ready && <footer className="launch-account-recovery"><small>{access?.blockers[0] ?? "账户接入或创建能力尚未就绪。"}</small><button className="secondary-button compact-button" disabled={recovering} onClick={() => void recoverLaunchAccount(account.id, access)} type="button">{recovering ? <><RefreshCcw className="spin" size={13} />检测中</> : access?.recovery === "sync" ? "立即同步" : access?.recovery === "connect" ? "前往账户接入" : "用本地凭据重新检测"}</button></footer>}
+        </article>;
+      })}</div>}
     </div><div className="form-grid">
       {targets.length === 0 ? <div className="launch-target-empty"><CircleX size={18} /><div><strong>暂时没有可发布账户</strong><span>人工真实创建只要求接入检测通过且具备创建权限；自动化开关不阻止手动发布。</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button">去完善账户</button></div> : <>
         {launchMode === "single" && <label className="field"><span>创建账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>仅显示已授权创建能力的账户。</small></label>}

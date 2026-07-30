@@ -409,6 +409,10 @@ export const api = {
     ),
   getConnections: (accountId: string) =>
     request<ProviderConnection[]>(`/api/accounts/${accountId}/connections`),
+  getConnectionCapabilities: (accountId: string) =>
+    request<AccountProviderCapabilities[]>(
+      `/api/accounts/${accountId}/connection-capabilities`,
+    ),
   getAccountCapabilities: (accountId: string) =>
     request<AccountProviderCapabilities>(`/api/accounts/${accountId}/capabilities`),
   getCookieReadiness: (accountId: string) =>

@@ -1,12 +1,47 @@
 import { describe, expect, it } from "vitest";
-import type { AccountProviderCapabilities } from "@tk-auto/core";
+import type { AccountProviderCapabilities, ProviderConnection, ReadOnlySyncResult } from "@tk-auto/core";
 import {
+  accountAccessStatus,
   canEnableAccountAutomation,
   canUseCopySource,
   canUseLaunchTarget,
   hasProviderCapability,
   providerCapabilitySummary,
 } from "./provider-capability-view";
+
+const connection: ProviderConnection = {
+  accountId: "account-1",
+  kind: "cookie",
+  settings: { kind: "cookie", advertiserId: "123", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+  hasCredential: true,
+  status: "ready",
+  authorizationStatus: "active",
+  capabilityVersion: "cookie-v2",
+  authorizedCapabilities: ["read-campaigns", "read-ad-groups", "change-status"],
+  authorizedAt: "2026-07-18T00:00:00.000Z",
+  authorizationExpiresAt: null,
+  lastMessage: "ready",
+  lastTestedAt: "2026-07-18T00:00:00.000Z",
+  updatedAt: "2026-07-18T00:00:00.000Z",
+};
+
+const latestSync: ReadOnlySyncResult = {
+  startedAt: "2026-07-18T00:00:00.000Z",
+  finishedAt: "2026-07-18T00:01:00.000Z",
+  counts: { campaign: 1, "ad-group": 1, ad: 1 },
+  warnings: [],
+  quality: {
+    status: "healthy",
+    paginationComplete: true,
+    requiredMetricsComplete: true,
+    contractValid: true,
+    providerContractVersion: "cookie-v2",
+    coverage: { startDate: "2026-07-18", endDate: "2026-07-18", timezone: "Asia/Shanghai" },
+    missingMetrics: [],
+    partialFailures: [],
+    lastHealthyAt: "2026-07-18T00:01:00.000Z",
+  },
+};
 
 const profile: AccountProviderCapabilities = {
   accountId: "account-1",
@@ -65,5 +100,42 @@ describe("provider capability presentation", () => {
       ...copyProfile,
       capabilities: copyProfile.capabilities.filter((item) => item.capability !== "change-status"),
     })).toBe(false);
+  });
+
+  it("does not call an account healthy when creation or copy is unavailable", () => {
+    const access = accountAccessStatus({ connection, latestSync, capabilities: {
+      ...profile,
+      capabilities: [
+        ...profile.capabilities,
+        { capability: "read-ad-groups", available: true, reason: "当前账户可用。" },
+      ],
+    } });
+
+    expect(access).toMatchObject({
+      tone: "warning",
+      label: "待完善",
+      readReady: true,
+      statusReady: true,
+      createReady: false,
+      copyReady: false,
+      recovery: "recheck",
+    });
+    expect(access.blockers).toContain("需要重新检测。");
+  });
+
+  it("uses the same healthy result only when every operational lane is ready", () => {
+    const complete = {
+      ...profile,
+      capabilities: [
+        ...profile.capabilities.map((item) => ({ ...item, available: true })),
+        { capability: "read-ad-groups" as const, available: true, reason: "当前账户可用。" },
+        { capability: "copy-ads" as const, available: true, reason: "当前账户可用。" },
+      ],
+    };
+    expect(accountAccessStatus({ connection, latestSync, capabilities: complete })).toMatchObject({
+      tone: "healthy",
+      label: "健康",
+      recovery: null,
+    });
   });
 });
