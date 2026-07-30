@@ -32,6 +32,10 @@ import { SignedUpdateRuntime } from "./update-runtime.js";
 
 const PRODUCT_NAME = "TK Ads Automation";
 const HOST = "127.0.0.1";
+// Local Electron sessions persist until explicit logout for practical purposes.
+// 2^31-1 seconds is the widest interoperable cookie Max-Age; web/server builds
+// keep the API's 12-hour default because only the desktop runtime passes this.
+const DESKTOP_SESSION_MAX_AGE_SECONDS = 2_147_483_647;
 const isSchedulerProcess = process.argv.includes("--scheduler");
 const isSmokeTest = process.argv.includes("--smoke-test");
 const legacyUserDataDirectory = join(app.getPath("appData"), PRODUCT_NAME);
@@ -156,6 +160,8 @@ async function startRuntime(origin: string) {
   });
   const server = await createApp({
     store, vault, startScheduler: true, appVersion: app.getVersion(), packaged: app.isPackaged,
+    authSessionLifetimeMs: DESKTOP_SESSION_MAX_AGE_SECONDS * 1_000,
+    authCookieMaxAgeSeconds: DESKTOP_SESSION_MAX_AGE_SECONDS,
     maintenanceUpdates: updateRuntime,
     onSystemRuntimeChanged: async (enabled) => {
       if (!isSchedulerProcess) return;

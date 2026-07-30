@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#edf0f3">
+  <title>方向 B · 信号剖面</title><link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到主要内容</a>
+  <header class="mast">
+    <a href="../" class="wordmark"><b>TK/A</b><span>信号剖面</span></a>
+    <nav aria-label="主导航"><a href="#overview">总览</a><a href="#accounts">账户</a><a class="active" href="#create" aria-current="page">创建</a><a href="#tasks">任务</a></nav>
+    <button id="themeToggle" type="button" aria-label="切换为深色主题" aria-pressed="false">明 / 暗</button>
+  </header>
+  <main id="main">
+    <section class="intro">
+      <div><span class="code">CREATE / ACCESS PROFILE</span><h1>创建之前，先看清<br>信号断在哪里。</h1></div>
+      <p>账户状态不再由单个“已连接”代替。凭据、同步、读取与创建能力采用同一份实时判断。</p>
+    </section>
+
+    <section class="account-focus" aria-labelledby="account-title">
+      <header>
+        <div><span class="code">ACCOUNT 02 / 05</span><h2 id="account-title">双科-TTN-SG-11-湖哆</h2></div>
+        <label class="account-switch"><span>切换账户</span><select name="account" autocomplete="off"><option>双科-TTN-SG-11-湖哆</option><option>双科-TTN-SG-08-湖哆</option><option>双科-TTN-SG-15-湖哆</option></select></label>
+      </header>
+      <div class="spine" aria-label="账户能力状态">
+        <article class="node good"><div class="node-mark"><b>01</b><i></i></div><div><span>本地凭据</span><strong>Cookie 已加密保存</strong><small>最近更新 07-30 05:42</small></div><button type="button" data-toast="本地凭据详情已展开">查看</button></article>
+        <article class="node good"><div class="node-mark"><b>02</b><i></i></div><div><span>连接检测</span><strong>TikTok 会话有效</strong><small>4 分钟前检测成功</small></div><button type="button" data-toast="正在使用本地凭据重新检测">重新检测</button></article>
+        <article class="node good"><div class="node-mark"><b>03</b><i></i></div><div><span>数据同步</span><strong>广告组已更新</strong><small>312 个当前实体 · 无历史污染</small></div><button type="button" data-toast="已加入立即同步队列">立即同步</button></article>
+        <article class="node warn"><div class="node-mark"><b>04</b><i></i></div><div><span>创建能力</span><strong>创建模板需要恢复</strong><small>读取正常；旧能力契约未包含创建流程</small></div><button class="action" type="button" data-recover>恢复能力</button></article>
+        <article class="node pending"><div class="node-mark"><b>05</b><i></i></div><div><span>执行发布</span><strong>等待创建能力恢复</strong><small>恢复后无需返回此页重新选择</small></div><button disabled type="button">暂不可用</button></article>
+      </div>
+    </section>
+
+    <div class="work-grid">
+      <section class="source-card" aria-labelledby="source-title">
+        <header><div><span class="code">SOURCE</span><h2 id="source-title">源广告组</h2></div><span>2 已选</span></header>
+        <label class="search"><span>搜索</span><input name="source-query" type="search" autocomplete="off" placeholder="例如：SG-湖哆-0729…"></label>
+        <div class="check-list">
+          <label><input checked type="checkbox"><span><strong>SG-湖哆-0729-A</strong><small>3 条关联帖子 · 同一 TK 身份</small></span></label>
+          <label><input checked type="checkbox"><span><strong>SG-湖哆-0729-B</strong><small>2 条关联帖子 · 同一 TK 身份</small></span></label>
+          <label><input type="checkbox"><span><strong>SG-湖哆-素材上传组</strong><small>无关联帖子 · 不参与原贴迁移</small></span></label>
+        </div>
+      </section>
+      <section class="config-card" aria-labelledby="config-title">
+        <header><div><span class="code">OUTPUT</span><h2 id="config-title">创建参数</h2></div><span>目标 2 户</span></header>
+        <form>
+          <label><span>目标账户</span><select name="targets" multiple size="3" aria-describedby="target-help" autocomplete="off"><option selected>双科 · SG · 08　可创建</option><option selected>双科 · SG · 11　恢复后可创建</option><option>双科 · SG · 15　凭据已过期</option></select><small id="target-help">仅显示绑定同一 TikTok 身份的账户</small></label>
+          <div class="pair"><label><span>创建数量 / 户</span><input name="quantity" type="number" value="2" min="1" max="20" inputmode="numeric" autocomplete="off"></label><label><span>每日预算 USD</span><input name="budget" type="number" value="50" min="0.01" step="0.01" inputmode="decimal" autocomplete="off"></label></div>
+          <div class="pair"><label><span>出价 USD</span><input name="bid" type="number" placeholder="留空则自动出价…" min="0" step="0.01" inputmode="decimal" autocomplete="off"></label><label><span>创建时间</span><select name="start-rule" autocomplete="off"><option>立即投放</option><option>最近未来 06:00</option><option>当天 24:00</option></select></label></div>
+        </form>
+        <footer><span><b>预计创建 8 组</b><small>默认开启 · 立即投放</small></span><button class="primary" type="button" data-toast="确认页已准备：8 个广告组">核对并继续</button></footer>
+      </section>
+    </div>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js"></script>
+</body></html>

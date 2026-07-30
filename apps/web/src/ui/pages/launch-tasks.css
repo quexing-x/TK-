@@ -408,6 +408,52 @@
 }
 .expand-excluded-note svg { flex: none; margin-top: 2px; color: var(--ink-faint); }
 
+.expand-excluded-list {
+  display: grid;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.expand-excluded-summary,
+.expand-excluded-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+}
+.expand-excluded-summary { justify-content: flex-start; color: var(--ink-soft); font-size: 13px; }
+.expand-excluded-summary svg { flex: none; color: var(--ink-faint); }
+.expand-excluded-account { border-top: 1px solid var(--line); }
+.expand-excluded-account > span { min-width: 0; display: grid; gap: 3px; }
+.expand-excluded-account strong { color: var(--ink); font-size: 13px; }
+.expand-excluded-account small { color: var(--ink-soft); line-height: 1.45; }
+.expand-excluded-account button { flex: none; min-height: 36px; }
+
+.launch-account-recovery {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.launch-account-recovery small {
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+.launch-account-recovery button {
+  justify-self: start;
+  min-height: 36px;
+}
+
+@media (max-width: 720px) {
+  .expand-excluded-account { align-items: stretch; flex-direction: column; }
+  .expand-excluded-account button { width: 100%; }
+}
+
 .expand-empty {
   display: flex;
   flex-direction: column;

@@ -132,6 +132,10 @@ export interface AppDependencies {
   maintenanceUpdates?: MaintenanceUpdateRuntime;
   /** Desktop-only lifecycle bridge for the separately hosted scheduler. */
   onSystemRuntimeChanged?: (enabled: boolean) => void | Promise<void>;
+  /** Desktop client override. Web/server deployments keep the 12-hour default. */
+  authSessionLifetimeMs?: number;
+  /** Desktop client cookie override paired with authSessionLifetimeMs. */
+  authCookieMaxAgeSeconds?: number;
 }
 
 export async function createApp(
@@ -157,7 +161,12 @@ export async function createApp(
   const notifications =
     dependencies.notifications ??
     new NotificationService(dependencies.store, dependencies.vault);
-  const auth = new AuthService(dependencies.store);
+  const auth = new AuthService(
+    dependencies.store,
+    dependencies.authSessionLifetimeMs,
+  );
+  const sessionCookieMaxAgeSeconds = dependencies.authCookieMaxAgeSeconds
+    ?? authCookie.maxAgeSeconds;
   const maintenanceUpdates = dependencies.maintenanceUpdates
     ?? unavailableMaintenanceUpdateRuntime(dependencies.appVersion);
   const scheduler = new AutomationScheduler(
@@ -321,13 +330,13 @@ export async function createApp(
     const session = await auth.setupInitialDeveloper(
       InitialDeveloperInputSchema.parse(request.body),
     );
-    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false);
+    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false, sessionCookieMaxAgeSeconds);
     return reply.status(201).send(auth.status(session));
   });
 
   app.post("/api/auth/login", async (request, reply) => {
     const session = await auth.login(LoginInputSchema.parse(request.body), request.ip);
-    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false);
+    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false, sessionCookieMaxAgeSeconds);
     return auth.status(session);
   });
 
@@ -910,6 +919,16 @@ export async function createApp(
       return reply.status(404).send({ message: "账号不存在。" });
     }
     return dependencies.store.listProviderConnections(accountId);
+  });
+
+  app.get("/api/accounts/:accountId/connection-capabilities", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    if (!dependencies.store.getAccount(accountId)) {
+      return reply.status(404).send({ message: "账号不存在。" });
+    }
+    return dependencies.store.listProviderConnections(accountId).map((connection) =>
+      providers.describeAccount(accountId, connection.kind, connection),
+    );
   });
 
   app.get("/api/accounts/:accountId/capabilities", async (request, reply) => {
@@ -1666,10 +1685,11 @@ function setSessionCookie(
   reply: FastifyReply,
   token: string,
   secure: boolean,
+  maxAgeSeconds: number,
 ): void {
   reply.header(
     "set-cookie",
-    `${authCookie.name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=${authCookie.maxAgeSeconds}`,
+    `${authCookie.name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=${maxAgeSeconds}`,
   );
 }
 

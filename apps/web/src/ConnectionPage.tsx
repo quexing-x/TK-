@@ -17,6 +17,7 @@ import {
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
   AccountConfig,
+  AccountProviderCapabilities,
   OfficialApiConnectionSettings,
   ProviderConnection,
   ProviderKind,
@@ -24,6 +25,7 @@ import type {
 import { api, type CookieConnectionReadiness } from "./api";
 import { useAuth } from "./AuthGate";
 import { useOverlays } from "./ui/overlays";
+import { hasProviderCapability, providerCapabilityReason } from "./provider-capability-view";
 import {
   canSubmitCookieImport,
   describeCookieState,
@@ -86,6 +88,7 @@ export function ConnectionPage({
   const canManageAccounts = auth.status.permissions.includes("accounts:manage");
   const [providerKind, setProviderKind] = useState<ProviderKind>("cookie");
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
+  const [capabilityProfiles, setCapabilityProfiles] = useState<AccountProviderCapabilities[]>([]);
   const [readiness, setReadiness] =
     useState<CookieConnectionReadiness>(emptyReadiness);
   const [apiSettings, setApiSettings] =
@@ -102,11 +105,13 @@ export function ConnectionPage({
 
   const load = useCallback(async () => {
     try {
-      const [list, nextReadiness] = await Promise.all([
+      const [list, nextReadiness, nextCapabilityProfiles] = await Promise.all([
         api.getConnections(account.id),
         api.getCookieReadiness(account.id),
+        api.getConnectionCapabilities(account.id),
       ]);
       setConnections(list);
+      setCapabilityProfiles(nextCapabilityProfiles);
       setReadiness(nextReadiness);
       const apiConnection = list.find((item) => item.kind === "official-api");
       setApiSettings(
@@ -466,7 +471,7 @@ export function ConnectionPage({
             onSync={() => void syncReadOnly()}
             providerKind={providerKind}
           />
-          <CapabilityMatrix cookieConnection={cookieConnection} apiConnection={apiConnection} />
+          <CapabilityMatrix capabilityProfiles={capabilityProfiles} />
         </div>
       </section>
 
@@ -685,12 +690,12 @@ function ConnectionStatusPanel({
 }
 
 function CapabilityMatrix({
-  apiConnection,
-  cookieConnection,
+  capabilityProfiles,
 }: {
-  apiConnection: ProviderConnection | undefined;
-  cookieConnection: ProviderConnection | undefined;
+  capabilityProfiles: AccountProviderCapabilities[];
 }) {
+  const cookieProfile = capabilityProfiles.find((item) => item.providerKind === "cookie");
+  const apiProfile = capabilityProfiles.find((item) => item.providerKind === "official-api");
   return (
     <div className="connection-capabilities">
       <div className="connection-capabilities-heading">
@@ -699,13 +704,13 @@ function CapabilityMatrix({
       </div>
       <div className="connection-capability-list">
         {capabilityLabels.map(([capability, label, mode]) => {
-          const cookieAvailable = cookieConnection?.authorizedCapabilities.includes(capability) ?? false;
-          const apiAvailable = apiConnection?.authorizedCapabilities.includes(capability) ?? false;
+          const cookieAvailable = hasProviderCapability(cookieProfile, capability);
+          const apiAvailable = hasProviderCapability(apiProfile, capability);
           return (
             <div key={capability}>
               <span><strong>{label}</strong><small>{mode}</small></span>
-              <CapabilityState available={cookieAvailable} />
-              <CapabilityState available={apiAvailable} />
+              <CapabilityState available={cookieAvailable} reason={providerCapabilityReason(cookieProfile, capability)} />
+              <CapabilityState available={apiAvailable} reason={providerCapabilityReason(apiProfile, capability)} />
             </div>
           );
         })}
@@ -714,8 +719,9 @@ function CapabilityMatrix({
   );
 }
 
-function CapabilityState({ available }: { available: boolean }) {
-  return <span className={available ? "available" : "unavailable"}>{available ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}{available ? "可用" : "不可用"}</span>;
+function CapabilityState({ available, reason }: { available: boolean; reason: string }) {
+  const label = available ? "可用" : "不可用";
+  return <span aria-label={`${label}：${reason}`} className={available ? "available" : "unavailable"} title={reason}>{available ? <CheckCircle2 aria-hidden="true" size={15} /> : <AlertTriangle aria-hidden="true" size={15} />}{label}</span>;
 }
 
 function SyncQualityPanel({

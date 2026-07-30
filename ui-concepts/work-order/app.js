@@ -1,0 +1,5 @@
+const root=document.documentElement,themeButton=document.querySelector('#themeToggle'),toast=document.querySelector('#toast'),confirmBox=document.querySelector('.confirm-check input'),submit=document.querySelector('.submit');let timer;
+function setTheme(value){root.dataset.theme=value;const dark=value==='dark';themeButton.setAttribute('aria-pressed',String(dark));themeButton.setAttribute('aria-label',dark?'切换为浅色主题':'切换为深色主题');localStorage.setItem('tk-concept-theme',value)}
+setTheme(localStorage.getItem('tk-concept-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));themeButton.addEventListener('click',()=>setTheme(root.dataset.theme==='dark'?'light':'dark'));
+function notify(message){toast.textContent=message;toast.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>toast.classList.remove('show'),2500)}document.querySelectorAll('[data-toast]').forEach(button=>button.addEventListener('click',()=>notify(button.dataset.toast)));
+confirmBox.addEventListener('change',()=>{submit.disabled=!confirmBox.checked});submit.addEventListener('click',()=>notify('作业已提交：12 个广告组进入创建队列'));

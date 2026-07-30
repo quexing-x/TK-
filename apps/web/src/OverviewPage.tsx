@@ -20,7 +20,7 @@ import type {
 } from "@tk-auto/core";
 import { api, type BootstrapPayload } from "./api";
 import { selectPendingAutomationDecisions } from "./automation-decision-view";
-import { hasProviderCapability } from "./provider-capability-view";
+import { accountAccessStatus } from "./provider-capability-view";
 
 type OverviewDestination = "launch" | "ads" | "users";
 
@@ -82,20 +82,17 @@ export function OverviewPage({
   );
   const accountExceptions = useMemo(() => connectionStates.flatMap((state) => {
     const accountName = accounts.find((account) => account.id === state.accountId)?.displayName ?? "未命名账户";
-    const disconnected = state.connection?.status === "failed"
-      || ["expired", "revoked", "failed"].includes(state.capabilities.authorizationStatus);
-    if (disconnected) return [`${accountName}：账户连接已失效，请重新接入。`];
-    if (!hasProviderCapability(state.capabilities, "change-status")) {
-      return [`${accountName}：广告启停能力不可用，请重新导入启停请求。`];
-    }
-    return [];
+    const access = accountAccessStatus(state);
+    return access.tone === "healthy"
+      ? []
+      : [`${accountName}：${access.blockers[0] ?? "账户能力尚未就绪。"}`];
   }), [accounts, connectionStates]);
   const accountHealth = useMemo(() => accounts.map((account) => {
     const state = connectionStates.find((item) => item.accountId === account.id);
-    const disconnected = state?.connection?.status === "failed"
-      || (state ? ["expired", "revoked", "failed"].includes(state.capabilities.authorizationStatus) : false);
-    const ready = state?.connection?.status === "ready" && !!state && hasProviderCapability(state.capabilities, "change-status");
-    return { id: account.id, name: account.displayName, tone: disconnected ? "danger" : ready ? "healthy" : "warning" };
+    const access = state
+      ? accountAccessStatus(state)
+      : { tone: "danger" as const, label: "异常" as const };
+    return { id: account.id, name: account.displayName, tone: access.tone, label: access.label };
   }), [accounts, connectionStates]);
   const healthyAccountCount = accountHealth.filter((account) => account.tone === "healthy").length;
   const warningAccountCount = accountHealth.filter((account) => account.tone === "warning").length;
@@ -158,7 +155,7 @@ export function OverviewPage({
               <div className="account-health-row" key={account.id}>
                 <span title={account.name}>{account.name}</span>
                 <i><b className={account.tone} /></i>
-                <strong className={account.tone}>{account.tone === "healthy" ? "健康" : account.tone === "danger" ? "异常" : "待完善"}</strong>
+                <strong className={account.tone}>{account.label}</strong>
               </div>
             )) : <p className="account-health-empty">尚未添加账户</p>}
           </div>

@@ -24,7 +24,7 @@ import {
 import { AutomationStore } from "@tk-auto/storage";
 
 const scrypt = promisify(scryptCallback);
-const SESSION_LIFETIME_MS = 12 * 60 * 60_000;
+export const DEFAULT_SESSION_LIFETIME_MS = 12 * 60 * 60_000;
 const LOGIN_WINDOW_MS = 15 * 60_000;
 const MAX_LOGIN_FAILURES = 5;
 const DUMMY_PASSWORD_SALT = Buffer.alloc(16).toString("base64");
@@ -54,7 +54,10 @@ export class AuthService {
   private readonly loginAttempts = new Map<string, LoginAttempt>();
   private setupInProgress = false;
 
-  constructor(private readonly store: AutomationStore) {}
+  constructor(
+    private readonly store: AutomationStore,
+    private readonly sessionLifetimeMs = DEFAULT_SESSION_LIFETIME_MS,
+  ) {}
 
   status(session: AuthenticatedSession | null): AuthStatus {
     return {
@@ -222,7 +225,7 @@ export class AuthService {
       userId: user.id,
       tokenHash,
       csrfToken,
-      expiresAt: new Date(now.getTime() + SESSION_LIFETIME_MS).toISOString(),
+      expiresAt: new Date(now.getTime() + this.sessionLifetimeMs).toISOString(),
       createdAt: now.toISOString(),
       lastSeenAt: now.toISOString(),
     });
@@ -295,5 +298,5 @@ export function hashToken(token: string): string {
 
 export const authCookie = {
   name: "tk_auto_session",
-  maxAgeSeconds: SESSION_LIFETIME_MS / 1000,
+  maxAgeSeconds: DEFAULT_SESSION_LIFETIME_MS / 1000,
 };

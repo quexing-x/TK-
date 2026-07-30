@@ -179,6 +179,43 @@ describe("local authentication and authorization", () => {
     }
   });
 
+  it("keeps the 12-hour session default unless the local desktop overrides it", async () => {
+    const defaultSetup = await app.inject({
+      method: "POST",
+      url: "/api/auth/setup",
+      payload: {
+        username: "default-session",
+        displayName: "默认会话",
+        password: developerPassword,
+      },
+    });
+    expect(defaultSetup.headers["set-cookie"]).toContain("Max-Age=43200");
+
+    const desktopStore = new AutomationStore(":memory:");
+    desktopStore.seed();
+    const desktopApp = await createApp({
+      store: desktopStore,
+      vault: new InMemoryCredentialVault(),
+      authSessionLifetimeMs: 2_147_483_647_000,
+      authCookieMaxAgeSeconds: 2_147_483_647,
+    });
+    try {
+      const desktopSetup = await desktopApp.inject({
+        method: "POST",
+        url: "/api/auth/setup",
+        payload: {
+          username: "desktop-session",
+          displayName: "本地客户端会话",
+          password: developerPassword,
+        },
+      });
+      expect(desktopSetup.headers["set-cookie"]).toContain("Max-Age=2147483647");
+    } finally {
+      await desktopApp.close();
+      desktopStore.close();
+    }
+  });
+
   it("requires ads operation permission for item-level creation retry", () => {
     expect(requiredPermission(
       "POST",
