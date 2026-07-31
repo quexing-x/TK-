@@ -637,8 +637,10 @@ export async function createApp(
   app.post("/api/campaigns/copy", async (request, reply) => {
     const input = z.object({
       accountId: z.string().min(1),
-      sourceCampaignId: z.string().min(1),
-      sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(50),
+      sources: z.array(z.object({
+        sourceCampaignId: z.string().min(1),
+        sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(50),
+      })).min(1).max(20),
       campaignCopies: z.number().int().min(1).max(20),
       groupsPerCampaign: z.number().int().min(1).max(20),
       initialStatus: z.enum(["enabled", "disabled"]).default("disabled"),

@@ -157,3 +157,54 @@ export function budgetModeOfCampaign(
 ): LaunchBudgetMode {
   return campaignBudgetOptimized ? "campaign" : "ad-group";
 }
+
+/** 判定预算模式所需的最小实体形状。 */
+interface BudgetModeEntityLike {
+  entityType: "campaign" | "ad-group" | "ad";
+  externalId: string;
+  parentCampaignId: string | null;
+  campaignBudgetOptimized: boolean;
+}
+
+/**
+ * 逐个系列判定是否为系列预算(CBO)。
+ *
+ * 系列列表接口不一定回传系列自身的预算字段（取决于用户导入的那条 cURL 带了哪些
+ * 列），只看系列行会把所有系列都误判成广告组预算。而**广告组行始终携带其父系列
+ * 的预算信息**，所以这里以「系列行自身判定」为先、「任一子广告组的判定」为准的
+ * 兜底，两者只要有一个为真就认定是 CBO。
+ *
+ * 返回 Map<系列 externalId, 是否 CBO>；同时返回没有任何依据可判定的系列，供界面
+ * 解释「为什么这条没出现在系列预算名单里」。
+ */
+export function deriveCampaignBudgetModes(
+  entities: readonly BudgetModeEntityLike[],
+): {
+  optimizedByCampaignId: Map<string, boolean>;
+  /** 既没有子广告组、系列行也不带预算字段的系列：判定依据不足。 */
+  undeterminedCampaignIds: Set<string>;
+} {
+  const optimizedByCampaignId = new Map<string, boolean>();
+  const hasEvidence = new Set<string>();
+
+  for (const entity of entities) {
+    if (entity.entityType !== "campaign") continue;
+    optimizedByCampaignId.set(entity.externalId, entity.campaignBudgetOptimized);
+    // 系列行只有在自己确实带了预算字段（判为 CBO）时才算有依据；判为 false 时
+    // 无法区分「真的是组预算」和「这条 cURL 没回传预算字段」。
+    if (entity.campaignBudgetOptimized) hasEvidence.add(entity.externalId);
+  }
+
+  for (const entity of entities) {
+    if (entity.entityType !== "ad-group" || !entity.parentCampaignId) continue;
+    const campaignId = entity.parentCampaignId;
+    if (!optimizedByCampaignId.has(campaignId)) continue;
+    hasEvidence.add(campaignId);
+    if (entity.campaignBudgetOptimized) optimizedByCampaignId.set(campaignId, true);
+  }
+
+  const undeterminedCampaignIds = new Set(
+    [...optimizedByCampaignId.keys()].filter((id) => !hasEvidence.has(id)),
+  );
+  return { optimizedByCampaignId, undeterminedCampaignIds };
+}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Copy, RefreshCcw } from "lucide-react";
-import { planCampaignCopy, type ManagedEntityRecord } from "@tk-auto/core";
+import { deriveCampaignBudgetModes, planCampaignCopy, type ManagedEntityRecord } from "@tk-auto/core";
 import { api } from "./api";
 import { useOverlays } from "./ui/overlays";
 
@@ -8,6 +8,12 @@ interface AccountOption {
   id: string;
   displayName: string;
   timezone?: string;
+}
+
+interface PlannedSource {
+  sourceCampaignId: string;
+  sourceCampaignName: string;
+  campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
 }
 
 export function CopyCampaignPanel(props: {
@@ -19,8 +25,12 @@ export function CopyCampaignPanel(props: {
   const [accountId, setAccountId] = useState<string>(props.accounts[0]?.id ?? "");
   const [entities, setEntities] = useState<ManagedEntityRecord[]>([]);
   const [loading, setLoading] = useState(false);
-  const [sourceCampaignId, setSourceCampaignId] = useState("");
-  const [selectedAdGroupIds, setSelectedAdGroupIds] = useState<string[]>([]);
+  const [sourceCampaignIds, setSourceCampaignIds] = useState<string[]>([]);
+  // 记录「被取消勾选的广告组」而不是「已勾选的」：新勾选的源系列天然默认全选，
+  // 取消源系列后也不会残留脏状态。
+  const [excludedAdGroupIds, setExcludedAdGroupIds] = useState<string[]>([]);
+  const [onlyCampaignBudget, setOnlyCampaignBudget] = useState(true);
+  const [query, setQuery] = useState("");
   const [campaignCopies, setCampaignCopies] = useState(2);
   const [groupsPerCampaign, setGroupsPerCampaign] = useState(1);
   const [initialStatus, setInitialStatus] = useState<"enabled" | "disabled">("disabled");
@@ -29,72 +39,131 @@ export function CopyCampaignPanel(props: {
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!accountId) return;
+  const load = (id: string) => {
     setLoading(true);
-    setSourceCampaignId("");
-    setSelectedAdGroupIds([]);
-    api.getManagedEntities(accountId)
+    api.getManagedEntities(id)
       .then(setEntities)
       .catch((cause: unknown) => props.onError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    if (!accountId) return;
+    setSourceCampaignIds([]);
+    setExcludedAdGroupIds([]);
+    load(accountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
-  const campaigns = useMemo(
+  // 系列列表接口不一定回传系列自身的预算字段，因此以广告组携带的父系列信息兜底。
+  const budgetModes = useMemo(() => deriveCampaignBudgetModes(entities), [entities]);
+  const isCbo = (externalId: string) => budgetModes.optimizedByCampaignId.get(externalId) === true;
+
+  const allCampaigns = useMemo(
     () => entities.filter((entity) => entity.entityType === "campaign" && !entity.ignored),
     [entities],
   );
-  const sourceCampaign = campaigns.find((entity) => entity.externalId === sourceCampaignId);
-  const adGroups = useMemo(
-    () => entities.filter((entity) => entity.entityType === "ad-group"
-      && !entity.ignored
-      && entity.parentCampaignId === sourceCampaignId),
-    [entities, sourceCampaignId],
-  );
-
-  // 选中一个新的源系列时默认全选它的广告组。
-  useEffect(() => {
-    setSelectedAdGroupIds(adGroups.map((entity) => entity.externalId));
+  const cboCount = useMemo(
+    () => allCampaigns.filter((entity) => isCbo(entity.externalId)).length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceCampaignId, entities]);
+    [allCampaigns, budgetModes],
+  );
+  const visibleCampaigns = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return allCampaigns
+      .filter((entity) => !onlyCampaignBudget || isCbo(entity.externalId))
+      .filter((entity) => !normalized
+        || entity.name.toLowerCase().includes(normalized)
+        || entity.externalId.toLowerCase().includes(normalized));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allCampaigns, onlyCampaignBudget, query, budgetModes]);
+
+  const adGroupsByCampaign = useMemo(() => {
+    const map = new Map<string, ManagedEntityRecord[]>();
+    for (const campaignId of sourceCampaignIds) map.set(campaignId, []);
+    for (const entity of entities) {
+      if (entity.entityType !== "ad-group" || entity.ignored || !entity.parentCampaignId) continue;
+      const list = map.get(entity.parentCampaignId);
+      if (list) list.push(entity);
+    }
+    return map;
+  }, [entities, sourceCampaignIds]);
+
+  const selectedFor = (campaignId: string) =>
+    (adGroupsByCampaign.get(campaignId) ?? [])
+      .map((entity) => entity.externalId)
+      .filter((id) => !excludedAdGroupIds.includes(id));
 
   const account = props.accounts.find((item) => item.id === accountId);
+  const nameOf = (externalId: string) =>
+    entities.find((entity) => entity.externalId === externalId)?.name ?? externalId;
 
   // 分配预览：M/N 组合出来的结果必须在执行前看得见，轮转规则不能是黑盒。
-  const preview = useMemo(() => {
-    if (!sourceCampaign || selectedAdGroupIds.length === 0) return null;
+  // 逐个源系列独立规划，名称预留跨源累积，避免两个源系列生成同名副本。
+  const preview = useMemo((): { sources: PlannedSource[]; totalGroups: number } | { error: string } | null => {
+    if (sourceCampaignIds.length === 0) return null;
     try {
-      return planCampaignCopy({
-        sourceCampaignName: sourceCampaign.name,
-        sourceAdGroupNames: new Map(adGroups.map((entity) => [entity.externalId, entity.name])),
-        sourceAdGroupIds: selectedAdGroupIds,
-        campaignCopies,
-        groupsPerCampaign,
-        at: new Date(),
-        ...(account?.timezone ? { timeZone: account.timezone } : {}),
-        existingCampaignNames: campaigns.map((entity) => entity.name),
-        existingAdGroupNames: entities
-          .filter((entity) => entity.entityType === "ad-group")
-          .map((entity) => entity.name),
-      });
+      const existingCampaignNames = allCampaigns.map((entity) => entity.name);
+      const existingAdGroupNames = entities
+        .filter((entity) => entity.entityType === "ad-group")
+        .map((entity) => entity.name);
+      const reservedCampaignNames: string[] = [];
+      const reservedAdGroupNames: string[] = [];
+      const sources: PlannedSource[] = [];
+      let totalGroups = 0;
+
+      for (const campaignId of sourceCampaignIds) {
+        const selected = selectedFor(campaignId);
+        if (selected.length === 0) continue;
+        const groupNames = new Map(
+          (adGroupsByCampaign.get(campaignId) ?? []).map((entity) => [entity.externalId, entity.name]),
+        );
+        const plan = planCampaignCopy({
+          sourceCampaignName: nameOf(campaignId),
+          sourceAdGroupNames: groupNames,
+          sourceAdGroupIds: selected,
+          campaignCopies,
+          groupsPerCampaign,
+          at: new Date(),
+          ...(account?.timezone ? { timeZone: account.timezone } : {}),
+          existingCampaignNames: [...existingCampaignNames, ...reservedCampaignNames],
+          existingAdGroupNames: [...existingAdGroupNames, ...reservedAdGroupNames],
+        });
+        for (const campaign of plan.campaigns) {
+          reservedCampaignNames.push(campaign.campaignName);
+          for (const group of campaign.groups) reservedAdGroupNames.push(group.name);
+        }
+        totalGroups += plan.totalGroups;
+        sources.push({
+          sourceCampaignId: campaignId,
+          sourceCampaignName: nameOf(campaignId),
+          campaigns: plan.campaigns,
+        });
+      }
+      return sources.length === 0 ? null : { sources, totalGroups };
     } catch (cause) {
-      return { error: cause instanceof Error ? cause.message : String(cause) } as const;
+      return { error: cause instanceof Error ? cause.message : String(cause) };
     }
-  }, [sourceCampaign, adGroups, selectedAdGroupIds, campaignCopies, groupsPerCampaign, account, campaigns, entities]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceCampaignIds, excludedAdGroupIds, adGroupsByCampaign, campaignCopies, groupsPerCampaign, account, allCampaigns, entities]);
 
   const previewError = preview && "error" in preview ? preview.error : null;
   const previewPlan = preview && !("error" in preview) ? preview : null;
-  const sourceIsCbo = Boolean(sourceCampaign?.campaignBudgetOptimized);
+  const anySourceIsCbo = sourceCampaignIds.some((id) => isCbo(id));
 
+  const toggleCampaign = (externalId: string) => {
+    setSourceCampaignIds((current) => current.includes(externalId)
+      ? current.filter((id) => id !== externalId)
+      : [...current, externalId]);
+  };
   const toggleAdGroup = (externalId: string) => {
-    setSelectedAdGroupIds((current) => current.includes(externalId)
+    setExcludedAdGroupIds((current) => current.includes(externalId)
       ? current.filter((id) => id !== externalId)
       : [...current, externalId]);
   };
 
   const submit = async () => {
-    if (!sourceCampaignId || selectedAdGroupIds.length === 0 || !previewPlan) return;
+    if (!previewPlan) return;
     const campaignBudget = campaignBudgetText.trim() === "" ? null : Number(campaignBudgetText);
     if (campaignBudget !== null && (!Number.isFinite(campaignBudget) || campaignBudget <= 0)) {
       props.onError("系列日预算必须为正数，或留空以继承源系列。");
@@ -105,10 +174,11 @@ export function CopyCampaignPanel(props: {
       props.onError("出价必须为非负数字，或留空继承源系列。");
       return;
     }
+    const totalCampaigns = previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0);
     if (initialStatus === "enabled") {
       const confirmed = await confirm({
         title: "立即投放确认",
-        message: `将创建 ${previewPlan.campaigns.length} 个推广系列、共 ${previewPlan.totalGroups} 个广告组，并【立即开始投放】。确认？`,
+        message: `将创建 ${totalCampaigns} 个推广系列、共 ${previewPlan.totalGroups} 个广告组，并【立即开始投放】。确认？`,
         confirmLabel: "确认立即投放",
         danger: true,
       });
@@ -120,8 +190,10 @@ export function CopyCampaignPanel(props: {
     try {
       const result = await api.copyCampaign({
         accountId,
-        sourceCampaignId,
-        sourceAdGroupIds: selectedAdGroupIds,
+        sources: previewPlan.sources.map((item) => ({
+          sourceCampaignId: item.sourceCampaignId,
+          sourceAdGroupIds: selectedFor(item.sourceCampaignId),
+        })),
         campaignCopies,
         groupsPerCampaign,
         initialStatus,
@@ -135,8 +207,7 @@ export function CopyCampaignPanel(props: {
       }
       setFeedback(parts.join("；"));
       toast(result.failed.length === 0 ? "系列复制完成" : "系列复制部分失败", result.failed.length === 0 ? "success" : "error");
-      const refreshed = await api.getManagedEntities(accountId);
-      setEntities(refreshed);
+      load(accountId);
     } catch (cause) {
       props.onError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -145,6 +216,7 @@ export function CopyCampaignPanel(props: {
   };
 
   const disabled = props.busy || submitting || loading;
+  const hiddenCount = allCampaigns.length - visibleCampaigns.length;
 
   return (
     <div className="panel campaign-copy-panel">
@@ -153,15 +225,11 @@ export function CopyCampaignPanel(props: {
           <span className="panel-icon"><Copy size={18} /></span>
           <div>
             <h2>系列复制</h2>
-            <p>把一个推广系列复制成多个新系列，并决定每个新系列里放几个广告组。系列预算的系列请用这里放量——往同一个系列里加广告组只会摊薄原有预算。</p>
+            <p>把推广系列复制成多个新系列，并决定每个新系列放几个广告组。系列预算的系列请用这里放量——往同一个系列里加广告组只会摊薄原有预算。</p>
           </div>
         </div>
-        <button className="secondary-button compact-button" disabled={disabled} type="button" onClick={() => {
-          setLoading(true);
-          api.getManagedEntities(accountId).then(setEntities)
-            .catch((cause: unknown) => props.onError(cause instanceof Error ? cause.message : String(cause)))
-            .finally(() => setLoading(false));
-        }}><RefreshCcw size={14} /> 重新读取</button>
+        <button className="secondary-button compact-button" disabled={disabled} type="button"
+          onClick={() => load(accountId)}><RefreshCcw size={14} /> 重新读取</button>
       </div>
 
       <div className="form-grid">
@@ -170,28 +238,20 @@ export function CopyCampaignPanel(props: {
             {props.accounts.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}
           </select>
         </label>
-        <label className="field"><span>源推广系列</span>
-          <select disabled={disabled} value={sourceCampaignId} onChange={(event) => setSourceCampaignId(event.target.value)}>
-            <option value="">请选择</option>
-            {campaigns.map((entity) => (
-              <option key={entity.externalId} value={entity.externalId}>
-                {entity.name}{entity.campaignBudgetOptimized ? "（系列预算）" : "（广告组预算）"}
-              </option>
-            ))}
-          </select>
-        </label>
         <label className="field"><span>生成几个系列（N）</span>
           <input disabled={disabled} max={20} min={1} type="number" value={campaignCopies}
             onChange={(event) => setCampaignCopies(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
+          <small>每个源系列各生成这么多个副本。</small>
         </label>
         <label className="field"><span>每个系列几个广告组（M）</span>
           <input disabled={disabled} max={20} min={1} type="number" value={groupsPerCampaign}
             onChange={(event) => setGroupsPerCampaign(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
+          <small>勾选的源广告组按顺序轮转填入。</small>
         </label>
         <label className="field"><span>系列日预算（留空继承源系列）</span>
-          <input disabled={disabled || !sourceIsCbo} min="0.01" step="0.01" type="number" value={campaignBudgetText}
+          <input disabled={disabled || !anySourceIsCbo} min="0.01" step="0.01" type="number" value={campaignBudgetText}
             onChange={(event) => setCampaignBudgetText(event.target.value)} />
-          <small>{sourceIsCbo ? "每个新系列各自持有这一份预算。" : "源系列使用广告组预算，此处不适用。"}</small>
+          <small>{anySourceIsCbo ? "每个新系列各自持有这一份预算。" : "所选源系列使用广告组预算，此处不适用。"}</small>
         </label>
         <label className="field"><span>出价（留空继承源系列）</span>
           <input disabled={disabled} min="0" step="0.01" type="number" value={bidText}
@@ -202,25 +262,69 @@ export function CopyCampaignPanel(props: {
             <option value="disabled">关闭（默认）</option>
             <option value="enabled">立即投放</option>
           </select>
-          <small>系列复制会一次拉起多个系列，默认关闭以避免误花费。</small>
+          <small>一次会创建多个系列，默认关闭以避免误花费。</small>
         </label>
       </div>
 
-      {sourceCampaignId && (
+      <div className="campaign-copy-sources">
+        <div className="campaign-copy-source-toolbar">
+          <strong>源推广系列（可多选，已选 {sourceCampaignIds.length}）</strong>
+          <label className="campaign-copy-filter">
+            <input checked={onlyCampaignBudget} disabled={disabled} type="checkbox"
+              onChange={(event) => setOnlyCampaignBudget(event.target.checked)} />
+            <span>只显示系列预算（共 {cboCount} 条）</span>
+          </label>
+          <input aria-label="搜索推广系列" disabled={disabled} placeholder="搜索系列名称或 ID"
+            value={query} onChange={(event) => setQuery(event.target.value)} />
+          <button className="secondary-button compact-button" disabled={disabled} type="button"
+            onClick={() => setSourceCampaignIds(visibleCampaigns.map((entity) => entity.externalId))}>全选当前结果</button>
+          <button className="secondary-button compact-button" disabled={disabled} type="button"
+            onClick={() => { setSourceCampaignIds([]); setExcludedAdGroupIds([]); }}>清空</button>
+        </div>
+        {visibleCampaigns.length === 0
+          ? <p className="target-account-empty">
+              {allCampaigns.length === 0
+                ? "该账户在当前同步快照中没有推广系列，请先执行只读同步。"
+                : onlyCampaignBudget
+                  ? `没有系列预算的推广系列${hiddenCount > 0 ? `（已隐藏 ${hiddenCount} 条广告组预算的系列）` : ""}。取消勾选上方过滤即可看到全部。`
+                  : "没有匹配的推广系列。"}
+            </p>
+          : <div className="target-account-grid">
+            {visibleCampaigns.map((entity) => (
+              <label key={entity.externalId}>
+                <input checked={sourceCampaignIds.includes(entity.externalId)} disabled={disabled}
+                  onChange={() => toggleCampaign(entity.externalId)} type="checkbox" />
+                <span>{entity.name}</span>
+                <small>{isCbo(entity.externalId) ? "系列预算" : "广告组预算"}
+                  {budgetModes.undeterminedCampaignIds.has(entity.externalId) ? " · 预算方式未知" : ""}</small>
+              </label>
+            ))}
+          </div>}
+        {!onlyCampaignBudget && hiddenCount === 0 && cboCount === 0 && allCampaigns.length > 0 && (
+          <p className="target-account-empty">当前账户没有识别到系列预算的推广系列。若与 TikTok 后台不符，请先执行一次只读同步。</p>
+        )}
+      </div>
+
+      {selectedCampaignsHaveGroups(adGroupsByCampaign) && (
         <div className="campaign-copy-sources">
-          <strong>源广告组（勾选参与分配，共 {adGroups.length} 个）</strong>
-          {adGroups.length === 0
-            ? <p className="target-account-empty">该系列在当前同步快照中没有广告组，请先执行只读同步。</p>
-            : <div className="target-account-grid">
-              {adGroups.map((entity) => (
-                <label key={entity.externalId}>
-                  <input checked={selectedAdGroupIds.includes(entity.externalId)} disabled={disabled}
-                    onChange={() => toggleAdGroup(entity.externalId)} type="checkbox" />
-                  <span>{entity.name}</span>
-                  <small>{entity.status === "enabled" ? "投放中" : "已关闭"}</small>
-                </label>
-              ))}
-            </div>}
+          <strong>参与分配的广告组（默认全选，可逐个取消）</strong>
+          {[...adGroupsByCampaign].map(([campaignId, list]) => (
+            <div className="campaign-copy-group-block" key={campaignId}>
+              <em>{nameOf(campaignId)}</em>
+              {list.length === 0
+                ? <p className="target-account-empty">该系列在当前快照中没有广告组。</p>
+                : <div className="target-account-grid">
+                  {list.map((entity) => (
+                    <label key={entity.externalId}>
+                      <input checked={!excludedAdGroupIds.includes(entity.externalId)} disabled={disabled}
+                        onChange={() => toggleAdGroup(entity.externalId)} type="checkbox" />
+                      <span>{entity.name}</span>
+                      <small>{entity.status === "enabled" ? "投放中" : "已关闭"}</small>
+                    </label>
+                  ))}
+                </div>}
+            </div>
+          ))}
         </div>
       )}
 
@@ -228,22 +332,28 @@ export function CopyCampaignPanel(props: {
 
       {previewPlan && (
         <div className="campaign-copy-preview">
-          <strong>分配预览 · {previewPlan.campaigns.length} 个系列 / 共 {previewPlan.totalGroups} 个广告组</strong>
+          <strong>
+            分配预览 · {previewPlan.sources.length} 个源系列 →
+            {" "}{previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0)} 个新系列 /
+            共 {previewPlan.totalGroups} 个广告组
+          </strong>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>新推广系列</th><th>包含的广告组</th></tr></thead>
+              <thead><tr><th>源系列</th><th>新推广系列</th><th>包含的广告组</th></tr></thead>
               <tbody>
-                {previewPlan.campaigns.map((campaign) => (
+                {previewPlan.sources.flatMap((source) => source.campaigns.map((campaign, index) => (
                   <tr key={campaign.campaignName}>
+                    {index === 0
+                      ? <td rowSpan={source.campaigns.length}>{source.sourceCampaignName}</td>
+                      : null}
                     <td>{campaign.campaignName}</td>
                     <td>{campaign.groups.map((group) => (
                       <small key={group.name}>
-                        {group.name}
-                        <em>（源：{adGroups.find((entity) => entity.externalId === group.sourceAdGroupId)?.name ?? group.sourceAdGroupId}）</em>
+                        {group.name}<em>（源：{nameOf(group.sourceAdGroupId)}）</em>
                       </small>
                     ))}</td>
                   </tr>
-                ))}
+                )))}
               </tbody>
             </table>
           </div>
@@ -254,9 +364,15 @@ export function CopyCampaignPanel(props: {
 
       <div className="form-actions">
         <button className="primary-button" disabled={disabled || !previewPlan} onClick={() => void submit()} type="button">
-          {submitting ? "正在复制…" : `确认并复制${previewPlan ? `（${previewPlan.campaigns.length} 个系列）` : ""}`}
+          {submitting
+            ? "正在复制…"
+            : `确认并复制${previewPlan ? `（${previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0)} 个系列）` : ""}`}
         </button>
       </div>
     </div>
   );
+}
+
+function selectedCampaignsHaveGroups(map: Map<string, ManagedEntityRecord[]>): boolean {
+  return map.size > 0;
 }

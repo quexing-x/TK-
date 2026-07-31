@@ -781,9 +781,8 @@ export class LaunchService {
    */
   async copyCampaign(input: {
     accountId: string;
-    sourceCampaignId: string;
-    /** 勾选的源广告组；顺序参与轮转分配。 */
-    sourceAdGroupIds: string[];
+    /** 多个源系列时逐个独立套用同一套 N/M 分配。 */
+    sources: Array<{ sourceCampaignId: string; sourceAdGroupIds: string[] }>;
     campaignCopies: number;
     groupsPerCampaign: number;
     initialStatus: "enabled" | "disabled";
@@ -796,7 +795,11 @@ export class LaunchService {
     createdGroups: number;
     skipped: number;
     failed: Array<{ name: string; message: string }>;
-    plan: ReturnType<typeof planCampaignCopy>["campaigns"];
+    plan: Array<{
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      campaigns: ReturnType<typeof planCampaignCopy>["campaigns"];
+    }>;
   }> {
     const account = this.store.getAccount(input.accountId);
     if (!account) throw new Error("账号不存在。");
@@ -812,23 +815,6 @@ export class LaunchService {
     );
 
     const managed = this.store.listCurrentManagedEntities(input.accountId, account.providerKind);
-    const sourceCampaign = managed.find(
-      (entity) => entity.entityType === "campaign" && entity.externalId === input.sourceCampaignId,
-    );
-    if (!sourceCampaign) {
-      throw new Error("源推广系列不在当前同步快照中，请先执行只读同步。");
-    }
-    const sourceAdGroups = new Map(
-      managed
-        .filter((entity) => entity.entityType === "ad-group"
-          && entity.parentCampaignId === input.sourceCampaignId)
-        .map((entity) => [entity.externalId, entity.name]),
-    );
-    for (const sourceAdGroupId of input.sourceAdGroupIds) {
-      if (!sourceAdGroups.has(sourceAdGroupId)) {
-        throw new Error(`广告组 ${sourceAdGroupId} 不属于源推广系列，请重新选择。`);
-      }
-    }
 
     // 命名的序号必须从账户现状往后接，因此要先拿到账户里已有的系列名与组名。
     const existingCampaignNames = managed
@@ -838,24 +824,58 @@ export class LaunchService {
       .filter((entity) => entity.entityType === "ad-group")
       .map((entity) => entity.name);
 
-    const plan = planCampaignCopy({
-      sourceCampaignName: sourceCampaign.name,
-      sourceAdGroupNames: sourceAdGroups,
-      sourceAdGroupIds: input.sourceAdGroupIds,
-      campaignCopies: input.campaignCopies,
-      groupsPerCampaign: input.groupsPerCampaign,
-      at: new Date(),
-      timeZone: account.timezone,
-      existingCampaignNames,
-      existingAdGroupNames,
-    });
-
-    // 发出任何写请求之前，先把整批名称都验一遍：系列名在账户内必须唯一，
-    // 否则发布后的终态核验无法判定哪个系列是本次创建的。
+    // 多个源系列时逐个规划。名称预留跨源累积，避免两个源系列生成同名副本。
     const reserved = new Set<string>();
-    for (const campaign of plan.campaigns) {
-      assertCampaignNameAvailable(existingCampaignNames, campaign.campaignName, reserved);
-      reserved.add(campaign.campaignName);
+    const reservedAdGroupNames = new Set<string>();
+    const plannedSources: Array<{
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      campaigns: ReturnType<typeof planCampaignCopy>["campaigns"];
+    }> = [];
+
+    for (const source of input.sources) {
+      const sourceCampaign = managed.find(
+        (entity) => entity.entityType === "campaign" && entity.externalId === source.sourceCampaignId,
+      );
+      if (!sourceCampaign) {
+        throw new Error("源推广系列不在当前同步快照中，请先执行只读同步。");
+      }
+      const sourceAdGroups = new Map(
+        managed
+          .filter((entity) => entity.entityType === "ad-group"
+            && entity.parentCampaignId === source.sourceCampaignId)
+          .map((entity) => [entity.externalId, entity.name]),
+      );
+      for (const sourceAdGroupId of source.sourceAdGroupIds) {
+        if (!sourceAdGroups.has(sourceAdGroupId)) {
+          throw new Error(`广告组 ${sourceAdGroupId} 不属于源推广系列，请重新选择。`);
+        }
+      }
+
+      const plan = planCampaignCopy({
+        sourceCampaignName: sourceCampaign.name,
+        sourceAdGroupNames: sourceAdGroups,
+        sourceAdGroupIds: source.sourceAdGroupIds,
+        campaignCopies: input.campaignCopies,
+        groupsPerCampaign: input.groupsPerCampaign,
+        at: new Date(),
+        timeZone: account.timezone,
+        existingCampaignNames: [...existingCampaignNames, ...reserved],
+        existingAdGroupNames: [...existingAdGroupNames, ...reservedAdGroupNames],
+      });
+
+      // 发出任何写请求之前，先把整批名称都验一遍：系列名在账户内必须唯一，
+      // 否则发布后的终态核验无法判定哪个系列是本次创建的。
+      for (const campaign of plan.campaigns) {
+        assertCampaignNameAvailable(existingCampaignNames, campaign.campaignName, reserved);
+        reserved.add(campaign.campaignName);
+        for (const group of campaign.groups) reservedAdGroupNames.add(group.name);
+      }
+      plannedSources.push({
+        sourceCampaignId: source.sourceCampaignId,
+        sourceCampaignName: sourceCampaign.name,
+        campaigns: plan.campaigns,
+      });
     }
 
     const context = await this.loadProviderContext(input.accountId, account.providerKind);
@@ -866,11 +886,12 @@ export class LaunchService {
     const failed: Array<{ name: string; message: string }> = [];
 
     // 账户内串行执行，降低 Provider 频控风险，也让重名预检始终基于最新状态。
-    for (const campaign of plan.campaigns) {
+    for (const { sourceCampaignId, campaigns } of plannedSources) {
+    for (const campaign of campaigns) {
       const taskKey = createHash("sha256").update(JSON.stringify({
         executor: "campaign-copy",
         accountId: input.accountId,
-        sourceCampaignId: input.sourceCampaignId,
+        sourceCampaignId,
         campaignName: campaign.campaignName,
         groups: campaign.groups,
         initialStatus: input.initialStatus,
@@ -882,7 +903,7 @@ export class LaunchService {
       const claim = this.store.claimCampaignCopyTask(
         taskKey,
         input.accountId,
-        input.sourceCampaignId,
+        sourceCampaignId,
         campaign.campaignName,
       );
       if (claim !== "claimed") {
@@ -899,7 +920,7 @@ export class LaunchService {
 
       try {
         const result = await this.providers.copyCampaign(account.providerKind, context, {
-          sourceCampaignId: input.sourceCampaignId,
+          sourceCampaignId,
           campaignName: campaign.campaignName,
           adGroups: campaign.groups,
           initialStatus: input.initialStatus,
@@ -932,8 +953,9 @@ export class LaunchService {
         });
       }
     }
+    }
 
-    return { createdCampaigns, createdGroups, skipped, failed, plan: plan.campaigns };
+    return { createdCampaigns, createdGroups, skipped, failed, plan: plannedSources };
   }
 
   // 一键扩组：批量选中的源广告组，每个各扩 count 个新组。

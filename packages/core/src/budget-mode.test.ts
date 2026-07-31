@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BudgetModeInputError,
   budgetModeOfCampaign,
+  deriveCampaignBudgetModes,
   resolveBudgetFields,
 } from "./budget-mode.js";
 import { buildDraftPayloads, buildProfileDraftPayloads } from "./creation-protocol.js";
@@ -100,6 +101,63 @@ describe("resolveBudgetFields", () => {
   it("从已同步的系列快照反推预算模式", () => {
     expect(budgetModeOfCampaign(true)).toBe("campaign");
     expect(budgetModeOfCampaign(false)).toBe("ad-group");
+  });
+});
+
+describe("deriveCampaignBudgetModes", () => {
+  const campaign = (externalId: string, optimized: boolean) => ({
+    entityType: "campaign" as const, externalId, parentCampaignId: null, campaignBudgetOptimized: optimized,
+  });
+  const adGroup = (externalId: string, parentCampaignId: string, optimized: boolean) => ({
+    entityType: "ad-group" as const, externalId, parentCampaignId, campaignBudgetOptimized: optimized,
+  });
+
+  it("系列行自身带预算字段时直接判定", () => {
+    const { optimizedByCampaignId, undeterminedCampaignIds } = deriveCampaignBudgetModes([
+      campaign("c1", true),
+      campaign("c2", false),
+    ]);
+    expect(optimizedByCampaignId.get("c1")).toBe(true);
+    expect(optimizedByCampaignId.get("c2")).toBe(false);
+    // c2 判为 false 但没有任何依据：可能只是列表 cURL 没回传预算字段。
+    expect(undeterminedCampaignIds.has("c1")).toBe(false);
+    expect(undeterminedCampaignIds.has("c2")).toBe(true);
+  });
+
+  it("系列行不带预算字段时，从子广告组反推（真实账户的主要路径）", () => {
+    const { optimizedByCampaignId, undeterminedCampaignIds } = deriveCampaignBudgetModes([
+      campaign("c1", false),
+      adGroup("g1", "c1", true),
+      campaign("c2", false),
+      adGroup("g2", "c2", false),
+    ]);
+    expect(optimizedByCampaignId.get("c1")).toBe(true);
+    expect(optimizedByCampaignId.get("c2")).toBe(false);
+    // 两条都有广告组作为依据。
+    expect(undeterminedCampaignIds.size).toBe(0);
+  });
+
+  it("任一子广告组显示 CBO 即认定整条系列为 CBO", () => {
+    const { optimizedByCampaignId } = deriveCampaignBudgetModes([
+      campaign("c1", false),
+      adGroup("g1", "c1", false),
+      adGroup("g2", "c1", true),
+    ]);
+    expect(optimizedByCampaignId.get("c1")).toBe(true);
+  });
+
+  it("没有广告组且系列行不带预算字段时标记为依据不足", () => {
+    const { undeterminedCampaignIds } = deriveCampaignBudgetModes([campaign("c1", false)]);
+    expect(undeterminedCampaignIds.has("c1")).toBe(true);
+  });
+
+  it("忽略不属于任何已知系列的广告组", () => {
+    const { optimizedByCampaignId } = deriveCampaignBudgetModes([
+      campaign("c1", false),
+      adGroup("g9", "unknown-campaign", true),
+    ]);
+    expect(optimizedByCampaignId.get("c1")).toBe(false);
+    expect(optimizedByCampaignId.has("unknown-campaign")).toBe(false);
   });
 });
 

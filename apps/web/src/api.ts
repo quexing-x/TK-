@@ -512,8 +512,7 @@ export const api = {
     ),
   copyCampaign: (input: {
     accountId: string;
-    sourceCampaignId: string;
-    sourceAdGroupIds: string[];
+    sources: Array<{ sourceCampaignId: string; sourceAdGroupIds: string[] }>;
     campaignCopies: number;
     groupsPerCampaign: number;
     initialStatus: "enabled" | "disabled";
@@ -526,7 +525,11 @@ export const api = {
       createdGroups: number;
       skipped: number;
       failed: Array<{ name: string; message: string }>;
-      plan: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
+      plan: Array<{
+        sourceCampaignId: string;
+        sourceCampaignName: string;
+        campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
+      }>;
     }>("/api/campaigns/copy", { method: "POST", body: JSON.stringify(input) }),
   getManualTakeovers: (accountId: string) =>
     request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),

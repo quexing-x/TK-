@@ -125,9 +125,8 @@ describe("local API", () => {
 
     const payload = {
       accountId: "demo-account",
-      sourceCampaignId: "campaign-1",
       // 你的场景：1 个系列 2 个组 → 2 个系列各 1 个组。
-      sourceAdGroupIds: ["adgroup-1", "adgroup-2"],
+      sources: [{ sourceCampaignId: "campaign-1", sourceAdGroupIds: ["adgroup-1", "adgroup-2"] }],
       campaignCopies: 2,
       groupsPerCampaign: 1,
       initialStatus: "disabled" as const,
@@ -154,6 +153,65 @@ describe("local API", () => {
     expect(replay.statusCode).toBe(200);
     expect(replay.json()).toMatchObject({ createdCampaigns: 0, skipped: 2 });
     expect(copyCampaign).toHaveBeenCalledTimes(2);
+  });
+
+  it("多选源系列时逐个套用同一套 N/M，且副本名不跨源撞名", async () => {
+    const copyCampaign = vi.fn(async (
+      _context: unknown,
+      _input: { campaignName: string; adGroups: Array<{ sourceAdGroupId: string; name: string }> },
+    ) => ({ ok: true, message: "copied" }));
+    const provider = {
+      kind: "cookie",
+      displayName: "campaign copy provider",
+      capabilityVersion: "campaign-copy-v1",
+      capabilities: new Set(["copy-campaigns"]),
+      copyCampaign,
+    } as unknown as AdsProvider & { copyCampaign: typeof copyCampaign };
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns"],
+    });
+    const syncedAt = new Date().toISOString();
+    // 两个源系列同名前缀，用来验证跨源的名称预留确实累积。
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "campaign", externalId: "c1", payload: { campaign_id: "c1", campaign_name: "同名系列" } },
+      { entityType: "ad-group", externalId: "g1", payload: { campaign_id: "c1", ad_name: "组1" } },
+      { entityType: "campaign", externalId: "c2", payload: { campaign_id: "c2", campaign_name: "同名系列" } },
+      { entityType: "ad-group", externalId: "g2", payload: { campaign_id: "c2", ad_name: "组2" } },
+    ], { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 2, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/campaigns/copy",
+      payload: {
+        accountId: "demo-account",
+        sources: [
+          { sourceCampaignId: "c1", sourceAdGroupIds: ["g1"] },
+          { sourceCampaignId: "c2", sourceAdGroupIds: ["g2"] },
+        ],
+        campaignCopies: 2,
+        groupsPerCampaign: 1,
+        initialStatus: "disabled",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    // 两个源系列 × 每个 2 个副本 = 4 个新系列。
+    expect(response.json()).toMatchObject({ createdCampaigns: 4, createdGroups: 4, failed: [] });
+    expect(copyCampaign).toHaveBeenCalledTimes(4);
+
+    const names = copyCampaign.mock.calls.map((call) => call[1].campaignName);
+    // 两个源系列名字相同，副本名必须靠序号累积区分开，不能撞名。
+    expect(new Set(names).size).toBe(4);
   });
 
   it("拒绝不属于源系列的广告组", async () => {
@@ -190,8 +248,7 @@ describe("local API", () => {
       url: "/api/campaigns/copy",
       payload: {
         accountId: "demo-account",
-        sourceCampaignId: "campaign-1",
-        sourceAdGroupIds: ["other-group"],
+        sources: [{ sourceCampaignId: "campaign-1", sourceAdGroupIds: ["other-group"] }],
         campaignCopies: 1,
         groupsPerCampaign: 1,
         initialStatus: "disabled",
