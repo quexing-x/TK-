@@ -118,6 +118,18 @@ button { cursor: pointer; }
 .launch-mode-options span { margin-top: 5px; color: #7a869a; font-size: 12px; }
 .quick-time-actions button { border: 1px solid #c9d9ff; border-radius: 6px; background: #f3f7ff; color: #245bdb; font-size: 12px; padding: 5px 9px; cursor: pointer; }
 .quick-time-actions button:hover { background: #e7efff; }
+.budget-mode-switch { display: inline-flex; gap: 0; margin-top: 4px; border: 1px solid #c9d9ff; border-radius: 8px; overflow: hidden; width: fit-content; }
+.budget-mode-switch button { border: 0; background: #f8faff; color: #4b5b76; font-size: 13px; padding: 7px 16px; cursor: pointer; }
+.budget-mode-switch button + button { border-left: 1px solid #c9d9ff; }
+.budget-mode-switch button:hover { background: #eef3ff; }
+.budget-mode-switch button.active { background: #245bdb; color: #fff; }
+.budget-mode-field small { margin-top: 6px; color: #7a869a; font-size: 12px; }
+.campaign-copy-sources { margin-top: 18px; }
+.campaign-copy-sources > strong { display: block; margin-bottom: 8px; font-size: 14px; }
+.campaign-copy-preview { margin-top: 18px; padding: 14px; border: 1px solid #dbe4f5; border-radius: 10px; background: #f8faff; }
+.campaign-copy-preview > strong { display: block; margin-bottom: 10px; font-size: 14px; color: #245bdb; }
+.campaign-copy-preview td small { display: block; color: #4b5b76; font-size: 12px; }
+.campaign-copy-preview td small em { color: #7a869a; font-style: normal; }
 .side-stack { display: grid; gap: 15px; }
 .provider-panel { padding: 23px; }
 .provider-icon { width: 48px; height: 48px; margin-bottom: 17px; display: grid; place-items: center; color: #526fe0; border-radius: 14px; background: #eef2ff; }

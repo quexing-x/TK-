@@ -220,8 +220,33 @@ export function normalizeProviderEntity(
     : {};
   const source = { ...entity.payload, ...rowData, ...reportMetrics };
 
-  const campaignBudget = firstNumber(source, ["campaign_budget"]);
-  const campaignBudgetMode = firstNumber(source, ["campaign_budget_mode"]);
+  // 广告组/广告行携带的是【父系列】的预算字段（campaign_budget*），而系列行自己的
+  // 预算在 budget / budget_mode / budget_optimize_switch 上。两者不能混用别名，
+  // 否则系列行读不到预算、广告组行又会把系列预算误当成组预算。
+  const isCampaignRow = entity.entityType === "campaign";
+  const campaignBudget = isCampaignRow
+    ? firstNumber(source, ["campaign_budget", "budget"])
+    : firstNumber(source, ["campaign_budget"]);
+  const campaignBudgetMode = isCampaignRow
+    ? firstNumber(source, ["campaign_budget_mode", "budget_mode"])
+    : firstNumber(source, ["campaign_budget_mode"]);
+  // 系列预算(CBO)：budget_optimize_switch=1 是真机上最直接的标志（见创建 HAR），
+  // budget_mode>0 与 budget>0 作为旧载荷的兜底判据。
+  const budgetOptimizeSwitch = isCampaignRow
+    ? firstNumber(source, ["budget_optimize_switch"])
+    : null;
+  const campaignBudgetOptimized =
+    (budgetOptimizeSwitch !== null && budgetOptimizeSwitch > 0)
+    || (campaignBudgetMode !== null && campaignBudgetMode > 0)
+    || (campaignBudget !== null && campaignBudget > 0);
+  // 对象自身的预算：系列行取系列预算；广告组行只认组自己的字段，且 CBO 下广告组
+  // 根本没有独立预算，必须留空——回退到 campaign_budget 会让组级预算规则拿整条
+  // 系列的预算做判断，量级直接错一位。
+  const ownBudget = isCampaignRow
+    ? campaignBudget
+    : campaignBudgetOptimized
+      ? null
+      : firstNumber(source, ["ad_budget", "budget"]);
 
   return {
     entityType: entity.entityType,
@@ -242,12 +267,9 @@ export function normalizeProviderEntity(
       "ad_group_id",
       "adGroupId",
     ]),
-    // 系列预算(CBO)：campaign_budget_mode 非 -1（无系列预算）或 campaign_budget>0 即为 CBO。
     // 该字段在广告组行上即携带其所属系列的预算信息，无需回查系列实体。
     campaignBudget,
-    campaignBudgetOptimized:
-      (campaignBudgetMode !== null && campaignBudgetMode > 0)
-      || (campaignBudget !== null && campaignBudget > 0),
+    campaignBudgetOptimized,
     metrics: {
       cost_per_conversion: firstNumber(source, [
         "time_attr_conversion_cost",
@@ -259,11 +281,7 @@ export function normalizeProviderEntity(
         "time_attr_cost_per_on_web_cart",
         "cost_per_cart",
       ]),
-      budget: firstNumber(source, [
-        "ad_budget",
-        "campaign_budget",
-        "budget",
-      ]),
+      budget: ownBudget,
       spend: firstNumber(source, ["stat_cost", "spend", "cost"]),
       conversions: firstNumber(source, [
         "time_attr_convert_cnt",

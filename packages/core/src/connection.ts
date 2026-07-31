@@ -8,6 +8,7 @@ export const ProviderCapabilitySchema = z.enum([
   "read-reports",
   "create-campaigns",
   "copy-ads",
+  "copy-campaigns",
   "change-status",
   "delete-ad-groups",
   "appeal-ads",

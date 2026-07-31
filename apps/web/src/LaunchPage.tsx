@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, CircleCheck, CircleX, Download, FileSpreadsheet, Pencil, RefreshCcw, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
-import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
+import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
@@ -12,10 +12,11 @@ import {
 } from "./provider-capability-view";
 import { createLaunchProgressPoller } from "./launch-progress-polling";
 import { ExpandGroupsPanel } from "./ExpandGroupsPanel";
+import { CopyCampaignPanel } from "./CopyCampaignPanel";
 import { useOverlays } from "./ui/overlays";
 import type { ReadOnlySyncResult } from "@tk-auto/core";
 
-type LaunchMode = "single" | "multi" | "copy" | "expand";
+type LaunchMode = "single" | "multi" | "copy" | "expand" | "campaign-copy";
 type ConnectionState = {
   accountId: string;
   connection: ProviderConnection | null;
@@ -480,12 +481,13 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   };
   const editPreset = (preset: LaunchPresetRecord) => {
     setEditingPresetId(preset.id);
-    setPresetForm({ name: preset.name, region: preset.region, dailyBudget: preset.dailyBudget, bid: preset.bid, startAt: preset.startAt, endAt: preset.endAt, startAtRule: preset.startAtRule ?? "absolute", initialStatus: preset.initialStatus, creationConfig: preset.creationConfig });
+    setPresetForm({ name: preset.name, region: preset.region, dailyBudget: preset.dailyBudget, campaignBudget: preset.campaignBudget ?? null, bid: preset.bid, startAt: preset.startAt, endAt: preset.endAt, startAtRule: preset.startAtRule ?? "absolute", initialStatus: preset.initialStatus, creationConfig: preset.creationConfig });
   };
   const updateCreationConfig = (patch: Partial<LaunchPresetInput["creationConfig"]>) => {
     setPresetForm((value) => ({ ...value, creationConfig: { ...(value.creationConfig ?? defaultCreationPresetConfig), ...patch } }));
   };
   const presetCreationConfig = CreationPresetConfigSchema.parse(presetForm.creationConfig ?? {});
+  const presetBudgetMode = resolveConfiguredBudgetMode(presetCreationConfig);
   const advancedTemplateReadiness = getCreationTemplateReadiness(presetCreationConfig);
   const advancedExecutionReady = advancedTemplateReadiness.ready;
   const removePreset = async (id: string) => {
@@ -545,7 +547,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     try {
       setBusy(true);
       setExecutionFeedback(null);
-      if (launchMode === "expand") return;
+      if (launchMode === "expand" || launchMode === "campaign-copy") return;
       const plan = await api.createLaunchPlan({
         clientRequestId: planRequestId,
         mode: launchMode,
@@ -616,7 +618,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     <div className="launch-workbench">
       <aside className="launch-mode-sidebar">
 
-    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建'],['expand','一键扩组','按账户勾选广告组，为每个源组各复制 N 个新组']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
+    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建'],['expand','一键扩组','按账户勾选广告组，为每个源组各复制 N 个新组'],['campaign-copy','系列复制','把整个推广系列复制成多个新系列，并决定每个系列放几个广告组']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
 
         {launchMode === "expand" && <div className="expand-preset-sidebar-host" ref={(node) => setExpandPresetHost(node)} />}
 
@@ -628,7 +630,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       </aside>
 
       <main className="launch-workspace">
-        {launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onConnectionStatesChanged={onConnectionStatesChanged} onManageConnection={onManageConnection} onError={onError} presetHost={expandPresetHost} /> : <>
+        {launchMode === "campaign-copy" ? <CopyCampaignPanel accounts={accounts} busy={busy} onError={onError} /> : launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onConnectionStatesChanged={onConnectionStatesChanged} onManageConnection={onManageConnection} onError={onError} presetHost={expandPresetHost} /> : <>
 
     <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "以源广告组为迁移载体，为每个目标账户独立配置创建数量和投放参数。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
@@ -659,19 +661,25 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     {launchMode !== "copy" && <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
       <label className="field"><span>预设名称</span><input value={presetForm.name} onChange={(event) => setPresetForm((value) => ({ ...value, name: event.target.value }))} /></label>
       <label className="field"><span>投放地区</span><input placeholder="例如：US、美国、US/CA" value={presetForm.region} onChange={(event) => setPresetForm((value) => ({ ...value, region: event.target.value }))} /></label>
-      <label className="field"><span>广告组日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.dailyBudget} onChange={(event) => setPresetForm((value) => ({ ...value, dailyBudget: Number(event.target.value) }))} /></label>
+      <div className="field budget-mode-field"><span>预算模式</span><div className="budget-mode-switch" role="group" aria-label="预算模式">
+        <button aria-pressed={presetBudgetMode === "ad-group"} className={presetBudgetMode === "ad-group" ? "active" : ""} onClick={() => updateCreationConfig({ budgetMode: "ad-group" })} type="button">广告组预算</button>
+        <button aria-pressed={presetBudgetMode === "campaign"} className={presetBudgetMode === "campaign" ? "active" : ""} onClick={() => updateCreationConfig({ budgetMode: "campaign" })} type="button">系列预算</button>
+      </div><small>{presetBudgetMode === "campaign" ? "预算由推广系列统一持有并在广告组之间自动分配；广告组不再单独设预算。" : "每个广告组各自持有日预算，推广系列不设预算。"}</small></div>
+      {presetBudgetMode === "campaign"
+        ? <label className="field"><span>系列日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.campaignBudget ?? ""} onChange={(event) => setPresetForm((value) => ({ ...value, campaignBudget: event.target.value === "" ? null : Number(event.target.value) }))} /><small>同一个推广系列下的所有广告组共用这一份预算。</small></label>
+        : <label className="field"><span>广告组日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.dailyBudget} onChange={(event) => setPresetForm((value) => ({ ...value, dailyBudget: Number(event.target.value) }))} /></label>}
       <label className="field"><span>出价（留空为自动）</span><input min="0" step="0.01" type="number" value={presetForm.bid ?? ""} onChange={(event) => setPresetForm((value) => ({ ...value, bid: event.target.value === "" ? null : Number(event.target.value) }))} /></label>
       <label className="field"><span>创建时间（留空为立即）</span><input type="datetime-local" value={presetForm.startAtRule === "absolute" ? toLocalInput(presetForm.startAt) : ""} onChange={(event) => setPresetForm((value) => ({ ...value, startAtRule: "absolute", startAt: toIso(event.target.value) }))} /><span className="quick-time-actions"><button className={presetForm.startAtRule === "tonight" ? "active" : ""} onClick={() => setPresetForm((value) => ({ ...value, startAtRule: "tonight", startAt: null }))} type="button">当天 24:00</button><button className={presetForm.startAtRule === "tomorrow-morning" ? "active" : ""} onClick={() => setPresetForm((value) => ({ ...value, startAtRule: "tomorrow-morning", startAt: null }))} type="button">次日 06:00</button></span>{presetForm.startAtRule !== "absolute" && <small className="preset-rule-hint">已设为{presetForm.startAtRule === "tonight" ? "当天 24:00" : "次日 06:00"}，随日期自动变动，无需每天修改。</small>}</label>
       <label className="field"><span>初始状态</span><select value={presetForm.initialStatus} onChange={(event) => setPresetForm((value) => ({ ...value, initialStatus: event.target.value as LaunchPresetInput["initialStatus"] }))}><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
     </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、出价和时间等业务参数。</span></div>{!canManageLaunchPresets && <div className="preset-save-feedback warning"><strong>当前账号无预设管理权限</strong><span>登录角色为“{auth.status.user?.role ?? "未知"}”，无法保存广告预设；请切换至开发者、管理员或操作员账号。</span></div>}{presetFeedback && <div className={`preset-save-feedback ${presetFeedback.tone}`}><strong>{presetFeedback.title}</strong><span>{presetFeedback.lines[0]}</span></div>}<div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets} onClick={() => void savePreset()} title={canManageLaunchPresets ? undefined : "需要 launch:manage 权限"} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(freshPreset()); setPresetFeedback(null); }} type="button">取消编辑</button>}</div>
-      <div className="table-wrap"><table><thead><tr><th>预设</th><th>地区</th><th>预算</th><th>出价</th><th>创建时间</th><th>初始状态</th><th>操作</th></tr></thead><tbody>{presets.map((preset) => <tr key={preset.id}><td>{preset.name}</td><td>{preset.region}</td><td>{preset.dailyBudget}</td><td>{preset.bid ?? "自动"}</td><td>{preset.startAtRule === "tonight" ? "当天 24:00（每日自动）" : preset.startAtRule === "tomorrow-morning" ? "次日 06:00（每日自动）" : preset.startAt ? new Date(preset.startAt).toLocaleString() : "立即"}</td><td>{preset.initialStatus === "enabled" ? "开启" : "关闭"}</td><td><button disabled={busy} onClick={() => editPreset(preset)} type="button">编辑</button> <button disabled={busy} onClick={() => void removePreset(preset.id)} type="button">删除</button></td></tr>)}</tbody></table></div>
+      <div className="table-wrap"><table><thead><tr><th>预设</th><th>地区</th><th>预算模式</th><th>预算</th><th>出价</th><th>创建时间</th><th>初始状态</th><th>操作</th></tr></thead><tbody>{presets.map((preset) => { const mode = resolveConfiguredBudgetMode(preset.creationConfig); return <tr key={preset.id}><td>{preset.name}</td><td>{preset.region}</td><td>{mode === "campaign" ? "系列预算" : "广告组预算"}</td><td>{mode === "campaign" ? preset.campaignBudget ?? "未设置" : preset.dailyBudget}</td><td>{preset.bid ?? "自动"}</td><td>{preset.startAtRule === "tonight" ? "当天 24:00（每日自动）" : preset.startAtRule === "tomorrow-morning" ? "次日 06:00（每日自动）" : preset.startAt ? new Date(preset.startAt).toLocaleString() : "立即"}</td><td>{preset.initialStatus === "enabled" ? "开启" : "关闭"}</td><td><button disabled={busy} onClick={() => editPreset(preset)} type="button">编辑</button> <button disabled={busy} onClick={() => void removePreset(preset.id)} type="button">删除</button></td></tr>; })}</tbody></table></div>
     </div>}
 
     <details className="panel creation-config-panel"><summary><span><Settings2 size={18} /></span><div><strong>高级自定义参数</strong><small>真实创建映射随预设保存；日常投放无需展开</small></div><em className={advancedExecutionReady ? "status active" : "status warning"}>{advancedExecutionReady ? "参数映射完整" : "参数映射不完整"}</em></summary><div className="creation-config-body"><div className="creation-template-note"><strong>{advancedExecutionReady ? "当前预设参数映射完整" : "当前预设尚未完成参数映射"}</strong><span>{advancedExecutionReady ? "创建时使用当前账户 Cookie 会话并覆盖下列业务参数。" : "请按参数对照补全真实创建需要的业务映射；账户内部系列 ID 不作为跨账户必填项。"}</span></div><div className="creation-config-reference"><div><strong>参数</strong><strong>来源 / 获取位置</strong></div><div><span>营销目标、购买方式、预算方式</span><span>TikTok Ads Manager 新建推广系列页</span></div><div><span>计费方式、优化目标、转化事件、像素</span><span>广告组设置与事件管理器</span></div><div><span>广告身份、行动号召</span><span>广告创建页的身份与创意设置</span></div><div><span>地区与版位代码</span><span>广告组定向设置</span></div></div><button className="secondary-button creation-guide-button" onClick={() => { window.location.hash = "#manual"; }} type="button">查看完整参数对照与获取方式</button><div className="form-grid">
       <label className="field"><span>营销目标</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.objectiveType ?? ""} onChange={(event) => updateCreationConfig({ objectiveType: nullableInteger(event.target.value) })} /></label>
       <label className="field"><span>购买方式</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.buyingType ?? ""} onChange={(event) => updateCreationConfig({ buyingType: nullableInteger(event.target.value) })} /></label>
-      <label className="field"><span>系列预算方式</span><input inputMode="numeric" placeholder="例如 0" value={presetCreationConfig.campaignBudgetMode ?? ""} onChange={(event) => updateCreationConfig({ campaignBudgetMode: nullableInteger(event.target.value) })} /></label>
-      <label className="field"><span>广告组预算方式</span><input inputMode="numeric" placeholder="例如 0" value={presetCreationConfig.adBudgetMode ?? ""} onChange={(event) => updateCreationConfig({ adBudgetMode: nullableInteger(event.target.value) })} /></label>
+      {/* 系列/广告组的 budget_mode 由上方「预算模式」开关派生，不再手填原始数字：
+          手填的数字曾经只改 budget_mode 而不带金额，会发出畸形表单。 */}
       <label className="field"><span>计费方式</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.pricing ?? ""} onChange={(event) => updateCreationConfig({ pricing: nullableInteger(event.target.value) })} /></label>
       <label className="field"><span>优化目标</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.optimizeGoal ?? ""} onChange={(event) => updateCreationConfig({ optimizeGoal: nullableInteger(event.target.value) })} /></label>
       <label className="field"><span>转化事件</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.externalAction ?? ""} onChange={(event) => updateCreationConfig({ externalAction: nullableInteger(event.target.value) })} /></label>

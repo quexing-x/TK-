@@ -7,6 +7,7 @@ import {
   TikTokCreationPublishSource,
   splitVideoCodes,
   deriveTikTokCreationRequest,
+  formatCampaignBudgetAmount,
   normalizeProviderEntity,
   type CapturedCookieRequest,
   type ProviderEntity,
@@ -52,6 +53,7 @@ const capabilities = new Set<ProviderCapability>([
   "change-status",
   "create-campaigns",
   "copy-ads",
+  "copy-campaigns",
   "appeal-ads",
   "delete-ad-groups",
 ]);
@@ -65,7 +67,9 @@ type ParsedCookieCredential = ReturnType<
 export class CookieAdsProvider implements AdsProvider {
   readonly kind = "cookie" as const;
   readonly displayName = "Cookie 会话";
-  readonly capabilityVersion = "cookie-capabilities-v3-2026-07";
+  // v4：新增 copy-campaigns（系列级复制）。契约版本变更会让所有已接入账户显示
+  // “能力契约已更新，请重新检测连接”，重新检测后才会开放新能力。
+  readonly capabilityVersion = "cookie-capabilities-v4-2026-07";
   readonly capabilities = capabilities;
   private readonly creationBatchLocks = new Map<string, Promise<void>>();
 
@@ -94,6 +98,8 @@ export class CookieAdsProvider implements AdsProvider {
             "read-reports",
             "create-campaigns",
             "copy-ads",
+            // 系列级复制与广告组级复制共用同一条创建会话，没有额外的 cURL 要求。
+            "copy-campaigns",
           ] as const
         : []),
       ...(hasCompleteStatusTemplates ? ["change-status"] as const : []),
@@ -978,6 +984,544 @@ export class CookieAdsProvider implements AdsProvider {
       };
     }
   }
+
+  /**
+   * 系列级复制：把一个完整推广系列复制成一个新系列，并在发布前把广告组数量调整
+   * 到目标值。
+   *
+   * 链路（与真机后台一致）：
+   *   campaign_snap/copy → campaign_snap/save（改名 + 预算）
+   *   → ad_sketch/delete（删到目标组数）/ ad_snap/copy（补到目标组数）
+   *   → 逐组 ad_snap/save（改名、排期）
+   *   → snap/cbo_consistency_check（系列预算专属门禁）
+   *   → snap/batch_create_cta_id → async_creation/create_by_snap（一次原子发布）
+   *
+   * 系列预算(CBO)天然随复制继承，不需要额外设置；只有显式覆盖时才改写金额。
+   */
+  async copyCampaign(
+    context: ProviderContext,
+    input: {
+      sourceCampaignId: string;
+      campaignName: string;
+      /** 保留哪些源广告组，以及每个副本的新名称。顺序即发布顺序。 */
+      adGroups: Array<{ sourceAdGroupId: string; name: string }>;
+      initialStatus: "enabled" | "disabled";
+      scheduledStartAt?: string | null;
+      /** 覆盖系列日预算；留空表示继承源系列。 */
+      campaignBudget?: number | null;
+      bid?: number | null;
+      onBeforeDispatch?: () => void;
+    },
+  ): Promise<{
+    ok: boolean;
+    message: string;
+    campaignId?: string;
+    adGroupIds?: string[];
+    failureKind?: "failed" | "unknown";
+    retrySafe?: boolean;
+  }> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      return { ok: false, message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。" };
+    }
+    if (input.adGroups.length === 0) {
+      return { ok: false, message: "系列复制至少需要保留一个广告组。" };
+    }
+    const profile = credential.creationProfile;
+    const riskInfo = profile && isRecord(profile.publishPayload) && isRecord(profile.publishPayload.risk_info)
+      ? profile.publishPayload.risk_info
+      : {};
+    const dispatchState: CreationDispatchState = {
+      mutationDispatched: false,
+      acceptedMutationCount: 0,
+      ...(input.onBeforeDispatch ? { onBeforeMutationDispatch: input.onBeforeDispatch } : {}),
+    };
+    const scheduledStart = input.scheduledStartAt
+      ? parseNativeScheduleStart(input.scheduledStartAt)
+      : null;
+    let copyAccepted = false;
+    let published = false;
+    try {
+      // 1) 复制整个源系列（含全部广告组与创意）。
+      const copied = await requestCreationStep(
+        "campaign_snap/copy",
+        () => creationPathRequest(sessionRequest, "/mi/api/v4/i18n/creation/campaign_snap/copy/", {
+          campaign_id: input.sourceCampaignId,
+          name: input.campaignName,
+          resp_with_detail: true,
+          with_ad: true,
+          with_creative: true,
+          with_sketch: true,
+          risk_info: riskInfo,
+        }),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      // 只是产生了草稿，尚未发布任何正式对象；此时重试仍是安全的。
+      const draft = parseCopiedCampaignDraft(copied);
+      copyAccepted = true;
+
+      // 2) 按 origin_ad_id 把草稿组对回源广告组。这是响应里唯一显式的来源标识，
+      //    不能退化成按下标猜测——猜错会把创意挂到别的组上且不会报错。
+      const byOrigin = new Map<string, CopiedCampaignDraftGroup[]>();
+      for (const group of draft.groups) {
+        if (!group.originAdGroupId) continue;
+        const list = byOrigin.get(group.originAdGroupId) ?? [];
+        list.push(group);
+        byOrigin.set(group.originAdGroupId, list);
+      }
+      if (byOrigin.size === 0) {
+        throw new RetryableCreationError(
+          "系列复制草稿没有回带 origin_ad_id，无法确认每个草稿组来自哪个源广告组；已在发布前停止。",
+        );
+      }
+
+      const keptGroups: CopiedCampaignDraftGroup[] = [];
+      const renames: Array<{ adSnapId: string; name: string }> = [];
+      const consumed = new Set<string>();
+      // 需要额外复制的（同一个源组要出现多份）留到下一步用 ad_snap/copy 补。
+      const pendingDuplicates: Array<{ template: CopiedCampaignDraftGroup; name: string }> = [];
+      for (const wanted of input.adGroups) {
+        const candidates = byOrigin.get(wanted.sourceAdGroupId);
+        if (!candidates || candidates.length === 0) {
+          throw new RetryableCreationError(
+            `源广告组 ${wanted.sourceAdGroupId} 不在本次系列复制的草稿中；已在发布前停止。`,
+          );
+        }
+        const fresh = candidates.find((group) => !consumed.has(group.adSnapId));
+        if (fresh) {
+          consumed.add(fresh.adSnapId);
+          keptGroups.push(fresh);
+          renames.push({ adSnapId: fresh.adSnapId, name: wanted.name });
+        } else {
+          pendingDuplicates.push({ template: candidates[0]!, name: wanted.name });
+        }
+      }
+
+      // 3) 删掉没被选中的草稿组。ad_sketch/delete 按 ad_sketch_id 删。
+      const unused = draft.groups.filter((group) => !consumed.has(group.adSnapId));
+      if (unused.length > 0) {
+        await requestCreationStep(
+          "ad_sketch/delete",
+          () => creationPathRequest(sessionRequest, "/mi/api/v4/i18n/creation/ad_sketch/delete/", {
+            ad_sketch_ids: unused.map((group) => group.adSketchId),
+          }),
+          credential,
+          { semantics: "mutation", dispatchState },
+        );
+      }
+
+      // 4) 需要更多份时，在草稿系列内部复制广告组（用 campaign_snap_id，而不是
+      //    面向已发布系列的 existing_campaign_id 变体）。
+      for (const duplicate of pendingDuplicates) {
+        const copiedGroup = await requestCreationStep(
+          "ad_snap/copy",
+          () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/ad_snap/copy/", {
+            ad_params: [{
+              ad_snap_id: duplicate.template.adSnapId,
+              name_list: [duplicate.name],
+              with_creative_snap_ids: duplicate.template.creativeSnapIds,
+            }],
+            with_creative: true,
+            with_sketch: true,
+            resp_with_detail: true,
+            is_batch_copy: true,
+            campaign_snap_id: draft.campaignSnapId,
+            campaign_sketch_id: draft.campaignSketchId,
+            risk_info: riskInfo,
+          }),
+          credential,
+          { semantics: "mutation", dispatchState },
+        );
+        const data = isRecord(copiedGroup.data) ? copiedGroup.data : undefined;
+        const allCopy = data && isRecord(data.all_copy_result) ? data.all_copy_result : undefined;
+        const list = allCopy && Array.isArray(allCopy.ad_and_creative_copy_result_list)
+          ? allCopy.ad_and_creative_copy_result_list.filter(isRecord)
+          : [];
+        const item = list[0];
+        if (!item) {
+          throw new UnknownCreationStateError("草稿内广告组复制未返回结果，已停止发布。");
+        }
+        const adSnap = isRecord(item.new_ad_snap_info_item) ? item.new_ad_snap_info_item : {};
+        const adSnapId = nonEmptyId(adSnap.ad_snap_id);
+        const adSketchId = nonEmptyId(item.new_ad_sketch_id);
+        const creatives = Array.isArray(item.new_creative_snap_info_item_list)
+          ? item.new_creative_snap_info_item_list.filter(isRecord)
+          : [];
+        const creativeSketchIds = Array.isArray(item.new_creative_sketch_ids)
+          ? item.new_creative_sketch_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+          : [];
+        const creativeSnapIds = creatives
+          .map((creative) => nonEmptyId(creative.creative_snap_id))
+          .filter((id): id is string => Boolean(id));
+        if (!adSnapId || !adSketchId
+          || creativeSnapIds.length === 0
+          || creativeSnapIds.length !== creativeSketchIds.length) {
+          throw new UnknownCreationStateError("草稿内广告组复制返回的 snap/sketch 标识不完整，已停止发布。");
+        }
+        keptGroups.push({
+          adSnapId,
+          adSketchId,
+          originAdGroupId: duplicate.template.originAdGroupId,
+          creativeSnapIds,
+          creativeSketchIds,
+        });
+        renames.push({ adSnapId, name: duplicate.name });
+      }
+
+      // 5) 系列改名 + 预算。复制响应已经带回源系列的完整表单（含 CBO 字段），
+      //    只覆盖名称，金额仅在显式指定时归一化后改写。
+      const campaignForm = cloneRecord(draft.campaignForm);
+      campaignForm.campaign_name = input.campaignName;
+      campaignForm.campaign_snap_id = draft.campaignSnapId;
+      campaignForm.campaign_sketch_id = draft.campaignSketchId;
+      campaignForm.campaign_id = "";
+      if (input.campaignBudget !== undefined && input.campaignBudget !== null) {
+        campaignForm.budget = formatCampaignBudgetAmount(input.campaignBudget);
+      } else if (typeof campaignForm.budget === "string" && campaignForm.budget.trim() !== "") {
+        // 复制响应回的是 "88"，而 save 需要 "88.00"。不归一化会让回读校验误判。
+        const numeric = Number(campaignForm.budget);
+        if (Number.isFinite(numeric) && numeric > 0) {
+          campaignForm.budget = formatCampaignBudgetAmount(numeric);
+        }
+      }
+      await requestCreationStep(
+        "campaign_snap/save",
+        () => creationRequest(sessionRequest, "campaign_snap/save", {
+          campaign_sketch_form_data: campaignForm,
+          is_from_startup: false,
+          with_sketch: true,
+          risk_info: riskInfo,
+        }),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+
+      // 6) 逐组改名/排期。复用既有的「回读 snap/detail 后再保存」逻辑，同时用
+      //    回读到的 ad_sketch_id 校正发布项。系列预算下绝不覆盖组预算。
+      const publishItems = keptGroups.map(draftGroupToPublishItem);
+      await applyCopiedCampaignGroupOverrides({
+        sessionRequest,
+        credential,
+        dispatchState,
+        campaignSnapId: draft.campaignSnapId,
+        campaignSketchId: draft.campaignSketchId,
+        publishItems,
+        renames,
+        scheduledStart,
+        timezone: context.timezone ?? "UTC",
+        riskInfo,
+        ...(input.bid !== undefined ? { bid: input.bid } : {}),
+      });
+
+      // 7) 系列预算一致性门禁。真机在每次结构变化后都会调；返回非 all_success
+      //    时必须停在发布之前。
+      const consistency = await requestCreationStep(
+        "snap/cbo_consistency_check",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/cbo_consistency_check/", {
+          campaign_snap_id: draft.campaignSnapId,
+          adgroup_snap_ids: publishItems.map((item) => item.ad_snap_id),
+          ad_snap_ids: publishItems.map((item) => item.ad_snap_id),
+          is_budget_split_test: false,
+        }),
+        credential,
+        { semantics: "support", dispatchState },
+      );
+      const consistencyData = isRecord(consistency.data) ? consistency.data : undefined;
+      if (consistencyData && consistencyData.is_all_success === false) {
+        throw new ConfirmedCreationFailureError(
+          "系列预算一致性校验未通过，已在发布前停止。请检查系列预算与各广告组的出价设置。",
+          true,
+        );
+      }
+
+      // 8) CTA + 发布。新系列用 campaign_snap_id/campaign_sketch_id，整批发布。
+      await requestCreationStep(
+        "snap/batch_create_cta_id",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
+          campaign_id: "",
+          campaign_snap_id: draft.campaignSnapId,
+          ad_and_creative_snap_info_list: publishItems.map((item) => ({
+            ad_id: "",
+            ad_snap_id: item.ad_snap_id,
+            creative_snap_ids: item.creative_snap_info_list.map((creative) => creative.creative_snap_id),
+          })),
+        }),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      const publishPayload = profile
+        ? materializePublishProfile(profile.publishPayload, {
+            campaignSnapId: draft.campaignSnapId,
+            campaignSketchId: draft.campaignSketchId,
+            publishItems,
+            initialStatus: scheduledStart ? "enabled" : input.initialStatus,
+          })
+        : buildPublishInput({
+            campaignSnapId: draft.campaignSnapId,
+            campaignSketchId: draft.campaignSketchId,
+            adAndCreativeSnapInfoList: publishItems,
+          }, scheduledStart ? "enabled" : input.initialStatus);
+      publishPayload.campaign_id = "";
+      publishPayload.campaign_snap_id = draft.campaignSnapId;
+      publishPayload.campaign_sketch_id = draft.campaignSketchId;
+      publishPayload.is_partial_publish = false;
+      if (scheduledStart && scheduledStart.getTime() <= Date.now()) {
+        throw new UnknownCreationStateError("TikTok 原生排期在发布前已到期；草稿已创建，已停止发布并禁止自动重试。");
+      }
+      const publishedResponse = await requestCreationStep(
+        "create_by_snap",
+        () => creationRequest(sessionRequest, "async_creation/create_by_snap", publishPayload),
+        credential,
+        { semantics: "mutation", dispatchState },
+      );
+      published = true;
+      const completed = await awaitCreationResult(sessionRequest, credential, publishedResponse);
+      const completedCounts = completedCreationCounts(completed);
+      const officialAdGroupIds = completedAdGroupIds(completed);
+      const expectedCreativeCount = publishItems.reduce(
+        (total, item) => total + item.creative_snap_info_list.length,
+        0,
+      );
+      if (
+        completedCounts.adGroupCount !== publishItems.length
+        || completedCounts.creativeCount !== expectedCreativeCount
+        || officialAdGroupIds.length !== publishItems.length
+      ) {
+        throw new UnknownCreationStateError(
+          `TikTok 创建终态不完整：广告组 ${completedCounts.adGroupCount}/${publishItems.length}，广告 ${completedCounts.creativeCount}/${expectedCreativeCount}；禁止自动重试。`,
+        );
+      }
+      return {
+        ok: true,
+        message: `系列复制已发布 1 个系列、${publishItems.length} 个广告组`,
+        adGroupIds: officialAdGroupIds,
+      };
+    } catch (cause) {
+      return {
+        ok: false,
+        message: cause instanceof Error ? cause.message : "系列复制失败",
+        failureKind: cause instanceof ConfirmedCreationFailureError
+          ? "failed"
+          : cause instanceof UnknownCreationStateError || published
+            ? "unknown"
+            : "failed",
+        // 只产生草稿时重试是安全的（草稿不投放，也不占用正式系列名）；一旦
+        // create_by_snap 发出去，就不再允许自动重试。
+        retrySafe: cause instanceof ConfirmedCreationFailureError
+          ? cause.retrySafe && !published
+          : !published,
+      };
+    }
+  }
+}
+
+/**
+ * 系列复制专用的逐组保存：只改名字与排期，绝不写组预算——新系列继承源系列的
+ * 预算模式，写组预算会直接触发真机的
+ * budget_auto_adjust_initial_budget_not_equal_campaign_budget。
+ */
+async function applyCopiedCampaignGroupOverrides(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  campaignSnapId: string;
+  campaignSketchId: string;
+  publishItems: DraftPublishItem[];
+  renames: Array<{ adSnapId: string; name: string }>;
+  scheduledStart: Date | null;
+  timezone: string;
+  riskInfo: Record<string, unknown>;
+  bid?: number | null;
+}): Promise<void> {
+  const nameBySnapId = new Map(input.renames.map((item) => [item.adSnapId, item.name]));
+  const adSnapIds = input.publishItems.map((item) => item.ad_snap_id);
+  const startTime = input.scheduledStart
+    ? formatProviderDateTime(input.scheduledStart, input.timezone)
+    : null;
+  const forms = await readAdSnapForms(
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    adSnapIds,
+  );
+  for (const publishItem of input.publishItems) {
+    const sourceForm = forms.get(publishItem.ad_snap_id);
+    if (!sourceForm) {
+      throw new UnknownCreationStateError(
+        `TikTok 草稿详情缺少广告组 ${publishItem.ad_snap_id}，已停止发布。`,
+      );
+    }
+    const form = cloneRecord(sourceForm);
+    const formSnapId = nonEmptyId(form.ad_snap_id);
+    if (formSnapId && formSnapId !== publishItem.ad_snap_id) {
+      throw new UnknownCreationStateError("TikTok 草稿详情的广告组标识不一致，已停止发布。");
+    }
+    // 以回读到的 sketch id 为准：这是 ad_sketch/delete 与发布共同依赖的标识。
+    const formSketchId = nonEmptyId(form.ad_sketch_id);
+    if (formSketchId) {
+      publishItem.ad_sketch_id = formSketchId;
+    } else {
+      form.ad_sketch_id = publishItem.ad_sketch_id;
+    }
+    const name = nameBySnapId.get(publishItem.ad_snap_id);
+    if (name) form.ad_name = name;
+    if (input.bid !== undefined && input.bid !== null) {
+      form.cpa_bid = String(input.bid);
+    }
+    if (input.scheduledStart && startTime) {
+      form.schedule_type = 1;
+      form.start_time = startTime;
+      const existingEndTime = typeof form.end_time === "string" ? form.end_time.trim() : "";
+      if (!existingEndTime || existingEndTime <= startTime) {
+        const end = new Date(input.scheduledStart);
+        end.setUTCFullYear(end.getUTCFullYear() + 10);
+        form.end_time = formatProviderDateTime(end, input.timezone);
+      }
+    }
+    await requestCreationStep(
+      "ad_snap/save",
+      () => creationPathRequest(input.sessionRequest, "/api/v4/i18n/creation/ad_snap/save/", {
+        ad_sketch_form_data: form,
+        spc_upgrade_mode: typeof form.spc_upgrade_mode === "number" ? form.spc_upgrade_mode : 1,
+        with_sketch: true,
+        is_skip_check_fields: false,
+        campaign_snap_id: input.campaignSnapId,
+        campaign_sketch_id: input.campaignSketchId,
+        risk_info: input.riskInfo,
+      }),
+      input.credential,
+      { semantics: "mutation", dispatchState: input.dispatchState },
+    );
+  }
+
+  const verifiedForms = await readAdSnapForms(
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    adSnapIds,
+  );
+  for (const publishItem of input.publishItems) {
+    const verified = verifiedForms.get(publishItem.ad_snap_id);
+    if (!verified) {
+      throw new UnknownCreationStateError("TikTok 广告组草稿修改未能回读确认，已停止发布。");
+    }
+    const name = nameBySnapId.get(publishItem.ad_snap_id);
+    if (name && String(verified.ad_name) !== name) {
+      throw new UnknownCreationStateError("TikTok 广告组名称未能回读确认，已停止发布。");
+    }
+    if (startTime && (Number(verified.schedule_type) !== 1 || verified.start_time !== startTime)) {
+      throw new UnknownCreationStateError("TikTok 原生排期未能回读确认，已停止发布。");
+    }
+  }
+}
+
+/** 系列级复制里，一个草稿广告组连同它的创意草稿。 */
+interface CopiedCampaignDraftGroup {
+  adSnapId: string;
+  adSketchId: string;
+  /** 该草稿组克隆自哪个源广告组（TikTok 在草稿表单里显式回带）。 */
+  originAdGroupId: string | null;
+  creativeSnapIds: string[];
+  creativeSketchIds: string[];
+}
+
+interface CopiedCampaignDraft {
+  campaignSnapId: string;
+  campaignSketchId: string;
+  campaignForm: Record<string, unknown>;
+  groups: CopiedCampaignDraftGroup[];
+}
+
+/**
+ * 解析 campaign_snap/copy 的响应。
+ *
+ * 这里刻意不依赖「响应里两个平行集合按下标一一对应」这个假设——多组场景下一旦
+ * 顺序错位，会把 A 组的创意挂到 B 组上，而且发布会成功、不报错。改用显式键：
+ * - `new_ad_and_creative_snap_info_item_map` 以 ad_snap_id 为键；
+ * - `new_ad_and_creative_sketch_ids_map` 以 ad_sketch_id 为键；
+ * - 两者之间的 ad_snap_id ↔ ad_sketch_id 关系由 snap/detail 回读确定。
+ */
+function parseCopiedCampaignDraft(payload: Record<string, unknown>): CopiedCampaignDraft {
+  const data = isRecord(payload.data) ? payload.data : undefined;
+  if (!data) throw new UnknownCreationStateError("系列复制响应缺少 data。");
+  const campaignItem = isRecord(data.new_campaign_snap_info_item)
+    ? data.new_campaign_snap_info_item
+    : undefined;
+  const campaignSnapId = campaignItem ? nonEmptyId(campaignItem.campaign_snap_id) : undefined;
+  const campaignSketchId = nonEmptyId(data.new_campaign_sketch_id);
+  const campaignForm = campaignItem && isRecord(campaignItem.campaign_snap_form_data)
+    ? campaignItem.campaign_snap_form_data
+    : undefined;
+  if (!campaignSnapId || !campaignSketchId || !campaignForm) {
+    throw new UnknownCreationStateError("系列复制响应缺少系列草稿的 snap/sketch 标识。");
+  }
+  const adItems = Array.isArray(data.new_ad_snap_info_item_list)
+    ? data.new_ad_snap_info_item_list.filter(isRecord)
+    : [];
+  if (adItems.length === 0) {
+    throw new UnknownCreationStateError("系列复制响应没有返回任何广告组草稿。");
+  }
+  const snapMap = isRecord(data.new_ad_and_creative_snap_info_item_map)
+    ? data.new_ad_and_creative_snap_info_item_map
+    : {};
+  const adSketchIds = Array.isArray(data.new_ad_sketch_ids) ? data.new_ad_sketch_ids : [];
+  const sketchMap = isRecord(data.new_ad_and_creative_sketch_ids_map)
+    ? data.new_ad_and_creative_sketch_ids_map
+    : {};
+  if (adSketchIds.length !== adItems.length) {
+    throw new UnknownCreationStateError(
+      `系列复制响应的广告组草稿与 sketch 数量不一致（${adItems.length} / ${adSketchIds.length}）。`,
+    );
+  }
+  const groups = adItems.map((item, index) => {
+    const adSnapId = nonEmptyId(item.ad_snap_id);
+    const adSketchId = nonEmptyId(adSketchIds[index]);
+    if (!adSnapId || !adSketchId) {
+      throw new UnknownCreationStateError(`系列复制响应第 ${index + 1} 个广告组草稿缺少标识。`);
+    }
+    const form = isRecord(item.ad_snap_form_data) ? item.ad_snap_form_data : {};
+    const creativeItems = Array.isArray(snapMap[adSnapId])
+      ? (snapMap[adSnapId] as unknown[]).filter(isRecord)
+      : [];
+    const creativeSketchIds = Array.isArray(sketchMap[adSketchId])
+      ? (sketchMap[adSketchId] as unknown[]).map(nonEmptyId).filter((id): id is string => Boolean(id))
+      : [];
+    const creativeSnapIds = creativeItems
+      .map((creative) => nonEmptyId(creative.creative_snap_id))
+      .filter((id): id is string => Boolean(id));
+    if (creativeSnapIds.length === 0 || creativeSnapIds.length !== creativeSketchIds.length) {
+      throw new UnknownCreationStateError(
+        `系列复制响应第 ${index + 1} 个广告组的创意草稿映射不完整（snap ${creativeSnapIds.length} / sketch ${creativeSketchIds.length}）。`,
+      );
+    }
+    return {
+      adSnapId,
+      adSketchId,
+      originAdGroupId: nonEmptyId(form.origin_ad_id) ?? null,
+      creativeSnapIds,
+      creativeSketchIds,
+    };
+  });
+  return { campaignSnapId, campaignSketchId, campaignForm, groups };
+}
+
+function draftGroupToPublishItem(group: CopiedCampaignDraftGroup): DraftPublishItem {
+  return {
+    ad_id: "",
+    ad_snap_id: group.adSnapId,
+    ad_sketch_id: group.adSketchId,
+    need_publish: true,
+    creative_snap_info_list: group.creativeSnapIds.map((creativeSnapId, index) => ({
+      creative_id: "",
+      creative_snap_id: creativeSnapId,
+      creative_sketch_id: group.creativeSketchIds[index] ?? "",
+      need_publish: true as const,
+    })),
+  };
 }
 
 async function materializeSimpleCopyCreativeDrafts(input: {

@@ -175,4 +175,90 @@ describe("normalizeProviderEntity — 系列预算(CBO) 识别", () => {
   it("缺少系列预算字段时保守判为非 CBO", () => {
     expect(normalizeProviderEntity(adGroup({ ad_budget: "50.00" })).campaignBudgetOptimized).toBe(false);
   });
+
+  it("CBO 广告组没有自己的预算，budget 指标必须留空而不是回退到系列预算", () => {
+    const snapshot = normalizeProviderEntity(adGroup({
+      campaign_budget_mode: "3",
+      campaign_budget: "200.00",
+    }));
+    expect(snapshot.campaignBudget).toBe(200);
+    expect(snapshot.metrics.budget).toBeNull();
+  });
+
+  it("ABO 广告组的 budget 指标取组自身预算", () => {
+    expect(normalizeProviderEntity(adGroup({
+      campaign_budget_mode: "-1",
+      campaign_budget: "0.00",
+      ad_budget: "50.00",
+    })).metrics.budget).toBe(50);
+
+    expect(normalizeProviderEntity(adGroup({ budget: "35.00" })).metrics.budget).toBe(35);
+  });
+
+  const campaign = (payload: Record<string, unknown>): ProviderEntity => ({
+    entityType: "campaign",
+    externalId: "campaign-1",
+    payload,
+  });
+
+  it("系列行用自身的 budget / budget_mode / budget_optimize_switch 判定 CBO", () => {
+    const cbo = normalizeProviderEntity(campaign({
+      campaign_name: "CBO 系列",
+      budget: "88.00",
+      budget_mode: 3,
+      budget_optimize_switch: 1,
+    }));
+    expect(cbo.campaignBudgetOptimized).toBe(true);
+    expect(cbo.campaignBudget).toBe(88);
+    expect(cbo.metrics.budget).toBe(88);
+
+    const abo = normalizeProviderEntity(campaign({
+      campaign_name: "ABO 系列",
+      budget: "",
+      budget_mode: -1,
+      budget_optimize_switch: 0,
+    }));
+    expect(abo.campaignBudgetOptimized).toBe(false);
+    expect(abo.metrics.budget).toBeNull();
+  });
+
+  it("系列层预算规则受层级开关和 automationEnabled 双重保护", () => {
+    const budgetThreshold: ThresholdConfig = {
+      ...threshold,
+      id: "threshold-budget",
+      code: "BUDGET",
+      metric: "budget",
+      entityType: "campaign",
+      value: 200,
+      minimumSpend: 0,
+      automationEnabled: false,
+    };
+    const cboCampaign = campaign({
+      campaign_name: "CBO 系列",
+      campaign_primary_status: "enable",
+      budget: "888.00",
+      budget_mode: 3,
+      budget_optimize_switch: 1,
+    });
+
+    // 规则本身未启用自动执行：不产生候选。
+    expect(evaluateAutomation([cboCampaign], [budgetThreshold], {
+      ...createDefaultAutomationSwitches(),
+      manageCampaignStatus: true,
+    }).candidates).toHaveLength(0);
+
+    // 打开自动执行但系列层开关关闭：仍然不产生候选。
+    expect(evaluateAutomation(
+      [cboCampaign],
+      [{ ...budgetThreshold, automationEnabled: true }],
+      { ...createDefaultAutomationSwitches(), manageCampaignStatus: false },
+    ).candidates).toHaveLength(0);
+
+    // 两个开关都打开时才会命中——确认这条默认规则对 CBO 系列确实有杀伤力。
+    expect(evaluateAutomation(
+      [cboCampaign],
+      [{ ...budgetThreshold, automationEnabled: true }],
+      { ...createDefaultAutomationSwitches(), manageCampaignStatus: true },
+    ).candidates).toHaveLength(1);
+  });
 });

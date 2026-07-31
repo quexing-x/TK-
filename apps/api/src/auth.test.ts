@@ -237,6 +237,11 @@ describe("local authentication and authorization", () => {
     )).toBe("ads:operate");
   });
 
+  it("requires launch management permission for campaign copy", () => {
+    // 兜底规则对非 DELETE 返回 null（等于不校验权限），所以这条必须显式命中。
+    expect(requiredPermission("POST", "/api/campaigns/copy")).toBe("launch:manage");
+  });
+
   it("requires automation execution permission for resetting the write circuit", () => {
     expect(requiredPermission(
       "POST",

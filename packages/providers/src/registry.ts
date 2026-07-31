@@ -26,6 +26,28 @@ import type {
   TemplateCopyMutation,
 } from "./types.js";
 
+export interface CopyCampaignInput {
+  sourceCampaignId: string;
+  campaignName: string;
+  /** 保留哪些源广告组，以及每个副本的新名称。顺序即发布顺序。 */
+  adGroups: Array<{ sourceAdGroupId: string; name: string }>;
+  initialStatus: "enabled" | "disabled";
+  scheduledStartAt?: string | null;
+  /** 覆盖系列日预算；留空表示继承源系列。 */
+  campaignBudget?: number | null;
+  bid?: number | null;
+  onBeforeDispatch?: () => void;
+}
+
+export interface CopyCampaignResult {
+  ok: boolean;
+  message: string;
+  campaignId?: string;
+  adGroupIds?: string[];
+  failureKind?: "failed" | "unknown";
+  retrySafe?: boolean;
+}
+
 export class ProviderRegistry {
   private readonly providers = new Map<ProviderKind, AdsProvider>();
 
@@ -254,6 +276,23 @@ export class ProviderRegistry {
       throw new RetryableCreationError("当前接入不支持广告组级复制。");
     }
     return provider.copyAdGroupToExistingCampaign(context, input);
+  }
+
+  async copyCampaign(
+    kind: ProviderKind,
+    context: ProviderContext,
+    input: CopyCampaignInput,
+  ): Promise<CopyCampaignResult> {
+    const provider = this.get(kind) as unknown as {
+      copyCampaign?: (
+        context: ProviderContext,
+        input: CopyCampaignInput,
+      ) => Promise<CopyCampaignResult>;
+    };
+    if (!provider.copyCampaign || !this.get(kind).capabilities.has("copy-campaigns")) {
+      throw new RetryableCreationError("当前接入不支持系列级复制。");
+    }
+    return provider.copyCampaign(context, input);
   }
 
   async createFromPreset(

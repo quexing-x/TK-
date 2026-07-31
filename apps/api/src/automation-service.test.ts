@@ -1558,7 +1558,7 @@ describe("AutomationService", () => {
     };
     const scheduler = new AutomationScheduler(store, service, dispatcher);
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+    vi.setSystemTime(futureShanghaiTime(10));
 
     await scheduler.tick();
     await scheduler.tick();
@@ -1578,7 +1578,7 @@ describe("AutomationService", () => {
     provider.adGroupStatus = "disable";
     const scheduler = new AutomationScheduler(store, service);
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+    vi.setSystemTime(futureShanghaiTime(10));
 
     await scheduler.tick();
 
@@ -1609,7 +1609,7 @@ describe("AutomationService", () => {
     };
     const scheduler = new AutomationScheduler(store, service, dispatcher);
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+    vi.setSystemTime(futureShanghaiTime(10));
 
     await expect(scheduler.tick()).resolves.toBeUndefined();
 

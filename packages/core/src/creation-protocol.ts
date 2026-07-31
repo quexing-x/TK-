@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { CapturedCookieRequest, CookieCreationProfile } from "./connection.js";
-import type { CreationPresetConfig, LaunchConfigurationRow } from "./launch.js";
+import { resolveConfiguredBudgetMode, type CreationPresetConfig, type LaunchConfigurationRow } from "./launch.js";
+import { resolveBudgetFields, type ResolvedBudgetFields } from "./budget-mode.js";
 
 /** Confirmed TikTok draft-to-publish sequence.  Values are deliberately
  * account-neutral; credentials and dynamic signatures never belong here. */
@@ -110,6 +111,12 @@ export function buildDraftPayloads(
   if (required.length > 0) throw new CreationPresetIncompleteError(required);
   const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
   const smartPlus = config.objectiveType === 3;
+  const budget = resolveBudgetFields({
+    budgetMode: resolveConfiguredBudgetMode(config),
+    campaignBudget: row.campaignBudget ?? null,
+    adGroupBudget: row.dailyBudget,
+    smartPlus,
+  });
   const allAgeRanges = [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]];
   return {
     campaign: {
@@ -120,9 +127,17 @@ export function buildDraftPayloads(
         campaign_sketch_id: "",
         objective_type: config.objectiveType,
         buying_type: config.buyingType,
-        budget_mode: config.campaignBudgetMode,
-        budget: "0",
+        budget_mode: budget.campaign.budget_mode,
+        budget: budget.campaign.budget,
         industry_types: [],
+        // 非智能+ 系列的历史载荷不带预算优化字段，保持原样；但系列预算(CBO)必须
+        // 显式声明开关，否则 budget_mode=3 会被当成未开启 CBO 处理。
+        ...(!smartPlus && budget.campaign.budget_optimize_switch === 1
+          ? {
+              budget_optimize_switch: 1,
+              budget_auto_adjust: budget.campaign.budget_auto_adjust,
+            }
+          : {}),
         ...(smartPlus ? {
           app_campaign_type: 0,
           ba_campaign_type: 0,
@@ -157,8 +172,8 @@ export function buildDraftPayloads(
           traffic_catalog_toggle: 0,
           bid: "0",
           cpa_bid: "0",
-          budget_optimize_switch: 0,
-          budget_auto_adjust: { is_enabled: 0, initial_budget: "0", strategy: 0 },
+          budget_optimize_switch: budget.campaign.budget_optimize_switch,
+          budget_auto_adjust: budget.campaign.budget_auto_adjust,
         } : {}),
       },
       is_from_startup: false,
@@ -183,8 +198,8 @@ export function buildDraftPayloads(
         schedule_type: 1,
         start_time: startTime,
         end_time: endTime,
-        budget_mode: config.adBudgetMode,
-        budget: String(row.dailyBudget),
+        budget_mode: budget.adGroup.budget_mode,
+        budget: budget.adGroup.budget,
         pricing: config.pricing,
         // For oCPM, the cost cap belongs to cpa_bid. `bid` is the legacy CPM
         // field and must stay empty; sending the CPA value in both fields makes
@@ -277,16 +292,7 @@ export function buildDraftPayloads(
           ...(config.identityType !== 5 ? { spc_upgrade_mode: 1 } : {}),
           spc_multi_ad_mode: 1,
         } : {}),
-        budget_auto_adjust: smartPlus
-          ? {
-              is_enabled: 2,
-              initial_budget: "0",
-              strategy: 1,
-              increase_percentage: 20,
-              max_increase_times: 10,
-              auto_reset_next_day: false,
-            }
-          : { is_enabled: 0, initial_budget: "0", strategy: 0 },
+        budget_auto_adjust: budget.adGroup.budget_auto_adjust,
         week_schedule: [[], [], [], [], [], [], []],
       },
     },
@@ -374,7 +380,7 @@ export function buildProfileDraftPayloads(
   campaignForm.campaign_name = row.campaignName;
   campaignForm.campaign_id = ""; campaignForm.campaign_snap_id = ""; campaignForm.campaign_sketch_id = "";
   delete campaignForm.origin_campaign_id;
-  adForm.ad_name = row.adGroupName; adForm.budget = String(row.dailyBudget);
+  adForm.ad_name = row.adGroupName;
   adForm.origin_ad_id = 0;
   adForm.ad_snap_id = "";
   adForm.ad_sketch_id = "";
@@ -395,8 +401,37 @@ export function buildProfileDraftPayloads(
   if (customConfig && requiredCreationFields(customConfig).length === 0) {
     applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig);
   }
+  // 预算字段最后写，压过抓包模板和 config 覆盖里的旧值。它不依赖 config 是否完整：
+  // 模板不完整时也必须保证「持有预算的那一层」正确，否则会发出一个声明了系列预算
+  // 却把金额留在广告组上的畸形表单。
+  applyResolvedBudgetFields(campaignForm, adForm, resolveBudgetFields({
+    budgetMode: resolveConfiguredBudgetMode(customConfig),
+    campaignBudget: row.campaignBudget ?? null,
+    adGroupBudget: row.dailyBudget,
+    smartPlus: (customConfig?.objectiveType ?? numberOrNull(campaignForm.objective_type)) === 3,
+  }));
   if (campaignForm.industry_types === undefined) campaignForm.industry_types = [];
   return { campaign, adGroup, creative };
+}
+
+function numberOrNull(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+/** 把解析后的预算字段写进两层表单。两层互斥，必须成对写入。 */
+function applyResolvedBudgetFields(
+  campaignForm: Record<string, unknown>,
+  adForm: Record<string, unknown>,
+  budget: ResolvedBudgetFields,
+): void {
+  campaignForm.budget_mode = budget.campaign.budget_mode;
+  campaignForm.budget = budget.campaign.budget;
+  campaignForm.budget_optimize_switch = budget.campaign.budget_optimize_switch;
+  campaignForm.budget_auto_adjust = budget.campaign.budget_auto_adjust;
+  adForm.budget_mode = budget.adGroup.budget_mode;
+  adForm.budget = budget.adGroup.budget;
+  adForm.budget_auto_adjust = budget.adGroup.budget_auto_adjust;
 }
 function applyCreationConfigOverrides(
   campaignForm: Record<string, unknown>,
@@ -408,7 +443,7 @@ function applyCreationConfigOverrides(
   const allAgeRanges = [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]];
   campaignForm.objective_type = config.objectiveType;
   campaignForm.buying_type = config.buyingType;
-  campaignForm.budget_mode = config.campaignBudgetMode;
+  // 预算字段由 applyResolvedBudgetFields 在本函数之后统一写入。
   if (smartPlus) {
     Object.assign(campaignForm, {
       app_campaign_type: 0,
@@ -444,11 +479,8 @@ function applyCreationConfigOverrides(
       traffic_catalog_toggle: 0,
       bid: "0",
       cpa_bid: "0",
-      budget_optimize_switch: 0,
-      budget_auto_adjust: { is_enabled: 0, initial_budget: "0", strategy: 0 },
     });
   }
-  adForm.budget_mode = config.adBudgetMode;
   adForm.coming_source_type = 1;
   adForm.sketch_publish_source = 1;
   adForm.pricing = config.pricing;
@@ -463,16 +495,6 @@ function applyCreationConfigOverrides(
   adForm.optimization_source = 0;
   adForm.roas_bid = "0";
   adForm.cpa_skip_first_phrase = 1;
-  adForm.budget_auto_adjust = smartPlus
-    ? {
-        is_enabled: 2,
-        initial_budget: "0",
-        strategy: 1,
-        increase_percentage: 20,
-        max_increase_times: 10,
-        auto_reset_next_day: false,
-      }
-    : { is_enabled: 0, initial_budget: "0", strategy: 0 };
   adForm.ad_ref_pixel_id = config.pixelId ?? "";
   adForm.automated_targeting = config.objectiveType === 3 ? 0 : config.smartTargeting ? 1 : 0;
   if (smartPlus) {
@@ -634,8 +656,7 @@ function requiredCreationFields(config: Partial<CreationPresetConfig>): string[]
   const fields: Array<[string, unknown]> = [
     ["营销目标", config.objectiveType],
     ["购买方式", config.buyingType],
-    ["系列预算方式", config.campaignBudgetMode],
-    ["广告组预算方式", config.adBudgetMode],
+    // 两层的 budget_mode 已由 budgetMode 派生，不再要求用户填写原始数字。
     ["计费方式", config.pricing],
     ["优化目标", config.optimizeGoal],
     ["转化事件", config.externalAction],
