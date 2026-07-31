@@ -1621,7 +1621,31 @@ async function loadProviderContext(
 
 function getSafeProviderError(cause: unknown): string {
   if (!(cause instanceof Error)) return "连接检测失败。";
-  return cause.name === "TimeoutError" ? "连接检测超时。" : cause.message;
+  if (cause.name === "TimeoutError") return "连接检测超时。";
+  const detail = describeErrorCause(cause);
+  return detail ? `${cause.message}（${detail}）` : cause.message;
+}
+
+/**
+ * 展开 Error.cause 链上的底层原因。
+ *
+ * undici 的网络失败一律只留一句 `fetch failed`，真正的原因（ECONNREFUSED /
+ * ENOTFOUND / 证书错误等）藏在 cause 里。不展开的话，用户和排障都只能看到一句
+ * 没有任何指向性的话。
+ *
+ * 只取错误码；没有错误码时才退回到 message，并截断长度——避免把上游返回的长文本
+ * 原样写进审计记录。
+ */
+export function describeErrorCause(error: Error): string {
+  const parts: string[] = [];
+  let current: unknown = (error as { cause?: unknown }).cause;
+  for (let depth = 0; current instanceof Error && depth < 4; depth += 1) {
+    const code = (current as NodeJS.ErrnoException).code;
+    const text = (code ?? current.message ?? "").trim().slice(0, 120);
+    if (text && !parts.includes(text)) parts.push(text);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return parts.join(" ← ");
 }
 
 function isMutation(method: string): boolean {

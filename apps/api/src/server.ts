@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { AutomationStore } from "@tk-auto/storage";
 import { WindowsDpapiCredentialVault } from "@tk-auto/credentials";
 import { createApp } from "./app.js";
-import { installOutboundProxy, resolveOutboundProxy } from "./proxy.js";
+import { installOutboundProxy, resolveOutboundProxy, startOutboundProxyWatcher } from "./proxy.js";
 
 const packageDirectory = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const databasePath =
@@ -35,7 +35,22 @@ if (proxyConfig) {
   );
 }
 
+// 出站代理不能只在启动时解析一次：后台调度器开机自启，常比 VPN / 代理客户端先
+// 起来，那一刻解析到的结果（直连，或指向尚未监听的端口）会冻结整个进程生命周期。
+const proxyWatcher = startOutboundProxyWatcher({
+  initial: proxyConfig,
+  onChange: (next, previous) => {
+    app.log.warn(
+      { from: previous?.source ?? "direct", to: next?.source ?? "direct" },
+      next
+        ? "Outbound proxy changed; switched global dispatcher"
+        : "Outbound proxy removed; switched back to direct connections",
+    );
+  },
+});
+
 const shutdown = async () => {
+  proxyWatcher.stop();
   await app.close();
   await proxyAgent?.close();
   store.close();
