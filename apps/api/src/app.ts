@@ -634,6 +634,27 @@ export async function createApp(
     }
   });
 
+  app.post("/api/campaigns/copy", async (request, reply) => {
+    const input = z.object({
+      accountId: z.string().min(1),
+      sources: z.array(z.object({
+        sourceCampaignId: z.string().min(1),
+        sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(50),
+      })).min(1).max(20),
+      campaignCopies: z.number().int().min(1).max(20),
+      groupsPerCampaign: z.number().int().min(1).max(20),
+      initialStatus: z.enum(["enabled", "disabled"]).default("disabled"),
+      scheduledStartAt: z.string().datetime().nullable().default(null),
+      campaignBudget: z.number().positive().nullable().default(null),
+      bid: z.number().nonnegative().nullable().default(null),
+    }).parse(request.body);
+    try {
+      return reply.send(await launchService.copyCampaign(input));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   app.post("/api/ad-groups/batch-expand", async (request, reply) => {
     const input = z.object({
       sources: z.array(z.object({
@@ -1657,6 +1678,8 @@ export function requiredPermission(
   }
   if (path.includes("/manual-takeovers")) return "ads:operate";
   if (path.startsWith("/api/ad-groups")) return "ads:operate";
+  // 不能依赖函数末尾的兜底：那条规则对非 DELETE 返回 null，等于放行无权限校验。
+  if (path.startsWith("/api/campaigns")) return "launch:manage";
   if (path.startsWith("/api/launch-plans") || path.startsWith("/api/launch-presets")) return "launch:manage";
   if (path.startsWith("/api/accounts")) return "accounts:manage";
   return method === "DELETE" ? "system:control" : null;

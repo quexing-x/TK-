@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
+  assertCampaignNameAvailable,
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
+  planCampaignCopy,
   stripAutomaticAdGroupNameSuffixes,
   type ProviderKind,
   type ReadOnlySyncResult,
@@ -767,6 +769,193 @@ export class LaunchService {
       }
     }
     return results;
+  }
+
+  /**
+   * 系列级复制：把一个源系列复制成 N 个新系列，每个新系列放 M 个广告组。
+   *
+   * 这是系列预算(CBO)的放量路径——往同一个 CBO 系列里加广告组不会增加预算，
+   * 只会摊薄；每个系列副本各自持有一份系列预算才是真正的放量。
+   *
+   * 幂等：相同 (账户 + 源系列 + 系列名 + 分配 + 预算模式) 已成功则跳过。
+   */
+  async copyCampaign(input: {
+    accountId: string;
+    /** 多个源系列时逐个独立套用同一套 N/M 分配。 */
+    sources: Array<{ sourceCampaignId: string; sourceAdGroupIds: string[] }>;
+    campaignCopies: number;
+    groupsPerCampaign: number;
+    initialStatus: "enabled" | "disabled";
+    scheduledStartAt?: string | null;
+    /** 覆盖系列日预算；留空继承源系列。 */
+    campaignBudget?: number | null;
+    bid?: number | null;
+  }): Promise<{
+    createdCampaigns: number;
+    createdGroups: number;
+    skipped: number;
+    failed: Array<{ name: string; message: string }>;
+    plan: Array<{
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      campaigns: ReturnType<typeof planCampaignCopy>["campaigns"];
+    }>;
+  }> {
+    const account = this.store.getAccount(input.accountId);
+    if (!account) throw new Error("账号不存在。");
+    const connection = this.store.getProviderConnection(input.accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") {
+      throw new Error("账户未通过连接检测，已阻止系列复制。");
+    }
+    this.providers.requireAccountCapability(
+      input.accountId,
+      account.providerKind,
+      connection,
+      "copy-campaigns",
+    );
+
+    const managed = this.store.listCurrentManagedEntities(input.accountId, account.providerKind);
+
+    // 命名的序号必须从账户现状往后接，因此要先拿到账户里已有的系列名与组名。
+    const existingCampaignNames = managed
+      .filter((entity) => entity.entityType === "campaign")
+      .map((entity) => entity.name);
+    const existingAdGroupNames = managed
+      .filter((entity) => entity.entityType === "ad-group")
+      .map((entity) => entity.name);
+
+    // 多个源系列时逐个规划。名称预留跨源累积，避免两个源系列生成同名副本。
+    const reserved = new Set<string>();
+    const reservedAdGroupNames = new Set<string>();
+    const plannedSources: Array<{
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      campaigns: ReturnType<typeof planCampaignCopy>["campaigns"];
+    }> = [];
+
+    for (const source of input.sources) {
+      const sourceCampaign = managed.find(
+        (entity) => entity.entityType === "campaign" && entity.externalId === source.sourceCampaignId,
+      );
+      if (!sourceCampaign) {
+        throw new Error("源推广系列不在当前同步快照中，请先执行只读同步。");
+      }
+      const sourceAdGroups = new Map(
+        managed
+          .filter((entity) => entity.entityType === "ad-group"
+            && entity.parentCampaignId === source.sourceCampaignId)
+          .map((entity) => [entity.externalId, entity.name]),
+      );
+      for (const sourceAdGroupId of source.sourceAdGroupIds) {
+        if (!sourceAdGroups.has(sourceAdGroupId)) {
+          throw new Error(`广告组 ${sourceAdGroupId} 不属于源推广系列，请重新选择。`);
+        }
+      }
+
+      const plan = planCampaignCopy({
+        sourceCampaignName: sourceCampaign.name,
+        sourceAdGroupNames: sourceAdGroups,
+        sourceAdGroupIds: source.sourceAdGroupIds,
+        campaignCopies: input.campaignCopies,
+        groupsPerCampaign: input.groupsPerCampaign,
+        at: new Date(),
+        timeZone: account.timezone,
+        existingCampaignNames: [...existingCampaignNames, ...reserved],
+        existingAdGroupNames: [...existingAdGroupNames, ...reservedAdGroupNames],
+      });
+
+      // 发出任何写请求之前，先把整批名称都验一遍：系列名在账户内必须唯一，
+      // 否则发布后的终态核验无法判定哪个系列是本次创建的。
+      for (const campaign of plan.campaigns) {
+        assertCampaignNameAvailable(existingCampaignNames, campaign.campaignName, reserved);
+        reserved.add(campaign.campaignName);
+        for (const group of campaign.groups) reservedAdGroupNames.add(group.name);
+      }
+      plannedSources.push({
+        sourceCampaignId: source.sourceCampaignId,
+        sourceCampaignName: sourceCampaign.name,
+        campaigns: plan.campaigns,
+      });
+    }
+
+    const context = await this.loadProviderContext(input.accountId, account.providerKind);
+    const scheduledStartAt = input.scheduledStartAt ?? null;
+    let createdCampaigns = 0;
+    let createdGroups = 0;
+    let skipped = 0;
+    const failed: Array<{ name: string; message: string }> = [];
+
+    // 账户内串行执行，降低 Provider 频控风险，也让重名预检始终基于最新状态。
+    for (const { sourceCampaignId, campaigns } of plannedSources) {
+    for (const campaign of campaigns) {
+      const taskKey = createHash("sha256").update(JSON.stringify({
+        executor: "campaign-copy",
+        accountId: input.accountId,
+        sourceCampaignId,
+        campaignName: campaign.campaignName,
+        groups: campaign.groups,
+        initialStatus: input.initialStatus,
+        scheduledStartAt,
+        campaignBudget: input.campaignBudget ?? null,
+        bid: input.bid ?? null,
+      })).digest("hex");
+
+      const claim = this.store.claimCampaignCopyTask(
+        taskKey,
+        input.accountId,
+        sourceCampaignId,
+        campaign.campaignName,
+      );
+      if (claim !== "claimed") {
+        if (claim === "unknown") {
+          failed.push({
+            name: campaign.campaignName,
+            message: "上次系列复制结果待人工确认，已禁止自动重试。",
+          });
+        } else {
+          skipped += 1;
+        }
+        continue;
+      }
+
+      try {
+        const result = await this.providers.copyCampaign(account.providerKind, context, {
+          sourceCampaignId,
+          campaignName: campaign.campaignName,
+          adGroups: campaign.groups,
+          initialStatus: input.initialStatus,
+          scheduledStartAt,
+          ...(input.campaignBudget !== undefined ? { campaignBudget: input.campaignBudget } : {}),
+          ...(input.bid !== undefined ? { bid: input.bid } : {}),
+          onBeforeDispatch: () => this.store.markCampaignCopyTaskDispatching(taskKey),
+        });
+        if (result.ok) {
+          createdCampaigns += 1;
+          createdGroups += campaign.groups.length;
+          this.store.finishCampaignCopyTask(taskKey, "succeeded", {
+            campaignId: result.campaignId ?? null,
+            adGroupIds: result.adGroupIds ?? [],
+          });
+        } else {
+          const unknown = result.failureKind === "unknown" || result.retrySafe === false;
+          this.store.finishCampaignCopyTask(taskKey, unknown ? "unknown" : "failed");
+          failed.push({
+            name: campaign.campaignName,
+            message: `${result.message}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
+          });
+        }
+      } catch (cause) {
+        const unknown = cause instanceof UnknownCreationStateError;
+        this.store.finishCampaignCopyTask(taskKey, unknown ? "unknown" : "failed");
+        failed.push({
+          name: campaign.campaignName,
+          message: `${safeError(cause)}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
+        });
+      }
+    }
+    }
+
+    return { createdCampaigns, createdGroups, skipped, failed, plan: plannedSources };
   }
 
   // 一键扩组：批量选中的源广告组，每个各扩 count 个新组。

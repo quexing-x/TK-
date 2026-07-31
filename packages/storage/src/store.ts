@@ -79,7 +79,9 @@ import {
   type OneTimeScheduleInput,
   type OvernightScheduleInput,
   type ScheduledEntityActionRecord,
+  assertCampaignBudgetConsistency,
   automaticName,
+  resolveConfiguredBudgetMode,
   automaticAdGroupName,
   resolveLaunchStartAt,
   resolveMigrationStartAt,
@@ -2722,6 +2724,80 @@ export class AutomationStore {
     }
   }
 
+  // 系列级复制的幂等闸门。语义与扩组一致：
+  // "claimed" 可执行；"succeeded" 相同任务已成功应跳过；"running" 有未过期的
+  // 同名任务在跑；"unknown" 上次结果待人工确认，永久禁止自动重试。
+  claimCampaignCopyTask(
+    taskKey: string,
+    accountId: string,
+    sourceCampaignId: string,
+    campaignName: string,
+  ): "claimed" | "running" | "succeeded" | "unknown" {
+    const now = new Date().toISOString();
+    const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.prepare(
+        "SELECT status, claimed_at, uncertain FROM campaign_copy_tasks WHERE task_key = ?",
+      ).get(taskKey) as SqlRow | undefined;
+      if (existing) {
+        if (Number(existing.uncertain ?? 0) === 1) {
+          this.db.exec("COMMIT");
+          return "unknown";
+        }
+        if (String(existing.status) === "succeeded") {
+          this.db.exec("COMMIT");
+          return "succeeded";
+        }
+        if (String(existing.claimed_at) > staleBefore) {
+          this.db.exec("COMMIT");
+          return "running";
+        }
+      }
+      this.db.prepare(
+        `INSERT INTO campaign_copy_tasks (
+           task_key, account_id, source_campaign_id, campaign_name, status, claimed_at, updated_at, uncertain
+         ) VALUES (?, ?, ?, ?, 'running', ?, ?, 0)
+         ON CONFLICT(task_key) DO UPDATE SET
+           status = 'running', claimed_at = excluded.claimed_at,
+           updated_at = excluded.updated_at, uncertain = 0`,
+      ).run(taskKey, accountId, sourceCampaignId, campaignName, now, now);
+      this.db.exec("COMMIT");
+      return "claimed";
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 必须在第一个写请求发出之前调用：之后任何异常都按结果未知处理。 */
+  markCampaignCopyTaskDispatching(taskKey: string): void {
+    this.db.prepare(
+      "UPDATE campaign_copy_tasks SET uncertain = 1, updated_at = ? WHERE task_key = ? AND status = 'running'",
+    ).run(new Date().toISOString(), taskKey);
+  }
+
+  finishCampaignCopyTask(
+    taskKey: string,
+    outcome: "succeeded" | "failed" | "unknown",
+    generated?: { campaignId?: string | null; adGroupIds?: string[] },
+  ): void {
+    const now = new Date().toISOString();
+    if (outcome === "succeeded") {
+      this.db.prepare(
+        `UPDATE campaign_copy_tasks SET status = 'succeeded', uncertain = 0, updated_at = ?,
+           generated_campaign_id = ?, generated_ids_json = ? WHERE task_key = ?`,
+      ).run(now, generated?.campaignId ?? null, JSON.stringify(generated?.adGroupIds ?? []), taskKey);
+    } else if (outcome === "unknown") {
+      this.db.prepare(
+        "UPDATE campaign_copy_tasks SET status = 'running', uncertain = 1, updated_at = ? WHERE task_key = ?",
+      ).run(now, taskKey);
+    } else {
+      // 明确失败且未产生正式对象：删除记录，允许用户修正后重试。
+      this.db.prepare("DELETE FROM campaign_copy_tasks WHERE task_key = ?").run(taskKey);
+    }
+  }
+
   claimAutomaticCopyTask(input: {
     taskKey: string;
     accountId: string;
@@ -3678,10 +3754,10 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT INTO launch_presets (
-          id, name, region, daily_budget, bid, start_at, end_at, start_at_rule, initial_status, creation_config_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, name, region, daily_budget, campaign_budget, bid, start_at, end_at, start_at_rule, initial_status, creation_config_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.startAtRule, preset.initialStatus, JSON.stringify(preset.creationConfig), now, now);
+      .run(id, preset.name, preset.region, preset.dailyBudget, preset.campaignBudget ?? null, preset.bid, preset.startAt, preset.endAt, preset.startAtRule, preset.initialStatus, JSON.stringify(preset.creationConfig), now, now);
     return this.listLaunchPresets().find((item) => item.id === id) as LaunchPresetRecord;
   }
 
@@ -3693,10 +3769,10 @@ export class AutomationStore {
     const result = this.db
       .prepare(
         `UPDATE launch_presets SET
-          name = ?, region = ?, daily_budget = ?, bid = ?, start_at = ?, end_at = ?, start_at_rule = ?, initial_status = ?, creation_config_json = ?, updated_at = ?
+          name = ?, region = ?, daily_budget = ?, campaign_budget = ?, bid = ?, start_at = ?, end_at = ?, start_at_rule = ?, initial_status = ?, creation_config_json = ?, updated_at = ?
          WHERE id = ?`,
       )
-      .run(preset.name, preset.region, preset.dailyBudget, preset.bid, preset.startAt, preset.endAt, preset.startAtRule, preset.initialStatus, JSON.stringify(preset.creationConfig), new Date().toISOString(), id);
+      .run(preset.name, preset.region, preset.dailyBudget, preset.campaignBudget ?? null, preset.bid, preset.startAt, preset.endAt, preset.startAtRule, preset.initialStatus, JSON.stringify(preset.creationConfig), new Date().toISOString(), id);
     if (result.changes === 0) throw new Error("广告预设不存在。");
     return this.listLaunchPresets().find((item) => item.id === id) as LaunchPresetRecord;
   }
@@ -3741,6 +3817,7 @@ export class AutomationStore {
       name: preset.name,
       region: preset.region,
       dailyBudget: preset.dailyBudget,
+      campaignBudget: preset.campaignBudget ?? null,
       bid: preset.bid,
       startAt: preset.startAt,
       endAt: preset.endAt,
@@ -4040,6 +4117,7 @@ export class AutomationStore {
       name: preset.name,
       region: preset.region,
       dailyBudget: preset.dailyBudget,
+      campaignBudget: preset.campaignBudget ?? null,
       bid: preset.bid,
       startAt: preset.startAt,
       endAt: preset.endAt,
@@ -4056,6 +4134,12 @@ export class AutomationStore {
         new Date(now),
         this.getAccount(targetAccountIds[0] ?? "")?.timezone ?? "UTC",
       );
+    // 系列预算属于整个系列：同名系列的多行必须携带同一份金额，且不能为空。
+    // 放到这里校验，是为了在任何 Provider 写请求发出之前就拦下。
+    assertCampaignBudgetConsistency(
+      launchRows,
+      resolveConfiguredBudgetMode(presetSnapshot.creationConfig),
+    );
     const taskCount = preview ? preview.items.length : targetAccountIds.length * launchRows.length;
     const message =
       `已保存 ${taskCount} 条${plan.mode === "copy" ? "复制迁移" : "创建"}配置；等待创建执行器发布。`;
@@ -5520,6 +5604,22 @@ export class AutomationStore {
         PRIMARY KEY (plan_id, account_id, campaign_name)
       );
 
+      -- 系列级复制的幂等表。一次复制会建 1 个系列 + N 个广告组 + M 个广告，
+      -- 部分成功的破坏性远高于扩组，因此沿用同一套「成功永久跳过 / 未知永久
+      -- 禁止自动重试」的状态机，但独立记账。
+      CREATE TABLE IF NOT EXISTS campaign_copy_tasks (
+        task_key TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        source_campaign_id TEXT NOT NULL,
+        campaign_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded')),
+        claimed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
+        generated_campaign_id TEXT,
+        generated_ids_json TEXT NOT NULL DEFAULT '[]'
+      );
+
       CREATE TABLE IF NOT EXISTS ad_group_expand_tasks (
         task_key TEXT PRIMARY KEY,
         account_id TEXT NOT NULL,
@@ -5961,6 +6061,8 @@ export class AutomationStore {
       "start_at_rule",
       "TEXT NOT NULL DEFAULT 'absolute'",
     );
+    // 系列预算(CBO)的系列日预算。旧预设为 NULL，按组预算处理，行为不变。
+    this.ensureColumn("launch_presets", "campaign_budget", "REAL");
     this.ensureColumn(
       "multi_account_launch_plans",
       "launch_preset_id",
@@ -6763,6 +6865,8 @@ function applyPresetToLaunchRows(
     adName: automaticName(now, nextSerial + index),
     region: preset.region,
     dailyBudget: preset.dailyBudget,
+    // 系列预算模式下由本字段下发到系列层；组预算模式为 null，行为不变。
+    campaignBudget: preset.campaignBudget ?? null,
     bid: preset.bid,
     // 相对规则（当天24:00 / 次日06:00）按服务器 now 重算，不冻结日期。
     startAt: resolveLaunchStartAt(preset.startAtRule, preset.startAt, now, timeZone),
@@ -6777,6 +6881,9 @@ function mapLaunchPreset(row: SqlRow): LaunchPresetRecord {
     name: row.name,
     region: row.region,
     dailyBudget: Number(row.daily_budget),
+    campaignBudget: row.campaign_budget === null || row.campaign_budget === undefined
+      ? null
+      : Number(row.campaign_budget),
     bid: row.bid === null ? null : Number(row.bid),
     startAt: row.start_at ?? null,
     endAt: row.end_at ?? null,

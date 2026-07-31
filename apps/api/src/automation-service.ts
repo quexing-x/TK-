@@ -345,6 +345,10 @@ export class AutomationService {
           || entity.ignored
           || entity.status !== "enabled"
           || !entity.parentCampaignId
+          // 系列预算(CBO)不参与自动复制：往同一 CBO 系列里加组不增加任何预算，
+          // 只会把系列预算摊薄到更多组上，与放量的目的相反。CBO 的放量路径是
+          // 系列级复制，且只允许人工发起。
+          || entity.campaignBudgetOptimized
           || entity.metrics.conversions === null
           || entity.metrics.cost_per_conversion === null
           || entity.metrics.cost_per_click === null

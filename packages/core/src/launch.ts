@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { WriteTaskActorSchema } from "./write-task.js";
+import { LaunchBudgetModeSchema, type LaunchBudgetMode } from "./budget-mode.js";
 
 export const LaunchInitialStatusSchema = z.enum(["enabled", "disabled"]);
 export type LaunchInitialStatus = z.infer<typeof LaunchInitialStatusSchema>;
@@ -144,7 +145,14 @@ export const CreationPresetConfigSchema = z.object({
   templateCampaignId: z.string().trim().min(1).max(128).nullable().optional(),
   objectiveType: z.number().int().nullable().default(null),
   buyingType: z.number().int().nullable().default(null),
+  /**
+   * 预算模式。缺省时按旧配置的 campaignBudgetMode 推导，保证已保存的预设行为不变。
+   * 新配置只写这一个字段，两层的 budget_mode 由 resolveBudgetFields 派生。
+   */
+  budgetMode: LaunchBudgetModeSchema.optional(),
+  /** @deprecated 由 budgetMode 派生；仅为读取旧预设保留。 */
   campaignBudgetMode: z.number().int().nullable().default(null),
+  /** @deprecated 由 budgetMode 派生；仅为读取旧预设保留。 */
   adBudgetMode: z.number().int().nullable().default(null),
   pricing: z.number().int().nullable().default(null),
   optimizeGoal: z.number().int().nullable().default(null),
@@ -182,10 +190,56 @@ export const defaultCreationPresetConfig: CreationPresetConfig =
     placementIds: [3000],
   });
 
+/**
+ * 解析预设实际使用的预算模式。新配置直接读 `budgetMode`；旧配置没有这个字段，
+ * 按 TikTok 的 `campaignBudgetMode`（>0 表示系列持有日预算）反推，保证升级前
+ * 保存的预设行为完全不变。
+ */
+export function resolveConfiguredBudgetMode(
+  config: Pick<CreationPresetConfig, "budgetMode" | "campaignBudgetMode"> | undefined,
+): LaunchBudgetMode {
+  if (config?.budgetMode) return config.budgetMode;
+  const legacy = config?.campaignBudgetMode ?? null;
+  return legacy !== null && legacy > 0 ? "campaign" : "ad-group";
+}
+
+/**
+ * 系列预算模式下，同名系列只能有一份系列预算。导入表里同一个系列名的多行如果
+ * 填了不同金额，必须在保存计划之前拦下——真机会用最后写入的那份，而用户看到的
+ * 是表格里的另一份。
+ */
+export function assertCampaignBudgetConsistency(
+  rows: Array<Pick<LaunchConfigurationRow, "campaignName" | "campaignBudget">>,
+  budgetMode: LaunchBudgetMode,
+): void {
+  if (budgetMode !== "campaign") return;
+  const byCampaign = new Map<string, number | null>();
+  for (const row of rows) {
+    const name = row.campaignName.trim();
+    const budget = row.campaignBudget ?? null;
+    if (budget === null) {
+      throw new Error(`系列预算模式下推广系列“${name}”缺少系列日预算。`);
+    }
+    const seen = byCampaign.get(name);
+    if (seen === undefined) {
+      byCampaign.set(name, budget);
+      continue;
+    }
+    if (seen !== budget) {
+      throw new Error(
+        `推广系列“${name}”在本批次里出现了两个不同的系列日预算（${seen} 与 ${budget}）；系列预算属于整个系列，请统一后重试。`,
+      );
+    }
+  }
+}
+
 export const LaunchPresetInputSchema = z.object({
   name: z.string().trim().min(1).max(80),
   region: z.string().trim().min(1).max(120),
+  /** 广告组日预算。系列预算模式下不下发，但保留取值以便切回组预算。 */
   dailyBudget: z.number().positive().max(100_000_000),
+  /** 系列日预算；仅 creationConfig.budgetMode 为 campaign 时使用。 */
+  campaignBudget: z.number().positive().max(100_000_000).nullish(),
   bid: z.number().nonnegative().max(100_000_000).nullable(),
   startAt: z.string().datetime().nullable(),
   endAt: z.string().datetime().nullable(),
@@ -221,6 +275,10 @@ export const LaunchConfigurationRowSchema = z.object({
   // readability while every newly saved plan receives it from its preset.
   region: z.string().trim().min(1).max(120).default("未设置"),
   dailyBudget: z.number().positive().max(100_000_000),
+  // 系列日预算。系列预算(CBO)模式下由本字段下发到系列层，广告组层不再发预算。
+  // 旧计划没有这个字段，缺省即按组预算处理。同一个系列下的多行必须携带相同的
+  // 值，由 assertCampaignBudgetConsistency 在保存计划前校验。
+  campaignBudget: z.number().positive().max(100_000_000).nullish(),
   bid: z.number().nonnegative().max(100_000_000).nullable(),
   startAt: z.string().datetime().nullable(),
   endAt: z.string().datetime().nullable(),

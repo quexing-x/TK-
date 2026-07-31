@@ -510,6 +510,27 @@ export const api = {
       "/api/ad-groups/batch-expand",
       { method: "POST", body: JSON.stringify(input) },
     ),
+  copyCampaign: (input: {
+    accountId: string;
+    sources: Array<{ sourceCampaignId: string; sourceAdGroupIds: string[] }>;
+    campaignCopies: number;
+    groupsPerCampaign: number;
+    initialStatus: "enabled" | "disabled";
+    scheduledStartAt?: string | null;
+    campaignBudget?: number | null;
+    bid?: number | null;
+  }) =>
+    request<{
+      createdCampaigns: number;
+      createdGroups: number;
+      skipped: number;
+      failed: Array<{ name: string; message: string }>;
+      plan: Array<{
+        sourceCampaignId: string;
+        sourceCampaignName: string;
+        campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
+      }>;
+    }>("/api/campaigns/copy", { method: "POST", body: JSON.stringify(input) }),
   getManualTakeovers: (accountId: string) =>
     request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),
   changeEntityStatus: (accountId: string, input: ManualStatusInput) =>

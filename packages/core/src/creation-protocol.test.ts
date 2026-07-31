@@ -3,13 +3,13 @@ import { TikTokCreationSteps, buildDraftPayloads, buildProfileDraftPayloads, bui
 
 describe("creation protocol", () => {
   it("reports template readiness without exposing internal field names", () => {
-    expect(getCreationTemplateReadiness()).toEqual({ ready: false, missingFieldCount: 10 });
+    expect(getCreationTemplateReadiness()).toEqual({ ready: false, missingFieldCount: 8 });
     expect(getCreationTemplateReadiness({
       objectiveType: null, buyingType: null, campaignBudgetMode: null, adBudgetMode: null,
       pricing: null, optimizeGoal: null, externalAction: null, pixelId: null,
       identityType: null, identityId: null, callToActionId: null, countryCodes: [],
       placementIds: [], smartTargeting: true, commentDisabled: false, shareDisabled: false,
-    })).toEqual({ ready: false, missingFieldCount: 10 });
+    })).toEqual({ ready: false, missingFieldCount: 8 });
   });
   it("uses the confirmed four-step draft chain and makes the initial state explicit", () => {
     expect(TikTokCreationSteps).toEqual(["campaign_snap/save", "ad_snap/save", "creative_snap/save", "async_creation/create_by_snap"]);
@@ -183,13 +183,15 @@ describe("creation protocol", () => {
       creativePayload: { asset_group_sketch_form_data_list: [{ image_list: [{}], identity_type: 9, identity_id: "old", call_to_action_id: "old" }] },
       publishPayload: {},
     }, { rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad", videoCode: "video", productUrl: "https://example.com", region: "US", dailyBudget: 10, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }, "UTC", new Date("2026-07-20T00:00:00.000Z"), {
-      objectiveType: 1, buyingType: 2, campaignBudgetMode: 3, adBudgetMode: 4,
+      objectiveType: 1, buyingType: 2, campaignBudgetMode: -1, adBudgetMode: 3,
       pricing: 5, optimizeGoal: 6, externalAction: 7, pixelId: "pixel", identityType: 8,
       identityId: "identity", callToActionId: "SHOP_NOW", countryCodes: [840], placementIds: [11],
       smartTargeting: false, commentDisabled: true, shareDisabled: true,
     });
-    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ objective_type: 1, buying_type: 2, budget_mode: 3 });
-    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 4, pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [0], inventory_flow: [11] });
+    // 预算模式由 budgetMode 派生：组预算模式下系列层为 -1、组层为 3，
+    // 不再把预设里的原始 budget_mode 数字透传给 TikTok。
+    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ objective_type: 1, buying_type: 2, budget_mode: -1, budget: "" });
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 3, budget: "10", pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [0], inventory_flow: [11] });
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ identity_type: 8, identity_id: "identity", call_to_action_id: "SHOP_NOW", is_comment_disable: 1, is_share_disable: 1 });
   });
 
@@ -206,7 +208,7 @@ describe("creation protocol", () => {
       }] },
       publishPayload: {},
     }, { rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad", videoCode: "video", productUrl: "https://example.com", region: "US", dailyBudget: 10, bid: null, startAt: null, endAt: null, initialStatus: "disabled" }, "UTC", new Date("2026-07-20T00:00:00.000Z"), {
-      objectiveType: 1, buyingType: 2, campaignBudgetMode: 3, adBudgetMode: 4,
+      objectiveType: 1, buyingType: 2, campaignBudgetMode: -1, adBudgetMode: 3,
       pricing: 5, optimizeGoal: 6, externalAction: 7, pixelId: "pixel", identityType: 8,
       identityId: "identity", callToActionId: "0", countryCodes: [840], placementIds: [11],
       smartTargeting: false, commentDisabled: true, shareDisabled: true,
