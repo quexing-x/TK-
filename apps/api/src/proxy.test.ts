@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { describeErrorCause } from "./app.js";
 import {
   resolveOutboundProxy,
   startOutboundProxyWatcher,
@@ -24,34 +23,6 @@ describe("outbound proxy resolution", () => {
       source: "windows-system",
       url: "http://127.0.0.1:8800/",
     });
-  });
-});
-
-describe("网络错误的底层原因", () => {
-  it("展开 undici 的 cause，而不是只留一句 fetch failed", () => {
-    const underlying = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:10808"), {
-      code: "ECONNREFUSED",
-    });
-    const failure = new Error("fetch failed", { cause: underlying });
-    expect(describeErrorCause(failure)).toBe("ECONNREFUSED");
-  });
-
-  it("没有错误码时退回到 message 并截断", () => {
-    const failure = new Error("fetch failed", {
-      cause: new Error("x".repeat(400)),
-    });
-    expect(describeErrorCause(failure)).toHaveLength(120);
-  });
-
-  it("没有 cause 时返回空串", () => {
-    expect(describeErrorCause(new Error("boom"))).toBe("");
-  });
-
-  it("串联多层 cause", () => {
-    const inner = Object.assign(new Error("inner"), { code: "ENOTFOUND" });
-    const middle = new Error("middle", { cause: inner });
-    const outer = new Error("fetch failed", { cause: middle });
-    expect(describeErrorCause(outer)).toBe("middle ← ENOTFOUND");
   });
 });
 

@@ -118,3 +118,24 @@ export function planCampaignCopy(input: CampaignCopyPlanInput): CampaignCopyPlan
     totalGroups: allocation.campaignCopies * allocation.groupsPerCampaign,
   };
 }
+
+/**
+ * 停在「结果未知」状态的系列复制任务。
+ *
+ * 这类任务在写请求发出之后失去了确认结果的能力（网络中断、超时等），系统
+ * 无法自证是否安全重试，因此永久禁止自动重试——但也不能永远没有出路：人工
+ * 在 TikTok 后台核实真实状态后，需要一个入口把它标记为已处理，允许下次重新
+ * 领取执行。
+ */
+export const CampaignCopyStuckTaskSchema = z.object({
+  taskKey: z.string().min(1),
+  accountId: z.string().min(1),
+  sourceCampaignId: z.string().min(1),
+  campaignName: z.string().min(1),
+  claimedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  /** Provider 侧确认产生的系列 ID；发布前失败时为空。 */
+  generatedCampaignId: z.string().nullable(),
+  generatedAdGroupIds: z.array(z.string()),
+});
+export type CampaignCopyStuckTask = z.infer<typeof CampaignCopyStuckTaskSchema>;

@@ -242,6 +242,13 @@ describe("local authentication and authorization", () => {
     expect(requiredPermission("POST", "/api/campaigns/copy")).toBe("launch:manage");
   });
 
+  it("requires launch management permission for resetting a stuck campaign copy task", () => {
+    expect(requiredPermission(
+      "POST",
+      "/api/accounts/account-1/campaign-copy-tasks/abc123/reset",
+    )).toBe("launch:manage");
+  });
+
   it("requires automation execution permission for resetting the write circuit", () => {
     expect(requiredPermission(
       "POST",

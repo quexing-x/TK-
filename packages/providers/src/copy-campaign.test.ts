@@ -69,6 +69,11 @@ function stubTikTok(options: {
   calls: Call[];
   cboAllSuccess?: boolean;
   adGroupCount?: number;
+  /**
+   * 在匹配路径命中真正返回响应之前，先制造 N 次网络失败——用来验证传输层
+   * 重试。失败的尝试同样计入 calls，方便断言重试真的发生过。
+   */
+  failFirst?: { path: string; times: number; code: string };
 }) {
   // 草稿的服务端状态：ad_snap/save 写入什么，snap/detail 就回读什么。
   // 回读校验是这条链路的安全网，桩必须真实反映它才有意义。
@@ -76,6 +81,7 @@ function stubTikTok(options: {
     ["snap-A", { ad_snap_id: "snap-A", ad_sketch_id: "sketch-A", ad_name: "组A原名", budget: "", budget_mode: -1 }],
     ["snap-B", { ad_snap_id: "snap-B", ad_sketch_id: "sketch-B", ad_name: "组B原名", budget: "", budget_mode: -1 }],
   ]);
+  let remainingFailures = options.failFirst?.times ?? 0;
 
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -84,6 +90,12 @@ function stubTikTok(options: {
     options.calls.push({ path, body });
     const json = (payload: unknown) =>
       new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+
+    if (options.failFirst && path.includes(options.failFirst.path) && remainingFailures > 0) {
+      remainingFailures -= 1;
+      const cause = Object.assign(new Error("simulated"), { code: options.failFirst.code });
+      throw new Error("fetch failed", { cause });
+    }
 
     if (path.includes("campaign_snap/copy")) return json(copyResponse());
     if (path.includes("ad_sketch/delete")) {
@@ -303,5 +315,73 @@ describe("CookieAdsProvider.copyCampaign", () => {
     expect(result.ok).toBe(false);
     expect(result.failureKind).toBe("unknown");
     expect(result.retrySafe).toBe(false);
+  });
+
+  it("ECONNREFUSED 两次后自愈：传输层自动重试，系列复制仍然完成", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      adGroupCount: 2,
+      failFirst: { path: "campaign_snap/copy", times: 2, code: "ECONNREFUSED" },
+    });
+    const provider = new CookieAdsProvider();
+
+    const result = await provider.copyCampaign(context(), {
+      sourceCampaignId: "90001",
+      campaignName: "源系列-0730-1",
+      adGroups: [
+        { sourceAdGroupId: "src-A", name: "组A" },
+        { sourceAdGroupId: "src-B", name: "组B" },
+      ],
+      initialStatus: "disabled",
+    });
+
+    expect(result.ok).toBe(true);
+    // 前两次因 ECONNREFUSED 被吞掉重试，第三次才真正拿到响应。
+    const copyAttempts = calls.filter((call) => call.path.includes("campaign_snap/copy"));
+    expect(copyAttempts).toHaveLength(3);
+  }, 10_000);
+
+  it("ECONNREFUSED 超过重试上限：仍判定为可安全重试而非永久锁死", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      failFirst: { path: "campaign_snap/copy", times: 3, code: "ECONNREFUSED" },
+    });
+    const provider = new CookieAdsProvider();
+
+    const result = await provider.copyCampaign(context(), {
+      sourceCampaignId: "90001",
+      campaignName: "源系列-0730-1",
+      adGroups: [{ sourceAdGroupId: "src-A", name: "组A" }],
+      initialStatus: "disabled",
+    });
+
+    expect(result.ok).toBe(false);
+    // 一次都没有成功拿到响应：没有产生任何草稿，重试是安全的。
+    expect(result.retrySafe).toBe(true);
+    const copyAttempts = calls.filter((call) => call.path.includes("campaign_snap/copy"));
+    expect(copyAttempts).toHaveLength(3);
+  }, 10_000);
+
+  it("ECONNRESET 不重试：连接可能已经建立，安全边界不因优化而放松", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      failFirst: { path: "campaign_snap/copy", times: 1, code: "ECONNRESET" },
+    });
+    const provider = new CookieAdsProvider();
+
+    const result = await provider.copyCampaign(context(), {
+      sourceCampaignId: "90001",
+      campaignName: "源系列-0730-1",
+      adGroups: [{ sourceAdGroupId: "src-A", name: "组A" }],
+      initialStatus: "disabled",
+    });
+
+    expect(result.ok).toBe(false);
+    // ECONNRESET 只失败了一次就该停手——不属于「证明请求从未发出」的安全类别。
+    const copyAttempts = calls.filter((call) => call.path.includes("campaign_snap/copy"));
+    expect(copyAttempts).toHaveLength(1);
   });
 });

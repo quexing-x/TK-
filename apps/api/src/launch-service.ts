@@ -918,38 +918,71 @@ export class LaunchService {
         continue;
       }
 
-      try {
-        const result = await this.providers.copyCampaign(account.providerKind, context, {
-          sourceCampaignId,
-          campaignName: campaign.campaignName,
-          adGroups: campaign.groups,
-          initialStatus: input.initialStatus,
-          scheduledStartAt,
-          ...(input.campaignBudget !== undefined ? { campaignBudget: input.campaignBudget } : {}),
-          ...(input.bid !== undefined ? { bid: input.bid } : {}),
-          onBeforeDispatch: () => this.store.markCampaignCopyTaskDispatching(taskKey),
-        });
-        if (result.ok) {
-          createdCampaigns += 1;
-          createdGroups += campaign.groups.length;
-          this.store.finishCampaignCopyTask(taskKey, "succeeded", {
-            campaignId: result.campaignId ?? null,
-            adGroupIds: result.adGroupIds ?? [],
+      // 任务级重试：单条 HTTP 请求内的瞬时抖动已经由 Provider 自己的传输层重试
+      // 吸收（几秒内的网络毛刺）；这里额外兜底更长的中断（真实故障持续过约
+      // 90 秒）——只要 Provider 明确判断「安全重试」（没有产生任何写入），就在
+      // 同一次请求里自动重跑整个任务，用户不需要自己再点一次。
+      // 只有 Provider 明确判断「不安全」时才立刻停下来，交给人工确认；这条
+      // 安全边界不因为重试而放松。
+      const maxTaskAttempts = 3;
+      const taskRetryDelaysMs = [2_000, 4_000];
+      let result: Awaited<ReturnType<ProviderRegistry["copyCampaign"]>> | null = null;
+      let thrown: unknown = null;
+      for (let attempt = 0; attempt < maxTaskAttempts; attempt += 1) {
+        thrown = null;
+        try {
+          result = await this.providers.copyCampaign(account.providerKind, context, {
+            sourceCampaignId,
+            campaignName: campaign.campaignName,
+            adGroups: campaign.groups,
+            initialStatus: input.initialStatus,
+            scheduledStartAt,
+            ...(input.campaignBudget !== undefined ? { campaignBudget: input.campaignBudget } : {}),
+            ...(input.bid !== undefined ? { bid: input.bid } : {}),
+            onBeforeDispatch: () => this.store.markCampaignCopyTaskDispatching(taskKey),
           });
-        } else {
-          const unknown = result.failureKind === "unknown" || result.retrySafe === false;
-          this.store.finishCampaignCopyTask(taskKey, unknown ? "unknown" : "failed");
-          failed.push({
-            name: campaign.campaignName,
-            message: `${result.message}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
-          });
+          if (result.ok) break;
+          const retrySafe = result.retrySafe === true
+            || (result.retrySafe === undefined && result.failureKind !== "unknown");
+          if (!retrySafe || attempt === maxTaskAttempts - 1) break;
+        } catch (cause) {
+          result = null;
+          thrown = cause;
+          // RetryableCreationError 之外的一切都保守地当作不安全，不在这里重试。
+          const retrySafe = !(cause instanceof UnknownCreationStateError);
+          if (!retrySafe || attempt === maxTaskAttempts - 1) break;
         }
-      } catch (cause) {
-        const unknown = cause instanceof UnknownCreationStateError;
+        await new Promise((resolve) => setTimeout(resolve, taskRetryDelaysMs[attempt] ?? 4_000));
+      }
+
+      if (result?.ok) {
+        createdCampaigns += 1;
+        createdGroups += campaign.groups.length;
+        this.store.finishCampaignCopyTask(taskKey, "succeeded", {
+          campaignId: result.campaignId ?? null,
+          adGroupIds: result.adGroupIds ?? [],
+        });
+      } else if (result) {
+        // retrySafe 是 Provider 对「能否安全重试」的直接判断，必须优先信任它：
+        // failureKind==="unknown" 只表示「不确定 TikTok 侧最终状态」，不代表
+        // 重试会有重复创建的风险——比如系列复制第一步 campaign_snap/copy 本身
+        // 失败时，Provider 明确知道还没有产生任何草稿，retrySafe 会是 true。
+        // 只有在 Provider 没给出明确判断时，才退回旧的保守逻辑。
+        const unknown = result.retrySafe === false
+          || (result.retrySafe === undefined && result.failureKind === "unknown");
         this.store.finishCampaignCopyTask(taskKey, unknown ? "unknown" : "failed");
         failed.push({
           name: campaign.campaignName,
-          message: `${safeError(cause)}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
+          message: unknown
+            ? `${result.message}（结果待确认，禁止自动重试）`
+            : `${result.message}（已自动重试仍未成功，未产生任何写入）`,
+        });
+      } else {
+        const unknown = thrown instanceof UnknownCreationStateError;
+        this.store.finishCampaignCopyTask(taskKey, unknown ? "unknown" : "failed");
+        failed.push({
+          name: campaign.campaignName,
+          message: `${safeError(thrown)}${unknown ? "（结果待确认，禁止自动重试）" : "（已自动重试仍未成功）"}`,
         });
       }
     }

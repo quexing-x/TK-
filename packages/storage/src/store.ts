@@ -23,6 +23,8 @@ import {
   type GlobalAutomationSettingsInput,
   ProviderWriteCircuitSchema,
   type ProviderWriteCircuit,
+  CampaignCopyStuckTaskSchema,
+  type CampaignCopyStuckTask,
   type AutomationSwitchKey,
   type AutomationSwitches,
   type AutomationAction,
@@ -2796,6 +2798,40 @@ export class AutomationStore {
       // 明确失败且未产生正式对象：删除记录，允许用户修正后重试。
       this.db.prepare("DELETE FROM campaign_copy_tasks WHERE task_key = ?").run(taskKey);
     }
+  }
+
+  /** 列出某账户仍卡在「结果未知」的系列复制任务，供人工核实后处理。 */
+  listStuckCampaignCopyTasks(accountId: string): CampaignCopyStuckTask[] {
+    const rows = this.db.prepare(
+      `SELECT task_key, account_id, source_campaign_id, campaign_name, claimed_at,
+              updated_at, generated_campaign_id, generated_ids_json
+         FROM campaign_copy_tasks
+        WHERE account_id = ? AND uncertain = 1
+        ORDER BY updated_at DESC`,
+    ).all(accountId) as SqlRow[];
+    return rows.map((row) => CampaignCopyStuckTaskSchema.parse({
+      taskKey: row.task_key,
+      accountId: row.account_id,
+      sourceCampaignId: row.source_campaign_id,
+      campaignName: row.campaign_name,
+      claimedAt: row.claimed_at,
+      updatedAt: row.updated_at,
+      generatedCampaignId: row.generated_campaign_id ?? null,
+      generatedAdGroupIds: row.generated_ids_json ? JSON.parse(String(row.generated_ids_json)) : [],
+    }));
+  }
+
+  /**
+   * 人工在 TikTok 后台核实真实状态后，清除一条卡死的系列复制任务记录。
+   *
+   * 这不会去 TikTok 删除任何草稿或系列——那必须由人工确认后在后台自行处理；
+   * 这里只是清掉本地的「结果未知」锁，允许同样的任务下次重新被领取执行。
+   */
+  resetCampaignCopyTask(accountId: string, taskKey: string): boolean {
+    const result = this.db.prepare(
+      "DELETE FROM campaign_copy_tasks WHERE task_key = ? AND account_id = ? AND uncertain = 1",
+    ).run(taskKey, accountId);
+    return result.changes > 0;
   }
 
   claimAutomaticCopyTask(input: {

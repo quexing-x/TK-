@@ -44,6 +44,7 @@ import {
   parseMultipartFields,
   rewriteMultipartFields,
 } from "./multipart.js";
+import { isDefinitelyUnsentNetworkError, withCauseDetail } from "./network-error.js";
 
 const capabilities = new Set<ProviderCapability>([
   "read-campaigns",
@@ -4615,39 +4616,53 @@ async function requestDispatchedCreationJson(
     );
   }
 
-  let pending: Promise<Response>;
-  try {
-    if (
-      boundary.semantics === "mutation"
-      && boundary.dispatchState
-      && !boundary.dispatchState.mutationDispatched
-    ) {
-      // Persist the idempotency guard at the narrowest safe boundary: request
-      // construction and credential checks already succeeded, but fetch has
-      // not yet been invoked. If this callback fails, no remote request is sent.
-      boundary.dispatchState.onBeforeMutationDispatch?.();
-    }
-    // A synchronous exception proves fetch did not accept the request.
-    pending = fetch(request.url, requestInit);
-    if (boundary.semantics === "mutation" && boundary.dispatchState) {
-      boundary.dispatchState.mutationDispatched = true;
-    }
-  } catch (cause) {
-    throw new RetryableCreationError(
-      cause instanceof Error ? cause.message : "请求未能发送。",
-    );
+  if (
+    boundary.semantics === "mutation"
+    && boundary.dispatchState
+    && !boundary.dispatchState.mutationDispatched
+  ) {
+    // Persist the idempotency guard at the narrowest safe boundary: request
+    // construction and credential checks already succeeded, but fetch has
+    // not yet been invoked. If this callback fails, no remote request is sent.
+    boundary.dispatchState.onBeforeMutationDispatch?.();
   }
 
-  let response: Response;
-  try {
-    // Once fetch returns a promise, transport rejection cannot prove whether
-    // TikTok received the request.
-    response = await pending;
-  } catch (cause) {
-    throw uncertainCreationRequestError(
-      cause instanceof Error ? cause.message : "请求已发送，但响应丢失。",
-      boundary,
-    );
+  // 传输层失败最多重试两次（共 3 次尝试），且仅在能从数学上证明「这次请求
+  // 从未离开本机」时才重试——ECONNREFUSED / ENOTFOUND 等发生在 TCP 连接建立
+  // 之前，重放同一个请求不存在产生重复写入的风险。凡是无法证明这一点的失败
+  // （连接被重置、真正的超时等），维持原有行为：立即判定为结果未知，不自动
+  // 重试，交由上层幂等表拦下等待人工确认。
+  const retryDelaysMs = [500, 1500];
+  let response: Response | undefined;
+  for (let attempt = 0; response === undefined; attempt += 1) {
+    let pending: Promise<Response>;
+    try {
+      // A synchronous exception proves fetch did not accept the request.
+      pending = fetch(request.url, requestInit);
+      if (boundary.semantics === "mutation" && boundary.dispatchState) {
+        boundary.dispatchState.mutationDispatched = true;
+      }
+    } catch (cause) {
+      throw new RetryableCreationError(
+        cause instanceof Error ? cause.message : "请求未能发送。",
+      );
+    }
+
+    try {
+      // Once fetch returns a promise, transport rejection cannot prove whether
+      // TikTok received the request.
+      response = await pending;
+    } catch (cause) {
+      const delay = retryDelaysMs[attempt];
+      if (delay !== undefined && isDefinitelyUnsentNetworkError(cause)) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      throw uncertainCreationRequestError(
+        cause instanceof Error ? cause.message : "请求已发送，但响应丢失。",
+        boundary,
+      );
+    }
   }
 
   const contentType = response.headers.get("content-type") ?? "";
