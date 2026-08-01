@@ -16,6 +16,45 @@ interface PlannedSource {
   campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
 }
 
+type LaunchTiming = "disabled" | "immediate" | "scheduled";
+
+function defaultNextDaySix(): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  date.setHours(6, 0, 0, 0);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export interface ResolvedCampaignCopyLaunchTiming {
+  initialStatus: "enabled" | "disabled";
+  scheduledStartAt: string | null;
+}
+
+/**
+ * 把「关闭 / 立即投放 / 定时投放」三选一，翻译成服务端需要的
+ * initialStatus + scheduledStartAt。定时投放下服务端本来就会把 initialStatus
+ * 强制覆盖成 enabled（新系列以开启状态发布，由 TikTok 原生到点开始投放），
+ * 这里显式给出一致的值，避免前后端语义对不上。
+ */
+export function resolveCampaignCopyLaunchTiming(
+  timing: LaunchTiming,
+  scheduledAtLocal: string,
+  now = new Date(),
+): { ok: true; value: ResolvedCampaignCopyLaunchTiming } | { ok: false; error: string } {
+  if (timing !== "scheduled") {
+    return { ok: true, value: { initialStatus: timing === "immediate" ? "enabled" : "disabled", scheduledStartAt: null } };
+  }
+  const when = new Date(scheduledAtLocal);
+  if (Number.isNaN(when.getTime())) {
+    return { ok: false, error: "请填写有效的定时投放时间。" };
+  }
+  if (when.getTime() <= now.getTime()) {
+    return { ok: false, error: "定时投放时间必须晚于当前时间。" };
+  }
+  return { ok: true, value: { initialStatus: "enabled", scheduledStartAt: when.toISOString() } };
+}
+
 export function CopyCampaignPanel(props: {
   accounts: AccountOption[];
   busy: boolean;
@@ -33,7 +72,8 @@ export function CopyCampaignPanel(props: {
   const [query, setQuery] = useState("");
   const [campaignCopies, setCampaignCopies] = useState(2);
   const [groupsPerCampaign, setGroupsPerCampaign] = useState(1);
-  const [initialStatus, setInitialStatus] = useState<"enabled" | "disabled">("disabled");
+  const [launchTiming, setLaunchTiming] = useState<LaunchTiming>("disabled");
+  const [scheduledAt, setScheduledAt] = useState<string>(defaultNextDaySix);
   const [campaignBudgetText, setCampaignBudgetText] = useState("");
   const [bidText, setBidText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -175,7 +215,15 @@ export function CopyCampaignPanel(props: {
       return;
     }
     const totalCampaigns = previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0);
-    if (initialStatus === "enabled") {
+    const timing = resolveCampaignCopyLaunchTiming(launchTiming, scheduledAt);
+    if (!timing.ok) {
+      props.onError(timing.error);
+      return;
+    }
+    const { initialStatus, scheduledStartAt } = timing.value;
+    // 立即投放是不可逆的真实写入，二次确认避免误点；定时投放在 TikTok 侧到点
+    // 才会真正开始花费，与其他面板的既有约定一致，不额外二次确认。
+    if (launchTiming === "immediate") {
       const confirmed = await confirm({
         title: "立即投放确认",
         message: `将创建 ${totalCampaigns} 个推广系列、共 ${previewPlan.totalGroups} 个广告组，并【立即开始投放】。确认？`,
@@ -197,10 +245,14 @@ export function CopyCampaignPanel(props: {
         campaignCopies,
         groupsPerCampaign,
         initialStatus,
+        scheduledStartAt,
         campaignBudget,
         bid,
       });
       const parts = [`已创建 ${result.createdCampaigns} 个系列、${result.createdGroups} 个广告组`];
+      if (scheduledStartAt && result.createdCampaigns > 0) {
+        parts.push(`已设置 TikTok 原生定时投放：${new Date(scheduledStartAt).toLocaleString()}`);
+      }
       if (result.skipped > 0) parts.push(`跳过 ${result.skipped} 个重复任务`);
       if (result.failed.length > 0) {
         parts.push(`失败 ${result.failed.length} 个：${result.failed.map((item) => `${item.name}（${item.message}）`).join("；")}`);
@@ -257,13 +309,17 @@ export function CopyCampaignPanel(props: {
           <input disabled={disabled} min="0" step="0.01" type="number" value={bidText}
             onChange={(event) => setBidText(event.target.value)} />
         </label>
-        <label className="field"><span>创建后状态</span>
-          <select disabled={disabled} value={initialStatus} onChange={(event) => setInitialStatus(event.target.value as "enabled" | "disabled")}>
-            <option value="disabled">关闭（默认）</option>
-            <option value="enabled">立即投放</option>
-          </select>
-          <small>一次会创建多个系列，默认关闭以避免误花费。</small>
-        </label>
+        <div className="field campaign-copy-timing-field">
+          <span>创建时间</span>
+          <div className="campaign-copy-timing-modes" role="group" aria-label="创建时间">
+            <button aria-pressed={launchTiming === "disabled"} className={launchTiming === "disabled" ? "active" : ""} disabled={disabled} onClick={() => setLaunchTiming("disabled")} type="button">关闭（默认）</button>
+            <button aria-pressed={launchTiming === "immediate"} className={launchTiming === "immediate" ? "active" : ""} disabled={disabled} onClick={() => setLaunchTiming("immediate")} type="button">立即投放</button>
+            <button aria-pressed={launchTiming === "scheduled"} className={launchTiming === "scheduled" ? "active" : ""} disabled={disabled} onClick={() => setLaunchTiming("scheduled")} type="button">定时投放</button>
+          </div>
+          {launchTiming === "scheduled"
+            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。默认次日 06:00，可改。</small></label>
+            : <small>一次会创建多个系列，默认关闭以避免误花费。</small>}
+        </div>
       </div>
 
       <div className="campaign-copy-sources">
