@@ -5233,7 +5233,13 @@ function materializeStatusRequest(
           value: replaceMultipartEntityList(field.value, mutation.externalId),
         };
       });
-      replacements += replaced.changes;
+      // Use `matched` (field found), not `changes` (text actually differs).
+      // When the target entity happens to be the very object whose id was
+      // baked into the imported cURL at capture time, the replacement value
+      // equals the existing value — a real match with zero text diff. Gating
+      // on `changes` there falsely reports "no matching field" and blocks the
+      // write for that one entity forever, even though the field was found.
+      replacements += replaced.matched;
       body = replaced.body;
     } else if (contentType.includes("json") || body.trim().startsWith("{")) {
       try {
@@ -5303,7 +5309,10 @@ function materializeDeletionRequest(
           ? { value: "DELETE" }
           : undefined,
       );
-      replacements += replaced.changes;
+      // See the matching comment in materializeStatusRequest: `matched`, not
+      // `changes` — a captured template whose operation_status already reads
+      // "DELETE" is still a real match with zero text diff.
+      replacements += replaced.matched;
       body = replaced.body;
     } else if (contentType.includes("json") || body.trim().startsWith("{")) {
       const parsed = JSON.parse(body) as unknown;
