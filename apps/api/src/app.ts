@@ -41,6 +41,7 @@ import {
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
+  withCauseDetail,
   parseTikTokCurl,
   parseTikTokReadCurl,
   parseTikTokStatusCurl,
@@ -653,6 +654,26 @@ export async function createApp(
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
     }
+  });
+
+  // 卡在「结果未知」的系列复制任务：先列出来供人工去 TikTok 后台核实，
+  // 核实后再单独调重置。绝不在这里代为清理 TikTok 侧的草稿或系列——
+  // 那必须由人工确认后自行处理。
+  app.get("/api/accounts/:accountId/campaign-copy-tasks", async (request) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    return dependencies.store.listStuckCampaignCopyTasks(accountId);
+  });
+
+  app.post("/api/accounts/:accountId/campaign-copy-tasks/:taskKey/reset", async (request, reply) => {
+    const { accountId, taskKey } = z.object({
+      accountId: z.string().min(1),
+      taskKey: z.string().min(1),
+    }).parse(request.params);
+    const reset = dependencies.store.resetCampaignCopyTask(accountId, taskKey);
+    if (!reset) {
+      return reply.status(404).send({ message: "该系列复制任务不存在，或已不处于结果未知状态。" });
+    }
+    return reply.send({ ok: true });
   });
 
   app.post("/api/ad-groups/batch-expand", async (request, reply) => {
@@ -1622,30 +1643,7 @@ async function loadProviderContext(
 function getSafeProviderError(cause: unknown): string {
   if (!(cause instanceof Error)) return "连接检测失败。";
   if (cause.name === "TimeoutError") return "连接检测超时。";
-  const detail = describeErrorCause(cause);
-  return detail ? `${cause.message}（${detail}）` : cause.message;
-}
-
-/**
- * 展开 Error.cause 链上的底层原因。
- *
- * undici 的网络失败一律只留一句 `fetch failed`，真正的原因（ECONNREFUSED /
- * ENOTFOUND / 证书错误等）藏在 cause 里。不展开的话，用户和排障都只能看到一句
- * 没有任何指向性的话。
- *
- * 只取错误码；没有错误码时才退回到 message，并截断长度——避免把上游返回的长文本
- * 原样写进审计记录。
- */
-export function describeErrorCause(error: Error): string {
-  const parts: string[] = [];
-  let current: unknown = (error as { cause?: unknown }).cause;
-  for (let depth = 0; current instanceof Error && depth < 4; depth += 1) {
-    const code = (current as NodeJS.ErrnoException).code;
-    const text = (code ?? current.message ?? "").trim().slice(0, 120);
-    if (text && !parts.includes(text)) parts.push(text);
-    current = (current as { cause?: unknown }).cause;
-  }
-  return parts.join(" ← ");
+  return withCauseDetail(cause.message, cause);
 }
 
 function isMutation(method: string): boolean {
@@ -1702,6 +1700,7 @@ export function requiredPermission(
   }
   if (path.includes("/manual-takeovers")) return "ads:operate";
   if (path.startsWith("/api/ad-groups")) return "ads:operate";
+  if (path.includes("/campaign-copy-tasks")) return "launch:manage";
   // 不能依赖函数末尾的兜底：那条规则对非 DELETE 返回 null，等于放行无权限校验。
   if (path.startsWith("/api/campaigns")) return "launch:manage";
   if (path.startsWith("/api/launch-plans") || path.startsWith("/api/launch-presets")) return "launch:manage";

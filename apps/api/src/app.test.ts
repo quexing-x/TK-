@@ -155,6 +155,163 @@ describe("local API", () => {
     expect(copyCampaign).toHaveBeenCalledTimes(2);
   });
 
+  interface CampaignCopyMockResult {
+    ok: boolean;
+    message: string;
+    campaignId?: string;
+    adGroupIds?: string[];
+    failureKind?: "failed" | "unknown";
+    retrySafe?: boolean;
+  }
+
+  async function setupCampaignCopyAccount(
+    copyCampaign: (...args: unknown[]) => Promise<CampaignCopyMockResult>,
+  ) {
+    const provider = {
+      kind: "cookie",
+      displayName: "campaign copy provider",
+      capabilityVersion: "campaign-copy-v1",
+      capabilities: new Set(["copy-campaigns"]),
+      copyCampaign,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns"],
+    });
+    const syncedAt = new Date().toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "campaign", externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
+      { entityType: "ad-group", externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
+    ], { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 1, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+  }
+
+  const singleCampaignCopyPayload = {
+    accountId: "demo-account",
+    sources: [{ sourceCampaignId: "campaign-1", sourceAdGroupIds: ["adgroup-1"] }],
+    campaignCopies: 1,
+    groupsPerCampaign: 1,
+    initialStatus: "disabled" as const,
+  };
+
+  it("任务级自动重试：retrySafe=true 的失败会在同一次请求内自动重试直至成功，不需要人工再点一次", async () => {
+    // 复现真实故障：campaign_snap/copy 本身的传输失败，Provider 明确知道
+    // 还没有产生任何草稿（retrySafe: true），这类失败应当自动愈合。
+    const copyCampaign = vi.fn<(...args: unknown[]) => Promise<CampaignCopyMockResult>>(async () => ({
+      ok: false,
+      message: "campaign_snap/copy: fetch failed",
+      failureKind: "unknown",
+      retrySafe: true,
+    }));
+    copyCampaign.mockResolvedValueOnce({
+      ok: false, message: "campaign_snap/copy: fetch failed", failureKind: "unknown", retrySafe: true,
+    });
+    copyCampaign.mockResolvedValueOnce({ ok: true, message: "copied", adGroupIds: ["g1"] });
+    await setupCampaignCopyAccount(copyCampaign);
+
+    const response = await app.inject({ method: "POST", url: "/api/campaigns/copy", payload: singleCampaignCopyPayload });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ createdCampaigns: 1, createdGroups: 1, failed: [] });
+    // 同一个任务被自动重试了一次，用户不需要自己再点一次。
+    expect(copyCampaign).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("retrySafe=true 但自动重试耗尽后：判为 failed（可再次尝试）而不是 unknown（永久锁死）", async () => {
+    const copyCampaign = vi.fn<(...args: unknown[]) => Promise<CampaignCopyMockResult>>(async () => ({
+      ok: false,
+      message: "campaign_snap/copy: fetch failed",
+      failureKind: "unknown",
+      retrySafe: true,
+    }));
+    await setupCampaignCopyAccount(copyCampaign);
+
+    const response = await app.inject({ method: "POST", url: "/api/campaigns/copy", payload: singleCampaignCopyPayload });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.createdCampaigns).toBe(0);
+    expect(body.failed).toHaveLength(1);
+    // 明确不是「结果待确认，禁止自动重试」——这条路径已知没有产生任何写入。
+    expect(body.failed[0].message).toContain("已自动重试仍未成功，未产生任何写入");
+    expect(body.failed[0].message).not.toContain("禁止自动重试");
+    // 一次请求内重试到了上限（3 次尝试）。
+    expect(copyCampaign).toHaveBeenCalledTimes(3);
+
+    // 因为判定是 failed 而不是 unknown，任务记录会被清除，之后可以重新领取——
+    // 不需要人工去数据库或专门的重置入口才能再次尝试。
+    copyCampaign.mockResolvedValue({ ok: true, message: "copied", adGroupIds: ["g1"] });
+    const retry = await app.inject({ method: "POST", url: "/api/campaigns/copy", payload: singleCampaignCopyPayload });
+    expect(retry.json()).toMatchObject({ createdCampaigns: 1, skipped: 0 });
+  }, 20_000);
+
+  it("retrySafe=false：立即停止，不做任何自动重试，安全边界不因优化而放松", async () => {
+    const copyCampaign = vi.fn<(...args: unknown[]) => Promise<CampaignCopyMockResult>>(async () => ({
+      ok: false,
+      message: "TikTok 创建终态不完整",
+      failureKind: "unknown",
+      retrySafe: false,
+    }));
+    await setupCampaignCopyAccount(copyCampaign);
+
+    const response = await app.inject({ method: "POST", url: "/api/campaigns/copy", payload: singleCampaignCopyPayload });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.failed[0].message).toContain("结果待确认，禁止自动重试");
+    // 一次都没有重试——retrySafe:false 必须立刻停手。
+    expect(copyCampaign).toHaveBeenCalledTimes(1);
+
+    // 后续同一个任务应当仍然被锁死，不能自动重新领取。
+    const replay = await app.inject({ method: "POST", url: "/api/campaigns/copy", payload: singleCampaignCopyPayload });
+    expect(replay.json().failed[0].message).toContain("上次系列复制结果待人工确认");
+    expect(copyCampaign).toHaveBeenCalledTimes(1);
+
+    // 卡死的任务必须能被列出来，供人工去 TikTok 后台核实真实状态。
+    const listed = await app.inject({ method: "GET", url: "/api/accounts/demo-account/campaign-copy-tasks" });
+    expect(listed.statusCode).toBe(200);
+    const stuck = listed.json();
+    expect(stuck).toHaveLength(1);
+    expect(stuck[0]).toMatchObject({ accountId: "demo-account", sourceCampaignId: "campaign-1" });
+    expect(stuck[0].campaignName).toMatch(/^夏季系列-\d{4}-\d+$/);
+
+    // 人工核实后重置：清掉本地锁，下次可以重新领取——不需要我去手动改数据库。
+    const reset = await app.inject({
+      method: "POST",
+      url: `/api/accounts/demo-account/campaign-copy-tasks/${stuck[0].taskKey}/reset`,
+    });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json()).toEqual({ ok: true });
+
+    const listedAfterReset = await app.inject({ method: "GET", url: "/api/accounts/demo-account/campaign-copy-tasks" });
+    expect(listedAfterReset.json()).toEqual([]);
+
+    copyCampaign.mockResolvedValue({ ok: true, message: "copied", adGroupIds: ["g1"] });
+    const afterReset = await app.inject({ method: "POST", url: "/api/campaigns/copy", payload: singleCampaignCopyPayload });
+    expect(afterReset.json()).toMatchObject({ createdCampaigns: 1, skipped: 0 });
+  });
+
+  it("重置一个不存在或未卡死的任务返回 404", async () => {
+    const copyCampaign = vi.fn<(...args: unknown[]) => Promise<CampaignCopyMockResult>>(async () => ({
+      ok: true, message: "copied",
+    }));
+    await setupCampaignCopyAccount(copyCampaign);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/campaign-copy-tasks/does-not-exist/reset",
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
   it("多选源系列时逐个套用同一套 N/M，且副本名不跨源撞名", async () => {
     const copyCampaign = vi.fn(async (
       _context: unknown,

@@ -16,6 +16,17 @@ interface PlannedSource {
   campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
 }
 
+interface StuckCampaignCopyTask {
+  taskKey: string;
+  accountId: string;
+  sourceCampaignId: string;
+  campaignName: string;
+  claimedAt: string;
+  updatedAt: string;
+  generatedCampaignId: string | null;
+  generatedAdGroupIds: string[];
+}
+
 type LaunchTiming = "disabled" | "immediate" | "scheduled";
 
 function defaultNextDaySix(): string {
@@ -78,6 +89,8 @@ export function CopyCampaignPanel(props: {
   const [bidText, setBidText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [stuckTasks, setStuckTasks] = useState<StuckCampaignCopyTask[]>([]);
+  const [resettingTaskKey, setResettingTaskKey] = useState<string | null>(null);
 
   const load = (id: string) => {
     setLoading(true);
@@ -87,13 +100,41 @@ export function CopyCampaignPanel(props: {
       .finally(() => setLoading(false));
   };
 
+  const loadStuckTasks = (id: string) => {
+    api.listStuckCampaignCopyTasks(id)
+      .then(setStuckTasks)
+      .catch((cause: unknown) => props.onError(cause instanceof Error ? cause.message : String(cause)));
+  };
+
   useEffect(() => {
     if (!accountId) return;
     setSourceCampaignIds([]);
     setExcludedAdGroupIds([]);
     load(accountId);
+    loadStuckTasks(accountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
+
+  const resetStuckTask = async (task: StuckCampaignCopyTask) => {
+    const confirmed = await confirm({
+      title: "重置该系列复制任务",
+      message: `请先在 TikTok 广告后台核实「${task.campaignName}」的真实状态（是否已创建成功、是否为无用草稿）。确认无误后重置，才会允许系统重新领取并执行该任务，否则可能产生重复系列。确认重置？`,
+      confirmLabel: "已核实，确认重置",
+      danger: true,
+    });
+    if (!confirmed) return;
+    setResettingTaskKey(task.taskKey);
+    props.onError(null);
+    try {
+      await api.resetCampaignCopyTask(accountId, task.taskKey);
+      toast("已重置，可重新执行", "success");
+      loadStuckTasks(accountId);
+    } catch (cause) {
+      props.onError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setResettingTaskKey(null);
+    }
+  };
 
   // 系列列表接口不一定回传系列自身的预算字段，因此以广告组携带的父系列信息兜底。
   const budgetModes = useMemo(() => deriveCampaignBudgetModes(entities), [entities]);
@@ -260,6 +301,7 @@ export function CopyCampaignPanel(props: {
       setFeedback(parts.join("；"));
       toast(result.failed.length === 0 ? "系列复制完成" : "系列复制部分失败", result.failed.length === 0 ? "success" : "error");
       load(accountId);
+      loadStuckTasks(accountId);
     } catch (cause) {
       props.onError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -283,6 +325,34 @@ export function CopyCampaignPanel(props: {
         <button className="secondary-button compact-button" disabled={disabled} type="button"
           onClick={() => load(accountId)}><RefreshCcw size={14} /> 重新读取</button>
       </div>
+
+      {stuckTasks.length > 0 && (
+        <div className="sheet-issues warning campaign-copy-stuck-tasks">
+          <strong>{stuckTasks.length} 个任务结果未知，已暂停自动重试</strong>
+          <span>网络中断导致系统无法确认这些任务是否已在 TikTok 侧创建成功，为避免产生重复系列，已停止自动重试。请先到 TikTok 广告后台核实真实状态，再逐个重置。</span>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>新系列名称</th><th>源系列 ID</th><th>最近更新</th><th>已生成的系列 ID</th><th></th></tr></thead>
+              <tbody>
+                {stuckTasks.map((task) => (
+                  <tr key={task.taskKey}>
+                    <td>{task.campaignName}</td>
+                    <td>{task.sourceCampaignId}</td>
+                    <td>{new Date(task.updatedAt).toLocaleString()}</td>
+                    <td>{task.generatedCampaignId ?? "（未生成）"}</td>
+                    <td>
+                      <button className="secondary-button compact-button" disabled={disabled || resettingTaskKey === task.taskKey}
+                        onClick={() => void resetStuckTask(task)} type="button">
+                        {resettingTaskKey === task.taskKey ? "重置中…" : "已核实，重置"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="form-grid">
         <label className="field"><span>账户</span>

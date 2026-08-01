@@ -531,6 +531,22 @@ export const api = {
         campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
       }>;
     }>("/api/campaigns/copy", { method: "POST", body: JSON.stringify(input) }),
+  listStuckCampaignCopyTasks: (accountId: string) =>
+    request<Array<{
+      taskKey: string;
+      accountId: string;
+      sourceCampaignId: string;
+      campaignName: string;
+      claimedAt: string;
+      updatedAt: string;
+      generatedCampaignId: string | null;
+      generatedAdGroupIds: string[];
+    }>>(`/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks`),
+  resetCampaignCopyTask: (accountId: string, taskKey: string) =>
+    request<{ ok: true }>(
+      `/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks/${encodeURIComponent(taskKey)}/reset`,
+      { method: "POST" },
+    ),
   getManualTakeovers: (accountId: string) =>
     request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),
   changeEntityStatus: (accountId: string, input: ManualStatusInput) =>
