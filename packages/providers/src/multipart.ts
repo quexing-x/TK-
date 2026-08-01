@@ -49,12 +49,22 @@ export function rewriteMultipartFields(
   transform: (
     field: MultipartField,
   ) => { name?: string; value?: string } | undefined,
-): { body: string; changes: number } {
+): { body: string; changes: number; matched: number } {
   const replacements: Array<{ start: number; end: number; value: string }> = [];
   let changes = 0;
+  // `matched` counts every field the transform claimed (returned a non-undefined
+  // result for), independent of whether the replacement text actually differs
+  // from what was already there. Callers that need to know "did we find a field
+  // to target this entity" must use `matched`, not `changes` — a field whose
+  // captured value already happens to equal the desired value produces zero
+  // text diff but is still a real match. Conflating the two made status writes
+  // silently no-op (and get rejected as "no matching field") whenever the
+  // target id happened to equal whatever id was captured in the imported cURL.
+  let matched = 0;
   for (const field of parseMultipartFields(body)) {
     const next = transform(field);
     if (!next) continue;
+    matched += 1;
     if (next.name !== undefined && next.name !== field.name) {
       replacements.push({
         start: field.nameStart,
@@ -80,7 +90,7 @@ export function rewriteMultipartFields(
       replacement.value +
       output.slice(replacement.end);
   }
-  return { body: output, changes };
+  return { body: output, changes, matched };
 }
 
 export function copyMultipartField(

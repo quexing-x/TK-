@@ -1144,6 +1144,116 @@ describe("CookieAdsProvider", () => {
     expect(requestBody).toContain('name="operation"\r\n\r\nenable');
   });
 
+  it("succeeds when the target id equals the id captured in the template (2026-08-01 incident)", async () => {
+    // 真实故障复现：导入启停 cURL 时，被选中的正好就是这个广告组本身，所以模板
+    // 里 ad_list 已经是 ["captured-id"]。以后再对同一个广告组做同样的启停操作，
+    // 替换后的值和已有值完全相同——字段确实被匹配到了，只是没有产生文本差异。
+    // 在修复前，这会被误判为“模板里没有可替换的广告对象 ID”而直接拒绝派发。
+    let requestBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        requestBody = String(init?.body ?? "");
+        return new Response(JSON.stringify({ code: 0, data: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const body = [
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="ad_list"\r\n\r\n',
+      '["captured-id"]\r\n',
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "disable\r\n",
+      "------TestBoundary--\r\n",
+    ].join("");
+
+    const provider = new CookieAdsProvider();
+    const result = await provider.changeStatus(
+      {
+        accountId: "test-account",
+        settings: {
+          kind: "cookie",
+          advertiserId: "123456",
+          healthUrl: "",
+          campaignsUrl: "",
+          adGroupsUrl: "",
+          adsUrl: "",
+        },
+        credential: {
+          kind: "cookie",
+          cookie: "sessionid=test-cookie",
+          csrfHeaderName: "x-csrftoken",
+          requestTemplates: [
+            {
+              target: "ad-group-status",
+              action: "disable",
+              url: "https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456",
+              method: "POST",
+              body,
+              contentType: "multipart/form-data; boundary=----TestBoundary",
+            },
+          ],
+        },
+      },
+      // 目标广告组的 ID 与模板里已经写死的 ID 完全一样。
+      [{ entityType: "ad-group", externalId: "captured-id", action: "disable" }],
+    );
+
+    expect(result[0]).toMatchObject({ ok: true, externalId: "captured-id" });
+    expect(requestBody).toContain('name="ad_list"\r\n\r\n["captured-id"]');
+  });
+
+  it("still rejects a template with no matching entity-list field at all", async () => {
+    // 反向校验：真正没有可替换字段时，仍然必须在派发前拒绝，不能被本次修复
+    // 误放行。
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("不应该发出任何请求。");
+    }));
+    const body = [
+      "------TestBoundary\r\n",
+      'Content-Disposition: form-data; name="operation"\r\n\r\n',
+      "disable\r\n",
+      "------TestBoundary--\r\n",
+    ].join("");
+
+    const provider = new CookieAdsProvider();
+    const result = await provider.changeStatus(
+      {
+        accountId: "test-account",
+        settings: {
+          kind: "cookie",
+          advertiserId: "123456",
+          healthUrl: "",
+          campaignsUrl: "",
+          adGroupsUrl: "",
+          adsUrl: "",
+        },
+        credential: {
+          kind: "cookie",
+          cookie: "sessionid=test-cookie",
+          csrfHeaderName: "x-csrftoken",
+          requestTemplates: [
+            {
+              target: "ad-group-status",
+              action: "disable",
+              url: "https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456",
+              method: "POST",
+              body,
+              contentType: "multipart/form-data; boundary=----TestBoundary",
+            },
+          ],
+        },
+      },
+      [{ entityType: "ad-group", externalId: "any-id", action: "disable" }],
+    );
+
+    expect(result[0]).toMatchObject({ ok: false });
+    expect(result[0]?.message).toContain("状态 cURL 中未找到可替换的广告对象 ID");
+  });
+
   it("replaces both confirmed final-ad creative id lists", async () => {
     let requestBody = "";
     vi.stubGlobal(
