@@ -86,12 +86,23 @@ describe("local API", () => {
       _context: unknown,
       _input: { campaignName: string; adGroups: Array<{ sourceAdGroupId: string; name: string }> },
     ) => ({ ok: true, message: "copied", adGroupIds: ["g1"] }));
+    const seedEntities = [
+      { entityType: "campaign" as const, externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列", budget: "88.00", budget_mode: 3, budget_optimize_switch: 1 } },
+      { entityType: "ad-group" as const, externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
+      { entityType: "ad-group" as const, externalId: "adgroup-2", payload: { campaign_id: "campaign-1", ad_name: "组B" } },
+    ];
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
       capabilityVersion: "campaign-copy-v1",
-      capabilities: new Set(["copy-campaigns"]),
+      capabilities: new Set(["copy-campaigns", "read-campaigns"]),
       copyCampaign,
+      // 系列复制发布前会强制刷新一次账户状态用于命名去重；测试里原样回放
+      // 已灌好的快照即可，验证的是「确实调用了」，不是刷新出的新内容。
+      syncReadOnly: async () => ({
+        entities: seedEntities,
+        result: { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) },
+      }),
     } as unknown as AdsProvider & { copyCampaign: typeof copyCampaign };
     store.saveProviderConnectionSettings("demo-account", {
       kind: "cookie",
@@ -112,14 +123,11 @@ describe("local API", () => {
     store.updateProviderAuthorization("demo-account", "cookie", {
       status: "active",
       capabilityVersion: "campaign-copy-v1",
-      capabilities: ["copy-campaigns"],
+      capabilities: ["copy-campaigns", "read-campaigns"],
     });
     const syncedAt = new Date().toISOString();
-    store.saveReadOnlySync("demo-account", "cookie", [
-      { entityType: "campaign", externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列", budget: "88.00", budget_mode: 3, budget_optimize_switch: 1 } },
-      { entityType: "ad-group", externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
-      { entityType: "ad-group", externalId: "adgroup-2", payload: { campaign_id: "campaign-1", ad_name: "组B" } },
-    ], { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+    store.saveReadOnlySync("demo-account", "cookie", seedEntities,
+      { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
     await app.close();
     app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
 
@@ -167,12 +175,20 @@ describe("local API", () => {
   async function setupCampaignCopyAccount(
     copyCampaign: (...args: unknown[]) => Promise<CampaignCopyMockResult>,
   ) {
+    const syncedAt = new Date().toISOString();
+    const seedEntities = [
+      { entityType: "campaign" as const, externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
+      { entityType: "ad-group" as const, externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
+    ];
+    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 1, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
       capabilityVersion: "campaign-copy-v1",
-      capabilities: new Set(["copy-campaigns"]),
+      capabilities: new Set(["copy-campaigns", "read-campaigns"]),
       copyCampaign,
+      // 发布前会强制刷新账户状态用于命名去重；测试里原样回放已灌好的快照。
+      syncReadOnly: async () => ({ entities: seedEntities, result: syncResult }),
     } as unknown as AdsProvider;
     store.saveProviderConnectionSettings("demo-account", {
       kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
@@ -183,13 +199,9 @@ describe("local API", () => {
     store.setProviderCredentialReference("demo-account", "cookie", reference);
     store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
     store.updateProviderAuthorization("demo-account", "cookie", {
-      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns"],
+      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns", "read-campaigns"],
     });
-    const syncedAt = new Date().toISOString();
-    store.saveReadOnlySync("demo-account", "cookie", [
-      { entityType: "campaign", externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
-      { entityType: "ad-group", externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
-    ], { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 1, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+    store.saveReadOnlySync("demo-account", "cookie", seedEntities, syncResult);
     await app.close();
     app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
   }
@@ -317,12 +329,22 @@ describe("local API", () => {
       _context: unknown,
       _input: { campaignName: string; adGroups: Array<{ sourceAdGroupId: string; name: string }> },
     ) => ({ ok: true, message: "copied" }));
+    const syncedAt = new Date().toISOString();
+    // 两个源系列同名前缀，用来验证跨源的名称预留确实累积。
+    const seedEntities = [
+      { entityType: "campaign" as const, externalId: "c1", payload: { campaign_id: "c1", campaign_name: "同名系列" } },
+      { entityType: "ad-group" as const, externalId: "g1", payload: { campaign_id: "c1", ad_name: "组1" } },
+      { entityType: "campaign" as const, externalId: "c2", payload: { campaign_id: "c2", campaign_name: "同名系列" } },
+      { entityType: "ad-group" as const, externalId: "g2", payload: { campaign_id: "c2", ad_name: "组2" } },
+    ];
+    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 2, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
       capabilityVersion: "campaign-copy-v1",
-      capabilities: new Set(["copy-campaigns"]),
+      capabilities: new Set(["copy-campaigns", "read-campaigns"]),
       copyCampaign,
+      syncReadOnly: async () => ({ entities: seedEntities, result: syncResult }),
     } as unknown as AdsProvider & { copyCampaign: typeof copyCampaign };
     store.saveProviderConnectionSettings("demo-account", {
       kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
@@ -333,16 +355,9 @@ describe("local API", () => {
     store.setProviderCredentialReference("demo-account", "cookie", reference);
     store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
     store.updateProviderAuthorization("demo-account", "cookie", {
-      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns"],
+      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns", "read-campaigns"],
     });
-    const syncedAt = new Date().toISOString();
-    // 两个源系列同名前缀，用来验证跨源的名称预留确实累积。
-    store.saveReadOnlySync("demo-account", "cookie", [
-      { entityType: "campaign", externalId: "c1", payload: { campaign_id: "c1", campaign_name: "同名系列" } },
-      { entityType: "ad-group", externalId: "g1", payload: { campaign_id: "c1", ad_name: "组1" } },
-      { entityType: "campaign", externalId: "c2", payload: { campaign_id: "c2", campaign_name: "同名系列" } },
-      { entityType: "ad-group", externalId: "g2", payload: { campaign_id: "c2", ad_name: "组2" } },
-    ], { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 2, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+    store.saveReadOnlySync("demo-account", "cookie", seedEntities, syncResult);
     await app.close();
     app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
 
@@ -373,12 +388,20 @@ describe("local API", () => {
 
   it("拒绝不属于源系列的广告组", async () => {
     const copyCampaign = vi.fn(async () => ({ ok: true, message: "copied" }));
+    const syncedAt = new Date().toISOString();
+    const seedEntities = [
+      { entityType: "campaign" as const, externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
+      { entityType: "ad-group" as const, externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
+      { entityType: "ad-group" as const, externalId: "other-group", payload: { campaign_id: "campaign-9", ad_name: "别的系列的组" } },
+    ];
+    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
       capabilityVersion: "campaign-copy-v1",
-      capabilities: new Set(["copy-campaigns"]),
+      capabilities: new Set(["copy-campaigns", "read-campaigns"]),
       copyCampaign,
+      syncReadOnly: async () => ({ entities: seedEntities, result: syncResult }),
     } as unknown as AdsProvider;
     store.saveProviderConnectionSettings("demo-account", {
       kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
@@ -389,14 +412,9 @@ describe("local API", () => {
     store.setProviderCredentialReference("demo-account", "cookie", reference);
     store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
     store.updateProviderAuthorization("demo-account", "cookie", {
-      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns"],
+      status: "active", capabilityVersion: "campaign-copy-v1", capabilities: ["copy-campaigns", "read-campaigns"],
     });
-    const syncedAt = new Date().toISOString();
-    store.saveReadOnlySync("demo-account", "cookie", [
-      { entityType: "campaign", externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
-      { entityType: "ad-group", externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
-      { entityType: "ad-group", externalId: "other-group", payload: { campaign_id: "campaign-9", ad_name: "别的系列的组" } },
-    ], { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+    store.saveReadOnlySync("demo-account", "cookie", seedEntities, syncResult);
     await app.close();
     app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
 
