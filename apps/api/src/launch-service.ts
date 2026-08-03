@@ -814,6 +814,25 @@ export class LaunchService {
       "copy-campaigns",
     );
 
+    const context = await this.loadProviderContext(input.accountId, account.providerKind);
+
+    // 命名去重必须基于账户的实时状态，而不是后台定时轮询留下的快照——快照
+    // 可能已经过期（默认最长 5 分钟一轮），账户里刚创建、还没被下一轮同步
+    // 捕获到的系列/广告组不会出现在本地数据里，命名会把它的名字当成可用的
+    // 重新分配出去，发布时被 TikTok 判定重名而拒绝。发布前强制刷新一次。
+    this.providers.requireAccountCapability(
+      input.accountId,
+      account.providerKind,
+      connection,
+      "read-campaigns",
+    );
+    try {
+      const sync = await this.providers.syncReadOnly(account.providerKind, context);
+      this.store.saveReadOnlySync(input.accountId, account.providerKind, sync.entities, sync.result);
+    } catch (cause) {
+      throw new Error(`系列复制前刷新账户状态失败，已阻止本次复制以避免与账户里未同步的系列/广告组重名：${safeError(cause)}`);
+    }
+
     const managed = this.store.listCurrentManagedEntities(input.accountId, account.providerKind);
 
     // 命名的序号必须从账户现状往后接，因此要先拿到账户里已有的系列名与组名。
@@ -878,7 +897,6 @@ export class LaunchService {
       });
     }
 
-    const context = await this.loadProviderContext(input.accountId, account.providerKind);
     const scheduledStartAt = input.scheduledStartAt ?? null;
     let createdCampaigns = 0;
     let createdGroups = 0;
