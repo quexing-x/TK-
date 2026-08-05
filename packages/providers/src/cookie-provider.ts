@@ -448,9 +448,13 @@ export class CookieAdsProvider implements AdsProvider {
       // captured range. Some valid TikTok list requests do not expose a date
       // parameter at all; those must still be replayed with the platform's
       // request defaults rather than blocking the complete polling cycle.
+      // 广告层级同样要规范化：账户里可能已经存着一条早期派生的 ad 模板，它
+      // 只换了路径、仍带广告组维度，直接重放会一行最终广告都取不到。
       const entityRequest = entityType === "campaign"
         ? campaignMetricsListRequest(request)
-        : request;
+        : entityType === "ad"
+          ? adFinalListRequest(request)
+          : request;
       const windowedRequest = withTodayMetricWindow(
         entityRequest,
         context.timezone ?? "UTC",
@@ -5494,6 +5498,37 @@ function buildReusableAppealRequest(
   };
 }
 
+/** 最终广告列表既要换路径，也要换统计维度。沿用广告组捕获里的
+ * `dimensions: ["ad_id"]` 时，TikTok 按广告组维度作答：每行 universal_type=1
+ * 且 creative_id 是 "0" 占位值，而 extractEntities 会刻意丢弃这类占位行，
+ * 于是广告层级每轮都同步为空。改成 creative_id 维度才会返回真正的最终广告。 */
+function adFinalListRequest(
+  template: CapturedCookieRequest,
+): CapturedCookieRequest {
+  const url = new URL(template.url);
+  url.pathname = url.pathname.replace(
+    /\/adgroup\/list(?=\/|$)/i,
+    "/ad/list",
+  );
+  let body = template.body;
+  if (body && template.contentType?.toLowerCase().includes("json")) {
+    try {
+      const value = JSON.parse(body) as unknown;
+      if (isRecord(value)) {
+        const commonRequest = isRecord(value.common_req) ? value.common_req : {};
+        commonRequest.dimensions = ["creative_id"];
+        commonRequest.page = 1;
+        commonRequest.page_size = 100;
+        value.common_req = commonRequest;
+        body = JSON.stringify(value);
+      }
+    } catch {
+      // 与系列列表一致：解析不了的请求体保持原样，交由列表预检拦截。
+    }
+  }
+  return { ...template, target: "ad", url: url.toString(), body };
+}
+
 function deriveFinalAdReadRequest(
   request: CapturedCookieRequest | undefined,
 ): CapturedCookieRequest | undefined {
@@ -5502,13 +5537,8 @@ function deriveFinalAdReadRequest(
   // The two-step Cookie onboarding captures the statistics ad-group list.
   // The matching final-ad list for that endpoint family is ad/list.
   if (!url.pathname.toLowerCase().includes("/statistics/op/")) return undefined;
-  const pathname = url.pathname.replace(
-    /\/adgroup\/list(?=\/|$)/i,
-    "/ad/list",
-  );
-  if (pathname === url.pathname) return undefined;
-  url.pathname = pathname;
-  return { ...request, target: "ad", url: url.toString(), derived: true };
+  if (!/\/adgroup\/list(?=\/|$)/i.test(url.pathname)) return undefined;
+  return { ...adFinalListRequest(request), derived: true };
 }
 
 function extractEntities(

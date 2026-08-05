@@ -133,14 +133,13 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
             <p className="executor-rule-summary">当天转化 ≥ {settings.copy.autoCopyMinConversions}、CPA ≤ {settings.copy.autoCopyMaxCpa}、CPC ≤ {settings.copy.autoCopyMaxCpc} · 每次 {settings.copy.autoCopyCount} 组 · 12:00 停止新任务</p>
             {editing === "copy" && (
               <div className="executor-rule-editor two-column">
-                <label className="field"><span>命名规则</span><input value={settings.copy.namingTemplate} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, namingTemplate: event.target.value } })} /><small>变量：{"{source_name}"}、{"{account_name}"}、{"{date}"}</small></label>
                 <label className="field"><span>转化数 ≥</span><input min={0} step={1} type="number" value={settings.copy.autoCopyMinConversions} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyMinConversions: Math.max(0, Number(event.target.value) || 0) } })} /></label>
                 <label className="field"><span>CPA ≤</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyMaxCpa} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyMaxCpa: Math.max(0, Number(event.target.value) || 0) } })} /></label>
                 <label className="field"><span>CPC ≤</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyMaxCpc} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyMaxCpc: Math.max(0, Number(event.target.value) || 0) } })} /></label>
                 <label className="field"><span>复制数量（默认 2）</span><input max={10} min={1} type="number" value={settings.copy.autoCopyCount} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyCount: Math.max(1, Math.min(10, Number(event.target.value) || 2)) } })} /></label>
                 <label className="field"><span>复制后预算（留空=同源）</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyBudget ?? ""} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyBudget: event.target.value === "" ? null : Math.max(0, Number(event.target.value)) } })} /></label>
                 <label className="field"><span>复制后出价（留空=同源）</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyBid ?? ""} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyBid: event.target.value === "" ? null : Math.max(0, Number(event.target.value)) } })} /></label>
-                <p>固定策略：只统计账户时区当天数据；立即投放；同一来源每天最多触发一次；自动生成组不再作为复制来源；每账户每日最多创建 {settings.copy.autoCopyDailyAccountLimit} 组。</p>
+                <p>固定策略：只统计账户时区当天数据；立即投放；同一来源只触发一次（不是每天一次）；自动生成组不再作为复制来源；命名固定为「源名-投放日期-时间」；每账户每日最多创建 {settings.copy.autoCopyDailyAccountLimit} 组。</p>
               </div>
             )}
           </article>

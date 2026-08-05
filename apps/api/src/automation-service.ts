@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
   automationRuleDefinitions,
+  dateTimeSuffix,
   evaluateRuleConfiguration,
   filterEntitiesToRecentWindow,
+  stripAutomaticAdGroupNameSuffixes,
   type AutomationCandidate,
   type AutomationRunRecord,
   type AutomationTrigger,
@@ -337,7 +339,10 @@ export class AutomationService {
         .filter((entity) => entity.entityType === "campaign")
         .map((entity) => [entity.externalId, entity.name]),
     );
-    const date = localDate.replaceAll("-", "");
+    // 复制出来的组永远不再当复制源：账户级全量排除，不限于同一个系列，也不放过
+    // 标记为失败但可能已部分创建的任务。否则一个跑得好的组会每天派生新组、新组
+    // 次日又符合阈值继续派生，账户被指数级铺满。
+    const generated = this.store.listAutomaticCopyGeneratedRefs(accountId);
     const candidates = entities
       .filter((entity) => {
         if (
@@ -353,12 +358,7 @@ export class AutomationService {
           || entity.metrics.cost_per_conversion === null
           || entity.metrics.cost_per_click === null
         ) return false;
-        if (this.store.isAutomaticCopyDestination(
-          accountId,
-          entity.parentCampaignId,
-          entity.externalId,
-          entity.name,
-        )) return false;
+        if (generated.ids.has(entity.externalId) || generated.names.has(entity.name)) return false;
         return entity.metrics.conversions >= copy.autoCopyMinConversions
           && entity.metrics.cost_per_conversion <= copy.autoCopyMaxCpa
           && entity.metrics.cost_per_click <= copy.autoCopyMaxCpc;
@@ -373,20 +373,20 @@ export class AutomationService {
 
     for (const entity of candidates) {
       const sourceCampaignId = entity.parentCampaignId!;
-      const baseAdGroupName = renderCopyNamingTemplate(copy.namingTemplate, {
-        sourceName: entity.name,
-        accountName: account.displayName,
-        date,
-      });
+      // 与系列复制、扩组统一：{清洗后源名}-{投放日期}-{时间}。自动复制没有排期，
+      // 投放时刻即本轮执行时刻。源名先清洗掉历史自动后缀，避免层层累积。
+      const baseAdGroupName = `${stripAutomaticAdGroupNameSuffixes(entity.name)}-${
+        dateTimeSuffix(asOf, account.timezone)
+      }`;
       const generatedNames = Array.from(
         { length: copy.autoCopyCount },
         (_unused, index) => `${baseAdGroupName}-${index + 1}`,
       );
+      // 任务键不含日期：同一个源广告组只自动复制一次，不是每天一次。
       const taskKey = createHash("sha256").update(JSON.stringify({
         executor: "scheduled-auto-copy",
         accountId,
         sourceAdGroupId: entity.externalId,
-        localDate,
       })).digest("hex");
       const claim = this.store.claimAutomaticCopyTask({
         taskKey,
@@ -1697,17 +1697,6 @@ function renderAppealTemplate(
     .replaceAll("{reject_reason}", values.rejectReason);
 }
 
-function renderCopyNamingTemplate(
-  template: string,
-  values: { sourceName: string; accountName: string; date: string },
-): string {
-  const rendered = template
-    .replaceAll("{source_name}", values.sourceName)
-    .replaceAll("{account_name}", values.accountName)
-    .replaceAll("{date}", values.date)
-    .trim();
-  return rendered || values.sourceName;
-}
 
 function dateKeyInTimeZone(value: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {

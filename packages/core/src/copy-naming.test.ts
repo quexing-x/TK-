@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DuplicateNameError,
   assertCampaignNameAvailable,
-  nextNameSerial,
+  dateTimeSuffix,
   planGeneratedNames,
   stripGeneratedNameSuffixes,
   truncateGeneratedName,
@@ -11,55 +11,67 @@ import {
 const at = new Date("2026-07-30T12:00:00.000Z");
 
 describe("planGeneratedNames", () => {
-  it("生成 {源名}-{MMDD}-{序号}", () => {
+  it("生成 {源名}-{MMDD}-{HHMMSS}，同批按秒递增", () => {
     const plan = planGeneratedNames({ sourceName: "夏季系列", count: 2, at, timeZone: "UTC" });
     expect(plan.baseName).toBe("夏季系列-0730");
-    expect(plan.names).toEqual(["夏季系列-0730-1", "夏季系列-0730-2"]);
+    expect(plan.names).toEqual(["夏季系列-0730-120000", "夏季系列-0730-120001"]);
   });
 
-  it("序号从账户已有名称往后接，而不是固定从 1 开始", () => {
-    const plan = planGeneratedNames({
+  it("名字不再依赖账户已有名称定序号：快照过期也不影响结果", () => {
+    // 旧规则会把这些已有名称当成序号起点；新规则只按投放时刻取名，传入过期
+    // 快照与传空必须得到完全一样的结果——这正是移除发布前强制刷新的前提。
+    const withStaleSnapshot = planGeneratedNames({
       sourceName: "夏季系列",
       count: 2,
       at,
       timeZone: "UTC",
       existingNames: ["夏季系列-0730-1", "夏季系列-0730-2", "无关系列"],
     });
-    expect(plan.names).toEqual(["夏季系列-0730-3", "夏季系列-0730-4"]);
-  });
-
-  it("同一天重复扩量不会撞上第一次生成的名字", () => {
-    const first = planGeneratedNames({ sourceName: "夏季系列", count: 2, at, timeZone: "UTC" });
-    const second = planGeneratedNames({
-      sourceName: "夏季系列",
-      count: 2,
-      at,
-      timeZone: "UTC",
-      existingNames: first.names,
+    const withoutSnapshot = planGeneratedNames({
+      sourceName: "夏季系列", count: 2, at, timeZone: "UTC",
     });
-    expect(second.names.some((name) => first.names.includes(name))).toBe(false);
+    expect(withStaleSnapshot.names).toEqual(withoutSnapshot.names);
   });
 
-  it("对已生成的名字再次扩量时清洗掉旧后缀，不会累积", () => {
+  it("定时投放取排期时刻，与立即投放区分开", () => {
+    const scheduled = planGeneratedNames({
+      sourceName: "夏季系列",
+      count: 1,
+      at: new Date("2026-08-06T01:00:00.000Z"),
+      timeZone: "UTC",
+    });
+    expect(scheduled.names).toEqual(["夏季系列-0806-010000"]);
+  });
+
+  it("对已生成的名字再次复制时清洗掉旧时间戳，不会累积", () => {
     const plan = planGeneratedNames({
-      sourceName: "夏季系列-0730-1",
+      sourceName: "夏季系列-0730-120000",
       count: 1,
       at: new Date("2026-07-31T12:00:00.000Z"),
       timeZone: "UTC",
     });
-    expect(plan.names).toEqual(["夏季系列-0731-1"]);
+    expect(plan.names).toEqual(["夏季系列-0731-120000"]);
   });
 
-  it("跳过用户手工起的同名对象", () => {
+  it("旧格式的名字（-MMDD-序号）同样能清洗干净", () => {
+    const plan = planGeneratedNames({
+      sourceName: "夏季系列-0730-3",
+      count: 1,
+      at: new Date("2026-07-31T12:00:00.000Z"),
+      timeZone: "UTC",
+    });
+    expect(plan.names).toEqual(["夏季系列-0731-120000"]);
+  });
+
+  it("撞上用户手工起的同名对象时顺延一秒", () => {
     const plan = planGeneratedNames({
       sourceName: "夏季系列",
-      count: 2,
+      count: 1,
       at,
       timeZone: "UTC",
-      existingNames: ["夏季系列-0730-2"],
+      existingNames: ["夏季系列-0730-120000"],
     });
-    // 已有最大序号是 2，从 3 起编。
-    expect(plan.names).toEqual(["夏季系列-0730-3", "夏季系列-0730-4"]);
+    expect(plan.names).toEqual(["夏季系列-0730-120001"]);
   });
 
   it("本批次预留的名称参与去重", () => {
@@ -68,28 +80,41 @@ describe("planGeneratedNames", () => {
       count: 1,
       at,
       timeZone: "UTC",
-      reservedNames: ["夏季系列-0730-1", "夏季系列-0730-2"],
+      reservedNames: ["夏季系列-0730-120000"],
     });
-    expect(plan.names).toEqual(["夏季系列-0730-3"]);
+    expect(plan.names).toEqual(["夏季系列-0730-120001"]);
   });
 
   it("像型号一样的四位数字不会被误当成日期清洗掉", () => {
     const plan = planGeneratedNames({ sourceName: "耳机2024", count: 1, at, timeZone: "UTC" });
-    expect(plan.names).toEqual(["耳机2024-0730-1"]);
+    expect(plan.names).toEqual(["耳机2024-0730-120000"]);
+  });
+
+  it("跨午夜的秒递增会带着日期一起进位", () => {
+    const plan = planGeneratedNames({
+      sourceName: "夏季系列",
+      count: 2,
+      at: new Date("2026-07-30T23:59:59.000Z"),
+      timeZone: "UTC",
+    });
+    expect(plan.names).toEqual(["夏季系列-0730-235959", "夏季系列-0731-000000"]);
   });
 });
 
-describe("nextNameSerial", () => {
-  it("空账户从 1 起编", () => {
-    expect(nextNameSerial([], "A", "0730")).toBe(1);
+describe("dateTimeSuffix", () => {
+  it("按账户时区取投放日期与时间", () => {
+    expect(dateTimeSuffix(at, "UTC")).toBe("0730-120000");
+    // 台北 +8：UTC 12:00 是当地 20:00，仍是同一天。
+    expect(dateTimeSuffix(at, "Asia/Taipei")).toBe("0730-200000");
   });
 
-  it("只认同前缀同日期的序号", () => {
-    expect(nextNameSerial(["A-0730-5", "A-0731-9", "B-0730-7"], "A", "0730")).toBe(6);
+  it("时区跨日时日期跟着走", () => {
+    expect(dateTimeSuffix(new Date("2026-07-30T17:00:00.000Z"), "Asia/Taipei"))
+      .toBe("0731-010000");
   });
 
-  it("忽略非序号后缀", () => {
-    expect(nextNameSerial(["A-0730-abc", "A-0730-0"], "A", "0730")).toBe(1);
+  it("用 24 小时制，不会把 00 点写成 24", () => {
+    expect(dateTimeSuffix(new Date("2026-07-30T00:00:00.000Z"), "UTC")).toBe("0730-000000");
   });
 });
 

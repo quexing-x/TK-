@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type ProviderEntity } from "@tk-auto/core";
+import { dateTimeSuffix, type ProviderEntity } from "@tk-auto/core";
 import type { SyncDataQualityStatus } from "@tk-auto/core";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -992,7 +992,6 @@ describe("AutomationService", () => {
     );
     const settings = store.getAutomationFeatureSettings();
     settings.copy.autoCopyEnabled = true;
-    settings.copy.namingTemplate = "{source_name}";
     settings.copy.autoCopyBudget = 25;
     settings.copy.autoCopyBid = 4;
     store.updateAutomationFeatureSettings(settings);
@@ -1015,7 +1014,8 @@ describe("AutomationService", () => {
       accountId: "demo-account",
       sourceCampaignId: "campaign-1",
       sourceAdGroupId: "adgroup-1",
-      baseAdGroupName: "测试广告组",
+      // 命名不再可配置：统一 {清洗后源名}-{投放日期}-{时间}。
+      baseAdGroupName: `测试广告组-${dateTimeSuffix(beforeNoon, "Asia/Shanghai")}`,
       count: 2,
       dailyBudget: 25,
       bid: 4,
@@ -1025,6 +1025,8 @@ describe("AutomationService", () => {
     }));
     expect(autoCopyRunner).toHaveBeenCalledTimes(1);
 
+    // 次日：源组依然满足阈值，但同源只复制一次，不再触发；复制出来的
+    // generated-copy-1 即使被用户改了名，也靠 ID 排除在候选之外。
     autoCopyRunner.mockClear();
     const nextDay = new Date(beforeNoon.getTime() + 24 * 60 * 60_000);
     vi.setSystemTime(nextDay);
@@ -1049,10 +1051,41 @@ describe("AutomationService", () => {
 
     await copyService.runScheduledAutoCopies("demo-account", nextDay);
 
+    expect(autoCopyRunner).not.toHaveBeenCalled();
+  });
+
+  it("同源只复制一次：任务键不含日期，隔多少天都不会再复制同一个源", async () => {
+    const autoCopyRunner = vi.fn(async (input: { onBeforeDispatch?: () => void }) => {
+      input.onBeforeDispatch?.();
+      return [{ ok: true, adGroupIds: ["generated-copy-1"] }];
+    });
+    const copyService = new AutomationService(
+      store, vault, new ProviderRegistry([provider]), autoCopyRunner,
+    );
+    const settings = store.getAutomationFeatureSettings();
+    settings.copy.autoCopyEnabled = true;
+    store.updateAutomationFeatureSettings(settings);
+    provider.adGroupConversions = 2;
+    provider.adGroupCpa = 5;
+    provider.adGroupCpc = 0.5;
+
+    const firstDay = futureShanghaiTime(10);
+    vi.useFakeTimers();
+    vi.setSystemTime(firstDay);
+    const first = alignSyncTo(await provider.syncReadOnly(), firstDay);
+    store.saveReadOnlySync("demo-account", "cookie", first.entities, first.result);
+    await copyService.runScheduledAutoCopies("demo-account", firstDay);
     expect(autoCopyRunner).toHaveBeenCalledTimes(1);
-    expect(autoCopyRunner).toHaveBeenCalledWith(expect.objectContaining({
-      sourceAdGroupId: "adgroup-1",
-    }));
+
+    // 隔一周后源组仍然满足阈值，但已经复制过了，不再触发。
+    autoCopyRunner.mockClear();
+    const laterDay = new Date(firstDay.getTime() + 7 * 24 * 60 * 60_000);
+    vi.setSystemTime(laterDay);
+    const later = alignSyncTo(await provider.syncReadOnly(), laterDay);
+    store.saveReadOnlySync("demo-account", "cookie", later.entities, later.result);
+    await copyService.runScheduledAutoCopies("demo-account", laterDay);
+
+    expect(autoCopyRunner).not.toHaveBeenCalled();
   });
 
   it("does not start new automatic copies at or after 12:00 account time", async () => {

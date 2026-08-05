@@ -11,7 +11,9 @@ export const AutomationFeatureSettingsInputSchema = z.object({
       .default([1, 12]),
   }),
   copy: z.object({
-    namingTemplate: z.string().trim().min(1).max(300),
+    // 命名不再可配置：系列复制、扩组、自动复制统一用
+    // {清洗后源名}-{投放日期}-{时间}，靠时间戳保证唯一。旧配置里残留的
+    // namingTemplate 会被 zod 直接丢弃，不需要迁移。
     startPaused: z.boolean(),
     copyBudget: z.boolean(),
     // 独立账户广告组自动复制：命中规则时在同账户/同系列自动复制 N 个广告组。
@@ -60,7 +62,6 @@ export const defaultAutomationFeatureSettings: AutomationFeatureSettingsInput = 
     scheduleHours: [1, 12],
   },
   copy: {
-    namingTemplate: "{source_name}-{account_name}-{date}",
     startPaused: true,
     copyBudget: false,
     autoCopyEnabled: false,

@@ -496,7 +496,8 @@ describe("local API", () => {
     expect(copyAdGroupToExistingCampaign).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        names: ["蓝牙音响-0724-1", "蓝牙音响-0724-2"],
+        // 排期 2026-07-24T00:00Z 在账户时区（Asia/Shanghai）是当天 08:00:00。
+        names: ["蓝牙音响-0724-080000-1", "蓝牙音响-0724-080000-2"],
         initialStatus: "enabled",
         scheduledStartAt,
         dailyBudget: 50,

@@ -29,8 +29,8 @@ describe("planCampaignCopy", () => {
 
     expect(result.totalGroups).toBe(2);
     expect(result.campaigns).toHaveLength(2);
-    expect(result.campaigns[0]?.campaignName).toBe("源系列-0730-1");
-    expect(result.campaigns[1]?.campaignName).toBe("源系列-0730-2");
+    expect(result.campaigns[0]?.campaignName).toBe("源系列-0730-120000");
+    expect(result.campaigns[1]?.campaignName).toBe("源系列-0730-120001");
     // 每个源组各自落到一个独立系列里——这才是 CBO 下真正的放量。
     expect(result.campaigns[0]?.groups.map((group) => group.sourceAdGroupId)).toEqual(["src-A"]);
     expect(result.campaigns[1]?.groups.map((group) => group.sourceAdGroupId)).toEqual(["src-B"]);
@@ -74,23 +74,28 @@ describe("planCampaignCopy", () => {
     expect(new Set(groupNames).size).toBe(groupNames.length);
   });
 
-  it("系列名序号从账户现状往后接", () => {
-    const result = plan({
+  it("系列名不再依赖账户快照定序号：传入过期快照结果不变", () => {
+    const withStaleSnapshot = plan({
       campaignCopies: 2,
       groupsPerCampaign: 1,
       sourceAdGroupIds: ["src-A"],
       existingCampaignNames: ["源系列-0730-1", "源系列-0730-2"],
     });
+    const withoutSnapshot = plan({
+      campaignCopies: 2,
+      groupsPerCampaign: 1,
+      sourceAdGroupIds: ["src-A"],
+    });
 
-    expect(result.campaigns.map((campaign) => campaign.campaignName))
-      .toEqual(["源系列-0730-3", "源系列-0730-4"]);
+    expect(withStaleSnapshot.campaigns.map((campaign) => campaign.campaignName))
+      .toEqual(withoutSnapshot.campaigns.map((campaign) => campaign.campaignName));
   });
 
   it("组名带来源可追溯", () => {
     const result = plan({ campaignCopies: 2, groupsPerCampaign: 1, sourceAdGroupIds: ["src-A", "src-B"] });
 
-    expect(result.campaigns[0]?.groups[0]?.name).toBe("组A-0730-1");
-    expect(result.campaigns[1]?.groups[0]?.name).toBe("组B-0730-1");
+    expect(result.campaigns[0]?.groups[0]?.name).toBe("组A-0730-120000");
+    expect(result.campaigns[1]?.groups[0]?.name).toBe("组B-0730-120000");
   });
 
   it("超过单次 100 组上限时拒绝", () => {

@@ -618,6 +618,29 @@ export function stripAutomaticAdGroupNameSuffixes(sourceName: string): string {
   const original = sourceName.trim();
   let current = original;
   while (current) {
+    // -MMDD-HHMMSS[-序号]（投放日期+时间）。必须排在纯序号形式之前判定：像
+    // 143052 这样的时间同时也匹配序号正则，先判序号会把时间当成序号、只剥掉
+    // 一半后缀。扩组与自动复制会在时间戳后再接批内序号，因此两种都要认。
+    const stampedIndexed = current.match(/^(.*?)-(\d{4})-(\d{6})-[1-9]\d*$/);
+    if (
+      stampedIndexed
+      && stampedIndexed[1]?.trim()
+      && isValidMonthDay(stampedIndexed[2]!)
+      && isValidTimeOfDay(stampedIndexed[3]!)
+    ) {
+      current = stampedIndexed[1].replace(/-+$/, "").trim();
+      continue;
+    }
+    const stamped = current.match(/^(.*?)-(\d{4})-(\d{6})$/);
+    if (
+      stamped
+      && stamped[1]?.trim()
+      && isValidMonthDay(stamped[2]!)
+      && isValidTimeOfDay(stamped[3]!)
+    ) {
+      current = stamped[1].replace(/-+$/, "").trim();
+      continue;
+    }
     const indexed = current.match(/^(.*?)-(\d{4})-([1-9]\d*)$/);
     if (indexed && indexed[1]?.trim() && isValidMonthDay(indexed[2]!)) {
       current = indexed[1].replace(/-+$/, "").trim();
@@ -646,6 +669,14 @@ export function automaticAdGroupName(
   };
   const suffix = `${String(parts.month).padStart(2, "0")}${String(parts.day).padStart(2, "0")}`;
   return `${stripAutomaticAdGroupNameSuffixes(sourceName)}-${suffix}-${index + 1}`;
+}
+
+function isValidTimeOfDay(value: string): boolean {
+  const hour = Number(value.slice(0, 2));
+  const minute = Number(value.slice(2, 4));
+  const second = Number(value.slice(4, 6));
+  if (![hour, minute, second].every(Number.isInteger)) return false;
+  return hour <= 23 && minute <= 59 && second <= 59;
 }
 
 function isValidMonthDay(value: string): boolean {
