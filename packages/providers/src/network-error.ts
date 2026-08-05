@@ -30,6 +30,17 @@ export function withCauseDetail(message: string, cause: unknown): string {
 }
 
 /**
+ * 是否是我们自己的 AbortSignal.timeout 触发的超时。
+ *
+ * 这类失败和"对端拒绝服务"不是一回事：请求多半已经发出去、对端也在处理，只是
+ * 我们设的预算到了就撒手。判据是顶层 error.name === "TimeoutError"（DOMException），
+ * 而不是 cause 链上的错误码——超时错误根本没有 errno。
+ */
+export function isRequestTimeoutError(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === "TimeoutError";
+}
+
+/**
  * 错误码集合，凭经验实测钉死（node --version 24，undici 内置 fetch）：
  *
  *   ECONNREFUSED  —— 目标端口拒绝连接：TCP 三次握手在第一步就被拒绝，
