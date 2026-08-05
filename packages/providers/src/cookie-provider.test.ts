@@ -690,6 +690,28 @@ describe("CookieAdsProvider", () => {
     expect(output.result.warnings.some((warning) => warning.includes("HTTP 429"))).toBe(true);
   });
 
+  // 生产实测：广告层级失败的真正原因是我们自己的超时预算到点，而不是对端拒绝服务。
+  // 一个已经等满预算还没回话的请求，再等一轮也不会回话，重试只会把整轮轮询拖长数十秒。
+  it("does not retry a derived list request that timed out", async () => {
+    let adAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/ad/list")) {
+        adAttempts += 1;
+        const timeout = new Error("The operation was aborted due to timeout");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
+      return jsonResponse(derivedListPage());
+    }));
+
+    const output = await new CookieAdsProvider().syncReadOnly(derivedSyncContext());
+
+    expect(adAttempts).toBe(1);
+    expect(output.result.quality.partialFailures).toContain("ad:derived-request-failed");
+    expect(output.result.warnings.some((warning) => warning.includes("timeout"))).toBe(true);
+  });
+
   it("marks Cookie response contract drift invalid", async () => {
     vi.stubGlobal("fetch", vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, data: { unexpected: [] } }), {

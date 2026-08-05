@@ -44,7 +44,11 @@ import {
   parseMultipartFields,
   rewriteMultipartFields,
 } from "./multipart.js";
-import { isDefinitelyUnsentNetworkError, withCauseDetail } from "./network-error.js";
+import {
+  isDefinitelyUnsentNetworkError,
+  isRequestTimeoutError,
+  withCauseDetail,
+} from "./network-error.js";
 
 const capabilities = new Set<ProviderCapability>([
   "read-campaigns",
@@ -474,6 +478,7 @@ export class CookieAdsProvider implements AdsProvider {
         if (!entityRequest.derived) throw cause;
         // 原因必须落库。此前这里直接丢掉 cause，只留一句泛化的"请求失败"，事后
         // 完全无法区分是限流、超时还是会话失效——39 条历史失败记录里一条线索都没有。
+        // 加上之后第一时间就翻出了真凶：不是限流，是我们自己的超时预算到点。
         const reason = cause instanceof Error
           ? withCauseDetail(cause.message, cause).slice(0, 200)
           : "未知错误。";
@@ -5177,9 +5182,26 @@ function isHttpUrlValue(value: string): boolean {
 
 
 
+/** 写请求和单发只读请求的超时预算。 */
+const COOKIE_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * 只读列表请求单独的、更宽的超时预算。
+ *
+ * 15 秒对广告层级列表不够用：生产实测 100 条广告的账户会稳定卡在这个边界上，
+ * 75 条的偶尔卡，62 条和 2 条的从来不卡——失败账户和广告条数完全对应。超时导致
+ * 整轮同步被判 partial，而删除和自动复制都要求最近一次同步是 healthy。
+ *
+ * 只放宽只读列表这一条路径：requestAllCookieListPages 仅供 syncReadOnly 使用，
+ * 写请求（创建、启停、删除）继续用 COOKIE_REQUEST_TIMEOUT_MS，它们的超时语义
+ * 是"结果未知"，拖长只会扩大不确定窗口。
+ */
+const COOKIE_LIST_REQUEST_TIMEOUT_MS = 45_000;
+
 async function requestCookieJson(
   request: CapturedCookieRequest,
   credential: ParsedCookieCredential,
+  timeoutMs: number = COOKIE_REQUEST_TIMEOUT_MS,
 ): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = {
     ...(request.headers ?? {}),
@@ -5196,7 +5218,7 @@ async function requestCookieJson(
     method: request.method,
     headers,
     redirect: "error",
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(timeoutMs),
   };
   if (request.method === "POST" && request.body !== undefined) {
     requestInit.body = request.body;
@@ -5829,14 +5851,14 @@ async function requestAllCookieListPages(
   const requestedPage = readRequestedPage(template);
   if (requestedPage !== null && requestedPage !== 1) {
     return {
-      pages: [await requestCookieJson(template, credential)],
+      pages: [await requestCookieJson(template, credential, COOKIE_LIST_REQUEST_TIMEOUT_MS)],
       complete: false,
     };
   }
   const pages: Record<string, unknown>[] = [];
   for (let page = 1; page <= 100; page += 1) {
     const request = page === 1 ? template : withRequestedPage(template, page);
-    const payload = await requestCookieJson(request, credential);
+    const payload = await requestCookieJson(request, credential, COOKIE_LIST_REQUEST_TIMEOUT_MS);
     const responsePage = responsePageNumber(payload);
     if (responsePage !== null && responsePage !== page) {
       pages.push(payload);
@@ -5853,16 +5875,18 @@ async function requestAllCookieListPages(
 const LIST_REQUEST_RETRY_DELAY_MS = 750;
 
 /**
- * 只读列表请求失败后原地重试一次。
+ * 只读列表请求失败后原地重试一次，但超时不重试。
  *
- * 这里不适用 isDefinitelyUnsentNetworkError 那套「能否证明请求没发出去」的判据：
- * 那是为写请求防重复提交设的，而列表请求没有任何副作用，重放最坏只是多读一次，
- * 因此不管失败属于哪一类都可以安全重试。
+ * 可以无条件重试的理由：列表请求没有任何副作用，重放最坏只是多读一次，所以这里
+ * 不适用 isDefinitelyUnsentNetworkError 那套「能否证明请求没发出去」的判据——那
+ * 是为写请求防重复提交设的。
  *
- * 生产实测：这类失败集中在客户端重启、重新授权后的密集同步窗口，且只打广告条数
- * 最多的账户（92 条的那个 24 小时内 13 次，2 条的那个 0 次），特征像限流；日常
- * 基线约 0.5%。代价并不只是界面上一个黄标——失败那一轮整个同步会被判为 partial，
- * 而删除和自动复制这两个破坏性执行器都要求最近一次同步是 healthy，会连带跳过。
+ * 唯独超时要排除。生产实测，广告层级失败的真正原因是我们自己 45 秒预算到点撒手，
+ * 而不是对端拒绝服务；一个已经等了 45 秒还没回话的请求，再等 45 秒也不会回话，
+ * 重试只会把整轮轮询从 8 秒拖到 90 秒以上。重试留给 5xx、连接重置这类真正的抖动。
+ *
+ * 失败的代价不只是界面上一个黄标：那一轮同步会被判为 partial，而删除和自动复制
+ * 都要求最近一次同步是 healthy，会连带跳过。
  */
 async function requestAllCookieListPagesWithRetry(
   template: CapturedCookieRequest,
@@ -5870,7 +5894,8 @@ async function requestAllCookieListPagesWithRetry(
 ): Promise<{ pages: Record<string, unknown>[]; complete: boolean }> {
   try {
     return await requestAllCookieListPages(template, credential);
-  } catch {
+  } catch (cause) {
+    if (isRequestTimeoutError(cause)) throw cause;
     await new Promise((resolve) => setTimeout(resolve, LIST_REQUEST_RETRY_DELAY_MS));
     return requestAllCookieListPages(template, credential);
   }
