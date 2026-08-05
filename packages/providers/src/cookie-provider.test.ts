@@ -710,6 +710,31 @@ describe("CookieAdsProvider", () => {
     expect(adAttempts).toBe(1);
     expect(output.result.quality.partialFailures).toContain("ad:derived-request-failed");
     expect(output.result.warnings.some((warning) => warning.includes("timeout"))).toBe(true);
+    // 警告要如实说明没有重试，不能沿用"已重试 1 次"的固定话术。
+    expect(output.result.warnings.some((warning) => warning.includes("未重试"))).toBe(true);
+    expect(output.result.warnings.some((warning) => warning.includes("已重试 1 次"))).toBe(false);
+  });
+
+  // 广告层拉不到时，系列和广告组这两层照样要被标记为可用，否则删除、自动复制会被
+  // 无关层级的失败连坐跳过。
+  it("reports which layers a partial sync still completed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/ad/list")) {
+        const timeout = new Error("The operation was aborted due to timeout");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
+      return jsonResponse(derivedListPage());
+    }));
+
+    const output = await new CookieAdsProvider().syncReadOnly(derivedSyncContext());
+
+    expect(output.result.quality.status).toBe("partial");
+    expect(output.result.quality.completeEntityTypes).toEqual(
+      expect.arrayContaining(["campaign", "ad-group"]),
+    );
+    expect(output.result.quality.completeEntityTypes).not.toContain("ad");
   });
 
   it("marks Cookie response contract drift invalid", async () => {

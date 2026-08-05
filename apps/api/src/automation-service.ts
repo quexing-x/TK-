@@ -15,6 +15,7 @@ import {
   type AdOperationRecord,
   type WriteTaskActor,
   normalizeProviderEntity,
+  syncLayerComplete,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -185,7 +186,12 @@ export class AutomationService {
       : Number.POSITIVE_INFINITY;
     if (
       connection?.status !== "ready"
-      || latestSync?.quality.status !== "healthy"
+      // 删除是广告组层面的操作，只需要广告组与其所属系列的数据取全。广告层的派生
+      // 请求在 TikTok 侧慢且不稳，让它连坐会白白跳过一整轮。注意这里能放心用
+      // latestSync.finishedAt 量新鲜度，是因为 saveReadOnlySync 现在也会刷新
+      // partial 同步里取全的层级——快照确实是这一刻的，不是上一次 healthy 的。
+      || !syncLayerComplete(latestSync?.quality, "ad-group")
+      || !syncLayerComplete(latestSync?.quality, "campaign")
       || !hasCurrentDayMetricCoverage(latestSync, localDate, account.timezone)
       || syncAge < 0
       || syncAge > destructiveSyncFreshnessMs
@@ -321,7 +327,9 @@ export class AutomationService {
       : Number.POSITIVE_INFINITY;
     if (
       connection?.status !== "ready"
-      || latestSync?.quality.status !== "healthy"
+      // 同删除：自动复制的判据全部来自广告组层，不因广告层拉不到而跳过整轮。
+      || !syncLayerComplete(latestSync?.quality, "ad-group")
+      || !syncLayerComplete(latestSync?.quality, "campaign")
       || !hasCurrentDayMetricCoverage(latestSync, localDate, account.timezone)
       || syncAge < 0
       || syncAge > destructiveSyncFreshnessMs

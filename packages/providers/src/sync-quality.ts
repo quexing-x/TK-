@@ -3,6 +3,7 @@ import {
   type ProviderEntity,
   type SyncDataCoverage,
   type SyncDataQuality,
+  type SyncEntityType,
 } from "@tk-auto/core";
 
 const requiredMetrics = [
@@ -20,6 +21,8 @@ export function buildSyncDataQuality(input: {
   providerContractVersion: string;
   coverage: SyncDataCoverage;
   partialFailures: string[];
+  /** 本轮取全且通过契约与分页校验的层级；调用方不传时视为无法按层级判定。 */
+  completeEntityTypes?: SyncEntityType[];
 }): SyncDataQuality {
   const managed = input.entities
     .filter((entity) => entity.entityType === "ad-group" || entity.entityType === "ad")
@@ -47,6 +50,8 @@ export function buildSyncDataQuality(input: {
     missingMetrics,
     partialFailures: [...input.partialFailures],
     lastHealthyAt: null,
+    // 契约漂移是全局问题，这种情况下不承认任何层级完好。
+    completeEntityTypes: input.contractValid ? [...(input.completeEntityTypes ?? [])] : [],
   };
 }
 
