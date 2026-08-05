@@ -142,6 +142,11 @@ export function providerCapabilitySummary(
     "create-campaigns": "创建",
     "copy-ads": "复制",
     "appeal-ads": "申诉",
+    // 没有 label 的能力会被下面的 filter 整条丢掉，不是显示成灰色。删除少了这一条，
+    // 于是「可用能力」永远不出现"删除"，看起来像账户没拿到删除授权。
+    // read-ad-groups / read-ads / copy-campaigns 仍然刻意不给 label：它们分别被
+    // “读取”“复制”覆盖，各自再加一个标签只会让这一栏出现重复词。
+    "delete-ad-groups": "删除",
   };
   const available = profile.capabilities
     .filter((item) => item.available && labels[item.capability])

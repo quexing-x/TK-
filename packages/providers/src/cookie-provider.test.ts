@@ -653,6 +653,43 @@ describe("CookieAdsProvider", () => {
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
+  it("retries a failed derived list request once instead of dropping the whole ad layer", async () => {
+    let adAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/ad/list")) {
+        adAttempts += 1;
+        if (adAttempts === 1) return new Response("rate limited", { status: 429 });
+      }
+      return jsonResponse(derivedListPage());
+    }));
+
+    const output = await new CookieAdsProvider().syncReadOnly(derivedSyncContext());
+
+    expect(adAttempts).toBe(2);
+    expect(output.result.counts.ad).toBe(1);
+    expect(output.result.quality.partialFailures).not.toContain("ad:derived-request-failed");
+  });
+
+  it("records why a derived list request failed instead of a generic warning", async () => {
+    let adAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/ad/list")) {
+        adAttempts += 1;
+        return new Response("rate limited", { status: 429 });
+      }
+      return jsonResponse(derivedListPage());
+    }));
+
+    const output = await new CookieAdsProvider().syncReadOnly(derivedSyncContext());
+
+    // 恰好两次：重试一次就放弃，不会退化成无界重试。
+    expect(adAttempts).toBe(2);
+    expect(output.result.quality.partialFailures).toContain("ad:derived-request-failed");
+    expect(output.result.warnings.some((warning) => warning.includes("HTTP 429"))).toBe(true);
+  });
+
   it("marks Cookie response contract drift invalid", async () => {
     vi.stubGlobal("fetch", vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, data: { unexpected: [] } }), {
@@ -3913,6 +3950,52 @@ function cookieSyncContext(): ProviderContext {
       cookie: "sessionid=test-cookie",
       csrfHeaderName: "x-csrftoken",
       requestTemplates,
+    },
+  };
+}
+
+/** 只导入了广告组列表 cURL 的账户：系列和广告层级都靠派生请求补全。 */
+function derivedSyncContext(): ProviderContext {
+  return {
+    accountId: "test-account",
+    timezone: "Asia/Taipei",
+    settings: {
+      kind: "cookie",
+      advertiserId: "123456",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    },
+    credential: {
+      kind: "cookie",
+      cookie: "sessionid=test-cookie",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [{
+        target: "ad-group",
+        url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456",
+        method: "POST",
+        body: "{}",
+        contentType: "application/json",
+      }],
+    },
+  };
+}
+
+function derivedListPage(): Record<string, unknown> {
+  return {
+    code: 0,
+    data: {
+      table: [{
+        campaign_id: "c1",
+        campaign_name: "系列",
+        adgroup_id: "g1",
+        adgroup_name: "广告组",
+        creative_id: "a1",
+        ad_name: "广告",
+        spend: "1",
+      }],
+      page_info: { page: 1, total_page: 1 },
     },
   };
 }
