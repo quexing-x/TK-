@@ -417,6 +417,9 @@ export class CookieAdsProvider implements AdsProvider {
     const warnings: string[] = [];
     const partialFailures: string[] = [];
     const emptyResponses = new Set<SyncEntityType>();
+    // 逐层记录"这一层本轮取全了吗"。全局的 paginationComplete / contractValid 是
+    // 三层与出来的结果，无法回答某一层单独是否可信。
+    const completeEntityTypes: SyncEntityType[] = [];
     let paginationComplete = true;
     let contractValid = true;
     let coverageKnown = true;
@@ -482,14 +485,23 @@ export class CookieAdsProvider implements AdsProvider {
         const reason = cause instanceof Error
           ? withCauseDetail(cause.message, cause).slice(0, 200)
           : "未知错误。";
+        // 重试与否要如实说：超时走的是不重试那条分支，写死"已重试 1 次"会让日后
+        // 排障的人以为重试机制在跑。
+        const attempts = isRequestTimeoutError(cause) ? "未重试，超时不重试" : "已重试 1 次";
         warnings.push(
-          `${entityType} 自动补全请求失败（已重试 1 次）：${reason} 如需该层级数据，请补充一条真实列表 cURL。`,
+          `${entityType} 自动补全请求失败（${attempts}）：${reason} 如需该层级数据，请补充一条真实列表 cURL。`,
         );
         partialFailures.push(`${entityType}:derived-request-failed`);
         continue;
       }
-      contractValid &&= pages.every((payload) => hasRecognizedEntityList(payload, entityType));
+      const entityContractValid = pages.every(
+        (payload) => hasRecognizedEntityList(payload, entityType),
+      );
+      contractValid &&= entityContractValid;
       paginationComplete &&= entityPaginationComplete;
+      if (entityContractValid && entityPaginationComplete) {
+        completeEntityTypes.push(entityType);
+      }
       const extracted = pages.flatMap((payload) => extractEntities(payload, entityType));
       entities.push(...extracted);
       if (entityType === "ad-group") {
@@ -529,6 +541,7 @@ export class CookieAdsProvider implements AdsProvider {
             timezone,
           },
           partialFailures,
+          completeEntityTypes,
         }),
       },
     };

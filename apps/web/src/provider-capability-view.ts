@@ -1,3 +1,4 @@
+import { syncLayerComplete } from "@tk-auto/core";
 import type {
   AccountProviderCapabilities,
   ProviderConnection,
@@ -57,9 +58,12 @@ export function accountAccessStatus(state: AccountAccessState): AccountAccessSta
     && capabilities.authorizationStatus === "active";
   const readCapabilityReady = hasProviderCapability(capabilities, "read-campaigns")
     && hasProviderCapability(capabilities, "read-ad-groups");
+  // 「读取」就绪看的是账户管理与自动化实际依赖的广告组/系列层。广告层的派生请求
+  // 在 TikTok 侧慢且不稳，一层拉不到就把整个账户标成未就绪，是虚报。
   const readReady = connectionReady
     && readCapabilityReady
-    && latestSync?.quality.status === "healthy";
+    && syncLayerComplete(latestSync?.quality, "ad-group")
+    && syncLayerComplete(latestSync?.quality, "campaign");
   const statusReady = connectionReady && hasProviderCapability(capabilities, "change-status");
   const createReady = connectionReady && hasProviderCapability(capabilities, "create-campaigns");
   const copyReady = connectionReady && hasProviderCapability(capabilities, "copy-ads");
@@ -74,8 +78,8 @@ export function accountAccessStatus(state: AccountAccessState): AccountAccessSta
     blockers.push(providerCapabilityReason(capabilities, "read-ad-groups"));
   } else if (connectionReady && !latestSync) {
     blockers.push("尚未完成只读同步。");
-  } else if (connectionReady && latestSync?.quality.status !== "healthy") {
-    blockers.push(`最近同步状态为 ${latestSync?.quality.status ?? "unknown"}。`);
+  } else if (connectionReady && !readReady) {
+    blockers.push(`最近同步的广告组数据不完整（状态 ${latestSync?.quality.status ?? "unknown"}）。`);
   }
   for (const capability of ["change-status", "create-campaigns", "copy-ads"] as const) {
     if (connectionReady && !hasProviderCapability(capabilities, capability)) {

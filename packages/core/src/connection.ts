@@ -220,6 +220,35 @@ export interface SyncDataQuality {
   partialFailures: string[];
   /** Most recent fully healthy sync, enriched by storage when available. */
   lastHealthyAt: string | null;
+  /**
+   * 本轮真正取全、且通过契约与分页校验的层级。
+   *
+   * 一层拉不到不代表其余层不可信：广告层的派生请求在 TikTok 侧慢且不稳，而同一轮
+   * 里广告组层往往几秒就取全了。删除、自动复制都是广告组层面的操作，不该被广告层
+   * 的失败连坐。
+   *
+   * 历史记录没有这个字段（undefined），syncLayerComplete 会把这种情况按旧语义处理。
+   */
+  completeEntityTypes?: SyncEntityType[];
+}
+
+/**
+ * 某一层数据本轮是否可信。
+ *
+ * - healthy：全部层级都取全了。
+ * - invalid：契约漂移是全局问题，任何层都不可信。
+ * - partial：只认 completeEntityTypes 里列出的层级。
+ * - 老记录缺少 completeEntityTypes 时退回旧语义（只有 healthy 才算数），保证升级
+ *   前写下的 partial 记录不会被追认为可用。
+ */
+export function syncLayerComplete(
+  quality: SyncDataQuality | undefined | null,
+  entityType: SyncEntityType,
+): boolean {
+  if (!quality) return false;
+  if (quality.status === "invalid") return false;
+  if (quality.status === "healthy") return true;
+  return quality.completeEntityTypes?.includes(entityType) === true;
 }
 
 export interface ReadOnlySyncResult {

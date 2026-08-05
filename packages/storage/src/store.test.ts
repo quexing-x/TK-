@@ -449,6 +449,92 @@ describe("AutomationStore", () => {
     });
   });
 
+  // 广告层的派生请求在 TikTok 侧慢且不稳。此前只要它失败，整轮同步就一个实体都不写，
+  // 广告组快照原地不动——删除和自动复制读到的要么是旧数据，要么被整轮跳过。
+  it("refreshes the layers a partial sync completed without wiping the layer that failed", () => {
+    const first = new Date("2026-08-05T00:00:00.000Z").toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [
+        { entityType: "ad-group", externalId: "adgroup-1", payload: { ad_name: "旧名字", ad_primary_status: "enable" } },
+        { entityType: "ad", externalId: "ad-1", payload: { ad_name: "广告一", creative_id: "ad-1" } },
+      ],
+      {
+        startedAt: first,
+        finishedAt: first,
+        counts: { campaign: 0, "ad-group": 1, ad: 1 },
+        warnings: [],
+        quality: healthySyncQuality(first),
+      },
+    );
+
+    // 第二轮：广告层超时，只有广告组层取全。
+    const second = new Date("2026-08-05T00:05:00.000Z").toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [
+        { entityType: "ad-group", externalId: "adgroup-1", payload: { ad_name: "新名字", ad_primary_status: "disable" } },
+      ],
+      {
+        startedAt: second,
+        finishedAt: second,
+        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        warnings: ["ad 层超时"],
+        quality: {
+          ...healthySyncQuality(first),
+          status: "partial" as const,
+          partialFailures: ["ad:derived-request-failed"],
+          completeEntityTypes: ["ad-group" as const],
+        },
+      },
+    );
+
+    const current = store.listCurrentProviderEntities("demo-account", "cookie");
+    const adGroup = current.find((entity) => entity.entityType === "ad-group");
+    const ad = current.find((entity) => entity.entityType === "ad");
+
+    // 取全的层级刷新到了本轮的新值。
+    expect(adGroup?.payload).toMatchObject({ ad_name: "新名字", ad_primary_status: "disable" });
+    // 失败的层级保持上一轮的数据，不被下线，也不被清空。
+    expect(ad?.payload).toMatchObject({ ad_name: "广告一" });
+  });
+
+  it("refreshes nothing when the provider contract drifted", () => {
+    const first = new Date("2026-08-05T00:00:00.000Z").toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [{ entityType: "ad-group", externalId: "adgroup-1", payload: { ad_name: "旧名字" } }],
+      {
+        startedAt: first,
+        finishedAt: first,
+        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        warnings: [],
+        quality: healthySyncQuality(first),
+      },
+    );
+
+    const second = new Date("2026-08-05T00:05:00.000Z").toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      [{ entityType: "ad-group", externalId: "adgroup-1", payload: { ad_name: "不该被采信" } }],
+      {
+        startedAt: second,
+        finishedAt: second,
+        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        warnings: [],
+        quality: { ...healthySyncQuality(first), status: "invalid" as const, contractValid: false },
+      },
+    );
+
+    expect(
+      store.listCurrentProviderEntities("demo-account", "cookie")[0]?.payload,
+    ).toMatchObject({ ad_name: "旧名字" });
+  });
+
   it("returns the newest three-level sync result for automation observability", () => {
     const finishedAt = new Date().toISOString();
     store.saveReadOnlySync("demo-account", "cookie", [], {

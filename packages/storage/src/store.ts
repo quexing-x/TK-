@@ -55,6 +55,7 @@ import {
   type ProviderCapability,
   type ProviderConnectionSettings,
   type ProviderEntity,
+  type SyncEntityType,
   type ProviderKind,
   type ReadOnlySyncResult,
   automationSwitchDefinitions,
@@ -1557,9 +1558,11 @@ export class AutomationStore {
       DO UPDATE SET payload_json = excluded.payload_json,
         synced_at = excluded.synced_at, is_current = 1`,
     );
-    const clearCurrent = this.db.prepare(
+    // 按层级下线，而不是整账户一把清。partial 同步里取全的层级同样要刷新，否则
+    // 广告层一慢，广告组快照就整轮不更新，删除和自动复制会读着旧数据或干脆跳过。
+    const clearCurrentLayer = this.db.prepare(
       `UPDATE provider_entities SET is_current = 0
-       WHERE account_id = ? AND provider_kind = ?`,
+       WHERE account_id = ? AND provider_kind = ? AND entity_type = ?`,
     );
     const removeExpired = this.db.prepare(
       `DELETE FROM provider_entities
@@ -1571,11 +1574,23 @@ export class AutomationStore {
         operational_status, metrics_json, captured_at, sync_quality_status
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    // healthy 时三层全刷（与历史行为一致）；partial 时只刷本轮确实取全的层级。
+    // invalid（契约漂移）不刷任何层：那是全局问题，没有哪一层可信。
+    const refreshed = new Set<SyncEntityType>(
+      quality.status === "healthy"
+        ? (["campaign", "ad-group", "ad"] as const)
+        : quality.status === "partial"
+          ? quality.completeEntityTypes ?? []
+          : [],
+    );
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      if (quality.status === "healthy") {
-        clearCurrent.run(accountId, kind);
+      if (refreshed.size > 0) {
+        for (const entityType of refreshed) {
+          clearCurrentLayer.run(accountId, kind, entityType);
+        }
         for (const entity of entities) {
+          if (!refreshed.has(entity.entityType)) continue;
           insert.run(
             accountId,
             kind,
@@ -1595,6 +1610,8 @@ export class AutomationStore {
             normalized.status,
             JSON.stringify(normalized.metrics),
             result.finishedAt,
+            // 这一列是"这行数据取得可不可信"，粒度是层级不是整轮同步：只有取全的
+            // 层级才会走到这里，所以恒为 healthy，指标趋势查询的口径保持不变。
             "healthy",
           );
         }

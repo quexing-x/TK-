@@ -1192,6 +1192,101 @@ describe("AutomationService", () => {
     expect(provider.deletions).toEqual([]);
   });
 
+  // 广告层的派生请求在 TikTok 侧慢且不稳，实测一个账户 50% 的轮次会超时。删除只用
+  // 广告组和系列的数据，不该被广告层连坐——但广告组层自己不完整时必须照旧拦住。
+  it("deletes when only the ad layer failed but refuses when the ad-group layer did", async () => {
+    const asOf = futureShanghaiTime(6);
+    vi.useFakeTimers();
+    vi.setSystemTime(asOf);
+    const settings = store.getAutomationFeatureSettings();
+    settings.deletion.enabled = true;
+    settings.deletion.gracePeriodHours = 1;
+    store.updateAutomationFeatureSettings(settings);
+
+    // 同一系列放两个已关闭的组：每系列保底一组，所以只会删掉其中一个。
+    const entities = [
+      { entityType: "campaign" as const, externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "系列" } },
+      ...["keep-1", "drop-1"].map((id) => ({
+        entityType: "ad-group" as const,
+        externalId: id,
+        payload: {
+          campaign_id: "campaign-1",
+          ad_name: id,
+          ad_primary_status: "disable",
+          row_data: { campaign_id: "campaign-1", time_attr_convert_cnt: "0", time_attr_on_web_cart: "0" },
+        },
+      })),
+    ];
+    const disabledAt = new Date(asOf.getTime() - 2 * 60 * 60_000).toISOString();
+    for (const id of ["keep-1", "drop-1"]) {
+      const operation = store.recordAdOperation({
+        accountId: "demo-account",
+        providerKind: "cookie",
+        entityType: "ad-group",
+        externalId: id,
+        entityName: id,
+        action: "disable",
+        source: "automation",
+        status: "succeeded",
+        message: "disabled",
+      });
+      (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db
+        .prepare("UPDATE ad_operations SET completed_at = ? WHERE id = ?")
+        .run(disabledAt, operation.id);
+    }
+
+    const partialButAdGroupComplete = {
+      startedAt: asOf.toISOString(),
+      finishedAt: asOf.toISOString(),
+      counts: { campaign: 1, "ad-group": 2, ad: 0 },
+      warnings: [],
+      quality: {
+        status: "partial" as const,
+        paginationComplete: true,
+        requiredMetricsComplete: true,
+        contractValid: true,
+        providerContractVersion: "test-v1",
+        missingMetrics: [],
+        lastHealthyAt: asOf.toISOString(),
+        partialFailures: ["ad:derived-request-failed"],
+        completeEntityTypes: ["campaign" as const, "ad-group" as const],
+        coverage: {
+          startDate: dateKeyInTimeZoneForTest(asOf, "Asia/Shanghai"),
+          endDate: dateKeyInTimeZoneForTest(asOf, "Asia/Shanghai"),
+          timezone: "Asia/Shanghai",
+        },
+      },
+    };
+    store.saveReadOnlySync("demo-account", "cookie", entities, partialButAdGroupComplete);
+
+    await service.runScheduledDeletions("demo-account", asOf);
+    expect(provider.deletions).toHaveLength(1);
+
+    // 反过来：广告组层自己没取全时，必须拒绝。
+    provider.deletions.length = 0;
+    const nextDay = new Date(asOf.getTime() + 24 * 60 * 60_000);
+    vi.setSystemTime(nextDay);
+    store.saveReadOnlySync("demo-account", "cookie", entities, {
+      ...partialButAdGroupComplete,
+      startedAt: nextDay.toISOString(),
+      finishedAt: nextDay.toISOString(),
+      quality: {
+        ...partialButAdGroupComplete.quality,
+        partialFailures: ["ad-group:derived-request-failed"],
+        completeEntityTypes: ["campaign" as const],
+        coverage: {
+          startDate: dateKeyInTimeZoneForTest(nextDay, "Asia/Shanghai"),
+          endDate: dateKeyInTimeZoneForTest(nextDay, "Asia/Shanghai"),
+          timezone: "Asia/Shanghai",
+        },
+      },
+    });
+
+    await service.runScheduledDeletions("demo-account", nextDay);
+    vi.useRealTimers();
+    expect(provider.deletions).toEqual([]);
+  });
+
   it("does not submit an automatic appeal while account automation is disabled", async () => {
     provider.scenario = "appeal";
     const synced = await provider.syncReadOnly();
