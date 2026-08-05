@@ -1296,7 +1296,7 @@ describe("AutomationService", () => {
     ]));
   });
 
-  it("keeps one group per campaign and applies cart plus positive-conversion CPA checks at 06:00 only", async () => {
+  it("keeps one group per campaign and applies cart plus positive-conversion CPA checks inside the scheduled hour only", async () => {
     const autoCopyRunner = vi.fn(async () => [{ ok: true }]);
     const guardedService = new AutomationService(
       store,
@@ -1378,10 +1378,13 @@ describe("AutomationService", () => {
     }
 
     await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() - 60 * 60_000));
-    await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() + 5 * 60_000));
+    await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() + 60 * 60_000));
     expect(provider.deletions).toEqual([]);
-    await guardedService.runScheduledDeletions("demo-account", asOf);
-    await guardedService.runScheduledDeletions("demo-account", asOf);
+    // 计划小时内的任意一分钟都要能触发：调度器 30 秒一跳，排在前面的账户真删起来会
+    // 占掉整点那一分钟，锁死第 0 分钟等于让后面的账户永远轮不上。
+    await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() + 2 * 60_000));
+    // 同一本地日的第二次调用必须被每日领取锁挡住。
+    await guardedService.runScheduledDeletions("demo-account", new Date(asOf.getTime() + 3 * 60_000));
 
     expect(provider.deletions).toEqual([
       { externalId: "delete-carts-4" },
@@ -1604,6 +1607,24 @@ describe("AutomationService", () => {
       enabledCount: 0,
       disabledCount: 1,
     });
+  });
+
+  // 回归：删除执行器曾经被放在「轮询到期」过滤之后的循环里，只有恰好在计划时刻到期的
+  // 那一轮才有机会评估。生产环境 19 天里只命中过 7 次，删除一次都没跑起来。它必须和
+  // 自动申诉一样，每一跳都对全部账户评估一次。
+  it("evaluates scheduled deletions on every tick even when no account is due for polling", async () => {
+    const scheduler = new AutomationScheduler(store, service);
+    const deletions = vi.spyOn(service, "runScheduledDeletions");
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+    // 刚检测过连接 = 本轮不到期，轮询会被跳过。
+    await service.checkAccountConnection("demo-account");
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    expect(store.listPollCycles()).toHaveLength(0);
+    expect(deletions).toHaveBeenCalledWith("demo-account");
   });
 
   it("reports a verified automatic recovery enable in the scheduler summary", async () => {

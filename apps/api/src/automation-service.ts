@@ -172,7 +172,11 @@ export class AutomationService {
       || !this.store.getSystemRuntimeState().enabled
     ) return;
     const localTime = timePartsInTimeZone(asOf, account.timezone);
-    if (localTime.hour !== 6 || localTime.minute !== 0) return;
+    // 整个计划小时内都可触发，不锁死在第 0 分钟：调度器 30 秒一跳，而本执行器还要
+    // 过「同步年龄 ≤ 5 分钟」这道门，一分钟窗口顶多给两次机会；真删起来一个账户几十
+    // 个组要跑上一分钟以上，后面的账户必然错过整点那一分钟。改成整小时后由
+    // claimDailyAutomationRun 保证每账户每个本地日仍然只跑一次。
+    if (localTime.hour !== settings.scheduleHour) return;
     const localDate = dateKeyInTimeZone(asOf, account.timezone);
     const connection = this.store.getProviderConnection(accountId, account.providerKind);
     const latestSync = this.store.getLatestReadOnlySync(accountId, account.providerKind);
@@ -1576,6 +1580,10 @@ export class AutomationScheduler {
           this.service.enrollNightlyAdGroups(account.id);
           await this.service.runScheduledAppeals(account.id);
           await this.service.runDueScheduledActions(account.id);
+          // 删除必须跟自动申诉一样待在「轮询到期」过滤之前的全账户循环里。放在
+          // dueAccounts 循环里意味着只有恰好在计划时刻到期的那一轮才有机会评估，
+          // 实测 19 天里只命中过 7 次，删除因此一次都没跑起来。
+          await this.service.runScheduledDeletions(account.id);
         }
       }
       const dueAccounts = this.store.listAccounts().filter((account) => {
@@ -1628,7 +1636,6 @@ export class AutomationScheduler {
           }
           const run = await this.service.runAccount(account.id, "scheduler");
           await this.service.runScheduledAutoCopies(account.id);
-          await this.service.runScheduledDeletions(account.id);
           const counts = this.store.summarizeAutomationRun(run.id);
           const failed = run.status === "failed" || counts.failureCount > 0;
           this.store.savePollAccountResult(cycle.id, {
