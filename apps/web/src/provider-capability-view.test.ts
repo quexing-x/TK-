@@ -66,6 +66,20 @@ describe("provider capability presentation", () => {
     expect(hasProviderCapability(profile, "change-status")).toBe(true);
   });
 
+  // 删除曾经没有 label，被摘要的 filter 整条丢掉，界面上永远看不到"删除"，
+  // 让已授权删除的账户看起来像缺了这项能力。
+  it("shows the delete capability instead of silently dropping it", () => {
+    const deleteProfile: AccountProviderCapabilities = {
+      ...profile,
+      capabilities: [
+        ...profile.capabilities,
+        { capability: "delete-ad-groups", available: true, reason: "当前账户可用。" },
+      ],
+    };
+
+    expect(providerCapabilitySummary(deleteProfile)).toBe("读取 · 报表 · 启停 · 删除");
+  });
+
   it("does not claim capabilities before account state is loaded", () => {
     expect(providerCapabilitySummary(undefined)).toBe("能力状态待同步");
     expect(hasProviderCapability(undefined, "create-campaigns")).toBe(false);

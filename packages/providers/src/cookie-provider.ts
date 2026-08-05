@@ -467,13 +467,18 @@ export class CookieAdsProvider implements AdsProvider {
       let pages: Record<string, unknown>[];
       let entityPaginationComplete = false;
       try {
-        const result = await requestAllCookieListPages(windowedRequest, credential);
+        const result = await requestAllCookieListPagesWithRetry(windowedRequest, credential);
         pages = result.pages;
         entityPaginationComplete = result.complete;
       } catch (cause) {
         if (!entityRequest.derived) throw cause;
+        // 原因必须落库。此前这里直接丢掉 cause，只留一句泛化的"请求失败"，事后
+        // 完全无法区分是限流、超时还是会话失效——39 条历史失败记录里一条线索都没有。
+        const reason = cause instanceof Error
+          ? withCauseDetail(cause.message, cause).slice(0, 200)
+          : "未知错误。";
         warnings.push(
-          `${entityType} 自动补全请求失败；如需该层级数据，请补充一条真实列表 cURL。`,
+          `${entityType} 自动补全请求失败（已重试 1 次）：${reason} 如需该层级数据，请补充一条真实列表 cURL。`,
         );
         partialFailures.push(`${entityType}:derived-request-failed`);
         continue;
@@ -5842,6 +5847,33 @@ async function requestAllCookieListPages(
     return { pages, complete: hasExplicitPaginationEnd(payload) };
   }
   return { pages, complete: false };
+}
+
+/** 只读列表请求的重试间隔，与创建链路的结果查询步骤保持一致。 */
+const LIST_REQUEST_RETRY_DELAY_MS = 750;
+
+/**
+ * 只读列表请求失败后原地重试一次。
+ *
+ * 这里不适用 isDefinitelyUnsentNetworkError 那套「能否证明请求没发出去」的判据：
+ * 那是为写请求防重复提交设的，而列表请求没有任何副作用，重放最坏只是多读一次，
+ * 因此不管失败属于哪一类都可以安全重试。
+ *
+ * 生产实测：这类失败集中在客户端重启、重新授权后的密集同步窗口，且只打广告条数
+ * 最多的账户（92 条的那个 24 小时内 13 次，2 条的那个 0 次），特征像限流；日常
+ * 基线约 0.5%。代价并不只是界面上一个黄标——失败那一轮整个同步会被判为 partial，
+ * 而删除和自动复制这两个破坏性执行器都要求最近一次同步是 healthy，会连带跳过。
+ */
+async function requestAllCookieListPagesWithRetry(
+  template: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+): Promise<{ pages: Record<string, unknown>[]; complete: boolean }> {
+  try {
+    return await requestAllCookieListPages(template, credential);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, LIST_REQUEST_RETRY_DELAY_MS));
+    return requestAllCookieListPages(template, credential);
+  }
 }
 
 function isCookiePaginationComplete(
