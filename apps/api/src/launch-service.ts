@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   ProviderCredentialInputSchema,
   assertCampaignNameAvailable,
+  dateTimeSuffix,
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
   planCampaignCopy,
@@ -816,26 +817,10 @@ export class LaunchService {
 
     const context = await this.loadProviderContext(input.accountId, account.providerKind);
 
-    // 命名去重必须基于账户的实时状态，而不是后台定时轮询留下的快照——快照
-    // 可能已经过期（默认最长 5 分钟一轮），账户里刚创建、还没被下一轮同步
-    // 捕获到的系列/广告组不会出现在本地数据里，命名会把它的名字当成可用的
-    // 重新分配出去，发布时被 TikTok 判定重名而拒绝。发布前强制刷新一次。
-    this.providers.requireAccountCapability(
-      input.accountId,
-      account.providerKind,
-      connection,
-      "read-campaigns",
-    );
-    try {
-      const sync = await this.providers.syncReadOnly(account.providerKind, context);
-      this.store.saveReadOnlySync(input.accountId, account.providerKind, sync.entities, sync.result);
-    } catch (cause) {
-      throw new Error(`系列复制前刷新账户状态失败，已阻止本次复制以避免与账户里未同步的系列/广告组重名：${safeError(cause)}`);
-    }
-
     const managed = this.store.listCurrentManagedEntities(input.accountId, account.providerKind);
 
-    // 命名的序号必须从账户现状往后接，因此要先拿到账户里已有的系列名与组名。
+    // 名称带到秒之后天然唯一，不再依赖快照定序号；这里取到的已有名称只当兜底
+    // 跳过集合用（应对用户手工起的同名对象），允许它滞后于账户真实状态。
     const existingCampaignNames = managed
       .filter((entity) => entity.entityType === "campaign")
       .map((entity) => entity.name);
@@ -877,7 +862,8 @@ export class LaunchService {
         sourceAdGroupIds: source.sourceAdGroupIds,
         campaignCopies: input.campaignCopies,
         groupsPerCampaign: input.groupsPerCampaign,
-        at: new Date(),
+        // 命名时间取【投放时刻】：定时投放用排期时间，立即投放用当前时间。
+        at: input.scheduledStartAt ? new Date(input.scheduledStartAt) : new Date(),
         timeZone: account.timezone,
         existingCampaignNames: [...existingCampaignNames, ...reserved],
         existingAdGroupNames: [...existingAdGroupNames, ...reservedAdGroupNames],
@@ -1035,10 +1021,10 @@ export class LaunchService {
   }> {
     const count = Math.max(1, Math.min(10, input.count));
     const scheduledStartAt = input.scheduledStartAt ?? null;
-    // 命名后缀按【投放日期】：定时投放取排期当天，立即投放取当天；用本地日期，
-    // 与用户在界面选的投放时间一致（而非创建时间）。
+    // 命名后缀按【投放日期+时间】：定时投放取排期时刻，立即投放取当前时刻。
+    // 带到秒是为了让每次扩组的名字天然唯一——此前只到日、序号又固定从 1 重编，
+    // 同一天对同一个源第二次扩组必然撞上第一次的名字，被 TikTok 判重名拒绝。
     const deliveryDate = scheduledStartAt ? new Date(scheduledStartAt) : new Date();
-    const dateSuffix = `${String(deliveryDate.getMonth() + 1).padStart(2, "0")}${String(deliveryDate.getDate()).padStart(2, "0")}`;
     if (scheduledStartAt && !input.sameCampaign) {
       throw new RetryableCreationError("定时扩组仅支持挂回原系列；已在发送任何创建请求前阻止执行。");
     }
@@ -1057,12 +1043,14 @@ export class LaunchService {
       byAccount.set(source.accountId, list);
     }
 
-    for (const [, sources] of byAccount) {
+    for (const [expandAccountId, sources] of byAccount) {
+      // 投放日期按账户时区取，与用户在界面上看到的投放时间一致。
+      const expandTimeZone = this.store.getAccount(expandAccountId)?.timezone;
       for (const source of sources) {
         const sourceBaseName = stripGeneratedAdGroupNameSuffixes(
           source.sourceAdGroupName,
         );
-        const baseAdGroupName = `${sourceBaseName}-${dateSuffix}`;
+        const baseAdGroupName = `${sourceBaseName}-${dateTimeSuffix(deliveryDate, expandTimeZone)}`;
         const taskKey = createHash("sha256").update(JSON.stringify({
           accountId: source.accountId,
           sourceAdGroupId: source.sourceAdGroupId,

@@ -987,6 +987,85 @@ describe("CookieAdsProvider", () => {
     );
   });
 
+  it("rewrites a stored ad template that still carries the ad-group dimension", async () => {
+    // 复刻线上账户的真实状态：凭据里存着一条早期派生的 ad 模板，路径已经是
+    // ad/list，但请求体仍是广告组维度。TikTok 对该维度只回占位行
+    // （universal_type=1、creative_id="0"），会被实体解析整行丢弃。
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      requested.push({ url, body });
+      const commonRequest = body.common_req as Record<string, unknown> | undefined;
+      const byCreative = JSON.stringify(commonRequest?.dimensions) === JSON.stringify(["creative_id"]);
+      const table = url.includes("/ad/list")
+        ? byCreative
+          ? [{
+              campaign_id: "campaign-1",
+              ad_id: "adgroup-1",
+              creative_id: "creative-1",
+              creative_name: "最终广告",
+              universal_type: 1,
+            }]
+          : [{
+              campaign_id: "campaign-1",
+              ad_id: "adgroup-1",
+              creative_id: "0",
+              universal_type: 1,
+            }]
+        : url.includes("adgroup/list")
+          ? [{ campaign_id: "campaign-1", ad_id: "adgroup-1", ad_name: "广告组" }]
+          : [{ campaign_id: "campaign-1", campaign_name: "系列" }];
+      return new Response(JSON.stringify({ data: { table }, code: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+
+    const provider = new CookieAdsProvider();
+    const output = await provider.syncReadOnly({
+      accountId: "test-account",
+      settings: {
+        kind: "cookie",
+        advertiserId: "123456",
+        healthUrl: "",
+        campaignsUrl: "",
+        adGroupsUrl: "",
+        adsUrl: "",
+      },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [
+          {
+            target: "ad-group",
+            url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456",
+            method: "POST",
+            body: JSON.stringify({ common_req: { dimensions: ["ad_id"], page: 1, page_size: 20 } }),
+            contentType: "application/json",
+          },
+          {
+            target: "ad",
+            derived: true,
+            url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/ad/list/?aadvid=123456",
+            method: "POST",
+            body: JSON.stringify({ common_req: { dimensions: ["ad_id"], page: 1, page_size: 20 } }),
+            contentType: "application/json",
+          },
+        ],
+      },
+    });
+
+    expect(requested.find((item) => item.url.includes("/ad/list"))?.body).toMatchObject({
+      common_req: { dimensions: ["creative_id"] },
+    });
+    expect(output.result.counts.ad).toBe(1);
+    expect(output.entities).toContainEqual(
+      expect.objectContaining({ entityType: "ad", externalId: "creative-1" }),
+    );
+  });
+
   it("does not turn a two-level creative placeholder into a duplicate final ad", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

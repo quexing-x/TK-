@@ -87,23 +87,17 @@ describe("AutomationStore", () => {
       generatedNames: ["other-0724-1", "other-0724-2"],
       dailyLimit: 3,
     })).toBe("daily-limit");
-    expect(store.isAutomaticCopyDestination(
-      "demo-account",
-      "campaign-1",
-      "generated-1",
-      "source-0724-1",
-    )).toBe(true);
+    // 结果回读之前只有预留的名称可用来排除。
+    expect(store.listAutomaticCopyGeneratedRefs("demo-account").names)
+      .toContain("source-0724-1");
     store.finishAutomaticCopyTask(
       "auto-copy-1",
       "succeeded",
       ["generated-1", "generated-2"],
     );
-    expect(store.isAutomaticCopyDestination(
-      "demo-account",
-      "campaign-1",
-      "generated-1",
-      "用户已重命名",
-    )).toBe(true);
+    // 回读到真实 ID 后，即使用户把组改了名也照样排除。
+    expect(store.listAutomaticCopyGeneratedRefs("demo-account").ids)
+      .toContain("generated-1");
     expect(store.claimAutomaticCopyTask({
       taskKey: "auto-copy-1",
       accountId: "demo-account",
@@ -136,12 +130,10 @@ describe("AutomationStore", () => {
       generatedNames: ["failed-1", "failed-2"],
       dailyLimit: 20,
     })).toBe("failed");
-    expect(store.isAutomaticCopyDestination(
-      "demo-account",
-      "campaign-1",
-      "failed-id",
-      "failed-1",
-    )).toBe(false);
+    // 失败的任务也可能已经部分创建成功，它预留过的名称同样要排除在复制源之外，
+    // 否则那些组会反过来成为下一轮的源。
+    expect(store.listAutomaticCopyGeneratedRefs("demo-account").names)
+      .toContain("failed-1");
   });
 
   it("claims a daily executor once and allows only stale unfinished scans to resume", () => {

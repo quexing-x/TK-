@@ -25,6 +25,23 @@ export function monthDaySuffix(at: Date, timeZone?: string): string {
   return `${month}${day}`;
 }
 
+/** 投放日期 + 时间，格式 `MMDD-HHMMSS`，按账户时区取值。 */
+export function dateTimeSuffix(at: Date, timeZone?: string): string {
+  if (!timeZone) {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${monthDaySuffix(at)}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
+  }
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(at);
+  const pick = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${monthDaySuffix(at, timeZone)}-${pick("hour")}${pick("minute")}${pick("second")}`;
+}
+
 /**
  * 在 512 字符上限内截断，但**保留尾部**（日期与序号）。从头部截会把序号一起截
  * 掉，反而制造重名。
@@ -35,34 +52,8 @@ export function truncateGeneratedName(name: string): string {
   return tail;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * 计算下一个可用序号。
- *
- * 关键点：序号必须从【账户里已经存在的同前缀名称】往后接，而不是固定从 1 开始。
- * 固定从 1 开始时，同一天对同一个源做第二次扩量必然撞上第一次的名字，创建会被
- * TikTok 直接拒绝，用户看到的是一个没有解释的失败。
- */
-export function nextNameSerial(
-  existingNames: Iterable<string>,
-  baseName: string,
-  dateSuffix: string,
-): number {
-  const pattern = new RegExp(`^${escapeRegExp(`${baseName}-${dateSuffix}-`)}([1-9]\\d*)$`);
-  let max = 0;
-  for (const name of existingNames) {
-    const matched = pattern.exec(name.trim());
-    const serial = matched ? Number(matched[1]) : 0;
-    if (Number.isFinite(serial) && serial > max) max = serial;
-  }
-  return max + 1;
-}
-
 export interface GeneratedNamePlan {
-  /** 清洗并加上日期后的基名，例如 `夏季系列-0730`。 */
+  /** 清洗并加上投放日期后的基名，例如 `夏季系列-0730`。 */
   baseName: string;
   /** 逐个副本的最终名称。 */
   names: string[];
@@ -71,8 +62,16 @@ export interface GeneratedNamePlan {
 }
 
 /**
- * 生成 `{清洗后源名}-{MMDD}-{序号}` 序列，序号从账户现状往后接，并跳过所有已被
- * 占用的名称（包括本批次已经预留的）。
+ * 生成 `{清洗后源名}-{MMDD}-{HHMMSS}` 序列，时间取【投放时刻】：定时投放用排期
+ * 时间，立即投放用当前时间。
+ *
+ * 名字带到秒之后就不再依赖「账户里已有哪些名字」来定序号了——这一点是刻意的。
+ * 旧规则的序号必须从账户现状往后接，而本地快照最长可能滞后一整轮轮询，账户里
+ * 刚建好、还没被同步捕获的对象会被误判成名字可用，发布时才被 TikTok 判重名。
+ * 同一批的多个副本按秒递增区分，因此批内也不会自撞。
+ *
+ * existingNames / reservedNames 仍然接受，但只作为跳过用的兜底集合（应对手工
+ * 起了同名对象的情况），不再参与序号计算，允许调用方传入过期快照。
  */
 export function planGeneratedNames(input: {
   sourceName: string;
@@ -84,21 +83,22 @@ export function planGeneratedNames(input: {
   /** 本批次已经预留但尚未创建的名称。 */
   reservedNames?: Iterable<string>;
 }): GeneratedNamePlan {
-  const dateSuffix = monthDaySuffix(input.at, input.timeZone);
   const cleaned = stripGeneratedNameSuffixes(input.sourceName);
-  const baseName = `${cleaned}-${dateSuffix}`;
+  const baseName = `${cleaned}-${monthDaySuffix(input.at, input.timeZone)}`;
   const taken = new Set<string>();
   for (const name of input.existingNames ?? []) taken.add(name.trim());
   for (const name of input.reservedNames ?? []) taken.add(name.trim());
 
-  let serial = nextNameSerial(taken, cleaned, dateSuffix);
   const names: string[] = [];
   const reserved = new Set<string>();
-  while (names.length < Math.max(0, input.count)) {
-    const candidate = truncateGeneratedName(`${baseName}-${serial}`);
-    serial += 1;
-    // 序号是按最大值 +1 起编的，正常不会撞；但账户里可能存在用户手工起的同名
-    // 对象，所以仍然逐个跳过已占用的名字。
+  const wanted = Math.max(0, input.count);
+  // 每个副本往后推一秒。上限留出充足余量：撞名只可能来自用户手工起的同名对象，
+  // 正常情况下第一个候选就可用。
+  for (let offset = 0; names.length < wanted && offset < wanted + 600; offset += 1) {
+    const at = new Date(input.at.getTime() + offset * 1000);
+    const candidate = truncateGeneratedName(
+      `${cleaned}-${dateTimeSuffix(at, input.timeZone)}`,
+    );
     if (taken.has(candidate)) continue;
     taken.add(candidate);
     reserved.add(candidate);

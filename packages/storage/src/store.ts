@@ -2917,6 +2917,45 @@ export class AutomationStore {
     this.markAdGroupExpandTaskDispatching(taskKey);
   }
 
+  /**
+   * 自动复制产出过的广告组（ID 与名称）。
+   *
+   * 复制出来的组不能再成为复制源，否则一个跑得好的组会每天派生新组、新组次日
+   * 又符合阈值继续派生，账户被指数级铺满。ID 来自发布后回读的真实结果；结果未知
+   * 的任务拿不到 ID，因此名称一并返回作为兜底，避免漏掉这类组。
+   */
+  listAutomaticCopyGeneratedRefs(accountId: string): {
+    ids: Set<string>;
+    names: Set<string>;
+  } {
+    const rows = this.db.prepare(
+      `SELECT generated_ids_json, generated_names_json
+       FROM ad_group_expand_tasks
+       WHERE account_id = ? AND executor_kind = 'auto-copy'`,
+    ).all(accountId) as SqlRow[];
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    for (const row of rows) {
+      for (const [column, target] of [
+        [row.generated_ids_json, ids],
+        [row.generated_names_json, names],
+      ] as const) {
+        if (typeof column !== "string" || !column) continue;
+        try {
+          const parsed = JSON.parse(column) as unknown;
+          if (!Array.isArray(parsed)) continue;
+          for (const item of parsed) {
+            const value = String(item ?? "").trim();
+            if (value) target.add(value);
+          }
+        } catch {
+          // 损坏的历史行不应阻断本轮自动复制：跳过即可，最坏结果是少排除一个组。
+        }
+      }
+    }
+    return { ids, names };
+  }
+
   finishAutomaticCopyTask(
     taskKey: string,
     outcome: "succeeded" | "failed" | "unknown",
@@ -2951,26 +2990,6 @@ export class AutomationStore {
            automatic_outcome = ?, updated_at = ?
        WHERE task_key = ?`,
     ).run(outcome, now, taskKey);
-  }
-
-  isAutomaticCopyDestination(
-    accountId: string,
-    sourceCampaignId: string,
-    adGroupId: string,
-    adGroupName: string,
-  ): boolean {
-    const rows = this.db.prepare(
-      `SELECT generated_names_json, generated_ids_json FROM ad_group_expand_tasks
-       WHERE account_id = ? AND executor_kind = 'auto-copy'
-         AND source_campaign_id = ?
-         AND COALESCE(automatic_outcome, '') <> 'failed'`,
-    ).all(accountId, sourceCampaignId) as SqlRow[];
-    return rows.some((row) => {
-      const ids = JSON.parse(String(row.generated_ids_json ?? "[]")) as string[];
-      if (ids.length > 0) return ids.includes(adGroupId);
-      const names = JSON.parse(String(row.generated_names_json ?? "[]")) as string[];
-      return names.includes(adGroupName);
-    });
   }
 
   claimDailyAutomationRun(
