@@ -2225,6 +2225,10 @@ export class AutomationStore {
          AND pe.entity_type = 'ad-group' AND pe.is_current = 1
          AND latest_status.action = 'disable'
          AND latest_status.completed_at <= ?
+         -- 只有真正发出去过的删除才永久占坑：结果未知的不可逆操作绝不能自动重试。
+         -- 停在 validation 阶段的失败连请求都没构造出来，TikTok 侧什么都没发生，
+         -- 把它也当成占坑会让这些广告组在根因修好之后永远不再被尝试——2026-08-06
+         -- 那 66 条 phase=validation 的失败记录就是这样卡住的。
          AND NOT EXISTS (
            SELECT 1 FROM ad_operations deletion
            WHERE deletion.account_id = pe.account_id
@@ -2232,6 +2236,7 @@ export class AutomationStore {
              AND deletion.entity_type = 'ad-group'
              AND deletion.external_id = pe.external_id
              AND deletion.action = 'delete'
+             AND deletion.phase <> 'validation'
          )
        ORDER BY pe.external_id`,
     ).all(accountId, kind, disabledBefore) as SqlRow[];
@@ -2250,9 +2255,12 @@ export class AutomationStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const exists = this.db.prepare(
+        // 与 listDeletionReadyAdGroups 保持同一判据：停在 validation 阶段的失败
+        // 从未发出，不该占住这个广告组的删除名额。
         `SELECT 1 FROM ad_operations
          WHERE account_id = ? AND provider_kind = ? AND entity_type = 'ad-group'
-           AND external_id = ? AND action = 'delete' LIMIT 1`,
+           AND external_id = ? AND action = 'delete'
+           AND phase <> 'validation' LIMIT 1`,
       ).get(accountId, kind, externalId);
       if (exists) {
         this.db.exec("COMMIT");

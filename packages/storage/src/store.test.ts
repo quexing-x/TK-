@@ -501,6 +501,64 @@ describe("AutomationStore", () => {
     expect(ad?.payload).toMatchObject({ ad_name: "广告一" });
   });
 
+  // 2026-08-06：66 个广告组的删除停在 validation 阶段（请求都没构造出来），却按
+  // "已尝试过" 被永久排除，根因修好也永远轮不到它们。发出去过的才该占坑。
+  it("keeps an ad group deletable after a failure that never left validation", () => {
+    const disabledAt = new Date(Date.now() - 48 * 3600_000).toISOString();
+    const setup = (externalId: string) => {
+      const op = store.recordAdOperation({
+        accountId: "demo-account",
+        providerKind: "cookie",
+        entityType: "ad-group",
+        externalId,
+        entityName: externalId,
+        action: "disable",
+        source: "automation",
+        status: "succeeded",
+        message: "disabled",
+      });
+      (store as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => void } } }).db
+        .prepare("UPDATE ad_operations SET completed_at = ? WHERE id = ?")
+        .run(disabledAt, op.id);
+    };
+    const now = new Date().toISOString();
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      ["never-sent", "dispatched"].map((id) => ({
+        entityType: "ad-group" as const,
+        externalId: id,
+        payload: { campaign_id: "campaign-1", ad_name: id, ad_primary_status: "disable" },
+      })),
+      {
+        startedAt: now,
+        finishedAt: now,
+        counts: { campaign: 0, "ad-group": 2, ad: 0 },
+        warnings: [],
+        quality: healthySyncQuality(now),
+      },
+    );
+    setup("never-sent");
+    setup("dispatched");
+
+    const db = (store as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => void } } }).db;
+    for (const [externalId, phase] of [["never-sent", "validation"], ["dispatched", "dispatch"]]) {
+      const task = store.queueAdGroupDeletionIfAbsent("demo-account", "cookie", externalId!)!;
+      store.completeAdGroupDeletion(task.id, "failed", "失败");
+      db.prepare("UPDATE ad_operations SET phase = ? WHERE id = ?").run(phase, task.id);
+    }
+
+    const ready = store
+      .listDeletionReadyAdGroups("demo-account", "cookie", new Date().toISOString())
+      .map((entity) => entity.externalId);
+
+    expect(ready).toContain("never-sent");
+    expect(ready).not.toContain("dispatched");
+    // 重新排队也必须放行，否则选出来了照样下不了单。
+    expect(store.queueAdGroupDeletionIfAbsent("demo-account", "cookie", "never-sent")).not.toBeNull();
+    expect(store.queueAdGroupDeletionIfAbsent("demo-account", "cookie", "dispatched")).toBeNull();
+  });
+
   it("refreshes nothing when the provider contract drifted", () => {
     const first = new Date("2026-08-05T00:00:00.000Z").toISOString();
     store.saveReadOnlySync(
