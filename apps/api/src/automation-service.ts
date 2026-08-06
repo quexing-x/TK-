@@ -16,6 +16,7 @@ import {
   type WriteTaskActor,
   normalizeProviderEntity,
   syncLayerComplete,
+  creativeNeedsAppeal,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -139,8 +140,7 @@ export class AutomationService {
     for (const entity of this.store.listCurrentProviderEntities(accountId, account.providerKind)) {
       if (entity.entityType !== "ad") continue;
       const payload = entity.payload as Record<string, unknown>;
-      const status = String(payload.creative_status ?? "");
-      if (status !== "creative_offline_audit") continue;
+      if (!creativeNeedsAppeal(payload)) continue;
       const creativeId = String(payload.creative_id ?? "");
       if (!creativeId) continue;
       const execution = this.store.getAppealExecutionState(accountId, entity.externalId);
