@@ -264,6 +264,55 @@ describe("AutomationStore", () => {
     expect(store.listDueNotificationDeliveries()).toHaveLength(1);
   });
 
+  // 2026-08-06：三条自动申诉因 TikTok 后端解包失败被判 unknown，而 blocked 把
+  // unknown 也当成永久占坑，于是这三条广告被永久踢出候选池。申诉是可安全重复提交
+  // 的操作，代价远低于"永远不再申诉"，改为与明确失败一样受 retryLimit 约束。
+  describe("申诉的执行门禁", () => {
+    const appeal = (externalId: string, status: "succeeded" | "failed" | "unknown") => {
+      const task = store.queueAppeal("demo-account", "cookie", externalId, "理由", "automation");
+      store.completeAppeal(task.id, status, "消息");
+    };
+
+    it("结果未知不再永久拉黑，而是计入次数交给 retryLimit", () => {
+      appeal("ad-unknown", "unknown");
+
+      const state = store.getAppealExecutionState("demo-account", "ad-unknown");
+      expect(state.blocked).toBe(false);
+      expect(state.confirmedFailureCount).toBe(1);
+    });
+
+    it("明确失败与结果未知累加进同一个计数", () => {
+      appeal("ad-mixed", "failed");
+      appeal("ad-mixed", "unknown");
+
+      expect(store.getAppealExecutionState("demo-account", "ad-mixed")).toMatchObject({
+        blocked: false,
+        confirmedFailureCount: 2,
+      });
+    });
+
+    // 成功过的不再重复申诉，这条边界不因为放宽 unknown 而松掉。
+    it("申诉成功过的仍然永久占坑", () => {
+      appeal("ad-done", "succeeded");
+
+      expect(store.getAppealExecutionState("demo-account", "ad-done").blocked).toBe(true);
+    });
+
+    // 还在排队/执行中的不并发提交第二次。
+    it("还没收口的申诉仍然占坑", () => {
+      store.queueAppeal("demo-account", "cookie", "ad-inflight", "理由", "automation");
+
+      expect(store.getAppealExecutionState("demo-account", "ad-inflight").blocked).toBe(true);
+    });
+
+    it("按账户和广告分别计数，不互相污染", () => {
+      appeal("ad-a", "unknown");
+
+      expect(store.getAppealExecutionState("demo-account", "ad-b").confirmedFailureCount).toBe(0);
+      expect(store.getAppealExecutionState("demo-account", "ad-b").blocked).toBe(false);
+    });
+  });
+
   it("persists automation switches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.closeNoConversion = true;
