@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CookieAdsProvider } from "./cookie-provider.js";
 import type { ProviderContext } from "./types.js";
 
-function context(): ProviderContext {
+function context(options: { adStatusTemplate?: boolean } = {}): ProviderContext {
   return {
     accountId: "test-account",
     timezone: "Asia/Taipei",
@@ -18,19 +18,36 @@ function context(): ProviderContext {
       kind: "cookie",
       cookie: "sessionid=test-cookie",
       csrfHeaderName: "x-csrftoken",
-      requestTemplates: [{
-        target: "ad-group",
-        url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=654321",
-        method: "POST",
-        body: "{}",
-        contentType: "application/json",
-      }],
+      requestTemplates: [
+        {
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=654321",
+          method: "POST",
+          body: "{}",
+          contentType: "application/json",
+        },
+        ...(options.adStatusTemplate === false ? [] : [{
+          target: "ad-status" as const,
+          action: "enable" as const,
+          url: "https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=654321",
+          method: "POST" as const,
+          body: '{"creative_id":"captured-ad","operation":"enable"}',
+          contentType: "application/json",
+        }]),
+      ],
     },
   };
 }
 
 /** 两个源广告组的系列复制草稿，字段形状对照真机 campaign_snap/copy 响应。 */
-function copyResponse() {
+function copyResponse(creativesPerGroup = 1) {
+  const creativeSnaps = (group: string) =>
+    Array.from({ length: creativesPerGroup }, (_unused, index) => ({
+      creative_snap_id: `cre-${group}${index === 0 ? "" : `-${index + 1}`}`,
+    }));
+  const creativeSketches = (group: string) =>
+    Array.from({ length: creativesPerGroup }, (_unused, index) =>
+      `cre-sketch-${group}${index === 0 ? "" : `-${index + 1}`}`);
   return {
     code: 0,
     msg: "success",
@@ -52,12 +69,12 @@ function copyResponse() {
       ],
       new_ad_sketch_ids: ["sketch-A", "sketch-B"],
       new_ad_and_creative_snap_info_item_map: {
-        "snap-A": [{ creative_snap_id: "cre-A" }],
-        "snap-B": [{ creative_snap_id: "cre-B" }],
+        "snap-A": creativeSnaps("A"),
+        "snap-B": creativeSnaps("B"),
       },
       new_ad_and_creative_sketch_ids_map: {
-        "sketch-A": ["cre-sketch-A"],
-        "sketch-B": ["cre-sketch-B"],
+        "sketch-A": creativeSketches("A"),
+        "sketch-B": creativeSketches("B"),
       },
     },
   };
@@ -74,7 +91,20 @@ function stubTikTok(options: {
    * 重试。失败的尝试同样计入 calls，方便断言重试真的发生过。
    */
   failFirst?: { path: string; times: number; code: string };
+  /** 每个广告组里的广告条数，默认 1。 */
+  creativesPerGroup?: number;
+  /**
+   * 发布终态里 ad_and_creative / asset_group_result / creative_items 的容器形状。
+   * 真机回的是以下标为键的对象映射，不是数组；数组形状只是历史桩的简化。
+   */
+  publishShape?: "array" | "map";
+  /** 广告层开关请求返回业务失败（code≠0）。 */
+  failAdStatus?: boolean;
 }) {
+  const creativesPerGroup = options.creativesPerGroup ?? 1;
+  /** 数组或「下标为键」的对象映射——真机两种都出现过，解析必须都认。 */
+  const shaped = <T,>(items: T[]): T[] | Record<string, T> =>
+    options.publishShape === "map" ? Object.fromEntries(items.map((item, index) => [index, item])) : items;
   // 草稿的服务端状态：ad_snap/save 写入什么，snap/detail 就回读什么。
   // 回读校验是这条链路的安全网，桩必须真实反映它才有意义。
   const draftForms = new Map<string, Record<string, unknown>>([
@@ -97,7 +127,12 @@ function stubTikTok(options: {
       throw new Error("fetch failed", { cause });
     }
 
-    if (path.includes("campaign_snap/copy")) return json(copyResponse());
+    if (path.includes("campaign_snap/copy")) return json(copyResponse(creativesPerGroup));
+    if (path.includes("/ad/update_status")) {
+      return options.failAdStatus
+        ? json({ code: 40100, msg: "广告状态更新被拒绝" })
+        : json({ code: 0, msg: "success", data: {} });
+    }
     if (path.includes("ad_sketch/delete")) {
       for (const sketchId of (body.ad_sketch_ids as string[] | undefined) ?? []) {
         for (const [snapId, form] of draftForms) {
@@ -132,11 +167,18 @@ function stubTikTok(options: {
         code: 0,
         data: {
           result: {
-            ad_and_creative: Array.from({ length: count }, (_unused, index) => ({
-              ad_id: `new-group-${index + 1}`,
-              adgroup_id: `new-group-${index + 1}`,
-              asset_group_result: [{ creative_items: [{ id: `new-ad-${index + 1}` }] }],
-            })),
+            ad_and_creative: shaped(Array.from({ length: count }, (_unused, groupIndex) => ({
+              ad_id: `new-group-${groupIndex + 1}`,
+              adgroup_id: `new-group-${groupIndex + 1}`,
+              asset_group_result: shaped([{
+                creative_items: shaped(Array.from(
+                  { length: creativesPerGroup },
+                  (_ignored, creativeIndex) => ({
+                    id: `new-ad-${groupIndex + 1}-${creativeIndex + 1}`,
+                  }),
+                )),
+              }]),
+            }))),
           },
         },
       });
@@ -363,6 +405,149 @@ describe("CookieAdsProvider.copyCampaign", () => {
     const copyAttempts = calls.filter((call) => call.path.includes("campaign_snap/copy"));
     expect(copyAttempts).toHaveLength(3);
   }, 10_000);
+
+  // 复制是让 TikTok 按源对象克隆，广告的开关状态一并被克隆过来：源组里的广告是关的，
+  // 新组里的广告也是关的，于是组开着、广告关着，整组投不出去。发布载荷里只有
+  // is_status_disabled 一个开关且只作用于广告组层，创意快照里没有状态字段，所以只能
+  // 在拿到新建的广告 ID 之后再显式开一次。
+  describe("复制后显式开启新建的广告", () => {
+    const enableCalls = (calls: Call[]) => calls.filter((call) => call.path.includes("/ad/update_status"));
+
+    it("组以 enabled 发布时，逐条开启本次新建的广告", async () => {
+      const calls: Call[] = [];
+      stubTikTok({ calls, adGroupCount: 2 });
+      const provider = new CookieAdsProvider();
+
+      const result = await provider.copyCampaign(context(), {
+        sourceCampaignId: "90001",
+        campaignName: "源系列-0730-1",
+        adGroups: [
+          { sourceAdGroupId: "src-A", name: "组A" },
+          { sourceAdGroupId: "src-B", name: "组B" },
+        ],
+        initialStatus: "enabled",
+      });
+
+      expect(result.ok).toBe(true);
+      const enables = enableCalls(calls);
+      // 只开本次发布回来的两条广告，不多也不少。
+      expect(enables.map((call) => call.body.creative_id)).toEqual(["new-ad-1-1", "new-ad-2-1"]);
+      // 开启必须发生在发布之后——广告 ID 是发布终态才有的。
+      const publishIndex = calls.findIndex((call) => call.path.includes("create_by_snap"));
+      expect(calls.indexOf(enables[0]!)).toBeGreaterThan(publishIndex);
+      expect(enables[0]?.body.operation).toBe("enable");
+    });
+
+    it("终态用「下标为键」的对象映射回多条广告时，全部提取并开启", async () => {
+      const calls: Call[] = [];
+      // 真机回的 ad_and_creative / asset_group_result / creative_items 都是对象映射。
+      stubTikTok({ calls, adGroupCount: 2, creativesPerGroup: 2, publishShape: "map" });
+      const provider = new CookieAdsProvider();
+
+      const result = await provider.copyCampaign(context(), {
+        sourceCampaignId: "90001",
+        campaignName: "源系列-0730-1",
+        adGroups: [
+          { sourceAdGroupId: "src-A", name: "组A" },
+          { sourceAdGroupId: "src-B", name: "组B" },
+        ],
+        initialStatus: "enabled",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(enableCalls(calls).map((call) => call.body.creative_id)).toEqual([
+        "new-ad-1-1", "new-ad-1-2", "new-ad-2-1", "new-ad-2-2",
+      ]);
+    });
+
+    it("组以 disabled 发布时一条都不开", async () => {
+      const calls: Call[] = [];
+      stubTikTok({ calls, adGroupCount: 2 });
+      const provider = new CookieAdsProvider();
+
+      const result = await provider.copyCampaign(context(), {
+        sourceCampaignId: "90001",
+        campaignName: "源系列-0730-1",
+        adGroups: [
+          { sourceAdGroupId: "src-A", name: "组A" },
+          { sourceAdGroupId: "src-B", name: "组B" },
+        ],
+        initialStatus: "disabled",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(enableCalls(calls)).toHaveLength(0);
+    });
+
+    // 原生定时投放的组同样是以 enabled 发布的，拦住投放的是 TikTok 按广告组排期判定的
+    // ad_time_no_reach，不是广告自己的开关。生产快照里创建即为关闭的 6 条广告有 5 条
+    // 属于定时批次，跳过定时批次等于这个修复基本没生效。
+    it("定时投放的组也要开：组以 enabled 发布，排期由 TikTok 把关", async () => {
+      const calls: Call[] = [];
+      stubTikTok({ calls, adGroupCount: 2 });
+      const provider = new CookieAdsProvider();
+
+      const result = await provider.copyCampaign(context(), {
+        sourceCampaignId: "90001",
+        campaignName: "源系列-0730-1",
+        adGroups: [
+          { sourceAdGroupId: "src-A", name: "组A" },
+          { sourceAdGroupId: "src-B", name: "组B" },
+        ],
+        initialStatus: "disabled",
+        scheduledStartAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      });
+
+      expect(result.ok).toBe(true);
+      const publish = calls.find((call) => call.path.includes("create_by_snap"));
+      expect(publish?.body.is_status_disabled).toBe(false);
+      expect(enableCalls(calls).map((call) => call.body.creative_id)).toEqual(["new-ad-1-1", "new-ad-2-1"]);
+    });
+
+    it("开启失败不推翻整次创建，失败明细进返回消息", async () => {
+      const calls: Call[] = [];
+      stubTikTok({ calls, adGroupCount: 2, failAdStatus: true });
+      const provider = new CookieAdsProvider();
+
+      const result = await provider.copyCampaign(context(), {
+        sourceCampaignId: "90001",
+        campaignName: "源系列-0730-1",
+        adGroups: [
+          { sourceAdGroupId: "src-A", name: "组A" },
+          { sourceAdGroupId: "src-B", name: "组B" },
+        ],
+        initialStatus: "enabled",
+      });
+
+      // 广告组已经建好了，把这次判成失败会诱发重复创建。
+      expect(result.ok).toBe(true);
+      expect(result.message).toContain("2 条广告未能自动开启");
+      expect(result.message).toContain("new-ad-1-1");
+      expect(result.message).toContain("new-ad-2-1");
+      // 一条失败不能拖累后面的，两条都必须尝试过。
+      expect(enableCalls(calls)).toHaveLength(2);
+    });
+
+    it("没有广告层开关模板时照常返回成功，并说明广告保持了克隆来的状态", async () => {
+      const calls: Call[] = [];
+      stubTikTok({ calls, adGroupCount: 2 });
+      const provider = new CookieAdsProvider();
+
+      const result = await provider.copyCampaign(context({ adStatusTemplate: false }), {
+        sourceCampaignId: "90001",
+        campaignName: "源系列-0730-1",
+        adGroups: [
+          { sourceAdGroupId: "src-A", name: "组A" },
+          { sourceAdGroupId: "src-B", name: "组B" },
+        ],
+        initialStatus: "enabled",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.message).toContain("缺少广告层开关模板");
+      expect(enableCalls(calls)).toHaveLength(0);
+    });
+  });
 
   it("ECONNRESET 不重试：连接可能已经建立，安全边界不因优化而放松", async () => {
     const calls: Call[] = [];

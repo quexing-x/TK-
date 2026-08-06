@@ -3486,6 +3486,17 @@ describe("CookieAdsProvider", () => {
 
     const context = creationTestContext(false);
     context.timezone = "Asia/Taipei";
+    if (context.credential.kind !== "cookie" || !context.credential.requestTemplates) {
+      throw new Error("test fixture must include cookie request templates");
+    }
+    context.credential.requestTemplates.push({
+      target: "ad-status",
+      action: "enable",
+      url: "https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456",
+      method: "POST",
+      body: '{"creative_id":"captured-ad","operation":"enable"}',
+      contentType: "application/json",
+    });
     const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(context, {
       sourceAdGroupId: "source-adgroup",
       existingCampaignId: "campaign",
@@ -3514,6 +3525,11 @@ describe("CookieAdsProvider", () => {
     const publish = requests.find((request) => request.path.includes("/async_creation/create_by_snap/"));
     expect(publish?.body).toMatchObject({ is_status_disabled: false });
     expect(requests.filter((request) => request.path.includes("/snap/detail/"))).toHaveLength(2);
+    // 组以 enabled 发布，组里克隆出来的广告也必须显式打开：拦住投放的是 TikTok 按
+    // 广告组排期判定的 ad_time_no_reach，不是广告自己的开关。定时批次一样要开。
+    const enables = requests.filter((request) => request.path.includes("/ad/update_status/"));
+    expect(enables).toHaveLength(1);
+    expect(enables[0]?.body).toMatchObject({ creative_id: "creative", operation: "enable" });
   });
 
   it("inherits the source 系列预算(CBO) instead of overriding the ad-group budget", async () => {

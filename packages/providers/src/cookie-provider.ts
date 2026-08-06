@@ -946,19 +946,21 @@ export class CookieAdsProvider implements AdsProvider {
         { semantics: "mutation", dispatchState },
       );
       // 3) 发布进现有系列（campaign_snap/sketch 置空，用 campaign_id）。
+      // 原生定时投放的组以 enabled 发布，由 TikTok 的排期决定何时放行。
+      const publishedStatus = scheduledStart ? "enabled" as const : input.initialStatus;
       const publishPayload = profile
         ? materializePublishProfile(profile.publishPayload, {
             campaignId: input.existingCampaignId,
             campaignSnapId: "",
             campaignSketchId: "",
             publishItems,
-            initialStatus: scheduledStart ? "enabled" : input.initialStatus,
+            initialStatus: publishedStatus,
           })
         : buildPublishInput({
             campaignSnapId: input.existingCampaignId,
             campaignSketchId: input.existingCampaignId,
             adAndCreativeSnapInfoList: publishItems,
-          }, scheduledStart ? "enabled" : input.initialStatus);
+          }, publishedStatus);
       publishPayload.campaign_id = input.existingCampaignId;
       publishPayload.campaign_snap_id = "";
       publishPayload.campaign_sketch_id = "";
@@ -997,9 +999,16 @@ export class CookieAdsProvider implements AdsProvider {
           `TikTok 创建终态不完整：广告组 ${completedCounts.adGroupCount}/${publishItems.length}，广告 ${completedCounts.creativeCount}/${expectedCreativeCount}，每组广告 ${completedCreativeCountsByAdGroup.join(",") || "无"}（预期 ${expectedCreativeCountsByAdGroup.join(",") || "无"}）；禁止自动重试。`,
         );
       }
+      // 克隆过来的广告会继承源广告的开关状态；广告组开着而里面的广告是关的，整组
+      // 投不出去。广告的开关跟随广告组的发布状态：组以 disabled 发布就全部保持关闭。
+      const enableFailures = publishedStatus === "enabled"
+        ? await enableCreatedCreatives(context, credential, completedCreativeIds(completed))
+        : [];
       return {
         ok: true,
-        message: `同系列复制已发布 ${publishItems.length} 个广告组`,
+        message: enableFailures.length > 0
+          ? `同系列复制已发布 ${publishItems.length} 个广告组；${enableFailures.length} 条广告未能自动开启：${enableFailures.join("；")}`
+          : `同系列复制已发布 ${publishItems.length} 个广告组`,
         adGroupSnapIds: publishItems.map((item) => item.ad_snap_id),
         adGroupIds: officialAdGroupIds,
       };
@@ -1287,18 +1296,20 @@ export class CookieAdsProvider implements AdsProvider {
         credential,
         { semantics: "mutation", dispatchState },
       );
+      // 原生定时投放的组以 enabled 发布，由 TikTok 的排期决定何时放行。
+      const publishedStatus = scheduledStart ? "enabled" as const : input.initialStatus;
       const publishPayload = profile
         ? materializePublishProfile(profile.publishPayload, {
             campaignSnapId: draft.campaignSnapId,
             campaignSketchId: draft.campaignSketchId,
             publishItems,
-            initialStatus: scheduledStart ? "enabled" : input.initialStatus,
+            initialStatus: publishedStatus,
           })
         : buildPublishInput({
             campaignSnapId: draft.campaignSnapId,
             campaignSketchId: draft.campaignSketchId,
             adAndCreativeSnapInfoList: publishItems,
-          }, scheduledStart ? "enabled" : input.initialStatus);
+          }, publishedStatus);
       publishPayload.campaign_id = "";
       publishPayload.campaign_snap_id = draft.campaignSnapId;
       publishPayload.campaign_sketch_id = draft.campaignSketchId;
@@ -1329,9 +1340,15 @@ export class CookieAdsProvider implements AdsProvider {
           `TikTok 创建终态不完整：广告组 ${completedCounts.adGroupCount}/${publishItems.length}，广告 ${completedCounts.creativeCount}/${expectedCreativeCount}；禁止自动重试。`,
         );
       }
+      // 同上：克隆出来的广告继承源广告的开关状态，需要显式打开。
+      const enableFailures = publishedStatus === "enabled"
+        ? await enableCreatedCreatives(context, credential, completedCreativeIds(completed))
+        : [];
       return {
         ok: true,
-        message: `系列复制已发布 1 个系列、${publishItems.length} 个广告组`,
+        message: enableFailures.length > 0
+          ? `系列复制已发布 1 个系列、${publishItems.length} 个广告组；${enableFailures.length} 条广告未能自动开启：${enableFailures.join("；")}`
+          : `系列复制已发布 1 个系列、${publishItems.length} 个广告组`,
         adGroupIds: officialAdGroupIds,
       };
     } catch (cause) {
@@ -5353,6 +5370,78 @@ function completedAdGroupIds(payload: Record<string, unknown>): string[] {
       ?? nonEmptyId(ad.ad_id);
     return id ? [id] : [];
   }))];
+}
+
+/**
+ * 本次发布真正创建出来的广告（创意）ID。
+ *
+ * 复制和扩组都是让 TikTok 按源对象克隆，创意的开关状态一并被克隆过来：源广告组
+ * 里的广告是关的，新组里的广告也是关的，于是组开着、广告关着，整组投不出去。
+ * 发布载荷里只有 is_status_disabled 一个开关且只作用于广告组层，创意快照里没有
+ * 状态字段，所以只能拿到这些 ID 之后再显式开一次。
+ */
+function completedCreativeIds(payload: Record<string, unknown>): string[] {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  const result = isRecord(data.result) ? data.result : data;
+  const ads = isRecord(result.ad_and_creative)
+    ? Object.values(result.ad_and_creative)
+    : Array.isArray(result.ad_and_creative) ? result.ad_and_creative : [];
+  return [...new Set(ads.flatMap((ad) => {
+    if (!isRecord(ad)) return [];
+    const groups = isRecord(ad.asset_group_result)
+      ? Object.values(ad.asset_group_result)
+      : Array.isArray(ad.asset_group_result) ? ad.asset_group_result : [];
+    return groups.flatMap((group) => {
+      if (!isRecord(group)) return [];
+      const creatives = Array.isArray(group.creative_items)
+        ? group.creative_items
+        : isRecord(group.creative_items) ? Object.values(group.creative_items) : [];
+      return creatives.flatMap((creative) => {
+        if (!isRecord(creative)) return [];
+        const id = nonEmptyId(creative.id) ?? nonEmptyId(creative.creative_id);
+        return id ? [id] : [];
+      });
+    });
+  }))];
+}
+
+/**
+ * 把刚创建出来的广告显式打开。
+ *
+ * 只处理本次发布返回的创意 ID，不碰任何存量对象；只在广告组以 enabled 发布时才执行，
+ * 组以 disabled 发布就全部保持关闭。
+ *
+ * 原生定时投放的组也是以 enabled 发布的，同样要开：拦住投放的是 TikTok 按广告组排期
+ * 判定的 ad_time_no_reach，不是广告自己的开关。生产快照里正常的定时批次广告本来就是
+ * 开的（creative_opt_status=0 + creative_ad_time_no_reach），漏开的那几批反而投不出去。
+ *
+ * 开启失败不推翻整次创建：广告组已经建好了，把它判成失败会诱发重复创建。失败信息
+ * 汇总返回给调用方记录。
+ */
+async function enableCreatedCreatives(
+  context: ProviderContext,
+  credential: ParsedCookieCredential,
+  creativeIds: string[],
+): Promise<string[]> {
+  if (creativeIds.length === 0) return [];
+  const template = credential.requestTemplates?.find(
+    (item) => item.target === "ad-status" && item.action === "enable",
+  );
+  if (!template) return ["缺少广告层开关模板，新建广告保持克隆自源广告的开关状态。"];
+  const failures: string[] = [];
+  for (const externalId of creativeIds) {
+    try {
+      await requestCookieJson(
+        materializeStatusRequest(template, { entityType: "ad", externalId, action: "enable" }),
+        credential,
+      );
+    } catch (cause) {
+      failures.push(
+        `广告 ${externalId} 开启失败：${cause instanceof Error ? cause.message : "未知错误"}`,
+      );
+    }
+  }
+  return failures;
 }
 
 function materializeDeletionRequest(
