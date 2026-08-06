@@ -569,10 +569,13 @@ function adaptStatusRequest(
         target === "ad-status" &&
         url.pathname.toLowerCase().includes("/overture/")
       ) {
+        // 空数组，不是 creative_list 的副本：真实请求里这两个列表装的是不同类型的
+        // 对象（普通广告 vs ACO 创意），把广告 ID 复制进来会被 TikTok 拒绝。
         const copied = copyMultipartField(
           body,
           "creative_list",
           "aco_creative_list",
+          "[]",
         );
         if (!copied.added) {
           throw new TikTokCurlImportError(

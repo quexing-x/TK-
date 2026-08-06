@@ -5294,6 +5294,13 @@ function materializeStatusRequest(
         ) {
           return undefined;
         }
+        // ACO 创意列表永远留空：它和 creative_list 装的是不同类型的对象，普通广告
+        // ID 落进来会被 TikTok 以 code 4「不支持特定界面」拒绝。这里强制置空而不是
+        // 只靠导入时写对，是为了让升级前已经存下的模板（里面是 creative_list 的
+        // 副本）不必重新导入就能自愈。
+        if (field.name.toLowerCase() === "aco_creative_list") {
+          return { value: "[]" };
+        }
         return {
           value: replaceMultipartEntityList(field.value, mutation.externalId),
         };
@@ -5529,7 +5536,11 @@ function replaceMultipartEntityList(value: string, externalId: string): string {
   try {
     const parsed = JSON.parse(trimmed) as unknown;
     if (Array.isArray(parsed)) {
-      return JSON.stringify([externalId]);
+      // 原本就是空数组的列表保持为空。广告层的开关请求同时带 creative_list 与
+      // aco_creative_list，真实请求只填其中一个、另一个留空——两者装的是不同类型
+      // 的对象。无差别填充会把普通广告 ID 塞进 ACO 列表，被 TikTok 以 code 4 拒绝。
+      // 保持这条规则也让「抓的是 ACO 创意开关」那种捕获同样成立。
+      return parsed.length === 0 ? trimmed : JSON.stringify([externalId]);
     }
   } catch {
     // Some TikTok variants send a plain identifier instead of a JSON array.
