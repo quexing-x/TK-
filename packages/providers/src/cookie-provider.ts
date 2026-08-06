@@ -946,19 +946,21 @@ export class CookieAdsProvider implements AdsProvider {
         { semantics: "mutation", dispatchState },
       );
       // 3) 发布进现有系列（campaign_snap/sketch 置空，用 campaign_id）。
+      // 原生定时投放的组以 enabled 发布，由 TikTok 的排期决定何时放行。
+      const publishedStatus = scheduledStart ? "enabled" as const : input.initialStatus;
       const publishPayload = profile
         ? materializePublishProfile(profile.publishPayload, {
             campaignId: input.existingCampaignId,
             campaignSnapId: "",
             campaignSketchId: "",
             publishItems,
-            initialStatus: scheduledStart ? "enabled" : input.initialStatus,
+            initialStatus: publishedStatus,
           })
         : buildPublishInput({
             campaignSnapId: input.existingCampaignId,
             campaignSketchId: input.existingCampaignId,
             adAndCreativeSnapInfoList: publishItems,
-          }, scheduledStart ? "enabled" : input.initialStatus);
+          }, publishedStatus);
       publishPayload.campaign_id = input.existingCampaignId;
       publishPayload.campaign_snap_id = "";
       publishPayload.campaign_sketch_id = "";
@@ -998,10 +1000,10 @@ export class CookieAdsProvider implements AdsProvider {
         );
       }
       // 克隆过来的广告会继承源广告的开关状态；广告组开着而里面的广告是关的，整组
-      // 投不出去。定时投放的批次保持全关，等排期到点由 TikTok 放行。
-      const enableFailures = scheduledStart || input.initialStatus === "disabled"
-        ? []
-        : await enableCreatedCreatives(context, credential, completedCreativeIds(completed));
+      // 投不出去。广告的开关跟随广告组的发布状态：组以 disabled 发布就全部保持关闭。
+      const enableFailures = publishedStatus === "enabled"
+        ? await enableCreatedCreatives(context, credential, completedCreativeIds(completed))
+        : [];
       return {
         ok: true,
         message: enableFailures.length > 0
@@ -1294,18 +1296,20 @@ export class CookieAdsProvider implements AdsProvider {
         credential,
         { semantics: "mutation", dispatchState },
       );
+      // 原生定时投放的组以 enabled 发布，由 TikTok 的排期决定何时放行。
+      const publishedStatus = scheduledStart ? "enabled" as const : input.initialStatus;
       const publishPayload = profile
         ? materializePublishProfile(profile.publishPayload, {
             campaignSnapId: draft.campaignSnapId,
             campaignSketchId: draft.campaignSketchId,
             publishItems,
-            initialStatus: scheduledStart ? "enabled" : input.initialStatus,
+            initialStatus: publishedStatus,
           })
         : buildPublishInput({
             campaignSnapId: draft.campaignSnapId,
             campaignSketchId: draft.campaignSketchId,
             adAndCreativeSnapInfoList: publishItems,
-          }, scheduledStart ? "enabled" : input.initialStatus);
+          }, publishedStatus);
       publishPayload.campaign_id = "";
       publishPayload.campaign_snap_id = draft.campaignSnapId;
       publishPayload.campaign_sketch_id = draft.campaignSketchId;
@@ -1337,9 +1341,9 @@ export class CookieAdsProvider implements AdsProvider {
         );
       }
       // 同上：克隆出来的广告继承源广告的开关状态，需要显式打开。
-      const enableFailures = scheduledStart || input.initialStatus === "disabled"
-        ? []
-        : await enableCreatedCreatives(context, credential, completedCreativeIds(completed));
+      const enableFailures = publishedStatus === "enabled"
+        ? await enableCreatedCreatives(context, credential, completedCreativeIds(completed))
+        : [];
       return {
         ok: true,
         message: enableFailures.length > 0
@@ -5404,8 +5408,12 @@ function completedCreativeIds(payload: Record<string, unknown>): string[] {
 /**
  * 把刚创建出来的广告显式打开。
  *
- * 只处理本次发布返回的创意 ID，不碰任何存量对象；只在广告组本身就是开启状态时
- * 才执行——定时投放（initialStatus=disabled）要保持全关，等排期到点由 TikTok 放行。
+ * 只处理本次发布返回的创意 ID，不碰任何存量对象；只在广告组以 enabled 发布时才执行，
+ * 组以 disabled 发布就全部保持关闭。
+ *
+ * 原生定时投放的组也是以 enabled 发布的，同样要开：拦住投放的是 TikTok 按广告组排期
+ * 判定的 ad_time_no_reach，不是广告自己的开关。生产快照里正常的定时批次广告本来就是
+ * 开的（creative_opt_status=0 + creative_ad_time_no_reach），漏开的那几批反而投不出去。
  *
  * 开启失败不推翻整次创建：广告组已经建好了，把它判成失败会诱发重复创建。失败信息
  * 汇总返回给调用方记录。
