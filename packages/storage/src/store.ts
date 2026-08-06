@@ -2191,8 +2191,16 @@ export class AutomationStore {
        WHERE account_id = ? AND external_id = ? AND action = 'appeal'`,
     ).all(accountId, externalId) as SqlRow[];
     return {
-      confirmedFailureCount: rows.filter((row) => row.status === "failed").length,
-      blocked: rows.some((row) => ["pending", "running", "succeeded", "unknown"].includes(String(row.status))),
+      // 结果未知与明确失败同样计入次数，由 retryLimit 兜底，而不是永久拉黑。
+      // 「结果未知的不可逆操作绝不自动重试」这条对删除和启停成立，对申诉不成立：
+      // 重复提交一次申诉不花钱、不改投放、不删对象，代价远低于永远不再申诉。
+      // 2026-08-06 三条申诉因 TikTok 后端解包失败被判 unknown，于是这三条广告被
+      // 永久踢出候选池；当天值得申诉的只有四条。
+      confirmedFailureCount: rows.filter(
+        (row) => row.status === "failed" || row.status === "unknown",
+      ).length,
+      // 成功过的不再重复申诉；还在排队或执行中的不并发提交。
+      blocked: rows.some((row) => ["pending", "running", "succeeded"].includes(String(row.status))),
     };
   }
 

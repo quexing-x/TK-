@@ -532,6 +532,49 @@ describe("CookieAdsProvider", () => {
     })]);
   });
 
+  // 2026-08-06：三条自动申诉全部失败，但库里只留下 JS 自己截断的
+  // `Unexpected token 'j', "json: cann"... is not valid JSON`——TikTok 到底说哪个
+  // 字段不对被丢掉了，根因无从查起。响应体必须原样带进错误消息。
+  it("把 TikTok 回的非 JSON 响应体带进错误消息，而不是只留 JS 的解析报错", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      // content-type 仍然写着 json，body 却是后端的纯文本报错——真机就是这样。
+      new Response("json: cannot unmarshal string into Go struct field .creative_id of type int64", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })));
+    const provider = new CookieAdsProvider();
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=654321",
+          method: "POST",
+          body: "{}",
+          contentType: "application/json",
+          derived: false,
+        }],
+      },
+    };
+
+    const [result] = await provider.appeal(context, [{
+      externalId: "ad-1",
+      creativeId: "creative-1",
+      reason: "appeal",
+    }]);
+
+    expect(result).toMatchObject({ ok: false });
+    // 关键：服务端说的那句话必须完整可见，否则这类字段错永远查不出来。
+    expect(result?.message).toContain("cannot unmarshal");
+    expect(result?.message).toContain("creative_id");
+    expect(result?.message).not.toContain("Unexpected token");
+  });
+
   it("overrides a captured range with the account's current local date", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T02:30:00.000Z"));

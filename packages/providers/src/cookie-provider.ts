@@ -5264,7 +5264,20 @@ async function requestCookieJson(
   if (!response.ok || !contentType.includes("json")) {
     throw new Error(`Cookie 请求验证失败（HTTP ${response.status}）。`);
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  // 先读文本再自己解析，而不是 response.json()。TikTok 会在 content-type 仍然写着
+  // json 的情况下回一段纯文本错误（例如后端 JSON 解包失败时的 `json: cannot
+  // unmarshal ...`），此时 response.json() 抛的是 JS 自己的 SyntaxError，只带
+  // 十来个字符的预览——2026-08-06 的自动申诉就是这样连"哪个字段不对"都查不到，
+  // 三条申诉全部判为结果未知且再也不会重试。真实响应必须进错误消息。
+  const raw = await response.text();
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new Error(
+      `Cookie 请求返回的不是 JSON：${sanitizeProviderMessage(raw) || "（响应体为空）"}`,
+    );
+  }
   if (typeof payload.code === "number" && payload.code !== 0) {
     const providerMessage = typeof payload.msg === "string"
       ? sanitizeProviderMessage(payload.msg)
