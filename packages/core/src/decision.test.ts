@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createDefaultAutomationSwitches,
+  creativeNeedsAppeal,
   evaluateAutomation,
   normalizeProviderEntity,
   type ProviderEntity,
@@ -260,5 +261,63 @@ describe("normalizeProviderEntity — 系列预算(CBO) 识别", () => {
       [{ ...budgetThreshold, automationEnabled: true }],
       { ...createDefaultAutomationSwitches(), manageCampaignStatus: true },
     ).candidates).toHaveLength(1);
+  });
+});
+
+describe("creativeNeedsAppeal", () => {
+  // TikTok 用列表表达「一个对象同时处于多个状态」，单数字段只是列表的第一项。
+  // 只读单数字段会让候选集恒为空——生产环境自动申诉一次都没排过队就是这个原因。
+  it("reads the status list instead of the singular field", () => {
+    expect(creativeNeedsAppeal({
+      creative_status: "delivery_limited",
+      creative_status_list: '["creative_review_partially_approved"]',
+      ad_status_list: '["ads_review_partially_approved"]',
+    })).toBe(true);
+  });
+
+  // 已关停的广告不申诉：恢复过审也不会投放。生产快照里 35 条带审核问题的广告有
+  // 29 条属于这一类，其中不少是两周前的。
+  it("skips an ad that is already switched off", () => {
+    expect(creativeNeedsAppeal({
+      creative_status: "ad_disable",
+      creative_status_list: '["ad_disable","creative_review_partially_approved"]',
+      ad_status_list: '["ad_disable","ads_review_partially_approved"]',
+    })).toBe(false);
+  });
+
+  it("covers both full audit takedown and partial approval", () => {
+    expect(creativeNeedsAppeal({
+      creative_status_list: '["creative_offline_audit"]',
+    })).toBe(true);
+    expect(creativeNeedsAppeal({
+      creative_status_list: '["creative_review_partially_approved"]',
+    })).toBe(true);
+  });
+
+  it("leaves healthy and under-review creatives alone", () => {
+    expect(creativeNeedsAppeal({
+      creative_status: "creative_delivery_ok",
+      creative_status_list: '["creative_delivery_ok"]',
+    })).toBe(false);
+    // 还在审核中不是拒审，申诉没有意义。
+    expect(creativeNeedsAppeal({
+      creative_status_list: '["creative_audit"]',
+    })).toBe(false);
+    expect(creativeNeedsAppeal({
+      creative_status_list: '["creative_disable"]',
+    })).toBe(false);
+  });
+
+  it("falls back to the singular field when no list is present", () => {
+    expect(creativeNeedsAppeal({ creative_status: "creative_offline_audit" })).toBe(true);
+    expect(creativeNeedsAppeal({ creative_status: "ad_disable" })).toBe(false);
+    expect(creativeNeedsAppeal({})).toBe(false);
+  });
+
+  it("ignores an unparseable list instead of throwing", () => {
+    expect(creativeNeedsAppeal({
+      creative_status_list: "not json",
+      creative_status: "creative_offline_audit",
+    })).toBe(true);
   });
 });

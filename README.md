@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.4.28
+## Windows 桌面版 1.4.29
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.28.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.29.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -14,6 +14,12 @@
 - 后续升级先关闭程序，再直接运行更高版本安装包；不要先卸载旧版本。
 - 固定 App ID `com.tkads.automation`，新版安装包覆盖程序文件并保留用户数据。
 - 当前安装包未配置商业代码签名证书，Windows 可能显示未知发布者提示。
+
+升级到 1.4.29 后会出现的变化：
+
+- **自动申诉开始有候选可跑。** 此前判据读的是单数字段 `creative_status` 且只认 `creative_offline_audit`，而 TikTok 用 `creative_status_list` / `ad_status_list` 表达「一个对象同时处于多个状态」，单数字段只是列表第一项。生产快照里 35 条带审核问题的广告有 29 条长成 `["ad_disable","creative_review_partially_approved"]`，单数字段读出来是 `ad_disable`——两个缺陷叠加，命中数恒为 0，申诉从未排过一次队。现在解析列表，并同时认「完全审核下线」与「部分版位未过审」（界面上的「未全部投放 · 审核问题」）。
+- 已经关停的广告不再申诉：恢复过审也不会投放，真要重开时再申诉更合理。按当前快照，35 条候选里 29 条属于关停状态，实际会提交的是仍在投放的 6 条。
+- 申诉的去重口径未变：一条广告成功或结果未知后不再重复提交，明确失败最多重试到配置的上限。
 
 升级到 1.4.28 后会出现的变化：
 

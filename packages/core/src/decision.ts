@@ -136,6 +136,57 @@ const levelSwitches: Record<SyncEntityType, AutomationSwitchKey> = {
   ad: "manageAdStatus",
 };
 
+/**
+ * 需要申诉的审核状态。
+ *
+ * `creative_offline_audit` 是整条广告被审核下线；`creative_review_partially_approved`
+ * 是部分版位未过审，界面上显示「未全部投放 · 审核问题」。生产快照里后者占绝对多数
+ * （34 : 1），只认前者等于放过几乎所有真实情形。
+ */
+const appealWorthyCreativeStatuses = new Set([
+  "creative_offline_audit",
+  "creative_review_partially_approved",
+  "ad_offline_audit",
+  "ads_review_partially_approved",
+]);
+
+/**
+ * 这条广告是否处于需要申诉的审核状态。
+ *
+ * 判据必须读**列表**字段。TikTok 用 `creative_status_list` / `ad_status_list` 表达
+ * 「一个对象同时处于多个状态」，而单数的 `creative_status` 只是列表的第一项——生产
+ * 数据里 35 条待申诉广告有 33 条长成 `["ad_disable","creative_review_partially_approved"]`，
+ * 单数字段读出来是 `ad_disable`，于是候选集恒为空、自动申诉一次都没排过队。
+ *
+ * 列表缺失时才回退到单数字段，兼容不带列表的旧载荷。
+ */
+export function creativeNeedsAppeal(payload: Record<string, unknown>): boolean {
+  const statuses = new Set<string>();
+  for (const key of ["creative_status_list", "ad_status_list"] as const) {
+    const raw = payload[key];
+    if (typeof raw !== "string") continue;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === "string") statuses.add(item);
+        }
+      }
+    } catch {
+      // 结构不认识就当作没有列表，交给下面的单数字段兜底。
+    }
+  }
+  if (statuses.size === 0) {
+    const single = payload.creative_status;
+    if (typeof single === "string") statuses.add(single);
+  }
+  // 已经关停的广告不申诉：恢复过审也不会投放，真要重开时再申诉更合理。生产快照里
+  // 35 条带审核问题的广告有 29 条是关停状态，其中不少是两周前的，批量补提陈年申诉
+  // 对 TikTok 那边观感也不好。
+  if (statuses.has("ad_disable")) return false;
+  return [...statuses].some((status) => appealWorthyCreativeStatuses.has(status));
+}
+
 export function evaluateAutomation(
   entities: ProviderEntity[],
   thresholds: ThresholdConfig[],
