@@ -44,6 +44,7 @@ import {
   parseMultipartFields,
   rewriteMultipartFields,
 } from "./multipart.js";
+import { isStatusKey, matchCase } from "./curl-import.js";
 import {
   isDefinitelyUnsentNetworkError,
   isRequestTimeoutError,
@@ -91,8 +92,13 @@ export class CookieAdsProvider implements AdsProvider {
         templates.some((item) => item.target === target && item.action === action),
       ),
     );
+    // 光有关闭模板还不够：删除请求是把这条模板里的开关字段改写成 delete 派生出来的，
+    // 模板里没有可改写的开关字段就派生不出来。此前只检查模板存在与否，于是界面报
+    // “删除：可用”、执行器领了当天任务，然后 66 次全部在发出前失败。
     const hasAdGroupDeleteSession = templates.some(
-      (item) => item.target === "ad-group-status" && item.action === "disable",
+      (item) => item.target === "ad-group-status"
+        && item.action === "disable"
+        && hasRewritableStatusField(item),
     );
     return new Set<ProviderCapability>([
       ...(hasListSession
@@ -5354,8 +5360,8 @@ function materializeDeletionRequest(
   const url = new URL(materialized.url);
   let replacements = 0;
   for (const key of [...url.searchParams.keys()]) {
-    if (key.toLowerCase() === "operation_status") {
-      url.searchParams.set(key, "DELETE");
+    if (isStatusKey(key)) {
+      url.searchParams.set(key, matchCase(url.searchParams.get(key) ?? "", "delete"));
       replacements += 1;
     }
   }
@@ -5364,8 +5370,8 @@ function materializeDeletionRequest(
     const contentType = materialized.contentType?.toLowerCase() ?? "";
     if (isMultipartBody(contentType, body)) {
       const replaced = rewriteMultipartFields(body, (field) =>
-        field.name.toLowerCase() === "operation_status"
-          ? { value: "DELETE" }
+        isStatusKey(field.name)
+          ? { value: matchCase(field.value.trim(), "delete") }
           : undefined,
       );
       // See the matching comment in materializeStatusRequest: `matched`, not
@@ -5375,14 +5381,14 @@ function materializeDeletionRequest(
       body = replaced.body;
     } else if (contentType.includes("json") || body.trim().startsWith("{")) {
       const parsed = JSON.parse(body) as unknown;
-      const replaced = replaceOperationStatus(parsed, "DELETE");
+      const replaced = replaceOperationStatus(parsed);
       replacements += replaced.count;
       body = JSON.stringify(replaced.value);
     } else {
       const params = new URLSearchParams(body);
       for (const key of [...params.keys()]) {
-        if (key.toLowerCase() === "operation_status") {
-          params.set(key, "DELETE");
+        if (isStatusKey(key)) {
+          params.set(key, matchCase(params.get(key) ?? "", "delete"));
           replacements += 1;
         }
       }
@@ -5390,19 +5396,43 @@ function materializeDeletionRequest(
     }
   }
   if (replacements === 0) {
-    throw new Error("广告组关闭 cURL 中未找到 operation_status，无法安全派生删除请求。");
+    throw new Error("广告组关闭 cURL 中未找到开关字段，无法安全派生删除请求。");
   }
   return { ...materialized, url: url.toString(), body };
 }
 
+/**
+ * 这条模板里是否存在可以改写成 delete 的开关字段。
+ *
+ * 判据必须和 materializeDeletionRequest 实际扫描的位置一一对应（URL 查询参数、
+ * multipart 字段、JSON 键、表单键），否则能力上报又会和真实能力脱节。
+ */
+function hasRewritableStatusField(template: CapturedCookieRequest): boolean {
+  const url = new URL(template.url);
+  if ([...url.searchParams.keys()].some(isStatusKey)) return true;
+  const body = template.body;
+  if (!body) return false;
+  const contentType = template.contentType?.toLowerCase() ?? "";
+  if (isMultipartBody(contentType, body)) {
+    return parseMultipartFields(body).some((field) => isStatusKey(field.name));
+  }
+  if (contentType.includes("json") || body.trim().startsWith("{")) {
+    try {
+      return replaceOperationStatus(JSON.parse(body) as unknown).count > 0;
+    } catch {
+      return false;
+    }
+  }
+  return [...new URLSearchParams(body).keys()].some(isStatusKey);
+}
+
 function replaceOperationStatus(
   value: unknown,
-  operationStatus: string,
 ): { value: unknown; count: number } {
   if (Array.isArray(value)) {
     let count = 0;
     const output = value.map((item) => {
-      const replaced = replaceOperationStatus(item, operationStatus);
+      const replaced = replaceOperationStatus(item);
       count += replaced.count;
       return replaced.value;
     });
@@ -5412,12 +5442,12 @@ function replaceOperationStatus(
   let count = 0;
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
-    if (key.toLowerCase() === "operation_status") {
-      output[key] = operationStatus;
+    if (isStatusKey(key)) {
+      output[key] = typeof item === "string" ? matchCase(item, "delete") : "delete";
       count += 1;
       continue;
     }
-    const replaced = replaceOperationStatus(item, operationStatus);
+    const replaced = replaceOperationStatus(item);
     output[key] = replaced.value;
     count += replaced.count;
   }

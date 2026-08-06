@@ -800,7 +800,12 @@ function transformStatusMultipart(body: string): StatusTransformResult | null {
   return action ? { action, opposite: rewritten.body } : null;
 }
 
-function isStatusKey(key: string): boolean {
+/**
+ * 开关字段名的唯一判据。导入时用它识别启停字段，派生删除请求时也必须用同一个——
+ * 曾经删除那条路径写死了 `operation_status`，而 TikTok 现在的接口用的是
+ * `operation`，导致 66 次删除在发出前就失败，且当时无从察觉。
+ */
+export function isStatusKey(key: string): boolean {
   return /(?:^|_)(?:status|operation|operation_status|opt_status)$/.test(
     key.toLowerCase(),
   );
@@ -835,7 +840,8 @@ function detectStatusValue(
   return null;
 }
 
-function matchCase(source: string, value: string): string {
+/** 沿用原值的大小写写法：真实 cURL 里 enable/DISABLE 两种写法都出现过。 */
+export function matchCase(source: string, value: string): string {
   return source === source.toUpperCase() ? value.toUpperCase() : value;
 }
 

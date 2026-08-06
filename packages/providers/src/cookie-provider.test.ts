@@ -274,6 +274,79 @@ describe("CookieAdsProvider", () => {
     });
   });
 
+  // 生产事故：真实账户的关闭 cURL 是 multipart 且字段名叫 operation，而删除派生
+  // 当时写死了 operation_status，2026-08-06 早上 66 个广告组全部在发出前失败。
+  // 判据必须和导入时识别启停字段的 isStatusKey 完全一致。
+  it("derives the deletion from a multipart operation field, not just operation_status", async () => {
+    const sentBodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sentBodies.push(String(init?.body ?? ""));
+      return jsonResponse({ code: 0, data: {} });
+    }));
+    const boundary = "----WebKitFormBoundaryTest";
+    const body = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="operation"',
+      "",
+      "disable",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfToken: "test-csrf",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group-status",
+          action: "disable",
+          url: "https://ads.tiktok.com/api/v2/i18n/overture/adgroup/update_status/?aadvid=654321&adgroup_id=old-id",
+          method: "POST",
+          body,
+          contentType: `multipart/form-data; boundary=${boundary}`,
+        }],
+      },
+    };
+    const provider = new CookieAdsProvider();
+
+    expect(provider.resolveCapabilities(context)).toContain("delete-ad-groups");
+    await expect(provider.deleteAdGroups(context, [{ externalId: "adgroup-1" }]))
+      .resolves.toEqual([expect.objectContaining({ externalId: "adgroup-1", ok: true })]);
+    // 原值是小写 disable，改写后也应当是小写 delete。
+    expect(sentBodies[0]).toContain("delete");
+    expect(sentBodies[0]).not.toContain("disable");
+    expect(sentBodies[0]).not.toContain("DELETE");
+  });
+
+  // 能力上报必须和真实要求一致：模板里没有可改写的开关字段时，删除派生不出来，
+  // 就不该对外宣称删除可用——否则执行器会领走当天任务再整批失败。
+  it("does not advertise deletion when the status template has no rewritable switch field", () => {
+    const context: ProviderContext = {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group-status",
+          action: "disable",
+          url: "https://ads.tiktok.com/api/v4/i18n/adgroup/update_status/?aadvid=654321",
+          method: "POST",
+          body: '{"adgroup_ids":["old-id"]}',
+          contentType: "application/json",
+        }],
+      },
+    };
+
+    expect(new CookieAdsProvider().resolveCapabilities(context)).not.toContain("delete-ad-groups");
+  });
+
   it("keeps a dispatched deletion with a lost response in unknown", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => {
       throw new TypeError("connection lost");
