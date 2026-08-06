@@ -405,7 +405,8 @@ describe("CookieAdsProvider", () => {
       .resolves.toEqual([expect.objectContaining({ ok: false, failureKind: "unknown" })]);
   });
 
-  it("derives the reusable appeal request from the account session without an account appeal import", async () => {
+  // 报文形状按 2026-08-06 的真机抓包钉死；改这条测试前先重新抓一次包。
+  it("按真机抓包构造申诉报文，并从会话 cURL 派生出请求", async () => {
     const sentRequests: Array<{ url: string; body: string; headers: Record<string, string> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       sentRequests.push({
@@ -441,8 +442,9 @@ describe("CookieAdsProvider", () => {
 
     expect(provider.resolveCapabilities(context)).toContain("appeal-ads");
     const results = await provider.appeal(context, [{
-      externalId: "ad-1",
-      creativeId: "creative-1",
+      externalId: "1872730776636513",
+      creativeId: "1872730776636513",
+      adGroupId: "1872730776636497",
       reason: "我认为我的视频没有违规。",
     }]);
     const secondResults = await provider.appeal({
@@ -464,25 +466,38 @@ describe("CookieAdsProvider", () => {
         }],
       },
     }, [{
-      externalId: "ad-2",
-      creativeId: "creative-2",
+      externalId: "1872597696454978",
+      creativeId: "1872597696454978",
+      adGroupId: "1872597696453938",
       reason: "第二个账户的申诉。",
     }]);
 
     const url = new URL(sentRequests[0]!.url);
     expect(url.pathname).toBe("/api/v4/i18n/creation/audit/appeal_creative/");
     expect(url.searchParams.get("aadvid")).toBe("654321");
+    // 抓包里查询串带 req_src=bidding。
+    expect(url.searchParams.get("req_src")).toBe("bidding");
     expect(sentRequests[0]!.headers).toMatchObject({
       cookie: "sessionid=test-cookie",
       "x-csrftoken": "test-csrf",
     });
+    // 字段形状对照 2026-08-06 的真机抓包，逐字段钉死。此前这里断言的是手写报文
+    // 自己（测试名还写着 "without an account appeal import"），等于没测。
     expect(JSON.parse(sentRequests[0]!.body)).toEqual({
-      ad_id: "ad-1",
-      creative_id: "creative-1",
+      // ad_id 是广告组，creative_id 才是广告自己——这两个位置此前都填了广告 ID。
+      ad_id: "1872730776636497",
+      aadvid: "654321",
+      adv_entry: "ad review detail",
       appeal_reason: "我认为我的视频没有违规。",
-      appeal_reason_type: 1,
       attachment_list: [],
+      appeal_reason_type: 1,
+      creative_id: 1872730776636513,
+      advertiser_id: "654321",
     });
+    // creative_id 必须是数字字面量：发字符串会被 TikTok 在解 JSON 时以
+    // `json: cannot unmarshal string into ... int64` 拒绝。
+    expect(sentRequests[0]!.body).toContain('"creative_id":1872730776636513');
+    expect(sentRequests[0]!.body).not.toContain('"creative_id":"');
     const secondUrl = new URL(sentRequests[1]!.url);
     expect(secondUrl.searchParams.get("aadvid")).toBe("777888");
     expect(sentRequests[1]!.headers).toMatchObject({
@@ -490,12 +505,55 @@ describe("CookieAdsProvider", () => {
       "x-csrftoken": "second-csrf",
     });
     expect(JSON.parse(sentRequests[1]!.body)).toMatchObject({
-      ad_id: "ad-2",
-      creative_id: "creative-2",
+      ad_id: "1872597696453938",
+      creative_id: 1872597696454978,
+      aadvid: "777888",
+      advertiser_id: "777888",
       appeal_reason: "第二个账户的申诉。",
     });
     expect(results).toEqual([expect.objectContaining({ ok: true })]);
     expect(secondResults).toEqual([expect.objectContaining({ ok: true })]);
+  });
+
+  // TikTok 的 ID 可以长到 19 位，超过 2^53。creative_id 要发数字字面量，如果先过
+  // Number() 再 stringify，末几位会被静默改写，申诉就打到别的广告上去了。
+  it("19 位广告 ID 逐位原样发出，不经过 Number() 丢精度", async () => {
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sent.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ code: 0, data: { appeal_success: true } }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }));
+    const hugeId = "7668973964592414740";
+
+    await new CookieAdsProvider().appeal(appealTestContext(), [{
+      externalId: hugeId,
+      creativeId: hugeId,
+      adGroupId: "7668973964592414739",
+      reason: "理由",
+    }]);
+
+    expect(sent[0]).toContain(`"creative_id":${hugeId}`);
+    // 这是走 Number() 会得到的结果，出现它就说明精度已经丢了。
+    expect(sent[0]).not.toContain(String(Number(hugeId)));
+  });
+
+  it("拿不到广告组 ID 时明确报错，而不是发一个残缺报文出去", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [result] = await new CookieAdsProvider().appeal(appealTestContext(), [{
+      externalId: "1872730776636513",
+      creativeId: "1872730776636513",
+      adGroupId: "",
+      reason: "理由",
+    }]);
+
+    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
+    expect(result?.message).toContain("广告组 ID");
+    // 报文构造不出来就不该发请求：TikTok 侧什么都不该发生。
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps a dispatched appeal with a lost response in unknown", async () => {
@@ -523,14 +581,36 @@ describe("CookieAdsProvider", () => {
     };
 
     await expect(provider.appeal(context, [{
-      externalId: "ad-1",
-      creativeId: "creative-1",
+      externalId: "1872730776636513",
+      creativeId: "1872730776636513",
+      adGroupId: "1872730776636497",
       reason: "appeal",
     }])).resolves.toEqual([expect.objectContaining({
       ok: false,
       failureKind: "unknown",
     })]);
   });
+
+  function appealTestContext(): ProviderContext {
+    return {
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "654321", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-group",
+          url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=654321",
+          method: "POST",
+          body: "{}",
+          contentType: "application/json",
+          derived: false,
+        }],
+      },
+    };
+  }
 
   // 2026-08-06：三条自动申诉全部失败，但库里只留下 JS 自己截断的
   // `Unexpected token 'j', "json: cann"... is not valid JSON`——TikTok 到底说哪个
@@ -563,8 +643,9 @@ describe("CookieAdsProvider", () => {
     };
 
     const [result] = await provider.appeal(context, [{
-      externalId: "ad-1",
-      creativeId: "creative-1",
+      externalId: "1872730776636513",
+      creativeId: "1872730776636513",
+      adGroupId: "1872730776636497",
       reason: "appeal",
     }]);
 

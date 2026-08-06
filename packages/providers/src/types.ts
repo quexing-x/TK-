@@ -175,6 +175,11 @@ export interface TemplateCopyProvider extends ProviderContract {
 export interface AppealMutation {
   externalId: string;
   creativeId: string;
+  /**
+   * 广告所属的广告组 ID。真机申诉报文里的 `ad_id` 装的是广告组，`creative_id` 才是
+   * 广告自己；此前两个位置都填了广告 ID，是 2026-08-06 申诉全败的原因之一。
+   */
+  adGroupId: string;
   reason: string;
 }
 

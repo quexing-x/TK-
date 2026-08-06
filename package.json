@@ -1,6 +1,6 @@
 {
   "name": "tk-ads-automation",
-  "version": "1.4.31",
+  "version": "1.4.32",
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "scripts": {

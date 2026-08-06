@@ -142,7 +142,10 @@ export class AutomationService {
       const payload = entity.payload as Record<string, unknown>;
       if (!creativeNeedsAppeal(payload)) continue;
       const creativeId = String(payload.creative_id ?? "");
-      if (!creativeId) continue;
+      // 申诉报文里的 ad_id 是广告组，creative_id 才是广告自己；两者在广告实体上
+      // 是不同字段，取错会被 TikTok 拒。
+      const adGroupId = String(payload.adgroup_id ?? payload.ad_id ?? "");
+      if (!creativeId || !adGroupId) continue;
       const execution = this.store.getAppealExecutionState(accountId, entity.externalId);
       if (execution.blocked || execution.confirmedFailureCount > settings.retryLimit) continue;
       const reason = renderAppealTemplate(settings.textTemplate, {
@@ -152,7 +155,7 @@ export class AutomationService {
       });
       const task = this.store.queueAppeal(accountId, account.providerKind, entity.externalId, reason, "automation");
       try {
-        const [result] = await provider.appeal(context, [{ externalId: entity.externalId, creativeId, reason }]);
+        const [result] = await provider.appeal(context, [{ externalId: entity.externalId, creativeId, adGroupId, reason }]);
         const outcome = result?.ok
           ? "succeeded" as const
           : result?.failureKind === "unknown"

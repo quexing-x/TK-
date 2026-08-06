@@ -183,7 +183,10 @@ class FakeProvider implements AdsProvider {
         entityType: "ad",
         externalId: "ad-appeal-1",
         payload: {
-          ad_id: "ad-appeal-1",
+          // 真机上广告实体的 ad_id / adgroup_id 装的是**广告组**，creative_id 才是
+          // 广告自己。三者写成不同值，申诉报文取错字段才测得出来。
+          ad_id: "adgroup-appeal-1",
+          adgroup_id: "adgroup-appeal-1",
           creative_id: "creative-appeal-1",
           creative_status: "creative_offline_audit",
         },
@@ -972,6 +975,8 @@ describe("AutomationService", () => {
     expect(provider.appeals).toEqual([{
       externalId: "ad-appeal-1",
       creativeId: "creative-appeal-1",
+      // 广告组 ID 必须单独传下去：申诉报文的 ad_id 装的是广告组，不是广告。
+      adGroupId: "adgroup-appeal-1",
       reason: "我认为我的视频没有违规。",
     }]);
     expect(store.listAdOperations("demo-account")).toEqual(expect.arrayContaining([

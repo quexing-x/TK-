@@ -5656,6 +5656,18 @@ function legacyRequest(url: string): CapturedCookieRequest | undefined {
     : undefined;
 }
 
+/**
+ * 申诉请求。字段形状对照 2026-08-06 的真机抓包，逐项都有出处——此前这段报文是手写
+ * 的，从未对过真机，三处不一致叠加导致 TikTok 在解 JSON 时就拒绝，连"哪个字段不对"
+ * 都看不到（响应体是纯文本的 `json: cannot unmarshal ...`）：
+ *
+ * 1. `creative_id` 是**数字**字面量，其余 ID 都是字符串。此前发的是字符串。
+ * 2. `ad_id` 装的是**广告组** ID，`creative_id` 才是广告自己。此前两处都填了广告 ID。
+ * 3. `aadvid` / `advertiser_id` / `adv_entry` 三个必填字段此前根本没发。
+ *
+ * 查询串上的 `req_src=bidding` 同样照抓包补上。msToken / X-Bogus 之类的签名参数沿用
+ * 会话 cURL 上原有的：这次失败发生在服务端解包阶段，说明鉴权本来就过得去。
+ */
 function buildReusableAppealRequest(
   sessionRequest: CapturedCookieRequest,
   advertiserId: string,
@@ -5664,6 +5676,7 @@ function buildReusableAppealRequest(
   const url = new URL(sessionRequest.url);
   url.pathname = "/api/v4/i18n/creation/audit/appeal_creative/";
   url.searchParams.set("aadvid", advertiserId);
+  url.searchParams.set("req_src", "bidding");
   return {
     target: "appeal",
     url: url.toString(),
@@ -5671,14 +5684,37 @@ function buildReusableAppealRequest(
     contentType: "application/json",
     headers: sessionRequest.headers,
     derived: true,
-    body: JSON.stringify({
-      ad_id: mutation.externalId,
-      creative_id: mutation.creativeId,
-      appeal_reason: mutation.reason,
-      appeal_reason_type: 1,
-      attachment_list: [],
-    }),
+    body: appealRequestBody(advertiserId, mutation),
   };
+}
+
+/** `creative_id` 必须是数字字面量，占位后替换成裸数字再发。 */
+const APPEAL_CREATIVE_ID_PLACEHOLDER = "__APPEAL_CREATIVE_ID__";
+
+function appealRequestBody(
+  advertiserId: string,
+  mutation: import("./types.js").AppealMutation,
+): string {
+  const creativeId = mutation.creativeId.trim();
+  if (!/^\d+$/.test(creativeId)) {
+    throw new Error("广告 ID 不是纯数字，无法构造申诉请求。");
+  }
+  if (!mutation.adGroupId.trim()) {
+    throw new Error("缺少广告所属的广告组 ID，无法构造申诉请求。");
+  }
+  const serialized = JSON.stringify({
+    ad_id: mutation.adGroupId,
+    aadvid: advertiserId,
+    adv_entry: "ad review detail",
+    appeal_reason: mutation.reason,
+    attachment_list: [],
+    appeal_reason_type: 1,
+    creative_id: APPEAL_CREATIVE_ID_PLACEHOLDER,
+    advertiser_id: advertiserId,
+  });
+  // 换成裸数字而不是走 Number()：TikTok 的 ID 可以长到 19 位，超过 2^53 之后
+  // JSON.stringify(Number(id)) 会静默改写末几位，发出去的就不是这条广告了。
+  return serialized.replace(`"${APPEAL_CREATIVE_ID_PLACEHOLDER}"`, creativeId);
 }
 
 /** 最终广告列表既要换路径，也要换统计维度。沿用广告组捕获里的
