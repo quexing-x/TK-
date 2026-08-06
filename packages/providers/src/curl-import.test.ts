@@ -6,6 +6,7 @@ import {
   parseTikTokStatusCurl,
   TikTokCurlImportError,
 } from "./curl-import.js";
+import { parseMultipartFields } from "./multipart.js";
 
 describe("parseTikTokCurl", () => {
   it("imports a Chrome POST request without exposing secrets in settings", () => {
@@ -263,5 +264,66 @@ describe("parseTikTokCurl", () => {
         `curl 'https://ads.tiktok.com/api/v4/i18n/statistics/op/creative/material/list/?aadvid=123456' -H 'cookie: sessionid=authorized-test-cookie'`,
       ),
     ).toThrow("/adgroup/list/?");
+  });
+});
+
+// 用两条真实抓包样本钉死派生结果：广告组那条（/api/v3/…/overture/ad/update_status/，
+// 字段 ad_list / operation / ad_channel / risk_info）必须能推出与真实广告层请求
+// （/api/v2/…/overture/creative/update_status/，字段 creative_list /
+// aco_creative_list=[] / operation / ad_channel / risk_info）逐字段一致的模板。
+// 此前 aco_creative_list 被复制成 creative_list 的副本，普通广告 ID 落进 ACO 列表，
+// TikTok 一律以 code 4「Smart+ 推广系列不支持特定界面」拒绝，广告层启停 67 次全败。
+describe("从广告组开关 cURL 派生广告层开关", () => {
+  const boundary = "----WebKitFormBoundary19xPn7uLj44yh0iu";
+  const adGroupCurl = [
+    `curl 'https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=123456&req_src=bidding'`,
+    `-H 'content-type: multipart/form-data; boundary=${boundary}'`,
+    `-b 'sessionid=test-cookie'`,
+    `-H 'x-csrftoken: test-csrf'`,
+    `--data-raw $'--${boundary}\r\nContent-Disposition: form-data; name="ad_list"\r\n\r\n["1872677118817330"]\r\n--${boundary}\r\nContent-Disposition: form-data; name="operation"\r\n\r\nenable\r\n--${boundary}\r\nContent-Disposition: form-data; name="ad_channel"\r\n\r\n1\r\n--${boundary}\r\nContent-Disposition: form-data; name="risk_info"\r\n\r\n{"cookie_enabled":true}\r\n--${boundary}--\r\n'`,
+  ].join(" ");
+
+  it("路径、版本号与字段全部对齐真实广告层请求", () => {
+    const templates = parseTikTokStatusCurl(adGroupCurl).credential.requestTemplates ?? [];
+    const adDisable = templates.find(
+      (item) => item.target === "ad-status" && item.action === "disable",
+    );
+
+    expect(adDisable).toBeDefined();
+    // 层级 ad → creative，且 overture 广告层是 v2 而非 v3。
+    expect(new URL(adDisable!.url).pathname).toBe(
+      "/api/v2/i18n/overture/creative/update_status/",
+    );
+    expect(new URL(adDisable!.url).searchParams.get("req_src")).toBe("bidding");
+
+    const fields = new Map(
+      parseMultipartFields(adDisable!.body!).map((f) => [f.name, f.value.trim()]),
+    );
+    expect([...fields.keys()].sort()).toEqual(
+      ["aco_creative_list", "ad_channel", "creative_list", "operation", "risk_info"],
+    );
+    // 关键：ACO 列表必须是空数组，不是 creative_list 的副本。
+    expect(fields.get("aco_creative_list")).toBe("[]");
+    expect(fields.get("creative_list")).toBe('["1872677118817330"]');
+    expect(fields.get("operation")).toBe("disable");
+    // 与开关无关的字段原样保留。
+    expect(fields.get("ad_channel")).toBe("1");
+  });
+
+  it("广告组自身的模板不受影响", () => {
+    const templates = parseTikTokStatusCurl(adGroupCurl).credential.requestTemplates ?? [];
+    const groupDisable = templates.find(
+      (item) => item.target === "ad-group-status" && item.action === "disable",
+    );
+
+    expect(new URL(groupDisable!.url).pathname).toBe(
+      "/api/v3/i18n/overture/ad/update_status/",
+    );
+    const fields = new Map(
+      parseMultipartFields(groupDisable!.body!).map((f) => [f.name, f.value.trim()]),
+    );
+    expect(fields.has("aco_creative_list")).toBe(false);
+    expect(fields.get("ad_list")).toBe('["1872677118817330"]');
+    expect(fields.get("operation")).toBe("disable");
   });
 });

@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.4.29
+## Windows 桌面版 1.4.30
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.29.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.30.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -14,6 +14,12 @@
 - 后续升级先关闭程序，再直接运行更高版本安装包；不要先卸载旧版本。
 - 固定 App ID `com.tkads.automation`，新版安装包覆盖程序文件并保留用户数据。
 - 当前安装包未配置商业代码签名证书，Windows 可能显示未知发布者提示。
+
+升级到 1.4.30 后会出现的变化：
+
+- **广告层启停从 0% 成功变为可用。** 此前广告层的开关请求是从广告组 cURL 派生的，派生时把 `creative_list` 原样复制了一份到 `aco_creative_list`。对照真实抓包，这个列表应当是空数组——它装的是 ACO 创意，和普通广告是两类对象。把普通广告 ID 塞进去，TikTok 一律以 `code 4` 「Smart+ 推广系列不支持特定界面」拒绝，生产环境广告层写入 67 次全败、零成功。
+- 除这一个字段外，派生结果与真实广告层请求逐字段一致（路径 `/ad/` → `/creative/`、overture 版本号 v3 → v2、`ad_list` → `creative_list`、`operation` / `ad_channel` / `risk_info` 原样沿用）。现已用两条真实抓包样本写成测试钉死。
+- 升级前存下的模板不必重新导入：执行时会强制把 `aco_creative_list` 置空，存量账户装上新版即自愈。
 
 升级到 1.4.29 后会出现的变化：
 

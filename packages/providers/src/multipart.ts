@@ -97,6 +97,14 @@ export function copyMultipartField(
   body: string,
   sourceName: string,
   targetName: string,
+  /**
+   * 新字段的值。省略时复制源字段的值。
+   *
+   * ACO 创意列表必须显式传 "[]"：真实的广告层开关请求里 creative_list 装目标广告、
+   * aco_creative_list 是空数组，两者是不同类型的对象。把普通广告 ID 复制进 ACO 列表
+   * 会被 TikTok 以 code 4「不支持特定界面」拒绝。
+   */
+  value?: string,
 ): { body: string; added: boolean } {
   const fields = parseMultipartFields(body);
   if (
@@ -119,7 +127,7 @@ export function copyMultipartField(
   const closingIndex = body.lastIndexOf(closingMarker);
   if (closingIndex < 0) return { body, added: false };
 
-  const copiedPart = `${newline}${boundary}${newline}Content-Disposition: form-data; name="${targetName}"${newline}${newline}${source.value}`;
+  const copiedPart = `${newline}${boundary}${newline}Content-Disposition: form-data; name="${targetName}"${newline}${newline}${value ?? source.value}`;
   return {
     body: body.slice(0, closingIndex) + copiedPart + body.slice(closingIndex),
     added: true,

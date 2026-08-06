@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CookieAdsProvider, resolveTemplateCampaignId } from "./cookie-provider.js";
 import type { CreationMutation, ProviderContext } from "./types.js";
+import { parseMultipartFields } from "./multipart.js";
 
 let successfulCreationCompleted = false;
 
@@ -1549,9 +1550,10 @@ describe("CookieAdsProvider", () => {
 
     expect(result[0]).toMatchObject({ ok: true, externalId: "new-id" });
     expect(requestBody).toContain('name="creative_list"\r\n\r\n["new-id"]');
-    expect(requestBody).toContain(
-      'name="aco_creative_list"\r\n\r\n["new-id"]',
-    );
+    // 这里原本断言 aco_creative_list 也被填成目标 ID，那正是让广告层启停 67 次
+    // 全部被 TikTok 以 code 4 拒绝的原因：真实抓包里这个列表是空数组，它和
+    // creative_list 装的是不同类型的对象。
+    expect(requestBody).toContain('name="aco_creative_list"\r\n\r\n[]');
   });
 
   it("runs the checked draft-to-publish chain from the imported list-session request", async () => {
@@ -4277,3 +4279,58 @@ function emptySketchListPayload(): Record<string, unknown> {
     },
   };
 }
+
+// 升级前存下的广告层模板里，aco_creative_list 是 creative_list 的副本（导入时被
+// 复制进去的）。执行时必须强制置空，否则这些账户不重新导入就永远修不好。
+describe("广告层开关：ACO 创意列表", () => {
+  it("即便模板里 aco_creative_list 带着 ID，发出时也置空", async () => {
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sent.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ code: 0, data: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+    const boundary = "----WebKitFormBoundaryAco";
+    const body = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="creative_list"',
+      "",
+      '["stale-id"]',
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="aco_creative_list"',
+      "",
+      '["stale-id"]',
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="operation"',
+      "",
+      "disable",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+
+    await new CookieAdsProvider().changeStatus({
+      accountId: "test-account",
+      timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: {
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+        requestTemplates: [{
+          target: "ad-status",
+          action: "disable",
+          url: "https://ads.tiktok.com/api/v2/i18n/overture/creative/update_status/?aadvid=123456",
+          method: "POST",
+          body,
+          contentType: `multipart/form-data; boundary=${boundary}`,
+        }],
+      },
+    }, [{ entityType: "ad", externalId: "target-ad", action: "disable" }]);
+
+    const fields = new Map(parseMultipartFields(sent[0]!).map((f) => [f.name, f.value.trim()]));
+    expect(fields.get("creative_list")).toBe('["target-ad"]');
+    expect(fields.get("aco_creative_list")).toBe("[]");
+  });
+});

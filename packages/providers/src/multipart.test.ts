@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMultipartFields, rewriteMultipartFields } from "./multipart.js";
+import { copyMultipartField, parseMultipartFields, rewriteMultipartFields } from "./multipart.js";
 
 function multipartBody(fields: Array<[string, string]>, boundary = "----test"): string {
   const parts = fields.map(([name, value]) =>
@@ -65,5 +65,24 @@ describe("rewriteMultipartFields", () => {
     expect(result.changes).toBe(2);
     expect(parseMultipartFields(result.body).filter((f) => f.name === "ad_list")
       .every((f) => f.value === '["9"]')).toBe(true);
+  });
+});
+
+describe("copyMultipartField", () => {
+  it("默认复制源字段的值", () => {
+    const body = multipartBody([["creative_list", '["111"]']]);
+    const result = copyMultipartField(body, "creative_list", "aco_creative_list");
+    expect(result.added).toBe(true);
+    const fields = new Map(parseMultipartFields(result.body).map((f) => [f.name, f.value.trim()]));
+    expect(fields.get("aco_creative_list")).toBe('["111"]');
+  });
+
+  // ACO 创意列表必须显式建成空数组：它和 creative_list 装的是不同类型的对象。
+  it("显式传值时用该值而不是源字段的值", () => {
+    const body = multipartBody([["creative_list", '["111"]']]);
+    const result = copyMultipartField(body, "creative_list", "aco_creative_list", "[]");
+    const fields = new Map(parseMultipartFields(result.body).map((f) => [f.name, f.value.trim()]));
+    expect(fields.get("aco_creative_list")).toBe("[]");
+    expect(fields.get("creative_list")).toBe('["111"]');
   });
 });
