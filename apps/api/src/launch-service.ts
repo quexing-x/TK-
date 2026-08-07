@@ -360,11 +360,20 @@ export class LaunchService {
         }
       };
 
+      // 同名系列自动复用：账户里已经有同名系列时，只往里面加广告组，不再新建系列。
+      // 此前只在同一批次内按系列名复用（Provider 侧的 reservations.campaignIds），
+      // 跨批次遇到线上已存在的同名系列仍会去新建，被 TikTok 判重名拒绝。
+      const reusableCampaignId = resolveExistingCampaignIdByName(
+        this.store.listCurrentManagedEntities(first.accountId, account.providerKind),
+        first.launchRow.campaignName,
+      );
+
       const mutations: CreationMutation[] = claimed.map((item) => ({
         row: item.launchRow,
         preset,
         initialStatus: item.launchRow.initialStatus,
         templateMode: item.templateMode,
+        ...(reusableCampaignId ? { batchCampaignId: reusableCampaignId } : {}),
         ...(item.templateCampaignId ? { templateCampaignId: item.templateCampaignId } : {}),
         ...(refreshedPosts.has(item.itemId)
           ? { originalPosts: refreshedPosts.get(item.itemId)! }
@@ -1129,6 +1138,33 @@ export class LaunchService {
     return { createdGroups, scheduled, failed, skipped };
   }
 
+}
+
+/**
+ * 账户里已存在的同名系列。命中就复用它、只建广告组，不再新建系列。
+ *
+ * 同名时**不允许**猜：TikTok 允许账户内存在多个同名系列，而发布后的终态核验是按
+ * 系列名精确匹配的，多个同名会让核验无从判定哪个是本次创建的。所以命中多个时明确
+ * 报错，交给人改名，而不是随便挑一个往里塞广告组。
+ *
+ * 快照可能滞后于账户真实状态（刚建好、还没被同步捕获的系列查不到）。那种情况下会
+ * 走新建、被 TikTok 判重名——与改动前的行为一致，不构成回退。
+ */
+export function resolveExistingCampaignIdByName(
+  managed: Array<{ entityType: string; externalId: string; name: string }>,
+  campaignName: string,
+): string | undefined {
+  const wanted = campaignName.trim();
+  if (!wanted) return undefined;
+  const matches = managed.filter(
+    (entity) => entity.entityType === "campaign" && entity.name.trim() === wanted,
+  );
+  if (matches.length > 1) {
+    throw new Error(
+      `账户内存在 ${matches.length} 个名为“${wanted}”的推广系列，无法判定该往哪个里加广告组；请先改名或合并。`,
+    );
+  }
+  return matches[0]?.externalId;
 }
 
 function groupLaunchItemsByAccountAndCampaign(
