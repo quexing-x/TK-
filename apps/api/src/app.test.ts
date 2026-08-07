@@ -1278,6 +1278,13 @@ describe("local API", () => {
           ? { table: published ? [{ campaign_id: "campaign", ad_id: "adgroup", ad_name: "测试广告组" }] : [], pagination: { page: 1, page_count: 1, total_count: published ? 1 : 0 } }
         : url.includes("/statistics/op/ad/list")
           ? { table: published ? [{ campaign_id: "campaign", ad_id: "adgroup", creative_id: "ad", creative_name: publishedAdNames.get(cookie ?? "") }] : [], pagination: { page: 1, page_count: 1, total_count: published ? 1 : 0 } }
+        // 发布前从 sketch 重铸整棵树的 snap，发布引用重铸出来的那套。
+        : url.includes("snap/save_by_sketch")
+         ? {
+             campaign_sketch_id_to_snap_id: { "campaign-sketch": "campaign-snap-reminted" },
+             ad_sketch_id_to_snap_id: { "ad-sketch": "ad-snap-reminted" },
+             creative_sketch_id_to_snap_id: { "creative-sketch": "creative-snap-reminted" },
+           }
         : url.includes("campaign_snap/save")
          ? { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }
         : url.includes("campaign_snap/check")
