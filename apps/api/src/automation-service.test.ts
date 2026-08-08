@@ -13,6 +13,7 @@ import { AutomationStore } from "@tk-auto/storage";
 import {
   AutomationScheduler,
   AutomationService,
+  isOvernightBlackout,
   type PollNotificationDispatcher,
 } from "./automation-service.js";
 
@@ -937,6 +938,34 @@ describe("AutomationService", () => {
     });
   });
 
+  // 2026-08-07：23:45 过夜关掉 4 个组，23:50–23:52 规则把其中几个开了回来，零点
+  // 排期又开一次，00:07 规则再关掉——一个组一晚上被开关四次。这 15 分钟本该全关。
+  describe("过夜静默窗口", () => {
+    // demo-account 在 Asia/Shanghai，本地 23:45 = 15:45Z。
+    const shanghai = "Asia/Shanghai";
+
+    it("本地 23:45 到零点之间判为静默窗口", () => {
+      expect(isOvernightBlackout(new Date("2026-07-20T15:45:00.000Z"), shanghai)).toBe(true);
+      expect(isOvernightBlackout(new Date("2026-07-20T15:51:00.000Z"), shanghai)).toBe(true);
+      expect(isOvernightBlackout(new Date("2026-07-20T15:59:59.000Z"), shanghai)).toBe(true);
+    });
+
+    it("窗口之外不判为静默", () => {
+      // 23:44 本地，差一分钟进窗口。
+      expect(isOvernightBlackout(new Date("2026-07-20T15:44:00.000Z"), shanghai)).toBe(false);
+      // 零点整，窗口已经结束，过夜排期正是在这一刻开启。
+      expect(isOvernightBlackout(new Date("2026-07-20T16:00:00.000Z"), shanghai)).toBe(false);
+      expect(isOvernightBlackout(new Date("2026-07-20T04:00:00.000Z"), shanghai)).toBe(false);
+    });
+
+    // 判据必须跟着账户时区走，不能按服务器本地时间算。
+    it("按账户时区判定，不看服务器时区", () => {
+      const at = new Date("2026-07-20T15:45:00.000Z");
+      expect(isOvernightBlackout(at, "Asia/Shanghai")).toBe(true);
+      expect(isOvernightBlackout(at, "UTC")).toBe(false);
+    });
+  });
+
   it("puts converting groups into overnight and closes non-converting groups at 23:45", async () => {
     provider.scenario = "priority";
     await service.runAccount("demo-account", "preview");
@@ -1725,6 +1754,28 @@ describe("AutomationService", () => {
     vi.useRealTimers();
     expect(store.listPollCycles()).toHaveLength(0);
     expect(deletions).toHaveBeenCalledWith("demo-account");
+  });
+
+  // 同一条恢复规则，只把时间挪进 23:45–零点，就不该再派发开启。
+  it("过夜静默窗口内不派发自动开启，只留一条跳过记录", async () => {
+    provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(23, 50));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    // 一个开启请求都没发出去。
+    expect(provider.mutations.filter((mutation) => mutation.action === "enable")).toEqual([]);
+    expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
+      externalId: "adgroup-1",
+      action: "enable",
+      status: "skipped",
+    });
+    expect(store.listAutomationDecisions("demo-account")[0]?.errorMessage)
+      .toContain("过夜静默窗口");
   });
 
   it("reports a verified automatic recovery enable in the scheduler summary", async () => {

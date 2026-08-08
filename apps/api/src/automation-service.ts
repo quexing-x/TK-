@@ -646,6 +646,20 @@ export class AutomationService {
             continue;
           }
           automaticTargets.add(targetKey);
+          // 过夜静默窗口内一律不自动开启：这 15 分钟正是 enrollNightlyAdGroups
+          // 把组关掉的时段，规则再开回来等于把过夜关停整个抵消掉。需要投放的
+          // 由零点的过夜排期统一打开。关闭方向不受限制——它和窗口同向。
+          if (
+            candidate.action === "enable"
+            && isOvernightBlackout(new Date(), account.timezone)
+          ) {
+            saveSuggestion(
+              candidate,
+              "skipped",
+              "过夜静默窗口（本地 23:45 至零点）内不自动开启；需要投放的由零点过夜排期统一打开。",
+            );
+            continue;
+          }
           const decision = saveSuggestion(candidate, "pending");
           const actionKey = buildAutomaticActionKey(
             accountId,
@@ -1023,7 +1037,7 @@ export class AutomationService {
     if (!account?.enabled) return { overnight: 0, closing: 0 };
     const now = new Date(asOf);
     const localTime = timePartsInTimeZone(now, account.timezone);
-    if (localTime.hour !== 23 || localTime.minute < 45) {
+    if (!isOvernightBlackout(now, account.timezone)) {
       return { overnight: 0, closing: 0 };
     }
 
@@ -1536,6 +1550,22 @@ function buildRulePredicate(
     operator: candidate.operator,
     thresholdValue: candidate.thresholdValue,
   };
+}
+
+/**
+ * 过夜静默窗口：账户本地时间 23:45 到零点。
+ *
+ * enrollNightlyAdGroups 在这个窗口把开着的广告组全部关掉（有转化的排一对过夜
+ * 开关，其余单纯关闭），零点由排期统一开回来。规则不能在同一个窗口里把它们又
+ * 打开——2026-08-07 就是这样：23:45 过夜关掉 4 个组，23:50–23:52 规则把其中几个
+ * 开了回来，零点排期又开一次，00:07 规则再关掉，一个组一晚上被开关四次。
+ *
+ * 判据与 enrollNightlyAdGroups 共用这一个函数。两处各写各的正是 1.4.28 那个
+ * 删除故障的成因：同一件事在两个地方判，早晚会漂移。
+ */
+export function isOvernightBlackout(at: Date, timeZone: string): boolean {
+  const local = timePartsInTimeZone(at, timeZone);
+  return local.hour === 23 && local.minute >= 45;
 }
 
 function hasStartedBy(scheduledStartAt: string | null | undefined, now: Date): boolean {
