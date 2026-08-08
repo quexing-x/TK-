@@ -37,7 +37,9 @@ export interface TikTokCurlImportResult {
       | "campaign-status"
       | "ad-group-status"
       | "ad-status"
-      | "appeal";
+      | "appeal"
+      | "material"
+      | "material-status";
   };
 }
 

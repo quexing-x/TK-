@@ -49,11 +49,14 @@ export function filterEntitiesToRecentWindow(
     if (entity.entityType === "ad-group") {
       return eligibleAdGroups.has(entity.externalId);
     }
-    if (entity.entityType === "ad") {
+    // 素材与广告同样是广告组的子级：都跟随所属广告组的创建时间判定窗口。
+    // 素材行里没有 create_time，按自身判定会被 48 小时窗口全部滤掉。
+    const childOfAdGroup = entity.entityType === "ad" || entity.entityType === "material";
+    if (childOfAdGroup) {
       const adGroupId = getAdGroupId(entity);
       if (adGroupId && eligibleAdGroups.has(adGroupId)) return true;
     }
-    const createdAt = entity.entityType === "ad"
+    const createdAt = childOfAdGroup
       ? adGroupCreatedAt.get(getAdGroupId(entity) ?? "") ??
         extractAdGroupCreatedAt(entity.payload)
       : extractEntityCreatedAt(entity.payload);
@@ -203,6 +206,9 @@ function layerEnabled(
 ): boolean {
   if (entityType === "campaign") return configuration.layers.campaign;
   if (entityType === "ad-group") return configuration.layers.adGroup;
+  // 素材有自己的开关。此前它悄悄落在 ad 那一档，关掉广告层会连素材一起关掉，
+  // 而这两件事现在是分开的：广告总开关常开，真正停开的是素材。
+  if (entityType === "material") return configuration.layers.material;
   return configuration.layers.ad;
 }
 

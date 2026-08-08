@@ -143,6 +143,9 @@ export const RuleLayerSettingsSchema = z.object({
   campaign: z.boolean(),
   adGroup: z.boolean(),
   ad: z.boolean(),
+  // 素材层。存量配置里没有这个键，默认开——广告层的关停已经改为只作用于素材，
+  // 默认关掉会让广告层的规则彻底没有落点。
+  material: z.boolean().default(true),
 });
 export type RuleLayerSettings = z.infer<typeof RuleLayerSettingsSchema>;
 
@@ -166,7 +169,7 @@ export const RuleConfigurationSchema = RuleConfigurationBaseSchema.extend({
 export type RuleConfiguration = z.infer<typeof RuleConfigurationSchema>;
 
 export const defaultRuleConfiguration: RuleConfigurationInput = {
-  layers: { campaign: false, adGroup: true, ad: true },
+  layers: { campaign: false, adGroup: true, ad: true, material: true },
   rules: [
     { code: "CV1_CPC_CLOSE", enabled: true, values: { conversions: 1, cpc: 0.8 } },
     { code: "CV1_CPA_CLOSE", enabled: true, values: { conversions: 1, cpa: 9 } },

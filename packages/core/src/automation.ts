@@ -38,6 +38,12 @@ export const automationSwitchDefinitions = [
     risk: "write" as const,
   },
   {
+    key: "manageMaterialStatus",
+    label: "自动管理素材状态",
+    description: "允许规则引擎按已启用阈值开启或关闭广告内的单条素材。",
+    risk: "write" as const,
+  },
+  {
     key: "copyAds",
     label: "复制广告",
     description: "允许规则引擎创建广告副本。",
@@ -106,6 +112,7 @@ export function createDefaultAutomationSwitches(): AutomationSwitches {
     "manageCampaignStatus",
     "manageAdGroupStatus",
     "manageAdStatus",
+    "manageMaterialStatus",
   ]);
   return Object.fromEntries(
     automationSwitchDefinitions.map((item) => [

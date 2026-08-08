@@ -120,6 +120,7 @@ export class OfficialApiAdsProvider implements AdsProvider {
         startedAt,
         finishedAt,
         counts: {
+          material: 0,
           campaign: entities.filter((item) => item.entityType === "campaign").length,
           "ad-group": entities.filter((item) => item.entityType === "ad-group").length,
           ad: entities.filter((item) => item.entityType === "ad").length,
@@ -195,6 +196,7 @@ async function requestOfficialList(
   contractValid: boolean;
 }> {
   const endpointName: Record<SyncEntityType, string> = {
+    material: "",
     campaign: "campaign",
     "ad-group": "adgroup",
     ad: "ad",
@@ -205,6 +207,7 @@ async function requestOfficialList(
   let contractValid = true;
   let paginationMetadataValid = true;
   const idKeys: Record<SyncEntityType, string[]> = {
+    material: [],
     campaign: ["campaign_id", "id"],
     "ad-group": ["adgroup_id", "id"],
     ad: ["ad_id", "id"],
@@ -276,11 +279,13 @@ async function requestOfficialReport(
   contractValid: boolean;
 }> {
   const levels: Record<SyncEntityType, string> = {
+    material: "",
     campaign: "AUCTION_CAMPAIGN",
     "ad-group": "AUCTION_ADGROUP",
     ad: "AUCTION_AD",
   };
   const dimensions: Record<SyncEntityType, string> = {
+    material: "",
     campaign: "campaign_id",
     "ad-group": "adgroup_id",
     ad: "ad_id",
@@ -350,12 +355,19 @@ async function requestOfficialStatus(
   accessToken: string,
   mutation: StatusMutation,
 ): Promise<void> {
+  // 官方 API 这条路没有素材层：素材只在 Cookie 侧的程序化创意里存在。与其让空的
+  // endpoint 拼出一个静默发错的请求，不如在这里直接拒绝。
+  if (mutation.entityType === "material") {
+    throw new Error("官方 API 不支持素材层启停；素材只能通过 Cookie 通道操作。");
+  }
   const endpoint: Record<SyncEntityType, string> = {
+    material: "",
     campaign: "campaign",
     "ad-group": "adgroup",
     ad: "ad",
   };
   const idField: Record<SyncEntityType, string> = {
+    material: "",
     campaign: "campaign_ids",
     "ad-group": "adgroup_ids",
     ad: "ad_ids",

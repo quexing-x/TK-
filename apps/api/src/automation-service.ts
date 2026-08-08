@@ -646,6 +646,19 @@ export class AutomationService {
             continue;
           }
           automaticTargets.add(targetKey);
+          // 广告总开关常开，规则不得关它。程序化创意下一个广告组只有 1 个广告、
+          // 内含多个素材，关掉广告总开关等同于关掉整组；更糟的是它会造出「广告组
+          // 开着、广告关着」——人工把广告组开回来也投不出去，而且界面上看不出来。
+          // 真正该关的是广告里那一条素材（procedural_material/update_status），
+          // 素材层做好之前这里一律不关。开启方向保留：它是纠正方向。
+          if (candidate.entity.entityType === "ad" && candidate.action === "disable") {
+            saveSuggestion(
+              candidate,
+              "skipped",
+              "广告总开关保持常开：关闭它等同于关停整个广告组，且会造成广告组开着而广告关着；应改为关闭广告内的具体素材。",
+            );
+            continue;
+          }
           const suppressed = suppressedAutomationActions(new Date(), account.timezone);
           if (suppressed === "enable" && candidate.action === "enable") {
             saveSuggestion(
@@ -1162,6 +1175,22 @@ export class AutomationService {
     };
   }
 
+  /** 素材所属广告组的 ID。素材行里它落在 ad_id 上（adgroup_id 由同步时回填）。 */
+  private resolveMaterialAdGroupId(
+    accountId: string,
+    providerKind: "cookie" | "official-api",
+    externalId: string,
+  ): string | undefined {
+    const entity = this.store
+      .listCurrentProviderEntities(accountId, providerKind)
+      .find((item) => item.entityType === "material" && item.externalId === externalId);
+    if (!entity) return undefined;
+    const payload = entity.payload as Record<string, unknown>;
+    const raw = payload.adgroup_id ?? payload.ad_id;
+    const value = typeof raw === "string" || typeof raw === "number" ? String(raw).trim() : "";
+    return value || undefined;
+  }
+
   private async waitForAccountIdle(accountId: string): Promise<void> {
     const deadline = Date.now() + 5 * 60_000;
     while (this.runningAccounts.has(accountId)) {
@@ -1198,10 +1227,22 @@ export class AutomationService {
     let result: StatusMutationResult;
     try {
       providerInvoked = true;
+      // 素材的启停报文要同时带广告组 ID 与素材 ID，光有素材 ID 发不出去
+      // （procedural_material/update_status 的 ad_id 装的是广告组）。父级不随
+      // 输入透传、而是在这里按当前快照解析：写任务落库后重建 mutation 时会丢掉
+      // 额外字段，放在这一层能同时覆盖自动、人工与重试三条路。
+      const mutation: StatusMutation = input.entityType === "material"
+        ? {
+            ...input,
+            ...(this.resolveMaterialAdGroupId(task.accountId, account.providerKind, input.externalId)
+              ? { parentAdGroupId: this.resolveMaterialAdGroupId(task.accountId, account.providerKind, input.externalId)! }
+              : {}),
+          }
+        : input;
       const results = await withLeaseHeartbeat(
         () => this.changeProviderStatus(
           context,
-          [input],
+          [mutation],
           expectedCredentialGeneration,
           requireAutomatic,
         ),
@@ -1523,7 +1564,8 @@ function compareAutomationCandidates(
     (rulePriorities.get(right.thresholdCode) ?? Number.MAX_SAFE_INTEGER);
   if (priorityDifference !== 0) return priorityDifference;
   if (left.action !== right.action) return left.action === "disable" ? -1 : 1;
-  const layerOrder = { campaign: 0, "ad-group": 1, ad: 2 } as const;
+  // 素材在广告之下，最后处理：先收口上层，避免上层被关之后还去动它的素材。
+  const layerOrder = { campaign: 0, "ad-group": 1, ad: 2, material: 3 } as const;
   const layerDifference =
     layerOrder[left.entity.entityType] - layerOrder[right.entity.entityType]
   ;

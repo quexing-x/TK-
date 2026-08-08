@@ -361,6 +361,55 @@ describe("AutomationStore", () => {
     });
   });
 
+  // SQLite 不能改 CHECK 约束，存量库必须重建表；不做的话素材写进去会被直接拒绝。
+  describe("素材层的数据库放行", () => {
+    it("素材实体能落库并读回", () => {
+      store.saveReadOnlySync("demo-account", "cookie", [
+        { entityType: "campaign", externalId: "c1", payload: { campaign_name: "系列" } },
+        { entityType: "ad-group", externalId: "g1", payload: { campaign_id: "c1", ad_name: "组" } },
+        { entityType: "ad", externalId: "a1", payload: { campaign_id: "c1", adgroup_id: "g1", creative_name: "广告" } },
+        {
+          entityType: "material",
+          externalId: "1872777743628513",
+          payload: { campaign_id: "c1", ad_id: "g1", creative_id: "a1", main_entity_name: "素材", stat_cost: "26.82" },
+        },
+      ], {
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        counts: { campaign: 1, "ad-group": 1, ad: 1, material: 1 },
+        warnings: [],
+        // 素材层只覆盖"当天有消耗的广告"，一轮里本来就不是全量，所以只有本轮
+        // 确实取全时才会刷新这一层——Provider 会把 material 放进 completeEntityTypes。
+        quality: { ...healthySyncQuality(new Date().toISOString()), completeEntityTypes: ["material"] },
+      });
+
+      const materials = store
+        .listCurrentProviderEntities("demo-account", "cookie")
+        .filter((entity) => entity.entityType === "material");
+
+      expect(materials).toHaveLength(1);
+      expect(materials[0]).toMatchObject({ externalId: "1872777743628513" });
+    });
+
+    // 同一个 ID 在不同层级各自独立：主键含 entity_type，不能互相顶掉。
+    it("素材与广告同名 ID 互不覆盖", () => {
+      store.saveReadOnlySync("demo-account", "cookie", [
+        { entityType: "ad", externalId: "same-id", payload: { creative_name: "广告" } },
+        { entityType: "material", externalId: "same-id", payload: { main_entity_name: "素材" } },
+      ], {
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        counts: { campaign: 0, "ad-group": 0, ad: 1, material: 1 },
+        warnings: [],
+        quality: { ...healthySyncQuality(new Date().toISOString()), completeEntityTypes: ["material"] },
+      });
+
+      const rows = store.listCurrentProviderEntities("demo-account", "cookie")
+        .filter((entity) => entity.externalId === "same-id");
+      expect(rows.map((entity) => entity.entityType).sort()).toEqual(["ad", "material"]);
+    });
+  });
+
   it("persists automation switches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.closeNoConversion = true;
@@ -523,7 +572,7 @@ describe("AutomationStore", () => {
       {
         startedAt: now,
         finishedAt: now,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(now),
       },
@@ -560,7 +609,7 @@ describe("AutomationStore", () => {
       {
         startedAt: first,
         finishedAt: first,
-        counts: { campaign: 0, "ad-group": 1, ad: 1 },
+        counts: { campaign: 0, "ad-group": 1, ad: 1, material: 0 },
         warnings: [],
         quality: healthySyncQuality(first),
       },
@@ -577,7 +626,7 @@ describe("AutomationStore", () => {
       {
         startedAt: second,
         finishedAt: second,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: ["ad 层超时"],
         quality: {
           ...healthySyncQuality(first),
@@ -630,7 +679,7 @@ describe("AutomationStore", () => {
       {
         startedAt: now,
         finishedAt: now,
-        counts: { campaign: 0, "ad-group": 2, ad: 0 },
+        counts: { campaign: 0, "ad-group": 2, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(now),
       },
@@ -665,7 +714,7 @@ describe("AutomationStore", () => {
       {
         startedAt: first,
         finishedAt: first,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(first),
       },
@@ -679,7 +728,7 @@ describe("AutomationStore", () => {
       {
         startedAt: second,
         finishedAt: second,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: { ...healthySyncQuality(first), status: "invalid" as const, contractValid: false },
       },
@@ -695,7 +744,7 @@ describe("AutomationStore", () => {
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
@@ -703,7 +752,7 @@ describe("AutomationStore", () => {
     expect(store.getLatestReadOnlySync("demo-account", "cookie")).toEqual({
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
@@ -1396,7 +1445,7 @@ describe("AutomationStore", () => {
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 0 },
+      counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
@@ -1416,7 +1465,7 @@ describe("AutomationStore", () => {
       {
         startedAt: healthyAt,
         finishedAt: healthyAt,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(healthyAt),
       },
@@ -1429,7 +1478,7 @@ describe("AutomationStore", () => {
       {
         startedAt: partialAt,
         finishedAt: partialAt,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: ["page incomplete"],
         quality: {
           ...healthySyncQuality(partialAt),
@@ -1457,7 +1506,7 @@ describe("AutomationStore", () => {
     ], {
       startedAt: firstAt,
       finishedAt: firstAt,
-      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(firstAt),
     });
@@ -1467,7 +1516,7 @@ describe("AutomationStore", () => {
     ], {
       startedAt: secondAt,
       finishedAt: secondAt,
-      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(secondAt),
     });
@@ -1888,7 +1937,7 @@ describe("AutomationStore", () => {
     store.saveReadOnlySync("demo-account", "cookie", entities, {
       startedAt: capturedAt,
       finishedAt: capturedAt,
-      counts: { campaign: 0, "ad-group": entities.length, ad: 0 },
+      counts: { campaign: 0, "ad-group": entities.length, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(capturedAt),
     });
@@ -2654,7 +2703,7 @@ function saveCopySource(
     {
       startedAt: capturedAt,
       finishedAt: capturedAt,
-      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(capturedAt),
     },
@@ -2687,7 +2736,7 @@ function saveTargetAsset(
     {
       startedAt: capturedAt,
       finishedAt: capturedAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 1 },
+      counts: { campaign: 0, "ad-group": 0, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(capturedAt),
     },
@@ -2722,6 +2771,7 @@ function saveEntity(
         campaign: 0,
         "ad-group": entityType === "ad-group" ? 1 : 0,
         ad: entityType === "ad" ? 1 : 0,
+        material: 0,
       },
       warnings: [],
       quality: healthySyncQuality(capturedAt),

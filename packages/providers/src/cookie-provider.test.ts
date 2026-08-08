@@ -1135,6 +1135,7 @@ describe("CookieAdsProvider", () => {
       campaign: 1,
       "ad-group": 1,
       ad: 0,
+      material: 0,
     });
     expect(output.result.warnings).not.toContain(
       "campaign 响应成功，但暂未识别到列表数据。",
@@ -1203,7 +1204,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(output.result.quality.status).toBe("healthy");
-    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 1 });
+    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 1, material: 0 });
     expect(requested.find((item) => item.url.includes("campaign/list"))?.body).toMatchObject({
       common_req: {
         dimensions: ["campaign_id"],
@@ -1390,7 +1391,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(output.result.quality.status).toBe("healthy");
-    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 0 });
+    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 0, material: 0 });
     expect(output.entities).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ entityType: "ad", externalId: "adgroup-1" }),
     ]));
@@ -2239,6 +2240,70 @@ describe("CookieAdsProvider", () => {
         creative_sketch_id: "creative-sketch",
       }],
     }]);
+  });
+
+  // 克隆出来的广告继承源广告的开关状态，广告组开着而广告关着，整组投不出去。
+  // 1.4.31 只把这段接在 copyCampaign / copyAdGroupToExistingCampaign 上，漏了
+  // createFromPreset——而跨账户迁移走的正是这条，生产上因此有 9 个组「组开广告关」。
+  it("createFromPreset 发布成功后显式开启新建的广告", async () => {
+    const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requested.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const context = creationTestContext(false);
+    if (context.credential.kind !== "cookie" || !context.credential.requestTemplates) {
+      throw new Error("test fixture must include cookie request templates");
+    }
+    context.credential.requestTemplates.push({
+      target: "ad-status",
+      action: "enable",
+      url: "https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456",
+      method: "POST",
+      body: '{"creative_id":"captured-ad","operation":"enable"}',
+      contentType: "application/json",
+    });
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(context, [{
+      ...creationTestMutation("none"),
+      initialStatus: "enabled",
+    }]);
+
+    expect(result).toMatchObject({ ok: true });
+    const enables = requested.filter((item) => item.url.includes("/ad/update_status"));
+    expect(enables).toHaveLength(1);
+    // 开的是本次回读到的广告，不是广告组，也不是任何存量对象。
+    expect(enables[0]?.body).toMatchObject({ creative_id: "creative", operation: "enable" });
+  });
+
+  it("createFromPreset 以 disabled 发布时不开启广告", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const context = creationTestContext(false);
+    if (context.credential.kind !== "cookie" || !context.credential.requestTemplates) {
+      throw new Error("test fixture must include cookie request templates");
+    }
+    context.credential.requestTemplates.push({
+      target: "ad-status",
+      action: "enable",
+      url: "https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=123456",
+      method: "POST",
+      body: '{"creative_id":"captured-ad","operation":"enable"}',
+      contentType: "application/json",
+    });
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      context,
+      [creationTestMutation("none")],
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    expect(requested.some((url) => url.includes("/ad/update_status"))).toBe(false);
   });
 
   it("重铸 snap 拿不到映射时停在发布之前，不拿旧 snap 硬发", async () => {
