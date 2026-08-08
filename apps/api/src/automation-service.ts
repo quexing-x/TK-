@@ -1175,6 +1175,22 @@ export class AutomationService {
     };
   }
 
+  /** 素材所属广告组的 ID。素材行里它落在 ad_id 上（adgroup_id 由同步时回填）。 */
+  private resolveMaterialAdGroupId(
+    accountId: string,
+    providerKind: "cookie" | "official-api",
+    externalId: string,
+  ): string | undefined {
+    const entity = this.store
+      .listCurrentProviderEntities(accountId, providerKind)
+      .find((item) => item.entityType === "material" && item.externalId === externalId);
+    if (!entity) return undefined;
+    const payload = entity.payload as Record<string, unknown>;
+    const raw = payload.adgroup_id ?? payload.ad_id;
+    const value = typeof raw === "string" || typeof raw === "number" ? String(raw).trim() : "";
+    return value || undefined;
+  }
+
   private async waitForAccountIdle(accountId: string): Promise<void> {
     const deadline = Date.now() + 5 * 60_000;
     while (this.runningAccounts.has(accountId)) {
@@ -1211,10 +1227,22 @@ export class AutomationService {
     let result: StatusMutationResult;
     try {
       providerInvoked = true;
+      // 素材的启停报文要同时带广告组 ID 与素材 ID，光有素材 ID 发不出去
+      // （procedural_material/update_status 的 ad_id 装的是广告组）。父级不随
+      // 输入透传、而是在这里按当前快照解析：写任务落库后重建 mutation 时会丢掉
+      // 额外字段，放在这一层能同时覆盖自动、人工与重试三条路。
+      const mutation: StatusMutation = input.entityType === "material"
+        ? {
+            ...input,
+            ...(this.resolveMaterialAdGroupId(task.accountId, account.providerKind, input.externalId)
+              ? { parentAdGroupId: this.resolveMaterialAdGroupId(task.accountId, account.providerKind, input.externalId)! }
+              : {}),
+          }
+        : input;
       const results = await withLeaseHeartbeat(
         () => this.changeProviderStatus(
           context,
-          [input],
+          [mutation],
           expectedCredentialGeneration,
           requireAutomatic,
         ),

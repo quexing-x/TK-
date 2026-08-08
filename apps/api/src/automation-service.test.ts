@@ -64,7 +64,7 @@ class FakeProvider implements AdsProvider {
   adGroupCpc = 1.5;
   adGroupCarts = 0;
   adGroupSpend = 20;
-  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" | "ad-switch" = "default";
+  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" | "ad-switch" | "material" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   syncCount = 0;
 
@@ -158,6 +158,44 @@ class FakeProvider implements AdsProvider {
         time_attr_conversion_cost: "1",
         time_attr_on_web_cart: "1",
       };
+    }
+    // 一条开着的素材，指标差到规则一定想关它。广告组与广告都保持开启，确认规则
+    // 动的是素材本身而不是上层。
+    if (this.scenario === "material") {
+      defaultGroup.payload.ad_primary_status = "enabled";
+      // 广告组本身指标健康：否则它同一轮里也会被判关，父子冲突规则会把子级跳过，
+      // 就测不到"规则动的是素材"。
+      defaultGroup.payload.row_data = {
+        campaign_id: "campaign-1",
+        stat_cost: "20",
+        cpc: "0.1",
+        click_cnt: "200",
+        time_attr_convert_cnt: "5",
+        time_attr_conversion_cost: "4",
+        time_attr_on_web_cart: "5",
+      };
+      entities.push({
+        entityType: "material",
+        externalId: "1872777743628513",
+        payload: {
+          campaign_id: "campaign-1",
+          // 素材行里广告组落在 ad_id 上，同步时回填成 adgroup_id。
+          ad_id: "adgroup-1",
+          adgroup_id: "adgroup-1",
+          creative_id: "ad-1",
+          main_entity_name: "测试素材",
+          material_primary_status: "delivery_ok",
+          row_data: {
+            campaign_id: "campaign-1",
+            adgroup_id: "adgroup-1",
+            stat_cost: "50",
+            cpc: "2",
+            click_cnt: "25",
+            time_attr_convert_cnt: "0",
+            time_attr_on_web_cart: "0",
+          },
+        },
+      });
     }
     // 一个开着的广告，指标差到规则一定想关它——用来验证广告总开关不会被自动关掉。
     if (this.scenario === "ad-switch") {
@@ -275,6 +313,11 @@ class FakeProvider implements AdsProvider {
           },
           missingMetrics: this.qualityStatus === "healthy" ? [] : ["cost_per_conversion"],
           partialFailures: this.qualityStatus === "healthy" ? [] : ["test-quality"],
+          // 素材层只覆盖"当天有消耗的广告"，不跟着 healthy 无条件刷新，本轮取全了
+          // 才声明——真 Provider 也是这么写的。
+          ...(entities.some((entity) => entity.entityType === "material")
+            ? { completeEntityTypes: ["material" as const] }
+            : {}),
           lastHealthyAt: now,
         },
       },
@@ -1818,6 +1861,28 @@ describe("AutomationService", () => {
     });
     expect(store.listAutomationDecisions("demo-account")[0]?.errorMessage)
       .toContain("过夜关停窗口");
+  });
+
+  // 素材层打通的端到端验证：规则命中素材 → 真的发出带广告组 ID 的启停请求。
+  it("规则按素材判定并关闭素材本身", async () => {
+    provider.scenario = "material";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    const materialMutations = provider.mutations.filter(
+      (mutation) => mutation.entityType === "material",
+    );
+    expect(materialMutations).toHaveLength(1);
+    expect(materialMutations[0]).toMatchObject({
+      externalId: "1872777743628513",
+      action: "disable",
+      // 缺了广告组 ID，procedural_material/update_status 发不出去。
+      parentAdGroupId: "adgroup-1",
+    });
   });
 
   // 程序化创意下一个广告组只有 1 个广告、内含多个素材。规则关广告总开关等同于关

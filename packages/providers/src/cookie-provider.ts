@@ -6034,7 +6034,11 @@ function extractEntities(
             ?? statData.ad_id
             ?? id,
         }
-      : item;
+      // 素材行里广告组落在 ad_id 上（creative_id 才是广告）。回填成 adgroup_id，
+      // 父子关系解析与素材启停都从这里取——启停报文缺了它发不出去。
+      : entityType === "material"
+        ? { ...item, adgroup_id: item.adgroup_id ?? item.ad_id }
+        : item;
     return [{ entityType, externalId: String(id), payload }];
   });
 }

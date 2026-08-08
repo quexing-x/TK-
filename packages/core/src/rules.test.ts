@@ -14,12 +14,25 @@ describe("global rule configuration", () => {
     expect(automationRuleDefinitions).toHaveLength(9);
   });
 
-  it("applies the shared rules to ad groups and ads by default", () => {
+  it("applies the shared rules to ad groups, ads and materials by default", () => {
     expect(defaultRuleConfiguration.layers).toEqual({
       campaign: false,
       adGroup: true,
       ad: true,
+      // 素材层默认开：广告层的关停已改为只作用于素材，默认关掉会让这些规则
+      // 彻底没有落点。
+      material: true,
     });
+  });
+
+  // 存量配置里没有 material 键，解析时必须补上默认值而不是直接报错。
+  it("补齐存量配置里缺失的素材层开关", () => {
+    const parsed = RuleConfigurationInputSchema.parse({
+      layers: { campaign: false, adGroup: true, ad: true },
+      rules: defaultRuleConfiguration.rules,
+    });
+
+    expect(parsed.layers.material).toBe(true);
   });
 
   it("rejects extra editable parameters", () => {

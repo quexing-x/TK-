@@ -190,4 +190,15 @@ describe("素材同步", () => {
       ad_id: "1872777456951841",
     });
   });
+
+  // 素材行里广告组落在 ad_id 上；启停报文缺了广告组 ID 就发不出去，所以同步时
+  // 必须回填成 adgroup_id，让父子解析和启停都能从同一个地方取。
+  it("素材回填 adgroup_id，父级解析得出来", async () => {
+    stub([{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }], [materialRow()]);
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    const material = output.entities.find((entity) => entity.entityType === "material");
+    expect(material?.payload).toMatchObject({ adgroup_id: "1872777456951841" });
+  });
 });

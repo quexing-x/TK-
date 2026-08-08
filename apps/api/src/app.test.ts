@@ -843,7 +843,7 @@ describe("local API", () => {
     const body = existing.json();
     expect(body.lookbackHours).toBe(48);
     expect(body.rules).toHaveLength(9);
-    expect(body.layers).toEqual({ campaign: false, adGroup: true, ad: true });
+    expect(body.layers).toEqual({ campaign: false, adGroup: true, ad: true, material: true });
 
     body.layers.campaign = true;
     body.rules[0].enabled = false;
