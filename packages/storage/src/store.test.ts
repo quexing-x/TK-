@@ -313,6 +313,54 @@ describe("AutomationStore", () => {
     });
   });
 
+  // 客户端 24 小时跑着、每 30 秒一轮，这些流水表增长很快：上线 25 天就攒了
+  // 3.6 万条审计、1.4 万轮轮询。只保留 30 天。
+  describe("操作历史保留 30 天", () => {
+
+    it("超过 30 天的操作记录连同它的尝试记录一起清掉", () => {
+      const old = store.queueAppeal("demo-account", "cookie", "ad-old", "理由", "automation");
+      store.completeAppeal(old.id, "failed", "旧记录");
+      const fresh = store.queueAppeal("demo-account", "cookie", "ad-fresh", "理由", "automation");
+      store.completeAppeal(fresh.id, "failed", "新记录");
+      // 把其中一条改成 40 天前。
+      store.pruneOperationHistory(new Date());
+      expect(store.getAdOperation(old.id)).toBeTruthy();
+
+      const deleted = store.pruneOperationHistory(new Date(Date.now() + 40 * 86_400_000));
+
+      expect(deleted.ad_operations).toBeGreaterThanOrEqual(2);
+      expect(() => store.getAdOperation(old.id)).toThrow();
+    });
+
+    // 还没收口的写任务是待办不是历史，多老都得留着。
+    it("pending / running 的写任务不清", () => {
+      const pending = store.queueAppeal("demo-account", "cookie", "ad-pending", "理由", "automation");
+
+      store.pruneOperationHistory(new Date(Date.now() + 400 * 86_400_000));
+
+      expect(store.getAdOperation(pending.id)).toMatchObject({ status: "pending" });
+    });
+
+    it("30 天以内的一条都不动", () => {
+      const recent = store.queueAppeal("demo-account", "cookie", "ad-recent", "理由", "automation");
+      store.completeAppeal(recent.id, "failed", "近期");
+
+      const deleted = store.pruneOperationHistory(new Date());
+
+      expect(deleted.ad_operations ?? 0).toBe(0);
+      expect(store.getAdOperation(recent.id)).toBeTruthy();
+    });
+
+    // 指标快照是界面上 90 天日历的数据源，不能跟着一起删。
+    it("不碰指标快照", () => {
+      const before = store.listCurrentProviderEntities("demo-account", "cookie").length;
+
+      store.pruneOperationHistory(new Date(Date.now() + 400 * 86_400_000));
+
+      expect(store.listCurrentProviderEntities("demo-account", "cookie").length).toBe(before);
+    });
+  });
+
   it("persists automation switches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.closeNoConversion = true;

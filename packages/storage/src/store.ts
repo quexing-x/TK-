@@ -171,8 +171,13 @@ export interface StoredNotificationChannel extends NotificationChannelRecord {
   credentialRef: string | null;
 }
 
+/** 操作历史保留天数。指标快照不走这个口径，它有自己的 90 天日历。 */
+const historyRetentionDays = 30;
+
 export class AutomationStore {
   private readonly db: DatabaseSync;
+  /** 上次清理操作历史的时刻，用来把清理限制成每 6 小时一次。 */
+  private lastHistoryPruneAt = 0;
   private readonly migrationRunner: MigrationRunner;
   private readonly databasePath: string;
   private readonly appVersion: string;
@@ -758,12 +763,16 @@ export class AutomationStore {
   createPollCycle(): PollCycleRecord {
     const id = randomUUID();
     const startedAt = new Date().toISOString();
-    const retentionCutoff = new Date(
-      Date.now() - 90 * 24 * 60 * 60 * 1000,
-    ).toISOString();
-    this.db
-      .prepare("DELETE FROM poll_cycles WHERE started_at < ?")
-      .run(retentionCutoff);
+    // 轮询每 30 秒一轮，清理没必要跟着跑；每 6 小时一次足够，也不会因为客户端
+    // 长期不重启就永远不清。
+    if (Date.now() - this.lastHistoryPruneAt > 6 * 60 * 60 * 1000) {
+      this.lastHistoryPruneAt = Date.now();
+      try {
+        this.pruneOperationHistory();
+      } catch {
+        // 清理失败不能影响这一轮轮询本身。
+      }
+    }
     this.db
       .prepare(
         `INSERT INTO poll_cycles (id, status, started_at, finished_at)
@@ -5289,6 +5298,56 @@ export class AutomationStore {
     return (this.db.prepare(
       "SELECT * FROM database_backups WHERE id = ?",
     ).get(backupId) as SqlRow | undefined) ?? null;
+  }
+
+  /**
+   * 操作历史只保留 30 天。
+   *
+   * 客户端 24 小时跑着，每 30 秒一轮轮询，这些表增长很快——上线 25 天就攒了
+   * 3.6 万条审计、1.4 万轮轮询、1.2 万次自动化运行。界面上翻几天前的发布记录
+   * 也因此越来越吃力。
+   *
+   * 只清「历史流水」，不碰这两类：
+   * - 还没收口的写任务（pending / running）：不管多老都留着，它们是待办不是历史。
+   * - entity_metric_snapshots：那是界面上 90 天指标日历的数据源，有自己的口径，
+   *   删了会把功能一起删掉。
+   */
+  pruneOperationHistory(now: Date = new Date()): Record<string, number> {
+    const cutoff = new Date(now.getTime() - historyRetentionDays * 86_400_000).toISOString();
+    const deleted: Record<string, number> = {};
+    const run = (table: string, sql: string, ...params: string[]): void => {
+      const result = this.db.prepare(sql).run(...params);
+      if (Number(result.changes) > 0) deleted[table] = Number(result.changes);
+    };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // 尝试记录跟着它的操作一起走，先删子表再删父表。
+      run(
+        "ad_operation_attempts",
+        `DELETE FROM ad_operation_attempts WHERE operation_id IN (
+           SELECT operation_id FROM ad_operations
+           WHERE created_at < ? AND status NOT IN ('pending', 'running')
+         )`,
+        cutoff,
+      );
+      run(
+        "ad_operations",
+        `DELETE FROM ad_operations
+         WHERE created_at < ? AND status NOT IN ('pending', 'running')`,
+        cutoff,
+      );
+      run("automation_decisions", "DELETE FROM automation_decisions WHERE created_at < ?", cutoff);
+      run("automation_runs", "DELETE FROM automation_runs WHERE started_at < ?", cutoff);
+      run("sync_runs", "DELETE FROM sync_runs WHERE started_at < ?", cutoff);
+      run("audit_logs", "DELETE FROM audit_logs WHERE created_at < ?", cutoff);
+      run("notification_deliveries", "DELETE FROM notification_deliveries WHERE created_at < ?", cutoff);
+      run("poll_cycles", "DELETE FROM poll_cycles WHERE started_at < ?", cutoff);
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+    return deleted;
   }
 
   private pruneDatabaseBackups(): void {
