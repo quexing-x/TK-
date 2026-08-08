@@ -646,19 +646,32 @@ export class AutomationService {
             continue;
           }
           automaticTargets.add(targetKey);
-          // 过夜静默窗口内一律不自动开启：这 15 分钟正是 enrollNightlyAdGroups
-          // 把组关掉的时段，规则再开回来等于把过夜关停整个抵消掉。需要投放的
-          // 由零点的过夜排期统一打开。关闭方向不受限制——它和窗口同向。
-          if (
-            candidate.action === "enable"
-            && isOvernightBlackout(new Date(), account.timezone)
-          ) {
+          const suppressed = suppressedAutomationActions(new Date(), account.timezone);
+          if (suppressed === "enable" && candidate.action === "enable") {
             saveSuggestion(
               candidate,
               "skipped",
-              "过夜静默窗口（本地 23:45 至零点）内不自动开启；需要投放的由零点过夜排期统一打开。",
+              "过夜关停窗口（本地 23:45 至零点）内不自动开启；需要投放的由零点过夜排期统一打开。",
             );
             continue;
+          }
+          if (suppressed === "overnight-entities") {
+            // 只保护过夜组本身及其下的广告：零点刚被排期开回来，当日数据从零
+            // 开始，规则一判必关。其它对象照常。
+            const overnightId = candidate.entity.entityType === "ad-group"
+              ? candidate.entity.externalId
+              : candidate.entity.parentAdGroupId;
+            if (
+              overnightId
+              && this.store.hasScheduledOvernightForEntity(accountId, overnightId)
+            ) {
+              saveSuggestion(
+                candidate,
+                "skipped",
+                "过夜组在本地零点至凌晨 3 点内不受规则调整：刚由排期开启，当日数据尚未积累。",
+              );
+              continue;
+            }
           }
           const decision = saveSuggestion(candidate, "pending");
           const actionKey = buildAutomaticActionKey(
@@ -1553,19 +1566,42 @@ function buildRulePredicate(
 }
 
 /**
- * 过夜静默窗口：账户本地时间 23:45 到零点。
+ * 过夜关停窗口：账户本地时间 23:45 到零点。
  *
  * enrollNightlyAdGroups 在这个窗口把开着的广告组全部关掉（有转化的排一对过夜
- * 开关，其余单纯关闭），零点由排期统一开回来。规则不能在同一个窗口里把它们又
- * 打开——2026-08-07 就是这样：23:45 过夜关掉 4 个组，23:50–23:52 规则把其中几个
- * 开了回来，零点排期又开一次，00:07 规则再关掉，一个组一晚上被开关四次。
+ * 开关，其余单纯关闭），零点由排期统一开回来。
  *
- * 判据与 enrollNightlyAdGroups 共用这一个函数。两处各写各的正是 1.4.28 那个
- * 删除故障的成因：同一件事在两个地方判，早晚会漂移。
+ * 判据与 suppressedAutomationActions 共用，两处各写各的正是 1.4.28 那个删除故障
+ * 的成因：同一件事在两个地方判，早晚会漂移。
  */
 export function isOvernightBlackout(at: Date, timeZone: string): boolean {
   const local = timePartsInTimeZone(at, timeZone);
   return local.hour === 23 && local.minute >= 45;
+}
+
+/**
+ * 本时刻自动启停被禁止的动作范围。只约束规则引擎（source=automation），不影响
+ * 过夜排期（source=scheduled）和人工操作。
+ *
+ * 两段窗口，禁止范围不同——2026-08-07 那一晚把两种病都犯了：
+ *
+ * - 23:45 至零点：**只禁开启**。这个窗口正是 enrollNightlyAdGroups 把组关掉的
+ *   时段，规则再开回来等于把过夜关停整个抵消掉；关闭方向与窗口同向，放行。
+ *   当晚 23:45 关掉 4 个组，23:50–23:52 规则又开回来。
+ * - 零点至凌晨 3 点：**过夜组的全部动作**。过夜排期在零点把这些组统一开回来，
+ *   此时当日数据从零开始，任何基于消耗/转化的规则都会立刻判它「零转化消耗过高」
+ *   而关掉——当晚 00:00:40 开启的「翻譯機_新」，00:07:59 就被关了，开了不到 8
+ *   分钟。这三小时是留给它们攒数据的。**只保护过夜组**：同一时段里其它广告组
+ *   （比如刚创建的、或本来就在跑的）不受影响，规则照常判定。
+ */
+export function suppressedAutomationActions(
+  at: Date,
+  timeZone: string,
+): "none" | "enable" | "overnight-entities" {
+  const local = timePartsInTimeZone(at, timeZone);
+  if (local.hour === 23 && local.minute >= 45) return "enable";
+  if (local.hour < 3) return "overnight-entities";
+  return "none";
 }
 
 function hasStartedBy(scheduledStartAt: string | null | undefined, now: Date): boolean {
