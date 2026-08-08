@@ -1002,7 +1002,7 @@ export class CookieAdsProvider implements AdsProvider {
       // 克隆过来的广告会继承源广告的开关状态；广告组开着而里面的广告是关的，整组
       // 投不出去。广告的开关跟随广告组的发布状态：组以 disabled 发布就全部保持关闭。
       const enableFailures = publishedStatus === "enabled"
-        ? await enableCreatedCreatives(context, credential, completedCreativeIds(completed))
+        ? await enableCreatedCreatives(credential, completedCreativeIds(completed))
         : [];
       return {
         ok: true,
@@ -1342,7 +1342,7 @@ export class CookieAdsProvider implements AdsProvider {
       }
       // 同上：克隆出来的广告继承源广告的开关状态，需要显式打开。
       const enableFailures = publishedStatus === "enabled"
-        ? await enableCreatedCreatives(context, credential, completedCreativeIds(completed))
+        ? await enableCreatedCreatives(credential, completedCreativeIds(completed))
         : [];
       return {
         ok: true,
@@ -2533,6 +2533,24 @@ async function createCookieDraftBatch(
       ...(completed ? { completed } : {}),
       ...(terminalError ? { terminalError } : {}),
     });
+    // 收尾：把本次建出来的广告显式打开。
+    //
+    // 克隆出来的广告继承源广告的开关状态，广告组开着而广告关着，整组投不出去。
+    // 1.4.31 只把这段接在 copyCampaign / copyAdGroupToExistingCampaign 上，漏了
+    // createFromPreset——而跨账户迁移（launch plan mode=copy）走的正是这条，
+    // 2026-08-08 生产上因此有 9 个广告组处于「组开着广告关着」。
+    //
+    // 安全边界与另外两条路一致：只处理本次发布回读到的广告 ID，不碰存量对象；
+    // 只在广告组以 enabled 发布时才开；开启失败不推翻整次创建（广告组已经建好，
+    // 判成失败会诱发重复创建），失败信息挂到对应条目的 warning 上。
+    const createdAdIds = readback.flatMap((outcome) =>
+      "error" in outcome || !outcome.ids.adId ? [] : [outcome.ids.adId]);
+    const enableFailures = first.mutation.initialStatus === "enabled"
+      ? await enableCreatedCreatives(credential, createdAdIds)
+      : [];
+    const enableWarning = enableFailures.length > 0
+      ? `${enableFailures.length} 条广告未能自动开启：${enableFailures.join("；")}`
+      : "";
     return [
       ...prepared.map((item, index): CreationMutationResult => {
         const outcome = readback[index]!;
@@ -2540,6 +2558,7 @@ async function createCookieDraftBatch(
           return creationFailureResult(item.mutation, outcome.error, item.dispatchState);
         }
         const ids = outcome.ids;
+        const warning = [ids.warning, enableWarning].filter(Boolean).join("；");
         return {
           ...item.mutation,
           row: item.row,
@@ -2547,7 +2566,7 @@ async function createCookieDraftBatch(
           campaignId: ids.campaignId,
           adGroupId: ids.adGroupId,
           ...(ids.adId ? { adId: ids.adId } : {}),
-          ...(ids.warning ? { warning: ids.warning } : {}),
+          ...(warning ? { warning } : {}),
           message: `TikTok 已同步发布同系列 ${prepared.length} 个广告组。`,
         };
       }),
@@ -5536,7 +5555,6 @@ function completedCreativeIds(payload: Record<string, unknown>): string[] {
  * 汇总返回给调用方记录。
  */
 async function enableCreatedCreatives(
-  context: ProviderContext,
   credential: ParsedCookieCredential,
   creativeIds: string[],
 ): Promise<string[]> {

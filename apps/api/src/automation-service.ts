@@ -646,6 +646,19 @@ export class AutomationService {
             continue;
           }
           automaticTargets.add(targetKey);
+          // 广告总开关常开，规则不得关它。程序化创意下一个广告组只有 1 个广告、
+          // 内含多个素材，关掉广告总开关等同于关掉整组；更糟的是它会造出「广告组
+          // 开着、广告关着」——人工把广告组开回来也投不出去，而且界面上看不出来。
+          // 真正该关的是广告里那一条素材（procedural_material/update_status），
+          // 素材层做好之前这里一律不关。开启方向保留：它是纠正方向。
+          if (candidate.entity.entityType === "ad" && candidate.action === "disable") {
+            saveSuggestion(
+              candidate,
+              "skipped",
+              "广告总开关保持常开：关闭它等同于关停整个广告组，且会造成广告组开着而广告关着；应改为关闭广告内的具体素材。",
+            );
+            continue;
+          }
           const suppressed = suppressedAutomationActions(new Date(), account.timezone);
           if (suppressed === "enable" && candidate.action === "enable") {
             saveSuggestion(

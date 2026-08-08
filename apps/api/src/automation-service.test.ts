@@ -64,7 +64,7 @@ class FakeProvider implements AdsProvider {
   adGroupCpc = 1.5;
   adGroupCarts = 0;
   adGroupSpend = 20;
-  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" = "default";
+  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" | "ad-switch" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   syncCount = 0;
 
@@ -158,6 +158,30 @@ class FakeProvider implements AdsProvider {
         time_attr_conversion_cost: "1",
         time_attr_on_web_cart: "1",
       };
+    }
+    // 一个开着的广告，指标差到规则一定想关它——用来验证广告总开关不会被自动关掉。
+    if (this.scenario === "ad-switch") {
+      defaultGroup.payload.ad_primary_status = "enabled";
+      entities.push({
+        entityType: "ad",
+        externalId: "ad-1",
+        payload: {
+          campaign_id: "campaign-1",
+          adgroup_id: "adgroup-1",
+          ad_name: "测试广告",
+          ad_primary_status: "enabled",
+          creative_primary_status: "delivery_ok",
+          row_data: {
+            campaign_id: "campaign-1",
+            adgroup_id: "adgroup-1",
+            stat_cost: "50",
+            cpc: "2",
+            click_cnt: "25",
+            time_attr_convert_cnt: "0",
+            time_attr_on_web_cart: "0",
+          },
+        },
+      });
     }
     if (this.scenario === "parent-child") {
       entities.push({
@@ -1793,6 +1817,42 @@ describe("AutomationService", () => {
     });
     expect(store.listAutomationDecisions("demo-account")[0]?.errorMessage)
       .toContain("过夜关停窗口");
+  });
+
+  // 程序化创意下一个广告组只有 1 个广告、内含多个素材。规则关广告总开关等同于关
+  // 整组，还会造出「广告组开着、广告关着」——人工把组开回来也投不出去。2026-08-08
+  // 生产上 11 个组处于这个状态，其中 1 个正是规则关的。
+  it("规则不关广告总开关，只留一条跳过记录", async () => {
+    provider.scenario = "ad-switch";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    // 广告层一个关闭请求都没发出去。
+    expect(provider.mutations.filter(
+      (mutation) => mutation.entityType === "ad" && mutation.action === "disable",
+    )).toEqual([]);
+    const adDecision = store.listAutomationDecisions("demo-account")
+      .find((decision) => decision.externalId === "ad-1" && decision.action === "disable");
+    expect(adDecision).toMatchObject({ status: "skipped" });
+    expect(adDecision?.errorMessage).toContain("广告总开关保持常开");
+  });
+
+  // 开启方向是纠正方向，不能一起拦掉——否则「组开着广告关着」永远修不回来。
+  it("规则仍然可以开启广告总开关", async () => {
+    provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    expect(provider.mutations.some((mutation) => mutation.action === "enable")).toBe(true);
   });
 
   // 零点至凌晨 3 点：过夜组刚被排期开回来，当日数据从零开始，规则一判必关。
