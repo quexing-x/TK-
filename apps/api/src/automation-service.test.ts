@@ -13,6 +13,8 @@ import { AutomationStore } from "@tk-auto/storage";
 import {
   AutomationScheduler,
   AutomationService,
+  isOvernightBlackout,
+  suppressedAutomationActions,
   type PollNotificationDispatcher,
 } from "./automation-service.js";
 
@@ -937,6 +939,50 @@ describe("AutomationService", () => {
     });
   });
 
+  // 2026-08-07：23:45 过夜关掉 4 个组，23:50–23:52 规则把其中几个开了回来，零点
+  // 排期又开一次，00:07 规则再关掉——一个组一晚上被开关四次。这 15 分钟本该全关。
+  describe("自动启停的静默窗口", () => {
+    // demo-account 在 Asia/Shanghai，本地 23:45 = 15:45Z，零点 = 16:00Z。
+    const shanghai = "Asia/Shanghai";
+    const at = (utc: string) => new Date(utc);
+
+    it("23:45 至零点只禁开启，关闭方向放行", () => {
+      expect(suppressedAutomationActions(at("2026-07-20T15:45:00.000Z"), shanghai)).toBe("enable");
+      expect(suppressedAutomationActions(at("2026-07-20T15:51:00.000Z"), shanghai)).toBe("enable");
+      expect(suppressedAutomationActions(at("2026-07-20T15:59:59.000Z"), shanghai)).toBe("enable");
+    });
+
+    it("零点至凌晨 3 点保护过夜组", () => {
+      expect(suppressedAutomationActions(at("2026-07-20T16:00:00.000Z"), shanghai)).toBe("overnight-entities");
+      expect(suppressedAutomationActions(at("2026-07-20T16:08:00.000Z"), shanghai)).toBe("overnight-entities");
+      // 本地 02:59:59，仍在窗口内。
+      expect(suppressedAutomationActions(at("2026-07-20T18:59:59.000Z"), shanghai)).toBe("overnight-entities");
+    });
+
+    it("窗口之外不做任何压制", () => {
+      // 23:44 本地，差一分钟进窗口。
+      expect(suppressedAutomationActions(at("2026-07-20T15:44:00.000Z"), shanghai)).toBe("none");
+      // 本地 03:00 整，保护期结束，规则恢复。
+      expect(suppressedAutomationActions(at("2026-07-20T19:00:00.000Z"), shanghai)).toBe("none");
+      expect(suppressedAutomationActions(at("2026-07-20T04:00:00.000Z"), shanghai)).toBe("none");
+    });
+
+    // 判据必须跟着账户时区走，不能按服务器本地时间算。
+    it("按账户时区判定，不看服务器时区", () => {
+      const moment = at("2026-07-20T15:45:00.000Z");
+      expect(suppressedAutomationActions(moment, "Asia/Shanghai")).toBe("enable");
+      expect(suppressedAutomationActions(moment, "UTC")).toBe("none");
+    });
+
+    // enrollNightlyAdGroups 与压制判据必须共用同一个 23:45 边界。
+    it("过夜关停窗口与压制窗口的 23:45 边界一致", () => {
+      for (const utc of ["2026-07-20T15:44:59.000Z", "2026-07-20T15:45:00.000Z", "2026-07-20T15:59:59.000Z"]) {
+        expect(isOvernightBlackout(at(utc), shanghai))
+          .toBe(suppressedAutomationActions(at(utc), shanghai) === "enable");
+      }
+    });
+  });
+
   it("puts converting groups into overnight and closes non-converting groups at 23:45", async () => {
     provider.scenario = "priority";
     await service.runAccount("demo-account", "preview");
@@ -1725,6 +1771,70 @@ describe("AutomationService", () => {
     vi.useRealTimers();
     expect(store.listPollCycles()).toHaveLength(0);
     expect(deletions).toHaveBeenCalledWith("demo-account");
+  });
+
+  // 同一条恢复规则，只把时间挪进 23:45–零点，就不该再派发开启。
+  it("过夜关停窗口内不派发自动开启，只留一条跳过记录", async () => {
+    provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(23, 50));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    // 一个开启请求都没发出去。
+    expect(provider.mutations.filter((mutation) => mutation.action === "enable")).toEqual([]);
+    expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
+      externalId: "adgroup-1",
+      action: "enable",
+      status: "skipped",
+    });
+    expect(store.listAutomationDecisions("demo-account")[0]?.errorMessage)
+      .toContain("过夜关停窗口");
+  });
+
+  // 零点至凌晨 3 点：过夜组刚被排期开回来，当日数据从零开始，规则一判必关。
+  // 2026-08-08 00:00:40 开启的「翻譯機_新」，00:07:59 就被「零转化消耗过高」关了。
+  it("零点至凌晨 3 点内不调整过夜组", async () => {
+    provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
+    store.createOvernightSchedule("demo-account", {
+      externalId: "adgroup-1",
+      disableAt: new Date().toISOString(),
+      enableAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(0, 30));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    expect(provider.mutations).toEqual([]);
+    expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
+      externalId: "adgroup-1",
+      status: "skipped",
+    });
+    expect(store.listAutomationDecisions("demo-account")[0]?.errorMessage)
+      .toContain("过夜组");
+  });
+
+  // 保护只针对过夜组：同一时段里其它组照常受规则调整。
+  it("零点至凌晨 3 点内非过夜组照常调整", async () => {
+    provider.scenario = "recovery";
+    provider.adGroupStatus = "disable";
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(0, 30));
+
+    await scheduler.tick();
+
+    vi.useRealTimers();
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "enable" },
+    ]);
   });
 
   it("reports a verified automatic recovery enable in the scheduler summary", async () => {

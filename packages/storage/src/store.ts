@@ -171,8 +171,13 @@ export interface StoredNotificationChannel extends NotificationChannelRecord {
   credentialRef: string | null;
 }
 
+/** 操作历史保留天数。指标快照不走这个口径，它有自己的 90 天日历。 */
+const historyRetentionDays = 30;
+
 export class AutomationStore {
   private readonly db: DatabaseSync;
+  /** 上次清理操作历史的时刻，用来把清理限制成每 6 小时一次。 */
+  private lastHistoryPruneAt = 0;
   private readonly migrationRunner: MigrationRunner;
   private readonly databasePath: string;
   private readonly appVersion: string;
@@ -758,12 +763,16 @@ export class AutomationStore {
   createPollCycle(): PollCycleRecord {
     const id = randomUUID();
     const startedAt = new Date().toISOString();
-    const retentionCutoff = new Date(
-      Date.now() - 90 * 24 * 60 * 60 * 1000,
-    ).toISOString();
-    this.db
-      .prepare("DELETE FROM poll_cycles WHERE started_at < ?")
-      .run(retentionCutoff);
+    // 轮询每 30 秒一轮，清理没必要跟着跑；每 6 小时一次足够，也不会因为客户端
+    // 长期不重启就永远不清。
+    if (Date.now() - this.lastHistoryPruneAt > 6 * 60 * 60 * 1000) {
+      this.lastHistoryPruneAt = Date.now();
+      try {
+        this.pruneOperationHistory();
+      } catch {
+        // 清理失败不能影响这一轮轮询本身。
+      }
+    }
     this.db
       .prepare(
         `INSERT INTO poll_cycles (id, status, started_at, finished_at)
@@ -4164,8 +4173,16 @@ export class AutomationStore {
       if (jsonHash(preview.presetSnapshot) !== preview.presetSnapshotHash) {
         throw new Error("差异预览的预设快照校验失败，请重新生成预览。");
       }
-      if (!preview.safeToCreate || preview.blockers.length > 0) {
-        throw new Error("差异预览仍有阻断项，不能创建复制迁移计划。");
+      // 原帖检查不再阻断创建。跨账户复制里最常见的阻断项是「目标账户没授权到某条
+      // 原帖」——没授权的本来就复制不过去，执行时那一条自己失败即可（系列批次已
+      // 改为逐条隔离，不会拖垮同批其余广告组），没必要在创建之前先拦一道，逼人
+      // 反复重新生成预览。
+      //
+      // 仍然要求至少有一条可创建：零条的计划没有意义，直接说明原因更有用。
+      if (preview.items.length === 0) {
+        throw new Error(
+          `原帖检查没有产出任何可创建的广告组：${preview.blockers[0] ?? "目标账户均无可用原帖。"}`,
+        );
       }
       const normalizedTargets = [...new Set(plan.targetAccountIds)];
       const inputHash = copyPreviewInputHash({
@@ -4186,9 +4203,13 @@ export class AutomationStore {
       if (existing) {
         return this.getMultiAccountLaunchPlan(String(existing.id)) as MultiAccountLaunchPlanRecord;
       }
-      if (new Date(preview.expiresAt).getTime() <= Date.now()) {
-        throw new Error("差异预览已过期，请重新同步并生成预览。");
-      }
+      // 预览过期同样不再阻断。过期只说明冻结的原帖证据可能变旧，而执行时会重新
+      // 回读并逐条校验（refreshLaunchCopyEvidence + validateLaunchCopyItem），变旧
+      // 的那条会在执行时单独失败。为此把人挡在创建之前、要求重新生成一遍，是拿
+      // 确定的麻烦去防一个执行时本来就会发现的问题。
+      //
+      // inputHash 校验保留：它防的是「预览的内容和你现在要创建的不是一回事」，
+      // 那是另一码事，不能放松。
     }
     const targetAccountIds = preview
       ? preview.targetAccountIds
@@ -5277,6 +5298,56 @@ export class AutomationStore {
     return (this.db.prepare(
       "SELECT * FROM database_backups WHERE id = ?",
     ).get(backupId) as SqlRow | undefined) ?? null;
+  }
+
+  /**
+   * 操作历史只保留 30 天。
+   *
+   * 客户端 24 小时跑着，每 30 秒一轮轮询，这些表增长很快——上线 25 天就攒了
+   * 3.6 万条审计、1.4 万轮轮询、1.2 万次自动化运行。界面上翻几天前的发布记录
+   * 也因此越来越吃力。
+   *
+   * 只清「历史流水」，不碰这两类：
+   * - 还没收口的写任务（pending / running）：不管多老都留着，它们是待办不是历史。
+   * - entity_metric_snapshots：那是界面上 90 天指标日历的数据源，有自己的口径，
+   *   删了会把功能一起删掉。
+   */
+  pruneOperationHistory(now: Date = new Date()): Record<string, number> {
+    const cutoff = new Date(now.getTime() - historyRetentionDays * 86_400_000).toISOString();
+    const deleted: Record<string, number> = {};
+    const run = (table: string, sql: string, ...params: string[]): void => {
+      const result = this.db.prepare(sql).run(...params);
+      if (Number(result.changes) > 0) deleted[table] = Number(result.changes);
+    };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // 尝试记录跟着它的操作一起走，先删子表再删父表。
+      run(
+        "ad_operation_attempts",
+        `DELETE FROM ad_operation_attempts WHERE operation_id IN (
+           SELECT operation_id FROM ad_operations
+           WHERE created_at < ? AND status NOT IN ('pending', 'running')
+         )`,
+        cutoff,
+      );
+      run(
+        "ad_operations",
+        `DELETE FROM ad_operations
+         WHERE created_at < ? AND status NOT IN ('pending', 'running')`,
+        cutoff,
+      );
+      run("automation_decisions", "DELETE FROM automation_decisions WHERE created_at < ?", cutoff);
+      run("automation_runs", "DELETE FROM automation_runs WHERE started_at < ?", cutoff);
+      run("sync_runs", "DELETE FROM sync_runs WHERE started_at < ?", cutoff);
+      run("audit_logs", "DELETE FROM audit_logs WHERE created_at < ?", cutoff);
+      run("notification_deliveries", "DELETE FROM notification_deliveries WHERE created_at < ?", cutoff);
+      run("poll_cycles", "DELETE FROM poll_cycles WHERE started_at < ?", cutoff);
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+    return deleted;
   }
 
   private pruneDatabaseBackups(): void {

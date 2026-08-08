@@ -313,6 +313,54 @@ describe("AutomationStore", () => {
     });
   });
 
+  // 客户端 24 小时跑着、每 30 秒一轮，这些流水表增长很快：上线 25 天就攒了
+  // 3.6 万条审计、1.4 万轮轮询。只保留 30 天。
+  describe("操作历史保留 30 天", () => {
+
+    it("超过 30 天的操作记录连同它的尝试记录一起清掉", () => {
+      const old = store.queueAppeal("demo-account", "cookie", "ad-old", "理由", "automation");
+      store.completeAppeal(old.id, "failed", "旧记录");
+      const fresh = store.queueAppeal("demo-account", "cookie", "ad-fresh", "理由", "automation");
+      store.completeAppeal(fresh.id, "failed", "新记录");
+      // 把其中一条改成 40 天前。
+      store.pruneOperationHistory(new Date());
+      expect(store.getAdOperation(old.id)).toBeTruthy();
+
+      const deleted = store.pruneOperationHistory(new Date(Date.now() + 40 * 86_400_000));
+
+      expect(deleted.ad_operations).toBeGreaterThanOrEqual(2);
+      expect(() => store.getAdOperation(old.id)).toThrow();
+    });
+
+    // 还没收口的写任务是待办不是历史，多老都得留着。
+    it("pending / running 的写任务不清", () => {
+      const pending = store.queueAppeal("demo-account", "cookie", "ad-pending", "理由", "automation");
+
+      store.pruneOperationHistory(new Date(Date.now() + 400 * 86_400_000));
+
+      expect(store.getAdOperation(pending.id)).toMatchObject({ status: "pending" });
+    });
+
+    it("30 天以内的一条都不动", () => {
+      const recent = store.queueAppeal("demo-account", "cookie", "ad-recent", "理由", "automation");
+      store.completeAppeal(recent.id, "failed", "近期");
+
+      const deleted = store.pruneOperationHistory(new Date());
+
+      expect(deleted.ad_operations ?? 0).toBe(0);
+      expect(store.getAdOperation(recent.id)).toBeTruthy();
+    });
+
+    // 指标快照是界面上 90 天日历的数据源，不能跟着一起删。
+    it("不碰指标快照", () => {
+      const before = store.listCurrentProviderEntities("demo-account", "cookie").length;
+
+      store.pruneOperationHistory(new Date(Date.now() + 400 * 86_400_000));
+
+      expect(store.listCurrentProviderEntities("demo-account", "cookie").length).toBe(before);
+    });
+  });
+
   it("persists automation switches", () => {
     const switches = createDefaultAutomationSwitches();
     switches.closeNoConversion = true;
@@ -955,11 +1003,89 @@ describe("AutomationStore", () => {
 
     expect(preview.safeToCreate).toBe(false);
     expect(preview.blockers.join(" ")).toContain("无法使用帖子");
+    // 唯一的目标账户都没产出条目，计划里一条都没有，此时才拒绝——并且把原因说清楚，
+    // 而不是笼统一句「仍有阻断项」。
     expect(() => store.createMultiAccountLaunchPlan({
       ...input,
       mode: "copy",
       copyPreviewId: preview.id,
-    })).toThrow("差异预览仍有阻断项");
+    })).toThrow("没有产出任何可创建的广告组");
+  });
+
+  // 跨账户复制最常见的阻断项就是「某个目标账户没授权到这条原帖」。没授权的本来就
+  // 复制不过去，不该因此把整个计划挡在创建之前——能建的先建，建不了的执行时自己
+  // 失败（系列批次已改为逐条隔离）。
+  it("部分目标账户缺素材时照常建计划，只跳过缺的那个账户", () => {
+    const good = store.createAccount({
+      displayName: "有素材目标账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    const bad = store.createAccount({
+      displayName: "无素材目标账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    saveCopySource(store, "source-for-partial", "source-video");
+    saveTargetAsset(store, good.id, "source-video");
+    saveTargetAsset(store, bad.id, "different-video");
+    const input = {
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: "source-for-partial",
+      targetAccountIds: [good.id, bad.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    };
+
+    const preview = createLaunchCopyPreview(store, input, { missingAccountIds: [bad.id] });
+    expect(preview.safeToCreate).toBe(false);
+
+    const plan = store.createMultiAccountLaunchPlan({
+      ...input,
+      mode: "copy",
+      copyPreviewId: preview.id,
+    });
+
+    const items = store.listLaunchPlanItems(plan.id);
+    expect(items.length).toBeGreaterThan(0);
+    // 缺素材的那个账户一条都没进来，有素材的照常建。
+    expect(items.every((item) => item.accountId === good.id)).toBe(true);
+  });
+
+  // 预览过期只说明冻结的证据可能变旧，执行时会重新回读并逐条校验；为此把人挡在
+  // 创建之前、要求重新生成一遍，是拿确定的麻烦去防执行时本来就会发现的问题。
+  it("预览过期不再阻断创建", () => {
+    saveCopySource(store, "source-for-expired", "source-video");
+    const target = store.createAccount({
+      displayName: "过期预览目标账户",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    saveTargetAsset(store, target.id, "source-video");
+    const input = {
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: "source-for-expired",
+      targetAccountIds: [target.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    };
+    const preview = createLaunchCopyPreview(store, input);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(new Date(preview.expiresAt).getTime() + 60_000));
+    // 时间确实推过了有效期，否则这条用例什么都没测。
+    expect(Date.now()).toBeGreaterThan(new Date(preview.expiresAt).getTime());
+
+    const plan = store.createMultiAccountLaunchPlan({
+      ...input,
+      mode: "copy",
+      copyPreviewId: preview.id,
+    });
+
+    expect(store.listLaunchPlanItems(plan.id).length).toBeGreaterThan(0);
+    vi.useRealTimers();
   });
 
   it("limits a copy preview to 100 generated ad groups", () => {

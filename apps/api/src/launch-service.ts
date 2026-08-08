@@ -290,6 +290,9 @@ export class LaunchService {
     });
     if (claimed.length === 0) return [];
 
+    // 提到 try 之外：catch 里要用它们收口。
+    const preflightFailures: LaunchExecutionItemResult[] = [];
+    const batch: LaunchPlanItemRecord[] = [];
     let providerInvoked = false;
     try {
       const first = claimed[0]!;
@@ -318,21 +321,53 @@ export class LaunchService {
         connection,
         "create-campaigns",
       );
+      // 逐条预检：坏的那条单独标失败并从批次里剔除，其余照常创建。此前这些校验
+      // 直接 throw，任何一条不合格都会把整个系列批次拖垮——十条里有一条帖子证据
+      // 对不上，另外九条明明没问题也一起判失败。
+      const failItem = (item: LaunchPlanItemRecord, cause: unknown): void => {
+        const message = safeError(cause);
+        this.tasks.fail(item.itemId, executorId, message);
+        preflightFailures.push({
+          itemId: item.itemId,
+          accountId: item.accountId,
+          status: "failed",
+          message,
+          syncWarning: null,
+          ok: false,
+          created: [{ ok: false, message }],
+          sync: null,
+        });
+      };
+
+      const preflighted: LaunchPlanItemRecord[] = [];
       for (const item of claimed) {
-        this.store.validateLaunchCopyItem(item);
-        if (!item.attemptId) throw new Error("创建任务缺少 attemptId，禁止调用 Provider。");
-        if (item.templateMode === "copy" && !item.templateCampaignId) {
-          throw new Error("复制计划没有冻结 templateCampaignId，禁止执行且不会按系列名称回退。");
+        try {
+          this.store.validateLaunchCopyItem(item);
+          if (!item.attemptId) throw new Error("创建任务缺少 attemptId，禁止调用 Provider。");
+          if (item.templateMode === "copy" && !item.templateCampaignId) {
+            throw new Error("复制计划没有冻结 templateCampaignId，禁止执行且不会按系列名称回退。");
+          }
+          preflighted.push(item);
+        } catch (cause) {
+          failItem(item, cause);
         }
       }
       const context = await this.loadProviderContext(first.accountId, account.providerKind);
       const connectionFingerprint = creationConnectionFingerprint(connection);
       const refreshedPosts = new Map<string, LaunchOriginalPost[]>();
-      for (const item of claimed) {
-        const posts = await this.refreshLaunchCopyEvidence(item, context);
-        if (posts) refreshedPosts.set(item.itemId, posts);
+      // 回读原帖证据同样逐条隔离：某个目标账户没授权到这条帖子，只该跳过它自己。
+      for (const item of preflighted) {
+        try {
+          const posts = await this.refreshLaunchCopyEvidence(item, context);
+          if (posts) refreshedPosts.set(item.itemId, posts);
+          this.store.validateLaunchCopyItem(item);
+          batch.push(item);
+        } catch (cause) {
+          failItem(item, cause);
+        }
       }
-      for (const item of claimed) this.store.validateLaunchCopyItem(item);
+      // 全部都没过预检才算整批没得跑；此时不该再调用 Provider。
+      if (batch.length === 0) return preflightFailures;
 
       const validateBeforeDispatch = () => {
         const currentAccount = this.store.getAccount(first.accountId);
@@ -355,7 +390,7 @@ export class LaunchService {
           dispatchConnection,
           "create-campaigns",
         );
-        if (!claimed.every((item) => this.launchStore.renew(item.itemId, executorId))) {
+        if (!batch.every((item) => this.launchStore.renew(item.itemId, executorId))) {
           throw new Error("创建批次执行权已变化，当前请求未发送。");
         }
       };
@@ -368,7 +403,7 @@ export class LaunchService {
         first.launchRow.campaignName,
       );
 
-      const mutations: CreationMutation[] = claimed.map((item) => ({
+      const mutations: CreationMutation[] = batch.map((item) => ({
         row: item.launchRow,
         preset,
         initialStatus: item.launchRow.initialStatus,
@@ -400,7 +435,7 @@ export class LaunchService {
       providerInvoked = true;
       const createdResults = await withLeaseHeartbeat(
         () => this.providers.createFromPreset(account.providerKind, context, mutations),
-        () => claimed.every((item) => this.launchStore.renew(item.itemId, executorId)),
+        () => batch.every((item) => this.launchStore.renew(item.itemId, executorId)),
         launchLeaseHeartbeatMs,
       );
       const byAttemptId = new Map(
@@ -419,7 +454,7 @@ export class LaunchService {
         created: NonNullable<(typeof createdResults)[number]>;
         output: LaunchExecutionItemResult;
       }> = [];
-      for (const [index, item] of claimed.entries()) {
+      for (const [index, item] of batch.entries()) {
         const created = (item.attemptId ? byAttemptId.get(item.attemptId) : undefined)
           ?? byOperationId.get(item.operationId)
           ?? createdResults[index];
@@ -547,14 +582,18 @@ export class LaunchService {
           success.output.sync = syncResult;
         }
       }
-      return outputs;
+      // 预检被剔除的那些必须一起回给调用方，否则界面上会凭空少几条。
+      return [...preflightFailures, ...outputs];
     } catch (cause) {
       const message = safeError(cause);
       const unknown = providerInvoked && !(cause instanceof RetryableCreationError);
+      // 预检之前就抛出（账户/系列/模式不一致等批次级不变量）时 batch 还是空的，
+      // 此时要收口的是全部 claimed。
+      const failing = batch.length > 0 ? batch : claimed;
       const current = new Map(
         this.launchStore.listItems(claimed[0]!.planId).map((item) => [item.itemId, item]),
       );
-      return claimed.map((item): LaunchExecutionItemResult => {
+      return [...preflightFailures, ...failing.map((item): LaunchExecutionItemResult => {
         if (current.get(item.itemId)?.status === "running") {
           if (unknown) this.tasks.unknown(item.itemId, executorId, message);
           else this.tasks.fail(item.itemId, executorId, message);
@@ -569,7 +608,7 @@ export class LaunchService {
           created: [{ ok: false, message }],
           sync: null,
         };
-      });
+      })];
     }
   }
 
