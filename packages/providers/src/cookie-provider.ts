@@ -430,6 +430,7 @@ export class CookieAdsProvider implements AdsProvider {
     let contractValid = true;
     let coverageKnown = true;
     const legacyEndpoints: Record<SyncEntityType, string> = {
+      material: "",
       campaign: settings.campaignsUrl,
       "ad-group": settings.adGroupsUrl,
       ad: settings.adsUrl,
@@ -5722,6 +5723,7 @@ function replaceEntityIds(
 function isEntityIdKey(entityType: SyncEntityType, key: string): boolean {
   const normalized = key.toLowerCase();
   const keys: Record<SyncEntityType, string[]> = {
+    material: [],
     campaign: ["campaign_id", "campaign_ids"],
     "ad-group": [
       "adgroup_id",
@@ -5744,6 +5746,7 @@ function isMultipartEntityListKey(
   const normalized = key.toLowerCase();
   const isOverture = pathname.toLowerCase().includes("/overture/");
   const keys: Record<SyncEntityType, string[]> = {
+    material: [],
     campaign: ["campaign_list"],
     "ad-group": isOverture
       ? ["ad_list"]
@@ -5888,6 +5891,7 @@ function extractEntities(
 ): ProviderEntity[] {
   const data = isRecord(payload.data) ? payload.data : payload;
   const typeKeys: Record<SyncEntityType, string[]> = {
+    material: [],
     campaign: ["campaigns", "campaign_list", "table", "list", "items"],
     "ad-group": ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"],
     ad: ["ads", "ad_list", "table", "list", "items"],
@@ -5914,6 +5918,7 @@ function extractEntities(
       return [];
     }
     const idKeys: Record<SyncEntityType, string[]> = {
+      material: [],
       campaign: ["campaign_id", "campaignId", "id"],
       "ad-group": ["adgroup_id", "ad_group_id", "adGroupId", "ad_id", "id"],
       ad: ["creative_id", "creativeId", "ad_id", "adId", "id"],
@@ -5945,6 +5950,7 @@ function hasRecognizedEntityList(
 ): boolean {
   const data = isRecord(payload.data) ? payload.data : payload;
   const typeKeys: Record<SyncEntityType, string[]> = {
+    material: [],
     campaign: ["campaigns", "campaign_list", "table", "list", "items"],
     "ad-group": ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"],
     ad: ["ads", "ad_list", "table", "list", "items"],
@@ -5954,6 +5960,7 @@ function hasRecognizedEntityList(
     .find(Array.isArray);
   if (!list) return false;
   const idKeys: Record<SyncEntityType, string[]> = {
+    material: [],
     campaign: ["campaign_id", "campaignId", "id"],
     "ad-group": ["adgroup_id", "ad_group_id", "adGroupId", "ad_id", "id"],
     ad: ["creative_id", "creativeId", "ad_id", "adId", "id"],
@@ -6358,6 +6365,7 @@ function countEntities(
   entities: ProviderEntity[],
 ): Record<SyncEntityType, number> {
   const counts: Record<SyncEntityType, number> = {
+    material: 0,
     campaign: 0,
     "ad-group": 0,
     ad: 0,

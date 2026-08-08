@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { SyncEntityType } from "./connection.js";
 
 /**
  * 预算模式。TikTok 在系列层和广告组层各有一个 `budget_mode`，两者互斥：
@@ -160,7 +161,9 @@ export function budgetModeOfCampaign(
 
 /** 判定预算模式所需的最小实体形状。 */
 interface BudgetModeEntityLike {
-  entityType: "campaign" | "ad-group" | "ad";
+  // 系列预算(CBO)只发生在系列与广告组之间，素材不参与；这里放宽成完整的实体类型
+  // 只是为了让调用方不必先窄化，函数体本身仍然只看 campaign / ad-group。
+  entityType: SyncEntityType;
   externalId: string;
   parentCampaignId: string | null;
   campaignBudgetOptimized: boolean;

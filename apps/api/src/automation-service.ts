@@ -1536,7 +1536,8 @@ function compareAutomationCandidates(
     (rulePriorities.get(right.thresholdCode) ?? Number.MAX_SAFE_INTEGER);
   if (priorityDifference !== 0) return priorityDifference;
   if (left.action !== right.action) return left.action === "disable" ? -1 : 1;
-  const layerOrder = { campaign: 0, "ad-group": 1, ad: 2 } as const;
+  // 素材在广告之下，最后处理：先收口上层，避免上层被关之后还去动它的素材。
+  const layerOrder = { campaign: 0, "ad-group": 1, ad: 2, material: 3 } as const;
   const layerDifference =
     layerOrder[left.entity.entityType] - layerOrder[right.entity.entityType]
   ;

@@ -28,7 +28,7 @@ const connection: ProviderConnection = {
 const latestSync: ReadOnlySyncResult = {
   startedAt: "2026-07-18T00:00:00.000Z",
   finishedAt: "2026-07-18T00:01:00.000Z",
-  counts: { campaign: 1, "ad-group": 1, ad: 1 },
+  counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
   warnings: [],
   quality: {
     status: "healthy",

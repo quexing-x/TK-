@@ -259,6 +259,7 @@ class FakeProvider implements AdsProvider {
           campaign: entities.filter((entity) => entity.entityType === "campaign").length,
           "ad-group": entities.filter((entity) => entity.entityType === "ad-group").length,
           ad: entities.filter((entity) => entity.entityType === "ad").length,
+          material: entities.filter((entity) => entity.entityType === "material").length,
         },
         warnings: [],
         quality: {
@@ -1313,7 +1314,7 @@ describe("AutomationService", () => {
     const partialButAdGroupComplete = {
       startedAt: asOf.toISOString(),
       finishedAt: asOf.toISOString(),
-      counts: { campaign: 1, "ad-group": 2, ad: 0 },
+      counts: { campaign: 1, "ad-group": 2, ad: 0, material: 0 },
       warnings: [],
       quality: {
         status: "partial" as const,
@@ -1511,7 +1512,7 @@ describe("AutomationService", () => {
     ], {
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 1, "ad-group": 3, ad: 0 },
+      counts: { campaign: 1, "ad-group": 3, ad: 0, material: 0 },
       warnings: [],
       quality: {
         status: "healthy",

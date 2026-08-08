@@ -523,7 +523,7 @@ describe("AutomationStore", () => {
       {
         startedAt: now,
         finishedAt: now,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(now),
       },
@@ -560,7 +560,7 @@ describe("AutomationStore", () => {
       {
         startedAt: first,
         finishedAt: first,
-        counts: { campaign: 0, "ad-group": 1, ad: 1 },
+        counts: { campaign: 0, "ad-group": 1, ad: 1, material: 0 },
         warnings: [],
         quality: healthySyncQuality(first),
       },
@@ -577,7 +577,7 @@ describe("AutomationStore", () => {
       {
         startedAt: second,
         finishedAt: second,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: ["ad 层超时"],
         quality: {
           ...healthySyncQuality(first),
@@ -630,7 +630,7 @@ describe("AutomationStore", () => {
       {
         startedAt: now,
         finishedAt: now,
-        counts: { campaign: 0, "ad-group": 2, ad: 0 },
+        counts: { campaign: 0, "ad-group": 2, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(now),
       },
@@ -665,7 +665,7 @@ describe("AutomationStore", () => {
       {
         startedAt: first,
         finishedAt: first,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(first),
       },
@@ -679,7 +679,7 @@ describe("AutomationStore", () => {
       {
         startedAt: second,
         finishedAt: second,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: { ...healthySyncQuality(first), status: "invalid" as const, contractValid: false },
       },
@@ -695,7 +695,7 @@ describe("AutomationStore", () => {
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
@@ -703,7 +703,7 @@ describe("AutomationStore", () => {
     expect(store.getLatestReadOnlySync("demo-account", "cookie")).toEqual({
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
@@ -1396,7 +1396,7 @@ describe("AutomationStore", () => {
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: finishedAt,
       finishedAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 0 },
+      counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(finishedAt),
     });
@@ -1416,7 +1416,7 @@ describe("AutomationStore", () => {
       {
         startedAt: healthyAt,
         finishedAt: healthyAt,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: healthySyncQuality(healthyAt),
       },
@@ -1429,7 +1429,7 @@ describe("AutomationStore", () => {
       {
         startedAt: partialAt,
         finishedAt: partialAt,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: ["page incomplete"],
         quality: {
           ...healthySyncQuality(partialAt),
@@ -1457,7 +1457,7 @@ describe("AutomationStore", () => {
     ], {
       startedAt: firstAt,
       finishedAt: firstAt,
-      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(firstAt),
     });
@@ -1467,7 +1467,7 @@ describe("AutomationStore", () => {
     ], {
       startedAt: secondAt,
       finishedAt: secondAt,
-      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(secondAt),
     });
@@ -1888,7 +1888,7 @@ describe("AutomationStore", () => {
     store.saveReadOnlySync("demo-account", "cookie", entities, {
       startedAt: capturedAt,
       finishedAt: capturedAt,
-      counts: { campaign: 0, "ad-group": entities.length, ad: 0 },
+      counts: { campaign: 0, "ad-group": entities.length, ad: 0, material: 0 },
       warnings: [],
       quality: healthySyncQuality(capturedAt),
     });
@@ -2654,7 +2654,7 @@ function saveCopySource(
     {
       startedAt: capturedAt,
       finishedAt: capturedAt,
-      counts: { campaign: 1, "ad-group": 1, ad: 1 },
+      counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(capturedAt),
     },
@@ -2687,7 +2687,7 @@ function saveTargetAsset(
     {
       startedAt: capturedAt,
       finishedAt: capturedAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 1 },
+      counts: { campaign: 0, "ad-group": 0, ad: 1, material: 0 },
       warnings: [],
       quality: healthySyncQuality(capturedAt),
     },
@@ -2722,6 +2722,7 @@ function saveEntity(
         campaign: 0,
         "ad-group": entityType === "ad-group" ? 1 : 0,
         ad: entityType === "ad" ? 1 : 0,
+        material: 0,
       },
       warnings: [],
       quality: healthySyncQuality(capturedAt),

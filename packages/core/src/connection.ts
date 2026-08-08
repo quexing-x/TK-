@@ -192,6 +192,9 @@ export const SyncEntityTypeSchema = z.enum([
   "campaign",
   "ad-group",
   "ad",
+  // 程序化创意下一个广告内含多条素材，投放实际是按素材粒度停开的。广告层保留
+  // 不动（自动申诉仍按 creative_id 走），素材单独成层。
+  "material",
 ]);
 export type SyncEntityType = z.infer<typeof SyncEntityTypeSchema>;
 

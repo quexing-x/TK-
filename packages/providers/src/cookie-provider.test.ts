@@ -1135,6 +1135,7 @@ describe("CookieAdsProvider", () => {
       campaign: 1,
       "ad-group": 1,
       ad: 0,
+      material: 0,
     });
     expect(output.result.warnings).not.toContain(
       "campaign 响应成功，但暂未识别到列表数据。",
@@ -1203,7 +1204,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(output.result.quality.status).toBe("healthy");
-    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 1 });
+    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 1, material: 0 });
     expect(requested.find((item) => item.url.includes("campaign/list"))?.body).toMatchObject({
       common_req: {
         dimensions: ["campaign_id"],
@@ -1390,7 +1391,7 @@ describe("CookieAdsProvider", () => {
     });
 
     expect(output.result.quality.status).toBe("healthy");
-    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 0 });
+    expect(output.result.counts).toEqual({ campaign: 1, "ad-group": 1, ad: 0, material: 0 });
     expect(output.entities).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ entityType: "ad", externalId: "adgroup-1" }),
     ]));

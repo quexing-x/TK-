@@ -53,6 +53,7 @@ import type {
   ThresholdConfig,
   ScheduledEntityActionRecord,
   AccountProviderCapabilities,
+  SyncEntityType,
 } from "@tk-auto/core";
 import {
   api,
@@ -2177,8 +2178,8 @@ function operatorLabel(operator: ThresholdConfig["operator"]): string {
   return { gt: ">", gte: "≥", lt: "<", lte: "≤" }[operator];
 }
 
-function entityTypeLabel(entityType: "campaign" | "ad-group" | "ad"): string {
-  return { campaign: "广告系列", "ad-group": "广告组", ad: "广告" }[
+function entityTypeLabel(entityType: SyncEntityType): string {
+  return { campaign: "广告系列", "ad-group": "广告组", ad: "广告", material: "素材" }[
     entityType
   ];
 }

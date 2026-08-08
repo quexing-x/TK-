@@ -134,6 +134,7 @@ const levelSwitches: Record<SyncEntityType, AutomationSwitchKey> = {
   campaign: "manageCampaignStatus",
   "ad-group": "manageAdGroupStatus",
   ad: "manageAdStatus",
+  material: "manageMaterialStatus",
 };
 
 /**
@@ -388,6 +389,10 @@ function normalizeStatus(
       "primary_status",
       "operation_status",
     ],
+    // 素材只读它自己那个状态字段。刻意不回退到 ad_/creative_ 的状态：那两个是
+    // 广告与广告组的状态，素材行里出现它们只说明素材在“继承”上层的关停，不代表
+    // 素材自己被关。回退过去会把整批素材误判成已关而永远不处理。
+    material: ["material_primary_status"],
   };
   let hasProviderStatus = false;
   for (const key of keys[entityType]) {
@@ -477,4 +482,6 @@ const nameKeys: Record<SyncEntityType, string[]> = {
   campaign: ["campaign_name", "name"],
   "ad-group": ["adgroup_name", "ad_group_name", "ad_name", "name"],
   ad: ["creative_name", "ad_name", "name"],
+  // 素材行里可读的名字是被推广的帖子标题。
+  material: ["main_entity_name", "mix_material_virtual_creative_name", "name"],
 };

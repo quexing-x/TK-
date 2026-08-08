@@ -101,7 +101,7 @@ describe("local API", () => {
       // 已灌好的快照即可，验证的是「确实调用了」，不是刷新出的新内容。
       syncReadOnly: async () => ({
         entities: seedEntities,
-        result: { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) },
+        result: { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0, material: 0 }, warnings: [], quality: testSyncQuality(syncedAt) },
       }),
     } as unknown as AdsProvider & { copyCampaign: typeof copyCampaign };
     store.saveProviderConnectionSettings("demo-account", {
@@ -127,7 +127,7 @@ describe("local API", () => {
     });
     const syncedAt = new Date().toISOString();
     store.saveReadOnlySync("demo-account", "cookie", seedEntities,
-      { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
+      { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0, material: 0 }, warnings: [], quality: testSyncQuality(syncedAt) });
     await app.close();
     app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
 
@@ -180,7 +180,7 @@ describe("local API", () => {
       { entityType: "campaign" as const, externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
       { entityType: "ad-group" as const, externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
     ];
-    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 1, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
+    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 1, ad: 0, material: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
@@ -337,7 +337,7 @@ describe("local API", () => {
       { entityType: "campaign" as const, externalId: "c2", payload: { campaign_id: "c2", campaign_name: "同名系列" } },
       { entityType: "ad-group" as const, externalId: "g2", payload: { campaign_id: "c2", ad_name: "组2" } },
     ];
-    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 2, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
+    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 2, "ad-group": 2, ad: 0, material: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
@@ -394,7 +394,7 @@ describe("local API", () => {
       { entityType: "ad-group" as const, externalId: "adgroup-1", payload: { campaign_id: "campaign-1", ad_name: "组A" } },
       { entityType: "ad-group" as const, externalId: "other-group", payload: { campaign_id: "campaign-9", ad_name: "别的系列的组" } },
     ];
-    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
+    const syncResult = { startedAt: syncedAt, finishedAt: syncedAt, counts: { campaign: 1, "ad-group": 2, ad: 0, material: 0 }, warnings: [], quality: testSyncQuality(syncedAt) };
     const provider = {
       kind: "cookie",
       displayName: "campaign copy provider",
@@ -1181,7 +1181,7 @@ describe("local API", () => {
       "demo-account",
       "cookie",
       [{ entityType: "ad", externalId: "source-ad", payload: { ad_name: "源广告" } }],
-      { startedAt: now, finishedAt: now, counts: { campaign: 0, "ad-group": 0, ad: 1 }, warnings: [], quality: testSyncQuality(now) },
+      { startedAt: now, finishedAt: now, counts: { campaign: 0, "ad-group": 0, ad: 1, material: 0 }, warnings: [], quality: testSyncQuality(now) },
     );
     const target = store.createAccount({ displayName: "目标", accountType: "standard", enabled: true, providerKind: "cookie" });
     const response = await app.inject({
@@ -1249,7 +1249,7 @@ describe("local API", () => {
       store.saveReadOnlySync(accountId, "cookie", [], {
         startedAt: syncAt,
         finishedAt: syncAt,
-        counts: { campaign: 0, "ad-group": 0, ad: 0 },
+        counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
         warnings: [],
         quality: testSyncQuality(syncAt),
       });
@@ -1416,7 +1416,7 @@ describe("local API", () => {
       {
         startedAt: now,
         finishedAt: now,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: testSyncQuality(now),
       },
@@ -1462,7 +1462,7 @@ describe("local API", () => {
       ignored: false,
     });
     expect(latestSync.json()).toMatchObject({
-      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
       warnings: [],
       quality: testSyncQuality(now),
     });
@@ -1481,7 +1481,7 @@ describe("local API", () => {
       {
         startedAt: firstAt,
         finishedAt: firstAt,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: testSyncQuality(firstAt),
       },
@@ -1499,7 +1499,7 @@ describe("local API", () => {
       {
         startedAt: latestAt,
         finishedAt: latestAt,
-        counts: { campaign: 0, "ad-group": 1, ad: 0 },
+        counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
         warnings: [],
         quality: testSyncQuality(latestAt),
       },
@@ -1524,7 +1524,7 @@ describe("local API", () => {
         { entityType: "ad-group", externalId: "g1", payload: { adgroup_name: "组 1", row_data: { stat_cost: "3", click_cnt: "2" } } },
         { entityType: "ad-group", externalId: "g2", payload: { adgroup_name: "组 2", row_data: { stat_cost: "5", click_cnt: "4" } } },
       ],
-      { startedAt: capturedAt, finishedAt: capturedAt, counts: { campaign: 0, "ad-group": 2, ad: 0 }, warnings: [], quality: testSyncQuality(capturedAt) },
+      { startedAt: capturedAt, finishedAt: capturedAt, counts: { campaign: 0, "ad-group": 2, ad: 0, material: 0 }, warnings: [], quality: testSyncQuality(capturedAt) },
     );
     const response = await app.inject({
       method: "GET",
@@ -1747,7 +1747,7 @@ describe("local API", () => {
           result: {
             startedAt: finishedAt,
             finishedAt,
-            counts: { campaign: 0, "ad-group": 1, ad: 0 },
+            counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
             warnings: [],
             quality: testSyncQuality(finishedAt),
           },
@@ -1764,7 +1764,7 @@ describe("local API", () => {
     }], {
       startedAt: syncedAt,
       finishedAt: syncedAt,
-      counts: { campaign: 0, "ad-group": 1, ad: 0 },
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
       warnings: [],
       quality: testSyncQuality(syncedAt),
     });
@@ -1870,7 +1870,7 @@ describe("local API", () => {
           result: {
             startedAt: finishedAt,
             finishedAt,
-            counts: { campaign: 1, "ad-group": 1, ad: 0 },
+            counts: { campaign: 1, "ad-group": 1, ad: 0, material: 0 },
             warnings: [],
             quality: testSyncQuality(finishedAt),
           },
@@ -1963,7 +1963,7 @@ describe("local API", () => {
         result: {
           startedAt: "2026-07-17T00:00:00.000Z",
           finishedAt: "2026-07-17T00:00:01.000Z",
-          counts: { campaign: 0, "ad-group": 0, ad: 0 },
+          counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
           warnings: [],
           quality: testSyncQuality("2026-07-17T00:00:01.000Z"),
         },
@@ -2007,7 +2007,7 @@ describe("local API", () => {
           result: {
             startedAt: finishedAt,
             finishedAt,
-            counts: { campaign: 1, "ad-group": 1, ad: 1 },
+            counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
             warnings: [],
             quality: {
               ...testSyncQuality(finishedAt),
@@ -2227,7 +2227,7 @@ describe("local API", () => {
         result: {
           startedAt: finishedAt,
           finishedAt,
-          counts: { campaign: 0, "ad-group": 0, ad: 0 },
+          counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
           warnings: [],
           quality: {
             ...testSyncQuality(finishedAt),
@@ -2635,7 +2635,7 @@ describe("local API", () => {
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: partialAt,
       finishedAt: partialAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 0 },
+      counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
       warnings: ["incomplete"],
       quality: {
         ...testSyncQuality(partialAt),
@@ -2674,7 +2674,7 @@ describe("local API", () => {
       store.saveReadOnlySync("demo-account", "cookie", [], {
         startedAt: partialAt,
         finishedAt: partialAt,
-        counts: { campaign: 0, "ad-group": 0, ad: 0 },
+        counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
         warnings: ["concurrent contract drift"],
         quality: {
           ...testSyncQuality(partialAt),
@@ -2989,6 +2989,7 @@ describe("local API", () => {
             campaign: entities.filter((item) => item.entityType === "campaign").length,
             "ad-group": entities.filter((item) => item.entityType === "ad-group").length,
             ad: entities.filter((item) => item.entityType === "ad").length,
+            material: 0,
           },
           warnings: [],
           quality: testSyncQuality("2026-07-17T00:00:01.000Z"),
@@ -3016,7 +3017,7 @@ describe("local API", () => {
     store.saveReadOnlySync("demo-account", "cookie", [], {
       startedAt: syncAt,
       finishedAt: syncAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 0 },
+      counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
       warnings: [],
       quality: testSyncQuality(syncAt),
     });
@@ -3136,7 +3137,7 @@ describe("local API", () => {
     }], {
       startedAt: syncAt,
       finishedAt: syncAt,
-      counts: { campaign: 0, "ad-group": 0, ad: 1 },
+      counts: { campaign: 0, "ad-group": 0, ad: 1, material: 0 },
       warnings: [],
       quality: testSyncQuality(syncAt),
     });
@@ -3203,7 +3204,7 @@ describe("local API", () => {
             result: {
               startedAt: refreshedAt,
               finishedAt: refreshedAt,
-              counts: { campaign: 1, "ad-group": 1, ad: 1 },
+              counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
               warnings: [],
               quality: testSyncQuality(refreshedAt),
             },
@@ -3228,8 +3229,8 @@ describe("local API", () => {
             startedAt: refreshedAt,
             finishedAt: refreshedAt,
             counts: creationDispatched
-              ? { campaign: 1, "ad-group": 1, ad: 1 }
-              : { campaign: 0, "ad-group": 0, ad: 1 },
+              ? { campaign: 1, "ad-group": 1, ad: 1, material: 0 }
+              : { campaign: 0, "ad-group": 0, ad: 1, material: 0 },
             warnings: creationDispatched && ordinaryAdListEmptyAfterCreation
               ? ["ad 响应成功，但暂未识别到列表数据。"]
               : [],
@@ -3330,7 +3331,7 @@ function saveApiCopySource(store: AutomationStore, adId: string, videoCode: stri
   ], {
     startedAt: syncAt,
     finishedAt: syncAt,
-    counts: { campaign: 1, "ad-group": 1, ad: 1 },
+    counts: { campaign: 1, "ad-group": 1, ad: 1, material: 0 },
     warnings: [],
     quality: testSyncQuality(syncAt),
   });
