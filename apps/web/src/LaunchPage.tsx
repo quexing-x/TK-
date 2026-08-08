@@ -253,10 +253,8 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       && selectedPresetLaunchReady
       && copyConfigsValid,
   );
-  // 原帖检查不再阻断创建：没授权到的原帖本来就复制不过去，执行时那一条自己失败
-  // 即可（系列批次已改为逐条隔离）。阻断项与倒计时降级成提示，只要预览里还有可
-  // 创建的条目就允许直接点。
-  const previewValid = Boolean(copyPreview && copyPreview.items.length > 0);
+  const previewReadiness = copyPreviewReadiness(copyPreview);
+  const previewValid = previewReadiness.usable;
   const previewSources = copyPreview
     ? copyPreview.sourceSnapshots.length > 0 ? copyPreview.sourceSnapshots : [copyPreview.sourceSnapshot]
     : [];
@@ -275,10 +273,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     launchMode === "copy" && !copySourceReady ? "源账户缺少广告读取能力，请重新检测接入。" : null,
     launchMode === "copy" && !copyConfigsValid ? "请完整填写每个目标账户的创建数量、预算、出价和创建时间。" : null,
     launchMode === "copy" && copyTaskCount > 100 ? "单次迁移最多创建 100 个广告组，请分批操作。" : null,
-    launchMode === "copy" && !copyPreview ? "请先生成并核对复制差异预览。" : null,
-    launchMode === "copy" && copyPreview && copyPreview.items.length === 0
-      ? `原帖检查没有产出任何可创建的广告组：${copyPreview.blockers[0] ?? "目标账户均无可用原帖。"}`
-      : null,
+    launchMode === "copy" ? previewReadiness.blocker : null,
   ].filter((item): item is string => Boolean(item));
 
   const load = async () => {
@@ -542,7 +537,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
         targetConfigs: copyTargetConfigs,
       });
       setCopyPreview(preview);
-      onError(preview.safeToCreate ? null : preview.blockers[0] ?? "复制差异预览存在阻断项。");
+      onError(copyPreviewReadiness(preview).blocker);
     } catch (cause) { onError(messageOf(cause)); }
     finally { copyPreviewInFlight.current = false; setBusy(false); }
   };
@@ -615,7 +610,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     <nav aria-label="广告创建流程" className="launch-workflow-steps">
       <span className="active"><b>1</b><strong>选择方式</strong><small>确定创建范围</small></span>
       <span className={selectedAccountIds.length > 0 ? "complete" : ""}><b>2</b><strong>账户与预设</strong><small>配置发布上下文</small></span>
-      <span className={launchMode === "copy" ? copyPreview?.safeToCreate ? "complete" : "" : sheet?.errors.length === 0 && sheet.rows.length ? "complete" : ""}><b>3</b><strong>{launchMode === "copy" ? "原帖检查" : "导入校验"}</strong><small>核对创建内容</small></span>
+      <span className={launchMode === "copy" ? previewValid ? "complete" : "" : sheet?.errors.length === 0 && sheet.rows.length ? "complete" : ""}><b>3</b><strong>{launchMode === "copy" ? "原帖检查" : "导入校验"}</strong><small>核对创建内容</small></span>
       <span className={canSave ? "ready" : ""}><b>4</b><strong>执行发布</strong><small>进入后台队列</small></span>
     </nav>
 
@@ -659,7 +654,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <article><strong>{launchMode === "copy" ? "原帖可用性" : "视频素材"}</strong><span>{launchMode === "copy" ? "按 TikTok item_id 核对每个目标账户；缺少任一原帖都会在发布前阻断。" : "普通创建继续使用表格视频代码及预设中的 TikTok Post 映射。"}</span></article>
       <article><strong>广告预设</strong><span>{selectedPreset ? `当前使用“${selectedPreset.name}”` : "请选择广告预设。"}</span></article>
       <article><strong>创建功能</strong><span>{selectedAccountIds.length === 0 ? "请选择发布账户。" : notReadyAccountIds.length > 0 ? "所选账户的连接或创建能力尚未就绪。" : selectedPresetLaunchReady ? "当前预设参数完整，日常投放无需重复填写内部字段。" : "当前预设参数不完整，不能发起创建。"}</span></article>
-      <article><strong>{launchMode === "copy" ? "迁移确认" : "导入信息"}</strong><span>{launchMode === "copy" ? copyPreview?.safeToCreate ? `原帖和逐账户配置已冻结，共 ${copyPreview.items.length} 个广告组。` : "选择源广告组并生成最终确认预览。" : sheet?.errors.length === 0 && sheet.rows.length ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组。` : "导入表只需填写系列名称、广告组名称、视频代码和产品 URL。"}</span></article>
+      <article><strong>{launchMode === "copy" ? "迁移确认" : "导入信息"}</strong><span>{launchMode === "copy" ? previewValid ? `原帖和逐账户配置已冻结，共 ${copyPreview!.items.length} 个广告组。` : "选择源广告组并生成最终确认预览。" : sheet?.errors.length === 0 && sheet.rows.length ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组。` : "导入表只需填写系列名称、广告组名称、视频代码和产品 URL。"}</span></article>
     </div></div>
 
     {launchMode !== "copy" && <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
@@ -702,7 +697,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       {selectedPreset && <div className="selected-preset-summary" aria-label="当前广告预设详情"><strong>{selectedPreset.name}</strong><div><span><small>地区</small>{selectedPreset.region}</span><span><small>每日预算</small>{selectedPreset.dailyBudget}</span><span><small>出价</small>{selectedPreset.bid ?? "自动"}</span><span><small>创建时间</small>{presetStartLabel(selectedPreset)}</span><span><small>预设初始状态</small>{selectedPreset.initialStatus === "enabled" ? "开启" : "关闭"}</span><span><small>创建参数</small>{selectedPresetLaunchReady ? "已就绪" : "待补全"}</span></div>{launchMode === "copy" && <p>原帖迁移的数量、预算、出价、时间和创建后状态，以上方每个目标账户的配置为准。</p>}</div>}
       {launchMode !== "copy" && <><button className="sheet-dropzone" disabled={busy || !selectedPreset} onClick={() => fileInput.current?.click()} type="button"><Upload size={22} /><strong>{fileName || "选择 .xlsx / .csv 文件"}</strong><span>{selectedPreset ? "导入不会立即创建广告。" : "请先选择广告预设。"}</span></button><input ref={fileInput} accept=".xlsx,.csv" hidden onChange={(event) => void importFile(event.target.files?.[0])} type="file" />{sheet && <div className="sheet-result"><div className="sheet-summary"><span className={sheet.errors.length === 0 ? "status active" : "status danger"}>{sheet.errors.length === 0 ? <CheckCircle2 size={14} /> : <X size={14} />}{sheet.errors.length === 0 ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组` : `${sheet.errors.length} 个错误`}</span></div>{sheet.errors.length > 0 && <IssueList issues={sheet.errors} />}{sheet.rows.length > 0 && <div className="table-wrap"><table className="sheet-preview-table"><thead><tr><th>来源行</th><th>推广系列</th><th>广告组</th><th>视频代码</th><th>产品 URL</th><th>广告名称</th><th>预算</th><th>出价</th></tr></thead><tbody>{sheet.rows.slice(0, 100).map((row) => <tr key={`${row.rowNumber}-${row.videoCode}`}><td>{row.rowNumber}</td><td>{row.campaignName}</td><td>{row.adGroupName}</td><td>{row.videoCode}</td><td><small>{row.productUrl}</small></td><td>{row.adName}</td><td>{row.dailyBudget}</td><td>{row.bid ?? "自动"}</td></tr>)}</tbody></table></div>}</div>}</>}
       {launchMode === "copy" && <div className="copy-preview-actions"><button className="secondary-button" disabled={busy || !canPreviewCopy || previewValid} onClick={() => void generateCopyPreview()} type="button">{previewValid ? "迁移预览已生成" : busy ? "正在检查原帖…" : "检查原帖并生成迁移预览"}</button><small>{previewValid ? "配置未变化时复用当前预览；修改任一配置后才会重新检查。" : "实时读取源广告组，并逐个目标账户核对全部 item_id；预览 15 分钟内有效。"}</small></div>}
-      {copyPreview && <div className={copyPreview.safeToCreate ? "creation-template-note copy-preview-result migration-confirmation" : "sheet-issues warning copy-preview-result"}><strong>{copyPreview.safeToCreate ? `最终确认 · ${previewSources.length} 个源组 · ${previewSources.reduce((sum, source) => sum + source.posts.length, 0)} 帖 · ${copyPreview.items.length} 个广告组` : "原帖检查存在阻断项"}</strong><span className={previewSecondsLeft > 0 ? "status warning" : "status danger"}>预览有效期：{formatCountdown(previewSecondsLeft)}</span>{copyPreview.blockers.length > 0 && <ul>{copyPreview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}{copyPreview.warnings.length > 0 && <ul>{copyPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}{copyPreview.safeToCreate && <><div className="migration-source-list">{previewSources.map((source) => <div className="migration-source-summary" key={source.adGroupId}><strong>{source.campaignName} / {source.adGroupName}</strong><span>源广告组 ID：{source.adGroupId}</span><span>产品 URL：{source.productUrl ?? "未读取"}</span><span>原帖：{source.posts.length} 条</span><details><summary>查看前 5 条原帖</summary>{source.posts.slice(0, 5).map((post) => <small key={post.itemId}>{post.displayName ?? post.itemId} · item_id：{post.itemId}</small>)}</details></div>)}</div><div className="table-wrap"><table><thead><tr><th>目标账户</th><th>总数量</th><th>预算 / 出价</th><th>创建后状态</th><th>自动生成广告组名称</th><th>最终创建时间</th><th>原帖核对</th></tr></thead><tbody>{copyPreview.targetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); const accountItems = copyPreview.items.filter((candidate) => candidate.accountId === config.accountId); const firstItem = accountItems[0]; const matchedPosts = new Map(accountItems.flatMap((item) => item.targetPostMapping.posts.map((post) => [post.itemId, post]))).size; const expectedPosts = previewSources.reduce((sum, source) => sum + source.posts.length, 0); return <tr key={config.accountId}><td>{account?.displayName ?? config.accountId}<small>{account?.timezone ?? "UTC"}</small></td><td>{config.quantity} × {previewSources.length} = {accountItems.length}</td><td>{config.dailyBudget} / {config.bid ?? "自动"}</td><td><span className={config.initialStatus === "enabled" ? "status active" : "status"}>{config.initialStatus === "enabled" ? "开启" : "关闭"}</span></td><td>{accountItems.slice(0, 4).map((item) => <small key={`${item.sourceSnapshot.adGroupId}-${item.itemIndex}`}>{item.launchRow.adGroupName}</small>)}{accountItems.length > 4 && <small>另 {accountItems.length - 4} 个…</small>}</td><td>{firstItem?.launchRow.startAt ? formatInTimeZone(firstItem.launchRow.startAt, account?.timezone ?? "UTC") : "立即"}</td><td>{matchedPosts}/{expectedPosts} 已匹配</td></tr>; })}</tbody></table></div></>}</div>}
+      {copyPreview && <div className={previewValid ? "creation-template-note copy-preview-result migration-confirmation" : "sheet-issues warning copy-preview-result"}><strong>{previewValid ? `最终确认 · ${previewSources.length} 个源组 · ${previewSources.reduce((sum, source) => sum + source.posts.length, 0)} 帖 · ${copyPreview.items.length} 个广告组` : "原帖检查没有产出任何可创建的广告组"}</strong><span className="status">{previewSecondsLeft > 0 ? `原帖证据已冻结 · ${formatCountdown(previewSecondsLeft)}` : "原帖证据已过期，执行时会重新回读并逐条校验"}</span>{copyPreview.blockers.length > 0 && <><small>以下情况会在执行时跳过，其余广告组照常创建：</small><ul>{copyPreview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></>}{copyPreview.warnings.length > 0 && <ul>{copyPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}{previewValid && <><div className="migration-source-list">{previewSources.map((source) => <div className="migration-source-summary" key={source.adGroupId}><strong>{source.campaignName} / {source.adGroupName}</strong><span>源广告组 ID：{source.adGroupId}</span><span>产品 URL：{source.productUrl ?? "未读取"}</span><span>原帖：{source.posts.length} 条</span><details><summary>查看前 5 条原帖</summary>{source.posts.slice(0, 5).map((post) => <small key={post.itemId}>{post.displayName ?? post.itemId} · item_id：{post.itemId}</small>)}</details></div>)}</div><div className="table-wrap"><table><thead><tr><th>目标账户</th><th>总数量</th><th>预算 / 出价</th><th>创建后状态</th><th>自动生成广告组名称</th><th>最终创建时间</th><th>原帖核对</th></tr></thead><tbody>{copyPreview.targetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); const accountItems = copyPreview.items.filter((candidate) => candidate.accountId === config.accountId); const firstItem = accountItems[0]; const matchedPosts = new Map(accountItems.flatMap((item) => item.targetPostMapping.posts.map((post) => [post.itemId, post]))).size; const expectedPosts = previewSources.reduce((sum, source) => sum + source.posts.length, 0); return <tr key={config.accountId}><td>{account?.displayName ?? config.accountId}<small>{account?.timezone ?? "UTC"}</small></td><td>{config.quantity} × {previewSources.length} = {accountItems.length}</td><td>{config.dailyBudget} / {config.bid ?? "自动"}</td><td><span className={config.initialStatus === "enabled" ? "status active" : "status"}>{config.initialStatus === "enabled" ? "开启" : "关闭"}</span></td><td>{accountItems.slice(0, 4).map((item) => <small key={`${item.sourceSnapshot.adGroupId}-${item.itemIndex}`}>{item.launchRow.adGroupName}</small>)}{accountItems.length > 4 && <small>另 {accountItems.length - 4} 个…</small>}</td><td>{firstItem?.launchRow.startAt ? formatInTimeZone(firstItem.launchRow.startAt, account?.timezone ?? "UTC") : "立即"}</td><td>{matchedPosts}/{expectedPosts} 已匹配</td></tr>; })}</tbody></table></div></>}</div>}
       {publishBlockers.length > 0 && <div className="sheet-issues warning publish-blockers" id="publish-blockers"><strong>暂不能发布</strong><ul>{publishBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}
       <div className="launch-dispatch-mode"><strong>执行方式</strong><label><input checked={dispatchMode === "queue"} name="launch-dispatch-mode" onChange={() => setDispatchMode("queue")} type="radio" /> 后台队列（默认）</label><label><input checked={dispatchMode === "immediate"} name="launch-dispatch-mode" onChange={() => setDispatchMode("immediate")} type="radio" /> 立即执行（显示逐项阶段）</label></div><div className="form-actions"><button aria-describedby={publishBlockers.length > 0 ? "publish-blockers" : undefined} className="primary-button" disabled={busy || !canSave} title={publishBlockers[0]} onClick={() => void savePlan()} type="button">{dispatchMode === "immediate" ? "确认并立即创建" : launchMode === "single" ? "创建并发布" : launchMode === "copy" ? "确认配置并加入迁移队列" : "向所选账户发布"}{launchMode === "copy" ? `（${copyTaskCount} 个广告组）` : sheet?.rows.length ? `（${sheet.rows.length} 条 × ${selectedAccountIds.length} 个账户）` : ""}</button></div>
       {executionFeedback && <div className={executionFeedback.tone === "success" ? "creation-template-note" : `sheet-issues ${executionFeedback.tone}`}><strong>{executionFeedback.title}</strong><ul>{executionFeedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul></div>}
@@ -769,6 +764,29 @@ function toLocalInput(value: string | null): string {
   const date = new Date(value);
   const pad = (number: number) => String(number).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * 复制预览能不能直接创建。
+ *
+ * 原帖检查不再阻断：跨账户复制最常见的阻断项是「目标账户没授权到某条原帖」，而
+ * 没授权的本来就复制不过去，执行时那一条自己失败即可（系列批次已改为逐条隔离，
+ * 不会拖垮同批其余广告组）。把人挡在创建之前、逼着反复重新生成预览没有意义。
+ *
+ * 预览过期同样不阻断：过期只说明冻结的原帖证据可能变旧，执行时会重新回读并逐条
+ * 校验。真正还该拦的只剩一种——一条可创建的条目都没有，那样的计划没有意义。
+ */
+export function copyPreviewReadiness(
+  preview: LaunchCopyPreviewRecord | null,
+): { usable: boolean; blocker: string | null } {
+  if (!preview) return { usable: false, blocker: "请先生成并核对复制差异预览。" };
+  if (preview.items.length === 0) {
+    return {
+      usable: false,
+      blocker: `原帖检查没有产出任何可创建的广告组：${preview.blockers[0] ?? "目标账户均无可用原帖。"}`,
+    };
+  }
+  return { usable: true, blocker: null };
 }
 
 export function presetStartLabel(preset: LaunchPresetRecord): string {
