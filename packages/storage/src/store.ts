@@ -1585,9 +1585,19 @@ export class AutomationStore {
     );
     // healthy 时三层全刷（与历史行为一致）；partial 时只刷本轮确实取全的层级。
     // invalid（契约漂移）不刷任何层：那是全局问题，没有哪一层可信。
+    //
+    // 素材层不跟着 healthy 一起无条件刷新：它只覆盖"当天有消耗的广告"，一轮里
+    // 本来就不是全量。跟着刷会把上一轮存下、本轮没查的素材整片下线，规则随即
+    // 认为它们不存在。改为只在本轮确实取全时（completeEntityTypes 里带 material）
+    // 才刷这一层。
     const refreshed = new Set<SyncEntityType>(
       quality.status === "healthy"
-        ? (["campaign", "ad-group", "ad"] as const)
+        ? ([
+            "campaign",
+            "ad-group",
+            "ad",
+            ...(quality.completeEntityTypes?.includes("material") ? (["material"] as const) : []),
+          ] as SyncEntityType[])
         : quality.status === "partial"
           ? quality.completeEntityTypes ?? []
           : [],
@@ -5551,7 +5561,7 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS provider_entities (
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         provider_kind TEXT NOT NULL,
-        entity_type TEXT NOT NULL CHECK (entity_type IN ('campaign', 'ad-group', 'ad')),
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('campaign', 'ad-group', 'ad', 'material')),
         external_id TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         synced_at TEXT NOT NULL,
@@ -6336,6 +6346,32 @@ export class AutomationStore {
            )`,
         )
         .run(new Date().toISOString());
+    });
+    // SQLite 不能改 CHECK 约束，只能重建表。存量库里 entity_type 仍是三层，
+    // 素材写进去会被约束直接拒绝。
+    this.applyMigration("provider-entities-material-level-v1", () => {
+      const definition = this.db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_entities'",
+      ).get() as SqlRow | undefined;
+      if (!definition || String(definition.sql).includes("'material'")) return;
+      this.db.exec(`
+        CREATE TABLE provider_entities_material_migration (
+          account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          provider_kind TEXT NOT NULL,
+          entity_type TEXT NOT NULL CHECK (entity_type IN ('campaign', 'ad-group', 'ad', 'material')),
+          external_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          synced_at TEXT NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+          PRIMARY KEY (account_id, provider_kind, entity_type, external_id)
+        );
+        INSERT INTO provider_entities_material_migration
+          (account_id, provider_kind, entity_type, external_id, payload_json, synced_at, is_current)
+        SELECT account_id, provider_kind, entity_type, external_id, payload_json, synced_at, is_current
+        FROM provider_entities;
+        DROP TABLE provider_entities;
+        ALTER TABLE provider_entities_material_migration RENAME TO provider_entities;
+      `);
     });
     this.applyMigration("remove-account-execution-mode-v1", () => {
       const accountColumns = this.db.prepare("PRAGMA table_info(accounts)").all() as SqlRow[];
