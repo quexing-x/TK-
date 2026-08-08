@@ -109,6 +109,10 @@ export const CapturedCookieRequestSchema = z.object({
     "ad-group-status",
     "ad-status",
     "appeal",
+    // 素材层：读用 expand/material/list，写用 procedural_material/update_status。
+    // 两者都从会话请求派生，不需要用户单独导入 cURL。
+    "material",
+    "material-status",
   ]),
   action: z.enum(["enable", "disable"]).optional(),
   url: TikTokHttpsUrlSchema,

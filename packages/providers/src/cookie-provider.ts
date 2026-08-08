@@ -519,6 +519,51 @@ export class CookieAdsProvider implements AdsProvider {
       }
     }
 
+    // 素材层：只对当天有消耗的广告拉。
+    //
+    // expand/material/list 只能按广告逐个查（"expand" 就是展开单个广告），没有
+    // 全账户列表。生产上 300 多个广告逐个查会把一轮轮询彻底拖垮，而广告层本来
+    // 就常因为慢而超时。同时，九条规则**全部**要消耗或转化才可能命中（最低门槛
+    // 是 spend≥1，CPC 类还要有点击），零消耗的素材永远触发不了任何一条——所以
+    // 按"当天有消耗"筛选不会漏掉任何本来会被处理的素材。
+    if (importedAdGroupRead) {
+      const materialTimezone = context.timezone ?? "UTC";
+      const materialNow = new Date();
+      const spendingAdIds = entities
+        .filter((entity) => entity.entityType === "ad")
+        .filter((entity) => entitySpend(entity.payload) > 0)
+        .map((entity) => entity.externalId);
+      let materialFailures = 0;
+      for (const creativeId of spendingAdIds.slice(0, MAX_MATERIAL_ADS_PER_SYNC)) {
+        try {
+          const payload = await requestCookieJson(
+            materialListRequest(importedAdGroupRead, creativeId, {
+              startDate: formatDateInTimezone(materialNow, materialTimezone),
+              endDate: formatDateInTimezone(materialNow, materialTimezone),
+            }),
+            credential,
+          );
+          entities.push(...extractEntities(payload, "material"));
+        } catch {
+          materialFailures += 1;
+        }
+      }
+      if (spendingAdIds.length > MAX_MATERIAL_ADS_PER_SYNC) {
+        // 静默截断会让人以为素材都覆盖到了。宁可吵一点。
+        warnings.push(
+          `本轮有 ${spendingAdIds.length} 个广告有消耗，超过单轮素材拉取上限 ${MAX_MATERIAL_ADS_PER_SYNC}，其余广告的素材本轮未取。`,
+        );
+        partialFailures.push("material:truncated");
+      }
+      if (materialFailures > 0) {
+        warnings.push(`${materialFailures} 个广告的素材列表拉取失败，这些广告的素材本轮不参与规则判定。`);
+        partialFailures.push("material:request-failed");
+      }
+      if (spendingAdIds.length > 0 && materialFailures === 0) {
+        completeEntityTypes.push("material");
+      }
+    }
+
     const uniqueEntities = dedupeEntities(entities);
     const counts = countEntities(uniqueEntities);
     for (const entityType of emptyResponses) {
@@ -573,7 +618,53 @@ export class CookieAdsProvider implements AdsProvider {
     }
     const results: StatusMutationResult[] = [];
 
+    // 素材的启停不靠导入的开关模板：它的报文形状与三层通用模板完全不同（要同时
+    // 带广告组 ID 与素材 ID），只能从会话请求派生。
+    const materialSessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+
     for (const mutation of mutations) {
+      if (mutation.entityType === "material") {
+        if (!materialSessionRequest) {
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            message: "尚未导入广告组列表 cURL，无法建立素材启停会话。",
+          });
+          continue;
+        }
+        let request: CapturedCookieRequest;
+        try {
+          request = materializeMaterialStatusRequest(materialSessionRequest, mutation);
+        } catch (cause) {
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            message: cause instanceof Error ? cause.message : "素材启停请求构造失败。",
+          });
+          continue;
+        }
+        try {
+          await requestCookieJson(request, credential);
+          results.push({
+            ...mutation,
+            ok: true,
+            message: `素材${mutation.action === "enable" ? "开启" : "关闭"}成功。`,
+          });
+        } catch (cause) {
+          const detail = cause instanceof Error ? cause.message : "素材启停请求失败。";
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: cause instanceof RetryableCreationError ? "retryable" : "unknown",
+            message: detail,
+          });
+        }
+        continue;
+      }
       const target = `${mutation.entityType}-status` as const;
       const template = credential.requestTemplates?.find(
         (item) => item.target === target && item.action === mutation.action,
@@ -5891,7 +5982,7 @@ function extractEntities(
 ): ProviderEntity[] {
   const data = isRecord(payload.data) ? payload.data : payload;
   const typeKeys: Record<SyncEntityType, string[]> = {
-    material: [],
+    material: ["table", "list", "items"],
     campaign: ["campaigns", "campaign_list", "table", "list", "items"],
     "ad-group": ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"],
     ad: ["ads", "ad_list", "table", "list", "items"],
@@ -5918,12 +6009,16 @@ function extractEntities(
       return [];
     }
     const idKeys: Record<SyncEntityType, string[]> = {
+      // 素材的 ID 走 materialDraftId：真机把它写成 "[1872777743628513]"，
+      // 是个字符串包着的数组，直接当 ID 用会连方括号一起发出去。
       material: [],
       campaign: ["campaign_id", "campaignId", "id"],
       "ad-group": ["adgroup_id", "ad_group_id", "adGroupId", "ad_id", "id"],
       ad: ["creative_id", "creativeId", "ad_id", "adId", "id"],
     };
-    const id = idKeys[entityType].map(lookup).find(isStableExternalId);
+    const id = entityType === "material"
+      ? materialDraftId(lookup("ad_material_draft_id"))
+      : idKeys[entityType].map(lookup).find(isStableExternalId);
     if (id === undefined) return [];
     // 两级系列里广告即广告组：回填 campaign_id / adgroup_id 到 payload，
     // 缺 adgroup_id 时用 ad_id 兜底，供父子关系解析与复制定位使用。
@@ -5944,13 +6039,142 @@ function extractEntities(
   });
 }
 
+/**
+ * 素材 ID。真机把它写成 `"[1872777743628513]"`——一个字符串包着的数组，直接拿来
+ * 当 ID 会把方括号一起发出去，`procedural_material/update_status` 会拒收。
+ *
+ * 只接受单元素：一行素材对应一个可独立启停的对象，出现多个说明这行不是我们以为
+ * 的那种素材行，宁可跳过也不要猜一个。
+ */
+/**
+ * 单个广告的素材列表请求。
+ *
+ * 路径与报文形状对照 2026-08-08 的真机抓包。这个接口只能**按广告逐个查**
+ * （`expand` 就是"展开某个广告"），没有全账户列表——所以调用方必须自己控制
+ * 查哪些广告，不能对全部广告逐个调。
+ */
+/**
+ * 单条素材的启停请求。
+ *
+ * 报文形状对照 2026-08-08 的真机抓包：
+ *   {"ad_id":"<广告组 ID>","material_list":["<素材 ID>"],"carousel_id_list":[],
+ *    "operation":"enable|disable","ad_channel":1,"risk_info":{...}}
+ *
+ * 注意 `ad_id` 装的是**广告组**，不是广告——与申诉接口同一套口径（2026-08-06
+ * 申诉全败就是把广告 ID 填进了这个位置）。所以素材的启停必须带上父级广告组 ID，
+ * 光有素材 ID 发不出去。
+ */
+function materializeMaterialStatusRequest(
+  sessionRequest: CapturedCookieRequest,
+  mutation: StatusMutation,
+): CapturedCookieRequest {
+  const adGroupId = mutation.parentAdGroupId?.trim();
+  if (!adGroupId) {
+    throw new Error("缺少素材所属的广告组 ID，无法构造素材启停请求。");
+  }
+  const url = new URL(sessionRequest.url);
+  url.pathname = "/api/v3/i18n/overture/procedural_material/update_status/";
+  url.searchParams.set("req_src", "bidding");
+  return {
+    ...sessionRequest,
+    target: "material-status",
+    action: mutation.action,
+    derived: true,
+    method: "POST",
+    contentType: "application/json",
+    url: url.toString(),
+    body: JSON.stringify({
+      ad_id: adGroupId,
+      material_list: [mutation.externalId],
+      carousel_id_list: [],
+      operation: mutation.action,
+      ad_channel: 1,
+      risk_info: {},
+    }),
+  };
+}
+
+function materialListRequest(
+  template: CapturedCookieRequest,
+  creativeId: string,
+  window: { startDate: string; endDate: string },
+): CapturedCookieRequest {
+  const url = new URL(template.url);
+  url.pathname = "/api/v4/i18n/statistics/op/expand/material/list/";
+  url.searchParams.set("req_src", "bidding");
+  return {
+    ...template,
+    target: "material",
+    derived: true,
+    method: "POST",
+    contentType: "application/json",
+    url: url.toString(),
+    body: JSON.stringify({
+      common_req: {
+        dimensions: ["main_entity_id", "main_entity_type", "creative_id", "ad_id", "campaign_id"],
+        filters: [
+          {
+            field: "origin_material_type",
+            filter_type: 0,
+            in_field_values: [
+              "no_post_video", "post_video", "no_post_carousel", "post_carousel",
+              "catalog_manual_video", "catalog_tpl_carousel", "catalog_tpl_video",
+              "no_post_single_image", "catalog_tpl_multi_show",
+            ],
+          },
+          { field: "is_del", filter_type: 0, in_field_values: ["0", "1"] },
+          { field: "creative_id", filter_type: 0, in_field_values: [creativeId] },
+        ],
+        // 规则要的五个指标：消耗、转化、点击、加购、展示。其余是界面用的，不要。
+        metrics: [
+          "stat_cost", "cpc", "cpm", "show_cnt", "click_cnt", "ctr",
+          "time_attr_convert_cnt", "time_attr_conversion_cost",
+          "time_attr_on_web_cart", "time_attr_cost_per_on_web_cart",
+        ],
+        st: window.startDate,
+        et: window.endDate,
+        lifetime: 0,
+        sort_stat: "stat_cost",
+        sort_order: 1,
+        page: 1,
+        page_size: 100,
+      },
+      extra: { scene: "campaign_list_v2" },
+    }),
+  };
+}
+
+/**
+ * 单轮同步最多为多少个广告拉素材。素材列表只能按广告逐个查，这是唯一的量级熔断。
+ * 生产上"当天有消耗的广告"通常是十几个；真超过了就如实告警，不静默截断。
+ */
+const MAX_MATERIAL_ADS_PER_SYNC = 40;
+
+/** 实体当天的消耗。列表接口可能把指标放在顶层，也可能放在 row_data / stat_data 里。 */
+function entitySpend(payload: Record<string, unknown>): number {
+  const rowData = isRecord(payload.row_data) ? payload.row_data : {};
+  const statData = isRecord(payload.stat_data) ? payload.stat_data : {};
+  const raw = payload.stat_cost ?? rowData.stat_cost ?? statData.stat_cost;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function materialDraftId(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return undefined;
+  const inner = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
+  const parts = inner.split(",").map((item) => item.trim().replace(/^"|"$/g, ""));
+  if (parts.length !== 1) return undefined;
+  return isStableExternalId(parts[0]) ? parts[0] : undefined;
+}
+
 function hasRecognizedEntityList(
   payload: Record<string, unknown>,
   entityType: SyncEntityType,
 ): boolean {
   const data = isRecord(payload.data) ? payload.data : payload;
   const typeKeys: Record<SyncEntityType, string[]> = {
-    material: [],
+    material: ["table", "list", "items"],
     campaign: ["campaigns", "campaign_list", "table", "list", "items"],
     "ad-group": ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"],
     ad: ["ads", "ad_list", "table", "list", "items"],

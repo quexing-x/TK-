@@ -39,6 +39,12 @@ export interface StatusMutation {
   entityType: SyncEntityType;
   externalId: string;
   action: AutomationAction;
+  /**
+   * 素材所属广告组的 ID。只有 entityType 为 material 时才需要：
+   * procedural_material/update_status 要同时带广告组 ID 和素材 ID，光有素材 ID
+   * 发不出去。其余三层不用填。
+   */
+  parentAdGroupId?: string;
 }
 
 export interface StatusMutationResult extends StatusMutation {
