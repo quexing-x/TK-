@@ -4164,8 +4164,16 @@ export class AutomationStore {
       if (jsonHash(preview.presetSnapshot) !== preview.presetSnapshotHash) {
         throw new Error("差异预览的预设快照校验失败，请重新生成预览。");
       }
-      if (!preview.safeToCreate || preview.blockers.length > 0) {
-        throw new Error("差异预览仍有阻断项，不能创建复制迁移计划。");
+      // 原帖检查不再阻断创建。跨账户复制里最常见的阻断项是「目标账户没授权到某条
+      // 原帖」——没授权的本来就复制不过去，执行时那一条自己失败即可（系列批次已
+      // 改为逐条隔离，不会拖垮同批其余广告组），没必要在创建之前先拦一道，逼人
+      // 反复重新生成预览。
+      //
+      // 仍然要求至少有一条可创建：零条的计划没有意义，直接说明原因更有用。
+      if (preview.items.length === 0) {
+        throw new Error(
+          `原帖检查没有产出任何可创建的广告组：${preview.blockers[0] ?? "目标账户均无可用原帖。"}`,
+        );
       }
       const normalizedTargets = [...new Set(plan.targetAccountIds)];
       const inputHash = copyPreviewInputHash({
@@ -4186,9 +4194,13 @@ export class AutomationStore {
       if (existing) {
         return this.getMultiAccountLaunchPlan(String(existing.id)) as MultiAccountLaunchPlanRecord;
       }
-      if (new Date(preview.expiresAt).getTime() <= Date.now()) {
-        throw new Error("差异预览已过期，请重新同步并生成预览。");
-      }
+      // 预览过期同样不再阻断。过期只说明冻结的原帖证据可能变旧，而执行时会重新
+      // 回读并逐条校验（refreshLaunchCopyEvidence + validateLaunchCopyItem），变旧
+      // 的那条会在执行时单独失败。为此把人挡在创建之前、要求重新生成一遍，是拿
+      // 确定的麻烦去防一个执行时本来就会发现的问题。
+      //
+      // inputHash 校验保留：它防的是「预览的内容和你现在要创建的不是一回事」，
+      // 那是另一码事，不能放松。
     }
     const targetAccountIds = preview
       ? preview.targetAccountIds

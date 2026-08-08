@@ -253,7 +253,10 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       && selectedPresetLaunchReady
       && copyConfigsValid,
   );
-  const previewValid = Boolean(copyPreview?.safeToCreate && copyPreview.blockers.length === 0 && previewSecondsLeft > 0);
+  // 原帖检查不再阻断创建：没授权到的原帖本来就复制不过去，执行时那一条自己失败
+  // 即可（系列批次已改为逐条隔离）。阻断项与倒计时降级成提示，只要预览里还有可
+  // 创建的条目就允许直接点。
+  const previewValid = Boolean(copyPreview && copyPreview.items.length > 0);
   const previewSources = copyPreview
     ? copyPreview.sourceSnapshots.length > 0 ? copyPreview.sourceSnapshots : [copyPreview.sourceSnapshot]
     : [];
@@ -273,8 +276,9 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     launchMode === "copy" && !copyConfigsValid ? "请完整填写每个目标账户的创建数量、预算、出价和创建时间。" : null,
     launchMode === "copy" && copyTaskCount > 100 ? "单次迁移最多创建 100 个广告组，请分批操作。" : null,
     launchMode === "copy" && !copyPreview ? "请先生成并核对复制差异预览。" : null,
-    launchMode === "copy" && copyPreview && !copyPreview.safeToCreate ? "复制差异预览仍有阻断项。" : null,
-    launchMode === "copy" && copyPreview && previewSecondsLeft <= 0 ? "确认预览已过期，请重新检查原帖。" : null,
+    launchMode === "copy" && copyPreview && copyPreview.items.length === 0
+      ? `原帖检查没有产出任何可创建的广告组：${copyPreview.blockers[0] ?? "目标账户均无可用原帖。"}`
+      : null,
   ].filter((item): item is string => Boolean(item));
 
   const load = async () => {
