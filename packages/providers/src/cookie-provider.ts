@@ -2444,27 +2444,43 @@ async function createCookieDraftBatch(
     },
   };
   try {
+    // 新建系列发布前必须从 sketch 重铸一套 snap。详见 remintSnapsFromSketches。
+    // 只作用于「从零创建」：复制路自带回读再保存，生产上一直是好的。
+    let publishCampaignSnapId = first.campaignSnapId;
+    let publishList = publishItems;
+    let remintedSnaps = false;
+    if (first.mutation.templateMode !== "copy" && !first.existingCampaignId && first.campaignSketchId) {
+      const reminted = await remintSnapsFromSketches(sessionRequest, credential, combinedDispatchState, {
+        campaignSketchId: first.campaignSketchId,
+        publishItems,
+      });
+      publishCampaignSnapId = reminted.campaignSnapId;
+      publishList = reminted.publishItems;
+      remintedSnaps = true;
+    }
     await runAdvisoryDraftSequence(sessionRequest, credential, {
       ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
-      campaignSnapId: first.campaignSnapId,
+      campaignSnapId: publishCampaignSnapId,
       campaignSketchId: first.campaignSketchId,
-      publishItems,
+      publishItems: publishList,
       ...(first.checkedFakeCampaignId ? { fakeCampaignId: first.checkedFakeCampaignId } : {}),
       riskInfo: first.riskInfo,
     });
     const publishPayload = credential.creationProfile
       ? materializePublishProfile(credential.creationProfile.publishPayload, {
           ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
-          campaignSnapId: first.campaignSnapId,
+          campaignSnapId: publishCampaignSnapId,
           campaignSketchId: first.campaignSketchId,
-          publishItems,
+          publishItems: publishList,
           initialStatus: first.mutation.initialStatus,
         })
       : buildPublishInput({
-          campaignSnapId: first.campaignSnapId || first.existingCampaignId!,
+          campaignSnapId: publishCampaignSnapId || first.existingCampaignId!,
           campaignSketchId: first.campaignSketchId || first.existingCampaignId!,
-          adAndCreativeSnapInfoList: publishItems,
+          adAndCreativeSnapInfoList: publishList,
         }, first.mutation.initialStatus);
+    // 真机在重铸 snap 之后发布时用的是 2（从草稿页发布），不是创建流程里的 1。
+    if (remintedSnaps) publishPayload.sketch_publish_source = 2;
     if (first.existingCampaignId) {
       publishPayload.campaign_id = first.existingCampaignId;
       publishPayload.campaign_snap_id = "";
@@ -3523,7 +3539,7 @@ async function runCookieDraftChain(
     evidence: { creativeSnapId, creativeSketchId },
   });
 
-  const publishItems = copyOnly && initializedIds
+  let publishItems: DraftPublishItem[] = copyOnly && initializedIds
     ? initializedIds.publishItems
     : [{
         ad_id: "", ad_snap_id: adSnapId, ad_sketch_id: adSketchId,
@@ -3549,16 +3565,34 @@ async function runCookieDraftChain(
       dispatchState,
     };
   }
+  // 新建系列发布前必须从 sketch 重铸一套 snap。详见 remintSnapsFromSketches。
+  //
+  // 只作用于「从零创建」：复制路自带回读再保存，生产上 20/20 全过，没有证据说明它
+  // 需要重铸，不能顺手改一条正在正常工作的链路。
+  let publishCampaignSnapId = campaignSnapId;
+  let remintedSnaps = false;
+  if (!copyOnly && !existingCampaignId && campaignSketchId) {
+    const reminted = await remintSnapsFromSketches(sessionRequest, credential, dispatchState, {
+      campaignSketchId,
+      publishItems,
+    });
+    publishCampaignSnapId = reminted.campaignSnapId;
+    publishItems = reminted.publishItems;
+    remintedSnaps = true;
+  }
   const publishPayload = credential.creationProfile
     ? materializePublishProfile(credential.creationProfile.publishPayload, {
-        ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
+        ...(existingCampaignId ? { campaignId: existingCampaignId } : {}),
+        campaignSnapId: publishCampaignSnapId, campaignSketchId, publishItems,
         initialStatus: mutation.initialStatus,
       })
     : buildPublishInput({
-      campaignSnapId: campaignSnapId || existingCampaignId!,
+      campaignSnapId: publishCampaignSnapId || existingCampaignId!,
       campaignSketchId: campaignSketchId || existingCampaignId!,
       adAndCreativeSnapInfoList: publishItems,
     }, mutation.initialStatus);
+  // 真机在重铸 snap 之后发布时用的是 2（从草稿页发布），不是创建流程里的 1。
+  if (remintedSnaps) publishPayload.sketch_publish_source = 2;
   if (existingCampaignId) {
     publishPayload.campaign_id = existingCampaignId;
     publishPayload.campaign_snap_id = "";
@@ -3570,7 +3604,8 @@ async function runCookieDraftChain(
   // age, bidding, and automation inconsistency errors at publish time.
   publishPayload.is_partial_publish = Boolean(existingCampaignId);
   await runAdvisoryDraftSequence(sessionRequest, credential, {
-    ...(existingCampaignId ? { campaignId: existingCampaignId } : {}), campaignSnapId, campaignSketchId, publishItems,
+    ...(existingCampaignId ? { campaignId: existingCampaignId } : {}),
+    campaignSnapId: publishCampaignSnapId, campaignSketchId, publishItems,
     ...(checkedFakeCampaignId ? { fakeCampaignId: checkedFakeCampaignId } : {}),
     riskInfo: credential.creationProfile && isRecord(credential.creationProfile.publishPayload.risk_info)
       ? credential.creationProfile.publishPayload.risk_info
@@ -5393,6 +5428,75 @@ function completedAdGroupIds(payload: Record<string, unknown>): string[] {
  * 发布载荷里只有 is_status_disabled 一个开关且只作用于广告组层，创意快照里没有
  * 状态字段，所以只能拿到这些 ID 之后再显式开一次。
  */
+/**
+ * 从 sketch 重新铸一套 snap，并把发布项重映射到新 snap 上。
+ *
+ * TikTok 的 `sketch` 是持久草稿，`snap` 是一次编辑会话的工作副本。真机打开广告组
+ * 页面时，第一批请求里就有 `snap/save_by_sketch`：它按 campaign_sketch_id 把整棵树
+ * （系列 / 广告组 / 创意）重铸出一套新 snap，之后的检查与发布全部引用新 snap。
+ *
+ * 我们此前一直拿建草稿那一刻的旧 snap 去发布。系列层的 automation 字段在那之后才被
+ * 归一化，于是发布时 campaign snap 与 ad/creative snap 的 automation 元组对不上，
+ * TikTok 以 `uaa_campaign_automation_inconsistent_error` 拒绝——2026-08-08 凌晨
+ * 从零创建的 10 条全部死在这里，而复制路因为本来就有「回读后再保存」而不受影响。
+ *
+ * 抓包为证：同一批 sketch（campaign 1872883127404066 / ad …528066 / creative
+ * …881473），用建草稿时的旧 snap 发布失败，用本接口重铸的新 snap 发布成功。
+ *
+ * 重铸失败就停在发布之前：拿旧 snap 发出去必然被拒，早停才不会产生正式对象。
+ */
+async function remintSnapsFromSketches(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  dispatchState: CreationDispatchState,
+  input: { campaignSketchId: string; publishItems: DraftPublishItem[] },
+): Promise<{ campaignSnapId: string; publishItems: DraftPublishItem[] }> {
+  const response = await requestCreationStep(
+    "snap/save_by_sketch",
+    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/save_by_sketch/", {
+      campaign_id: "",
+      campaign_sketch_id: input.campaignSketchId,
+    }),
+    credential,
+    { semantics: "mutation", dispatchState },
+  );
+  const data = isRecord(response.data) ? response.data : {};
+  const readMap = (key: string): Record<string, unknown> =>
+    isRecord(data[key]) ? data[key] : {};
+  const campaignMap = readMap("campaign_sketch_id_to_snap_id");
+  const adMap = readMap("ad_sketch_id_to_snap_id");
+  const creativeMap = readMap("creative_sketch_id_to_snap_id");
+
+  const remapped = nonEmptyId(campaignMap[input.campaignSketchId]);
+  if (!remapped) {
+    throw new UnknownCreationStateError(
+      `snap/save_by_sketch 未返回系列 ${input.campaignSketchId} 的新 snap，已停止发布且禁止自动重试。`,
+    );
+  }
+  const publishItems = input.publishItems.map((item) => {
+    const adSnapId = nonEmptyId(adMap[item.ad_sketch_id]);
+    if (!adSnapId) {
+      throw new UnknownCreationStateError(
+        `snap/save_by_sketch 未返回广告组 ${item.ad_sketch_id} 的新 snap，已停止发布且禁止自动重试。`,
+      );
+    }
+    return {
+      ...item,
+      ad_snap_id: adSnapId,
+      creative_snap_info_list: item.creative_snap_info_list.map((creative) => {
+        const creativeSnapId = nonEmptyId(creativeMap[creative.creative_sketch_id]);
+        if (!creativeSnapId) {
+          throw new UnknownCreationStateError(
+            `snap/save_by_sketch 未返回广告 ${creative.creative_sketch_id} 的新 snap，已停止发布且禁止自动重试。`,
+          );
+        }
+        return { ...creative, creative_snap_id: creativeSnapId };
+      }),
+    };
+  });
+  return { campaignSnapId: remapped, publishItems };
+}
+
 function completedCreativeIds(payload: Record<string, unknown>): string[] {
   const data = isRecord(payload.data) ? payload.data : payload;
   const result = isRecord(data.result) ? data.result : data;

@@ -2057,7 +2057,9 @@ describe("CookieAdsProvider", () => {
     const publish = requested.find((item) => item.url.includes("create_by_snap"));
     const adInfo = (publish?.body.ad_and_creative_snap_info_list as Array<{ ad_snap_id: string; creative_snap_info_list: Array<{ creative_snap_id: string }> }>);
     expect(adInfo).toHaveLength(1);
-    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-1"]);
+    // 发布引用的是重铸后的 snap（creative-sketch-1 → creative-snap-reminted-1），
+    // 不是建草稿时的 creative-snap-1。
+    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-reminted-1"]);
   });
 
   it("classifies a dispatched status request network loss as unknown", async () => {
@@ -2150,6 +2152,8 @@ describe("CookieAdsProvider", () => {
             ? { data: { success: true }, code: 0 }
           : url.includes("batch_create_cta_id")
             ? { data: { cta_id_map: {} }, code: 0 }
+          : url.includes("snap/save_by_sketch")
+        ? saveBySketchPayload()
           : url.includes("campaign_snap/save")
         ? { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 }
         : url.includes("ad_snap/save")
@@ -2210,6 +2214,54 @@ describe("CookieAdsProvider", () => {
     expect(requested.find((item) => item.url.includes("create_by_snap"))?.body)
       .toMatchObject({ is_status_disabled: true, is_partial_publish: false, coming_source_type: 1 });
     expect(result[0]).toMatchObject({ campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
+
+    // 发布前必须先用 sketch 重铸 snap，且发布引用的是重铸出来的那套。
+    // 2026-08-08：拿建草稿时的旧 snap 发布，被 TikTok 判
+    // uaa_campaign_automation_inconsistent_error，从零创建 10 条全灭。
+    const remint = requested.find((item) => item.url.includes("snap/save_by_sketch"));
+    expect(remint?.body).toEqual({ campaign_id: "", campaign_sketch_id: "campaign-sketch" });
+    const pathAt = (needle: string) =>
+      requested.findIndex((item) => new URL(item.url).pathname === needle);
+    expect(pathAt("/api/v4/i18n/creation/snap/save_by_sketch/"))
+      .toBeLessThan(pathAt("/api/v4/i18n/creation/async_creation/create_by_snap/"));
+    const publish = requested.find((item) => item.url.includes("create_by_snap"))?.body as Record<string, unknown>;
+    expect(publish).toMatchObject({
+      campaign_snap_id: "campaign-snap-reminted",
+      campaign_sketch_id: "campaign-sketch",
+      // 真机重铸后是从草稿页发布，来源标记是 2 而不是创建流程的 1。
+      sketch_publish_source: 2,
+    });
+    expect(publish.ad_and_creative_snap_info_list).toMatchObject([{
+      ad_snap_id: "ad-snap-reminted",
+      ad_sketch_id: "ad-sketch",
+      creative_snap_info_list: [{
+        creative_snap_id: "creative-snap-reminted",
+        creative_sketch_id: "creative-sketch",
+      }],
+    }]);
+  });
+
+  it("重铸 snap 拿不到映射时停在发布之前，不拿旧 snap 硬发", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(new URL(url).pathname);
+      // 映射表里没有本次的 sketch——旧 snap 发出去必然被 TikTok 拒。
+      if (url.includes("snap/save_by_sketch")) {
+        return jsonResponse({ code: 0, data: { campaign_sketch_id_to_snap_id: {}, ad_sketch_id_to_snap_id: {}, creative_sketch_id_to_snap_id: {} } });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [creationTestMutation("none")],
+    );
+
+    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
+    expect(result?.message).toContain("save_by_sketch");
+    // 没有拿旧 snap 去发布。
+    expect(requested).not.toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
   });
 
   it("stops before creative save when the HAR material lookup cannot resolve a code", async () => {
@@ -2949,7 +3001,7 @@ describe("CookieAdsProvider", () => {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ url, body });
       if (url.includes("ad_snap/save")) {
-        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap" } });
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
       }
       if (url.includes("ad_snap/bulk_check")) {
         return jsonResponse({ code: 0, data: {
@@ -2957,7 +3009,7 @@ describe("CookieAdsProvider", () => {
         } });
       }
       if (url.includes("creative_snap/save")) {
-        return jsonResponse({ code: 0, data: { creative_snap_id: "creative-snap" } });
+        return jsonResponse({ code: 0, data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" } });
       }
       return jsonResponse(successfulCreationPayload(url));
     }));
@@ -3012,13 +3064,13 @@ describe("CookieAdsProvider", () => {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ url, body });
       if (url.includes("campaign_snap/save")) {
-        return jsonResponse({ code: 0, data: { campaign_snap_id: "campaign-snap" } });
+        return jsonResponse({ code: 0, data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" } });
       }
       if (url.includes("campaign_snap/check")) {
         return jsonResponse({ code: 0, data: { success: true, fake_campaign_id: "campaign-sketch" } });
       }
       if (url.includes("ad_snap/save")) {
-        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap" } });
+        return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
       }
       if (url.includes("ad_snap/bulk_check")) {
         return jsonResponse({ code: 0, data: {
@@ -3026,7 +3078,7 @@ describe("CookieAdsProvider", () => {
         } });
       }
       if (url.includes("creative_snap/save")) {
-        return jsonResponse({ code: 0, data: { creative_snap_id: "creative-snap" } });
+        return jsonResponse({ code: 0, data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" } });
       }
       return jsonResponse(successfulCreationPayload(url));
     }));
@@ -3123,6 +3175,8 @@ describe("CookieAdsProvider", () => {
                 "ad-sketch-2": ["creative-sketch-2"],
               },
             }, code: 0 }
+          : url.includes("snap/save_by_sketch")
+            ? saveBySketchPayload()
           : url.includes("campaign_snap/save")
             ? { data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" }, code: 0 }
             : url.includes("cbo_consistency_check")
@@ -4366,6 +4420,13 @@ function successfulCreationPayload(url: string): Record<string, unknown> {
     new_ad_and_creative_snap_info_item_map: { "ad-snap": [{ creative_snap_id: "creative-snap", asset_group_creative_snap_form_data: { creative_name: "source", external_url: "https://example.com", creative_automation_type: 1, spc_upgrade_mode: 1, image_list: [{ aweme_item_id: "video" }] } }] },
     new_ad_and_creative_sketch_ids_map: { "ad-sketch": ["creative-sketch"] },
   } };
+  // 真机在发布前用 sketch 重铸一整套 snap，返回三张 sketch→snap 映射表。
+  // 这里刻意返回与建草稿时不同的 ID，取错了就会被断言抓到。
+  if (url.includes("snap/save_by_sketch")) return { code: 0, data: {
+    campaign_sketch_id_to_snap_id: { "campaign-sketch": "campaign-snap-reminted" },
+    ad_sketch_id_to_snap_id: { "ad-sketch": "ad-snap-reminted" },
+    creative_sketch_id_to_snap_id: { "creative-sketch": "creative-snap-reminted" },
+  } };
   if (url.includes("campaign_snap/save")) return { code: 0, data: { campaign_snap_id: "campaign-snap", campaign_sketch_id: "campaign-sketch" } };
   if (url.includes("ad_snap/save")) return { code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } };
   if (url.includes("creative_snap/save")) return { code: 0, data: { creative_snap_id: "creative-snap", creative_sketch_id: "creative-sketch" } };
@@ -4378,6 +4439,26 @@ function successfulCreationPayload(url: string): Record<string, unknown> {
   return { code: 0, data: { async_request_id: "async" } };
 }
 
+/**
+ * 发布前从 sketch 重铸 snap 的响应。真机按 campaign_sketch_id 把整棵树重铸一遍，
+ * 返回三张 sketch→snap 映射表。这里覆盖各用例用到的 sketch 命名，并刻意返回与建
+ * 草稿时不同的 snap ID——发布时若还引用旧 snap，断言就会抓到。
+ */
+function saveBySketchPayload(): Record<string, unknown> {
+  const remint = (base: string) => Object.fromEntries([
+    [`${base}-sketch`, `${base}-snap-reminted`],
+    ...Array.from({ length: 5 }, (_unused, index) => [
+      `${base}-sketch-${index + 1}`,
+      `${base}-snap-reminted-${index + 1}`,
+    ]),
+  ]);
+  return { code: 0, data: {
+    campaign_sketch_id_to_snap_id: remint("campaign"),
+    ad_sketch_id_to_snap_id: remint("ad"),
+    creative_sketch_id_to_snap_id: remint("creative"),
+  } };
+}
+
 function successfulDraftValidationPayload(
   url: string,
   adSnapIds = ["ad-snap"],
@@ -4387,6 +4468,7 @@ function successfulDraftValidationPayload(
     ad_snap_id: adSnapId,
     fake_ad_id: adSnapIds.length === 1 ? "ad-sketch" : `ad-sketch-${index + 1}`,
   }]));
+  if (url.includes("snap/save_by_sketch")) return saveBySketchPayload();
   if (url.includes("ad_snap/bulk_check")) return { code: 0, data: { ad_snap_check_report_map: reports } };
   if (url.includes("ad_creative_snap/check")) return { code: 0, data: { creative_success: true, ad_snap_check_report_map: reports } };
   if (url.includes("creative_snap/check")) return { code: 0, data: { success: true } };
