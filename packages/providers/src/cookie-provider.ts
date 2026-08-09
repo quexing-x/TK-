@@ -422,6 +422,7 @@ export class CookieAdsProvider implements AdsProvider {
     const entities: ProviderEntity[] = [];
     const warnings: string[] = [];
     const partialFailures: string[] = [];
+    const materialUnavailableAdIds: string[] = [];
     const emptyResponses = new Set<SyncEntityType>();
     // 逐层记录"这一层本轮取全了吗"。全局的 paginationComplete / contractValid 是
     // 三层与出来的结果，无法回答某一层单独是否可信。
@@ -534,7 +535,9 @@ export class CookieAdsProvider implements AdsProvider {
         .filter((entity) => entitySpend(entity.payload) > 0)
         .map((entity) => entity.externalId);
       let materialFailures = 0;
-      for (const creativeId of spendingAdIds.slice(0, MAX_MATERIAL_ADS_PER_SYNC)) {
+      const materialAdIdsToFetch = spendingAdIds.slice(0, MAX_MATERIAL_ADS_PER_SYNC);
+      materialUnavailableAdIds.push(...spendingAdIds.slice(MAX_MATERIAL_ADS_PER_SYNC));
+      for (const creativeId of materialAdIdsToFetch) {
         try {
           const payload = await requestCookieJson(
             materialListRequest(importedAdGroupRead, creativeId, {
@@ -546,6 +549,7 @@ export class CookieAdsProvider implements AdsProvider {
           entities.push(...extractEntities(payload, "material"));
         } catch {
           materialFailures += 1;
+          materialUnavailableAdIds.push(creativeId);
         }
       }
       if (spendingAdIds.length > MAX_MATERIAL_ADS_PER_SYNC) {
@@ -559,7 +563,11 @@ export class CookieAdsProvider implements AdsProvider {
         warnings.push(`${materialFailures} 个广告的素材列表拉取失败，这些广告的素材本轮不参与规则判定。`);
         partialFailures.push("material:request-failed");
       }
-      if (spendingAdIds.length > 0 && materialFailures === 0) {
+      if (
+        spendingAdIds.length > 0
+        && materialFailures === 0
+        && materialUnavailableAdIds.length === 0
+      ) {
         completeEntityTypes.push("material");
       }
     }
@@ -593,6 +601,7 @@ export class CookieAdsProvider implements AdsProvider {
             timezone,
           },
           partialFailures,
+          materialUnavailableAdIds,
           completeEntityTypes,
         }),
       },

@@ -21,6 +21,8 @@ export function buildSyncDataQuality(input: {
   providerContractVersion: string;
   coverage: SyncDataCoverage;
   partialFailures: string[];
+  /** 素材列表本轮未取到的所属广告 ID。 */
+  materialUnavailableAdIds?: string[];
   /** 本轮取全且通过契约与分页校验的层级；调用方不传时视为无法按层级判定。 */
   completeEntityTypes?: SyncEntityType[];
 }): SyncDataQuality {
@@ -49,6 +51,9 @@ export function buildSyncDataQuality(input: {
     coverage: input.coverage,
     missingMetrics,
     partialFailures: [...input.partialFailures],
+    ...(input.materialUnavailableAdIds?.length
+      ? { materialUnavailableAdIds: [...new Set(input.materialUnavailableAdIds)] }
+      : {}),
     lastHealthyAt: null,
     // 契约漂移是全局问题，这种情况下不承认任何层级完好。
     completeEntityTypes: input.contractValid ? [...(input.completeEntityTypes ?? [])] : [],
