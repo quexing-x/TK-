@@ -1587,6 +1587,9 @@ export class AutomationService {
 
     const unavailableAdIds = new Set(quality.materialUnavailableAdIds ?? []);
     if (unavailableAdIds.size === 0) return true;
+    // 广告组只依赖自己的指标与状态。素材列表的局部失败不能阻断广告组
+    // 的独立启停，否则“素材层独立”会退化成父级也不可用。
+    if (entity.entityType === "ad-group") return true;
     if (entity.entityType === "material") {
       const materialAdId = this.resolveMaterialAdId(
         accountId,
@@ -1600,9 +1603,6 @@ export class AutomationService {
       providerKind,
       quality,
     );
-    if (entity.entityType === "ad-group") {
-      return !unavailableAdGroupIds.has(entity.externalId);
-    }
     if (entity.entityType === "ad") {
       return !unavailableAdIds.has(entity.externalId)
         && !unavailableAdGroupIds.has(entity.parentAdGroupId ?? "");

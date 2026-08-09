@@ -203,7 +203,7 @@ class FakeProvider implements AdsProvider {
     }
     // 一个开着的广告，指标差到规则一定想关它——用来验证广告总开关不会被自动关掉。
     if (this.scenario === "ad-switch") {
-      defaultGroup.payload.ad_primary_status = "enabled";
+      defaultGroup.payload.ad_primary_status = this.adGroupStatus;
       entities.push({
         entityType: "ad",
         externalId: "ad-1",
@@ -631,7 +631,7 @@ describe("AutomationService", () => {
     ]);
   });
 
-  it("skips an ad group when material fetch failed for one of its ads", async () => {
+  it("does not block an ad group when material fetch failed for one of its ads", async () => {
     provider.scenario = "ad-switch";
     provider.qualityStatus = "partial";
     provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
@@ -641,15 +641,21 @@ describe("AutomationService", () => {
     const run = await service.runAccount("demo-account", "scheduler");
 
     expect(run.candidateCount).toBeGreaterThan(0);
-    expect(provider.mutations).toHaveLength(0);
+    expect(run.successCount).toBe(1);
+    expect(provider.mutations).toMatchObject([
+      {
+        entityType: "ad-group",
+        externalId: "adgroup-1",
+        action: "disable",
+      },
+    ]);
     const groupDecision = store.listAutomationDecisions("demo-account").find(
       (decision) => decision.entityType === "ad-group" && decision.externalId === "adgroup-1",
     );
     expect(groupDecision).toMatchObject({
-      status: "skipped",
+      status: "succeeded",
       dataQualityStatus: "partial",
     });
-    expect(groupDecision?.errorMessage).toContain("素材列表");
   });
 
   it("writes an unaffected material during partial sync and accepts partial readback", async () => {
