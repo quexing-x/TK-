@@ -170,6 +170,58 @@ describe("素材同步", () => {
       .toEqual(["spending-ad"]);
   });
 
+  // 素材列表选的是 mix_material 报表。2026-08-10 的真机抓包证实：不带
+  // report_id 时 TikTok 回 code 1300100001 拒收整个请求，素材层从上线到那天
+  // 一行都没取到过（全库 material 实体数为 0），而空 catch 把原因吞了。
+  it("请求体带上 report_id=mix_material，否则 TikTok 整条拒收", async () => {
+    const requested = stub(
+      [{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }],
+      [materialRow()],
+    );
+
+    await new CookieAdsProvider().syncReadOnly!(context());
+
+    const call = requested.find((item) => item.path.includes("expand/material/list"));
+    expect(call?.body.report_id).toBe("mix_material");
+  });
+
+  // 请求成功不等于取到素材：ID 和状态本身就是 metrics，不点名要就不返回，
+  // 于是 extractEntities 认不出 ID、normalizeStatus 判成 unknown，规则一条
+  // 都执行不了。真机验证过：只发消耗类指标时 code=0 但素材数仍是 0。
+  it("metrics 必须点名要素材 ID 与状态，不然拿回来也用不了", async () => {
+    const requested = stub(
+      [{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }],
+      [materialRow()],
+    );
+
+    await new CookieAdsProvider().syncReadOnly!(context());
+
+    const call = requested.find((item) => item.path.includes("expand/material/list"));
+    const metrics = (call?.body.common_req as Record<string, unknown>).metrics as string[];
+    expect(metrics).toEqual(expect.arrayContaining([
+      "ad_material_draft_id",
+      "material_primary_status",
+      "material_second_status_list",
+      "main_entity_name",
+    ]));
+  });
+
+  // 已删素材不进管线：它的 material_primary_status 是删除态，normalizeStatus
+  // 会误判成 enabled，零加购规则随即产出 disable 候选，向已删素材发写入必被
+  // TikTok 拒收，连续失败会打开写入熔断器停掉整账户自动化。源头只拉 is_del=0。
+  it("素材列表只请求未删除的素材（is_del=0）", async () => {
+    const requested = stub(
+      [{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }],
+      [materialRow()],
+    );
+
+    await new CookieAdsProvider().syncReadOnly!(context());
+
+    const call = requested.find((item) => item.path.includes("expand/material/list"));
+    const filters = (call?.body.common_req as Record<string, unknown>).filters as Array<Record<string, unknown>>;
+    expect(filters.find((item) => item.field === "is_del")?.in_field_values).toEqual(["0"]);
+  });
+
   it("素材 ID 从字符串包着的数组里取出裸数字", async () => {
     stub([{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }], [materialRow()]);
 
@@ -189,6 +241,34 @@ describe("素材同步", () => {
     const output = await new CookieAdsProvider().syncReadOnly!(context());
 
     expect(output.entities.filter((entity) => entity.entityType === "material")).toHaveLength(0);
+  });
+
+  // 有行却一条都解析不出来 = 字段形状变了，不是"这些广告没有素材"。
+  // 另外三层有 hasRecognizedEntityList 兜底，素材层没有；不拦下来的话
+  // completeEntityTypes 会带上 material，saveReadOnlySync 随即清空整层已存
+  // 素材快照，而同步质量仍旧显示 healthy——比漏判更糟。
+  it("响应有行但解析不出素材 ID 时判为契约不符，不宣称本层取全", async () => {
+    stub(
+      [{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }],
+      [materialRow({ ad_material_draft_id: "[111,222]" })],
+    );
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    expect(output.result.quality.completeEntityTypes).not.toContain("material");
+    expect(output.result.quality.partialFailures).toContain("material:contract-invalid");
+    expect(output.result.warnings.some((warning) => warning.includes("契约不符"))).toBe(true);
+  });
+
+  // 这批广告本来就没有素材（0 行）是正常结果，不能跟上面的契约不符混为一谈，
+  // 否则素材层永远宣称不了取全，已存快照再也不会刷新。
+  it("响应就是 0 行时仍然算本层取全", async () => {
+    stub([{ campaign_id: "c1", ad_id: "g1", creative_id: "spending-ad", stat_cost: "5" }], []);
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    expect(output.result.quality.completeEntityTypes).toContain("material");
+    expect(output.result.quality.partialFailures).not.toContain("material:contract-invalid");
   });
 
   it("记录素材请求失败的所属广告，并保持其他素材可用", async () => {
@@ -212,6 +292,23 @@ describe("素材同步", () => {
     expect(output.result.quality.completeEntityTypes).not.toContain("material");
     expect(output.entities.find((entity) => entity.entityType === "material")?.payload)
       .toMatchObject({ creative_id: "healthy-ad" });
+  });
+
+  // 空 catch 让「素材整层拉不动」和「个别广告超时」在界面上长得一模一样。
+  // 2026-08-10 线上每轮都报素材失败，真因是 TikTok 直接拒收请求体
+  // （code 1300100001），但告警里一个字都没有，连查两轮都没定位到。
+  it("把 TikTok 的拒收原因写进告警，而不是只说失败了", async () => {
+    stub(
+      [{ campaign_id: "c1", ad_id: "g1", creative_id: "failed-ad", stat_cost: "5" }],
+      [],
+      ["failed-ad"],
+    );
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    expect(
+      output.result.warnings.find((warning) => warning.includes("素材列表拉取失败")),
+    ).toContain("material request failed");
   });
 
   it("素材带上自己的消耗与转化，规则才判得动", async () => {
