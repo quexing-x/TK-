@@ -22,9 +22,11 @@ import {
 import { installOutboundProxy, resolveOutboundProxy } from "../../api/src/proxy.ts";
 import {
   BACKGROUND_PROGRAM_NAME,
+  isAddressInUseError,
   schedulerLaunchCommand,
   schedulerOrigin,
   schedulerProgramPath,
+  waitForSchedulerHealthy,
 } from "./background-program.js";
 import { setBackgroundStartup } from "./background-startup.js";
 import { migrateLegacyRuntimeData, resolveDesktopRuntimePaths } from "./runtime-paths.js";
@@ -60,7 +62,17 @@ if (!hasSingleInstanceLock) {
 }
 
 async function startSchedulerProcess(): Promise<void> {
-  runtime = await startRuntime(schedulerOrigin());
+  try {
+    runtime = await startRuntime(schedulerOrigin());
+  } catch (cause) {
+    // 端口被占：多半是上一次客户端启动时超时、但那个后台随后起来了，这个是多余的
+    // 重复实例。若已有健康后台在服务，安静退出（0）而不是再弹一个「后台启动失败」。
+    if (isAddressInUseError(cause) && (await isSchedulerHealthy(schedulerOrigin()))) {
+      app.exit(0);
+      return;
+    }
+    throw cause;
+  }
   const enabled = runtime.store.getSystemRuntimeState().enabled;
   await setBackgroundStartup(backgroundExecutablePath(), enabled);
   if (!enabled) beginDisabledShutdown(runtime.store);
@@ -94,10 +106,9 @@ async function ensureSchedulerRunning(): Promise<string> {
     windowsHide: true,
   });
   child.unref();
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-    if (await isSchedulerHealthy(origin)) return origin;
-  }
+  // 冷启动要等后台开库 + seed + 监听；库越大越久。用足够宽的上限（120 秒）轮询，
+  // 而不是写死 10 秒——后者在库变大后必然误报「后台未能启动」。
+  if (await waitForSchedulerHealthy(() => isSchedulerHealthy(origin))) return origin;
   throw new Error("tk自动化后台程序未能启动，请检查是否被安全软件阻止。");
 }
 
