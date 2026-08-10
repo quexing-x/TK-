@@ -626,9 +626,12 @@ export class AutomationService {
           candidate.entity.entityType !== "campaign" &&
           candidate.entity.parentCampaignId !== null &&
           closingCampaigns.has(candidate.entity.parentCampaignId);
+        // 广告与素材都是广告组的子级：同一轮里父广告组正被关，就别开它的子级。
+        // 只写 "ad" 会漏掉素材，造出「组开着、素材全关」且界面看不出来的状态。
         const blockedByAdGroup =
           candidate.action === "enable" &&
-          candidate.entity.entityType === "ad" &&
+          (candidate.entity.entityType === "ad" ||
+            candidate.entity.entityType === "material") &&
           candidate.entity.parentAdGroupId !== null &&
           closingAdGroups.has(candidate.entity.parentAdGroupId);
         if (blockedByCampaign || blockedByAdGroup) {
@@ -637,7 +640,7 @@ export class AutomationService {
             "skipped",
             blockedByCampaign
               ? "父推广系列建议关闭，本轮不建议开启子对象。"
-              : "父广告组建议关闭，本轮不建议开启子广告。",
+              : "父广告组建议关闭，本轮不建议开启子级。",
           );
         } else {
           conflictFree.push(candidate);
@@ -1418,8 +1421,13 @@ export class AutomationService {
           return "父推广系列处于关闭状态，不建议开启子对象。";
         }
       }
+      // 广告与素材都是广告组的子级：父广告组关着时不开子级。素材层此前是死的，
+      // 只写了 "ad"；现在素材真有数据，漏掉它会向一个关停广告组里的素材发 enable
+      // ——零投放效果的真实写入，且每轮重复。素材的父广告组 ID 回填在 adgroup_id
+      // 上，normalizeProviderEntity 已解析进 parentAdGroupId。
       if (
-        candidate.entity.entityType === "ad" &&
+        (candidate.entity.entityType === "ad" ||
+          candidate.entity.entityType === "material") &&
         candidate.entity.parentAdGroupId
       ) {
         const parentAdGroup = managedEntities.find(
@@ -1428,7 +1436,7 @@ export class AutomationService {
             entity.externalId === candidate.entity.parentAdGroupId,
         );
         if (parentAdGroup?.status === "disabled") {
-          return "父广告组处于关闭状态，不建议开启子广告。";
+          return "父广告组处于关闭状态，不建议开启子级。";
         }
       }
     }

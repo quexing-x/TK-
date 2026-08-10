@@ -64,7 +64,7 @@ class FakeProvider implements AdsProvider {
   adGroupCpc = 1.5;
   adGroupCarts = 0;
   adGroupSpend = 20;
-  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" | "ad-switch" | "material" = "default";
+  scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" | "ad-switch" | "material" | "material-closed-parent" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
   completeEntityTypes: SyncEntityType[] | undefined = undefined;
   partialFailures: string[] | undefined = undefined;
@@ -197,6 +197,43 @@ class FakeProvider implements AdsProvider {
             click_cnt: "25",
             time_attr_convert_cnt: "0",
             time_attr_on_web_cart: "0",
+          },
+        },
+      });
+    }
+    // 关停广告组 + 其下一条同样关停、但指标满足开启规则的素材。广告组自身指标
+    // 不满足任何开启规则，所以它这一轮不会成为 enable 候选、保持关停；用来验证
+    // 不会向一个关停广告组内部的素材发 enable（否则造出「组关着、素材开着」）。
+    if (this.scenario === "material-closed-parent") {
+      defaultGroup.payload.ad_primary_status = "disable";
+      defaultGroup.payload.row_data = {
+        campaign_id: "campaign-1",
+        stat_cost: "0",
+        cpc: "0",
+        click_cnt: "0",
+        time_attr_convert_cnt: "0",
+        time_attr_on_web_cart: "0",
+      };
+      entities.push({
+        entityType: "material",
+        externalId: "1872777743628513",
+        payload: {
+          campaign_id: "campaign-1",
+          ad_id: "adgroup-1",
+          adgroup_id: "adgroup-1",
+          creative_id: "ad-1",
+          main_entity_name: "测试素材",
+          // 关停状态：开启方向才有意义。指标命中 HAS_CART_OPEN（消耗≥1、加购≥1）。
+          material_primary_status: "disabled",
+          row_data: {
+            campaign_id: "campaign-1",
+            adgroup_id: "adgroup-1",
+            stat_cost: "5",
+            cpc: "0.2",
+            click_cnt: "25",
+            time_attr_convert_cnt: "1",
+            time_attr_conversion_cost: "5",
+            time_attr_on_web_cart: "3",
           },
         },
       });
@@ -1917,7 +1954,7 @@ describe("AutomationService", () => {
         externalId: "ad-1",
         action: "enable",
         status: "skipped",
-        errorMessage: "父广告组建议关闭，本轮不建议开启子广告。",
+        errorMessage: "父广告组建议关闭，本轮不建议开启子级。",
       }),
       expect.objectContaining({
         externalId: "adgroup-1",
@@ -2150,7 +2187,7 @@ describe("AutomationService", () => {
         .find((decision) => decision.externalId === "ad-1"),
     ).toMatchObject({
       status: "skipped",
-      errorMessage: "父广告组建议关闭，本轮不建议开启子广告。",
+      errorMessage: "父广告组建议关闭，本轮不建议开启子级。",
     });
   });
 
@@ -2185,6 +2222,27 @@ describe("AutomationService", () => {
         action: "enable",
         status: "skipped",
         errorMessage: "父推广系列处于关闭状态，不建议开启子对象。",
+      }),
+    ]));
+  });
+
+  it("skips enabling a material whose parent ad group is already closed", async () => {
+    provider.scenario = "material-closed-parent";
+
+    // manual 触发在本套件里是真实派发（automatic:true）；守卫失效时会真的发出
+    // 一条 material enable。
+    await service.runAccount("demo-account", "manual");
+
+    expect(
+      provider.mutations.some((mutation) => mutation.entityType === "material"),
+    ).toBe(false);
+    expect(store.listAutomationDecisions("demo-account")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entityType: "material",
+        externalId: "1872777743628513",
+        action: "enable",
+        status: "skipped",
+        errorMessage: "父广告组处于关闭状态，不建议开启子级。",
       }),
     ]));
   });
