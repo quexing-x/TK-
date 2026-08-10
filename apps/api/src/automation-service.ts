@@ -910,11 +910,11 @@ export class AutomationService {
         connection?.status,
       ));
     }
-    this.assertWriteAllowed(accountId, false);
     const entity = this.store.listManagedEntities(accountId, account.providerKind).find(
       (item) => item.entityType === input.entityType && item.externalId === input.externalId,
     );
     if (!entity) throw new Error("Ad object is missing or has not been synced.");
+    this.assertWriteAllowed(accountId, false, input);
     const task = this.store.createStatusWriteTask({
       accountId,
       providerKind: account.providerKind,
@@ -983,7 +983,10 @@ export class AutomationService {
         ));
       }
       const context = await this.loadContext(accountId, account.providerKind, account.timezone);
-      this.assertWriteAllowed(accountId, false);
+      this.assertWriteAllowed(accountId, false, {
+        entityType: task.entityType,
+        externalId: task.externalId,
+      });
       const executorId = randomUUID();
       const claimed = this.statusTasks.claim(task.id, executorId, "failed", actor);
       if (!claimed) throw new Error("状态写任务正在执行或状态已经变化。");
@@ -1317,14 +1320,12 @@ export class AutomationService {
       ).find(
         (entity) => entity.entityType === input.entityType && entity.externalId === input.externalId,
       )?.status;
-      const readbackUsable = requireAutomatic
-        ? this.isEntitySyncUsable(
-            task.accountId,
-            account.providerKind,
-            refreshed.result.quality,
-            input,
-          )
-        : refreshed.result.quality.status === "healthy";
+      const readbackUsable = this.isEntitySyncUsable(
+        task.accountId,
+        account.providerKind,
+        refreshed.result.quality,
+        input,
+      );
       if (!readbackUsable) {
         syncWarning = `状态写入后同步数据不完整：${refreshed.result.warnings.join("；")}`;
       } else if (observedStatus !== desiredStatus) {
@@ -1644,8 +1645,7 @@ export class AutomationService {
     if (
       latestSync.quality.status !== "healthy"
       && (
-        !requireAutomatic
-        || !entity
+        !entity
         || !this.isEntitySyncUsable(accountId, account.providerKind, latestSync.quality, entity)
       )
     ) {

@@ -730,6 +730,29 @@ describe("AutomationService", () => {
     expect(provider.mutations).toHaveLength(0);
   });
 
+  it("allows a manual ad-group write when only material fetches are partial", async () => {
+    provider.qualityStatus = "partial";
+    provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
+    provider.partialFailures = ["material:request-failed"];
+    provider.materialUnavailableAdIds = ["ad-1"];
+    const partial = await provider.syncReadOnly();
+    const partialAt = new Date(Date.now() + 1_000).toISOString();
+    partial.result.startedAt = partialAt;
+    partial.result.finishedAt = partialAt;
+    store.saveReadOnlySync("demo-account", "cookie", partial.entities, partial.result);
+
+    const task = service.enqueueManualStatusChange("demo-account", {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "disable",
+    });
+
+    await vi.waitFor(() => expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]));
+    expect(store.getAdOperation(task.id).status).toBe("succeeded");
+  });
+
   it("marks the status task unknown when status write readback fails", async () => {
     provider.shouldSyncFail = true;
 
