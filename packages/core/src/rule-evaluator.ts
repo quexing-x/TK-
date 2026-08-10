@@ -34,12 +34,14 @@ export function filterEntitiesToRecentWindow(
     adGroupCreatedAt.set(entity.externalId, createdAt);
     const normalized = normalizeProviderEntity(entity);
     const spend = normalized.metrics.spend;
+    // 超龄广告组的存活判据只看「今天有没有花钱」，**不能**再要求它当前是开着的。
+    // 同步取的是当天指标，spend > 0 已经等于「今天在投的活对象」；而叠加
+    // status === "enabled" 会把窗口变成单向门：老组还开着时关停规则能关它，
+    // 一旦被关掉就永久掉出评估集，开启规则再也够不着——归因延迟导致的
+    // 「先按零转化关掉、转化随后才回传」就永远开不回来了。
     if (
       createdAt <= futureTolerance &&
-      (
-        createdAt >= cutoff ||
-        (normalized.status === "enabled" && spend !== null && spend > 0)
-      )
+      (createdAt >= cutoff || (spend !== null && spend > 0))
     ) {
       eligibleAdGroups.add(entity.externalId);
     }

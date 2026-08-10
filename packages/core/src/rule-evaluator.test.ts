@@ -127,14 +127,39 @@ describe("48 hour ad-group window", () => {
     expect(result.excludedCount).toBe(1);
   });
 
-  it("excludes a closed old ad group even when it has spend today", () => {
+  it("keeps a closed old ad group that still has spend today", () => {
     const oldGroup = adGroup("closed", "2026-07-12T04:00:00.000Z");
     oldGroup.payload.ad_primary_status = "disable";
 
     const result = filterEntitiesToRecentWindow([oldGroup], now);
 
-    expect(result.entities).toHaveLength(0);
-    expect(result.excludedCount).toBe(1);
+    expect(result.entities).toEqual([oldGroup]);
+    expect(result.excludedCount).toBe(0);
+  });
+
+  // 归因延迟的真实场景：老广告组上午按「零转化 + 消耗超上限」被自动关掉，
+  // 转化随后才回传。窗口若要求对象当前开着，它就永久掉出评估集，开启规则
+  // 再也够不着——线上 2026-08-10 的 `漆面去除_新-0807-085313-1` 就是这样
+  // 只能人工开回来。
+  it("re-opens a closed old ad group once its metrics meet an open rule", () => {
+    const oldGroup = adGroup("late-conversion", "2026-07-12T04:00:00.000Z");
+    oldGroup.payload.ad_primary_status = "disable";
+    Object.assign(oldGroup.payload.row_data as Record<string, unknown>, {
+      time_attr_convert_cnt: 1,
+      time_attr_conversion_cost: 2.41,
+      cpc: 0.06,
+      stat_cost: 2.41,
+    });
+
+    const window = filterEntitiesToRecentWindow([oldGroup], now);
+    const result = evaluateRuleConfiguration(window.entities, configuration());
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]).toMatchObject({
+      thresholdCode: "CV1_CPA_OPEN",
+      action: "enable",
+    });
+    expect(result.candidates[0]?.entity.externalId).toBe(oldGroup.externalId);
   });
 });
 
