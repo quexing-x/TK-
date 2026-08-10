@@ -548,11 +548,19 @@ export class CookieAdsProvider implements AdsProvider {
       materialUnavailableAdIds.push(...spendingAdIds.slice(MAX_MATERIAL_ADS_PER_SYNC));
       for (const creativeId of materialAdIdsToFetch) {
         try {
+          // 过一遍 withTodayMetricWindow，和其它三层共用同一套日期改写 + 规则指标
+          // 保障（ensureStatisticsMetric）。日期在 materialListRequest 里已设成当天，
+          // 这里的改写是幂等的；真正的意义是：将来给规则加新指标时改
+          // ensureStatisticsMetric，素材层会自动跟上，不再各写各的、悄悄落下。
           const payload = await requestCookieJson(
-            materialListRequest(importedAdGroupRead, creativeId, {
-              startDate: formatDateInTimezone(materialNow, materialTimezone),
-              endDate: formatDateInTimezone(materialNow, materialTimezone),
-            }),
+            withTodayMetricWindow(
+              materialListRequest(importedAdGroupRead, creativeId, {
+                startDate: formatDateInTimezone(materialNow, materialTimezone),
+                endDate: formatDateInTimezone(materialNow, materialTimezone),
+              }),
+              materialTimezone,
+              materialNow,
+            ),
             credential,
           );
           const extracted = extractEntities(payload, "material");
@@ -6171,6 +6179,40 @@ function materializeMaterialStatusRequest(
   };
 }
 
+// 素材列表(expand/material/list, mix_material 报表)的请求形状，抽成命名常量做
+// 单一事实源——手搓字段散在函数里最容易悄悄漂移（当初就是这么漏了 report_id、
+// 整层从上线起一行没取到）。
+//
+// 注意：**不要**像 adFinalListRequest/campaignStatisticsListRequest 那样从广告组
+// 抓包体派生 common_req。mix_material 是另一套报表契约，它的 dimensions/filters/
+// metrics/sort 与广告组列表不同，继承广告组的字段（sort_stat=create_time、36 个
+// 广告组指标等）会被素材报表拒收；而当初漏掉的 report_id 本就不在广告组请求里，
+// 派生也救不了。能安全继承的只有 URL 查询参数（aadvid/msToken/风控串）与请求头，
+// 这两样已经通过 new URL(template.url) 和 ...template 继承了。
+const MATERIAL_LIST_DIMENSIONS = [
+  "main_entity_id", "main_entity_type", "creative_id", "ad_id", "campaign_id",
+] as const;
+
+const MATERIAL_ORIGIN_TYPES = [
+  "no_post_video", "post_video", "no_post_carousel", "post_carousel",
+  "catalog_manual_video", "catalog_tpl_carousel", "catalog_tpl_video",
+  "no_post_single_image", "catalog_tpl_multi_show",
+] as const;
+
+// 五个判定指标（消耗、转化、点击、加购、展示）+ 四个身份/状态字段，一个都不能删。
+// 后四个不是"界面用的"：`ad_material_draft_id` 是素材自己的 ID（extractEntities
+// 只认它，缺了整批行被当成没有 ID 丢掉）；`material_primary_status` 是启停状态
+// （缺了 normalizeStatus 判成 unknown，规则一条不执行）；`material_second_status_list`
+// 带审核态；`main_entity_name` 是素材名。真机 2026-08-10 验证：只发前十个指标时
+// 请求成功但返回行里没有 ID 和状态，素材数依旧是 0。material-layer.test 钉死这份清单。
+const MATERIAL_LIST_METRICS = [
+  "stat_cost", "cpc", "cpm", "show_cnt", "click_cnt", "ctr",
+  "time_attr_convert_cnt", "time_attr_conversion_cost",
+  "time_attr_on_web_cart", "time_attr_cost_per_on_web_cart",
+  "ad_material_draft_id", "material_primary_status",
+  "material_second_status_list", "main_entity_name",
+] as const;
+
 function materialListRequest(
   template: CapturedCookieRequest,
   creativeId: string,
@@ -6188,42 +6230,17 @@ function materialListRequest(
     url: url.toString(),
     body: JSON.stringify({
       common_req: {
-        dimensions: ["main_entity_id", "main_entity_type", "creative_id", "ad_id", "campaign_id"],
+        dimensions: [...MATERIAL_LIST_DIMENSIONS],
         filters: [
-          {
-            field: "origin_material_type",
-            filter_type: 0,
-            in_field_values: [
-              "no_post_video", "post_video", "no_post_carousel", "post_carousel",
-              "catalog_manual_video", "catalog_tpl_carousel", "catalog_tpl_video",
-              "no_post_single_image", "catalog_tpl_multi_show",
-            ],
-          },
-          // 只拉未删除的素材（is_del=0）。界面抓包发的是 ["0","1"]（列表里也
-          // 显示已删项），但自动化不能把已删素材当规则对象：它的
-          // material_primary_status 是删除态，normalizeStatus 不含 disable/paused
-          // 会误判成 enabled，零加购规则随即产出 disable 候选 → 向已删素材发写入
-          // → TikTok 拒收 → 连续失败打开写入熔断器，整账户自动化停摆。源头滤掉
-          // 最干净。真机 2026-08-11 验证 is_del=["0"] 被接受、返回同样的在投素材。
+          { field: "origin_material_type", filter_type: 0, in_field_values: [...MATERIAL_ORIGIN_TYPES] },
+          // 只拉未删除的素材（is_del=0）。界面抓包发的是 ["0","1"]（列表里也显示
+          // 已删项），但自动化不能把已删素材当规则对象：删除态会被 normalizeStatus
+          // 误判成 enabled，零加购规则随即对已删素材发写入 → TikTok 拒收 → 连续
+          // 失败打开写入熔断器停整账户。真机 2026-08-11 验证 is_del=["0"] 被接受。
           { field: "is_del", filter_type: 0, in_field_values: ["0"] },
           { field: "creative_id", filter_type: 0, in_field_values: [creativeId] },
         ],
-        // 五个判定指标（消耗、转化、点击、加购、展示）+ 四个身份/状态字段，
-        // 一个都不能删。
-        //
-        // 后四个不是"界面用的"，缺一不可：`ad_material_draft_id` 是素材自己的
-        // ID（extractEntities 只认它，缺了整批行会被当成没有 ID 全部丢掉）；
-        // `material_primary_status` 是素材的启停状态（缺了 normalizeStatus 判成
-        // unknown，规则一条都不会执行）；`material_second_status_list` 带审核态；
-        // `main_entity_name` 是素材名。真机 2026-08-10 验证：只发前十个指标时
-        // 请求会成功，但返回行里没有 ID 和状态，素材数依旧是 0。
-        metrics: [
-          "stat_cost", "cpc", "cpm", "show_cnt", "click_cnt", "ctr",
-          "time_attr_convert_cnt", "time_attr_conversion_cost",
-          "time_attr_on_web_cart", "time_attr_cost_per_on_web_cart",
-          "ad_material_draft_id", "material_primary_status",
-          "material_second_status_list", "main_entity_name",
-        ],
+        metrics: [...MATERIAL_LIST_METRICS],
         st: window.startDate,
         et: window.endDate,
         lifetime: 0,
