@@ -94,6 +94,7 @@ import {
   compareAdsManagementSpend,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
+  sumAdsManagementConversions,
 } from "./ads-management-view";
 import { CommandPalette, OverlayProvider, useOverlays } from "./ui/overlays";
 
@@ -1274,6 +1275,7 @@ function AdsManagementPage({
   const enabledCount = filtered.filter((entity) => entity.status === "enabled").length;
   const ignoredCount = filtered.filter((entity) => entity.ignored).length;
   const currentSpend = filtered.reduce((total, entity) => total + (entity.metrics.spend ?? 0), 0);
+  const currentConversions = sumAdsManagementConversions(filtered);
 
   return (
     <section className="page-stack ads-page">
@@ -1282,7 +1284,7 @@ function AdsManagementPage({
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
         <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>账户时区当天汇总</span></article>
         <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article className="stat-jump" role="button" tabIndex={0} title="查看广告组定时任务" onClick={() => scrollToSection("schedule-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("schedule-section"); } }}><small>定时任务</small><strong>{activeScheduleCount}</strong><span>待执行的单次与过夜计划</span></article>
+        <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1500,6 +1502,11 @@ function AllAccountsAdsView({
   useEffect(() => setPage(0), [statusFilter]);
   useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
 
+  const enabledCount = visible.filter(({ entity }) => entity.status === "enabled").length;
+  const currentSpend = visible.reduce((total, { entity }) => total + (entity.metrics.spend ?? 0), 0);
+  const ignoredCount = visible.filter(({ entity }) => entity.ignored).length;
+  const currentConversions = sumAdsManagementConversions(visible.map(({ entity }) => entity));
+
   const changeStatus = async (account: AccountConfig, entity: ManagedEntityRecord) => {
     if (!hasProviderCapability(accountCapabilities[account.id], "change-status")) return;
     try {
@@ -1536,6 +1543,13 @@ function AllAccountsAdsView({
 
   return (
     <section className="page-stack all-accounts-ads-page">
+      <div className="ads-metric-rail" aria-label="全部账户广告组摘要">
+        <article><small>当前对象</small><strong>{visible.length}</strong><span>当前筛选对象</span></article>
+        <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
+        <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>所有账户合计</span></article>
+        <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
+        <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
+      </div>
       <div className="panel table-panel">
         <div className="panel-heading">
           <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最新健康同步中仍存在的广告组；可直接执行启停和人工接管。</p></div></div>

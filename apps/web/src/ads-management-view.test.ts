@@ -6,6 +6,7 @@ import {
   ADS_MANAGEMENT_PAGE_SIZE,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
+  sumAdsManagementConversions,
 } from "./ads-management-view";
 
 const entity = (
@@ -44,6 +45,20 @@ describe("ads management view", () => {
     expect(ADS_MANAGEMENT_DEFAULT_LEVEL).toBe("ad-group");
     expect(ADS_MANAGEMENT_DEFAULT_STATUS).toBe("enabled");
     expect(ADS_MANAGEMENT_PAGE_SIZE).toBe(15);
+  });
+
+  it("sums conversion metrics without counting missing values", () => {
+    expect(sumAdsManagementConversions([
+      {
+        ...entity("one", "enabled", "2026-07-21T11:00:00.000Z"),
+        metrics: { ...entity("one", "enabled", "2026-07-21T11:00:00.000Z").metrics, conversions: 2 },
+      },
+      {
+        ...entity("two", "enabled", "2026-07-21T11:00:00.000Z"),
+        metrics: { ...entity("two", "enabled", "2026-07-21T11:00:00.000Z").metrics, conversions: 1.5 },
+      },
+      entity("missing", "enabled", "2026-07-21T11:00:00.000Z"),
+    ])).toBe(3.5);
   });
 
   it("keeps older live entities visible instead of treating 48 hours as their lifetime", () => {
