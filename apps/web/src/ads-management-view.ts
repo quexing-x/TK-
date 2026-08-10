@@ -11,6 +11,10 @@ export function compareAdsManagementSpend(
   return (right.metrics.spend ?? 0) - (left.metrics.spend ?? 0);
 }
 
+export function sumAdsManagementConversions(entities: ManagedEntityRecord[]): number {
+  return entities.reduce((total, entity) => total + (entity.metrics.conversions ?? 0), 0);
+}
+
 export function paginateAdsManagementItems<T>(
   items: T[],
   page: number,

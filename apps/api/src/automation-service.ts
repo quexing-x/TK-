@@ -13,6 +13,8 @@ import {
   type PollCycleRecord,
   type RuleConfiguration,
   type AdOperationRecord,
+  type SyncDataQuality,
+  type SyncEntityType,
   type WriteTaskActor,
   normalizeProviderEntity,
   syncLayerComplete,
@@ -578,8 +580,27 @@ export class AutomationService {
         }
       }
 
+      // partial 不是整账户一刀切：素材列表按广告逐个请求，只有失败广告及其所属
+      // 广告组本轮不具备安全写入条件；其余已取全的层级继续走自动执行。
+      const qualityEligible: AutomationCandidate[] = [];
+      for (const candidate of eligible) {
+        const qualityBlock = automaticRun
+          ? this.getAutomaticDataQualityBlockReason(
+              accountId,
+              account.providerKind,
+              output.result.quality,
+              candidate.entity,
+            )
+          : null;
+        if (qualityBlock) {
+          saveSuggestion(candidate, "skipped", qualityBlock);
+        } else {
+          qualityEligible.push(candidate);
+        }
+      }
+
       const { maxActionsPerRun } = this.store.getGlobalAutomationSettings();
-      const orderedEligible = eligible.sort(compareAutomationCandidates);
+      const orderedEligible = qualityEligible.sort(compareAutomationCandidates);
       const closingAdGroups = new Set(
         orderedEligible
           .filter(
@@ -630,7 +651,7 @@ export class AutomationService {
       let actionCount = 0;
       let successCount = 0;
       let failureCount = 0;
-      if (!automaticRun || output.result.quality.status !== "healthy") {
+      if (!automaticRun) {
         for (const candidate of selected) saveSuggestion(candidate, "preview");
       } else {
         const localDate = dateKeyInTimeZone(new Date(), account.timezone);
@@ -889,11 +910,11 @@ export class AutomationService {
         connection?.status,
       ));
     }
-    this.assertWriteAllowed(accountId, false);
     const entity = this.store.listManagedEntities(accountId, account.providerKind).find(
       (item) => item.entityType === input.entityType && item.externalId === input.externalId,
     );
     if (!entity) throw new Error("Ad object is missing or has not been synced.");
+    this.assertWriteAllowed(accountId, false, input);
     const task = this.store.createStatusWriteTask({
       accountId,
       providerKind: account.providerKind,
@@ -962,7 +983,10 @@ export class AutomationService {
         ));
       }
       const context = await this.loadContext(accountId, account.providerKind, account.timezone);
-      this.assertWriteAllowed(accountId, false);
+      this.assertWriteAllowed(accountId, false, {
+        entityType: task.entityType,
+        externalId: task.externalId,
+      });
       const executorId = randomUUID();
       const claimed = this.statusTasks.claim(task.id, executorId, "failed", actor);
       if (!claimed) throw new Error("状态写任务正在执行或状态已经变化。");
@@ -1140,7 +1164,7 @@ export class AutomationService {
       account.providerKind,
       account.timezone,
     );
-    this.assertWriteAllowed(accountId, requireAutomatic);
+    this.assertWriteAllowed(accountId, requireAutomatic, input);
     const entity = this.store
       .listManagedEntities(accountId, account.providerKind)
       .find(
@@ -1296,7 +1320,13 @@ export class AutomationService {
       ).find(
         (entity) => entity.entityType === input.entityType && entity.externalId === input.externalId,
       )?.status;
-      if (refreshed.result.quality.status !== "healthy") {
+      const readbackUsable = this.isEntitySyncUsable(
+        task.accountId,
+        account.providerKind,
+        refreshed.result.quality,
+        input,
+      );
+      if (!readbackUsable) {
         syncWarning = `状态写入后同步数据不完整：${refreshed.result.warnings.join("；")}`;
       } else if (observedStatus !== desiredStatus) {
         syncWarning = `状态写入后回读未确认目标状态：期望 ${desiredStatus}，实际 ${observedStatus ?? "未返回"}`;
@@ -1447,7 +1477,7 @@ export class AutomationService {
         "账户授权或凭据已变更，状态写入已在发送前阻止。",
       );
     }
-    this.assertWriteAllowed(context.accountId, requireAutomatic);
+    this.assertWriteAllowed(context.accountId, requireAutomatic, mutations[0]);
     this.providers.requireAccountCapability(
       context.accountId,
       context.settings.kind,
@@ -1485,9 +1515,123 @@ export class AutomationService {
     }
   }
 
+  private resolveMaterialAdId(
+    accountId: string,
+    providerKind: "cookie" | "official-api",
+    externalId: string,
+  ): string | undefined {
+    const entity = this.store
+      .listCurrentProviderEntities(accountId, providerKind)
+      .find((item) => item.entityType === "material" && item.externalId === externalId);
+    if (!entity) return undefined;
+    const payload = entity.payload as Record<string, unknown>;
+    const nested = [
+      payload,
+      ...(isRecordValue(payload.row_data) ? [payload.row_data] : []),
+      ...(isRecordValue(payload.stat_data) ? [payload.stat_data] : []),
+    ];
+    for (const source of nested) {
+      for (const key of ["creative_id", "creativeId"]) {
+        const value = source[key];
+        if (typeof value === "string" || typeof value === "number") {
+          const normalized = String(value).trim();
+          if (normalized) return normalized;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private materialUnavailableAdGroupIds(
+    accountId: string,
+    providerKind: "cookie" | "official-api",
+    quality: SyncDataQuality,
+  ): Set<string> {
+    const unavailableAdIds = new Set(quality.materialUnavailableAdIds ?? []);
+    if (unavailableAdIds.size === 0) return new Set();
+    return new Set(
+      this.store
+        .listManagedEntities(accountId, providerKind)
+        .filter((entity) => entity.entityType === "ad" && unavailableAdIds.has(entity.externalId))
+        .map((entity) => entity.parentAdGroupId)
+        .filter((externalId): externalId is string => Boolean(externalId)),
+    );
+  }
+
+  private isEntitySyncUsable(
+    accountId: string,
+    providerKind: "cookie" | "official-api",
+    quality: SyncDataQuality,
+    entity: {
+      entityType: SyncEntityType;
+      externalId: string;
+      parentAdGroupId?: string | null;
+    },
+  ): boolean {
+    if (quality.status === "healthy") return true;
+    if (quality.status !== "partial") return false;
+
+    if (!syncLayerComplete(quality, entity.entityType)) {
+      if (entity.entityType !== "material") return false;
+      const materialAdId = this.resolveMaterialAdId(
+        accountId,
+        providerKind,
+        entity.externalId,
+      );
+      // 没有按广告粒度的素材质量记录时，沿用旧的保守语义：素材不自动写。
+      return Boolean(
+        materialAdId
+        && quality.materialUnavailableAdIds
+        && !quality.materialUnavailableAdIds.includes(materialAdId),
+      );
+    }
+
+    const unavailableAdIds = new Set(quality.materialUnavailableAdIds ?? []);
+    if (unavailableAdIds.size === 0) return true;
+    // 广告组只依赖自己的指标与状态。素材列表的局部失败不能阻断广告组
+    // 的独立启停，否则“素材层独立”会退化成父级也不可用。
+    if (entity.entityType === "ad-group") return true;
+    if (entity.entityType === "material") {
+      const materialAdId = this.resolveMaterialAdId(
+        accountId,
+        providerKind,
+        entity.externalId,
+      );
+      return Boolean(materialAdId && !unavailableAdIds.has(materialAdId));
+    }
+    const unavailableAdGroupIds = this.materialUnavailableAdGroupIds(
+      accountId,
+      providerKind,
+      quality,
+    );
+    if (entity.entityType === "ad") {
+      return !unavailableAdIds.has(entity.externalId)
+        && !unavailableAdGroupIds.has(entity.parentAdGroupId ?? "");
+    }
+    return true;
+  }
+
+  private getAutomaticDataQualityBlockReason(
+    accountId: string,
+    providerKind: "cookie" | "official-api",
+    quality: SyncDataQuality,
+    entity: {
+      entityType: SyncEntityType;
+      externalId: string;
+      parentAdGroupId?: string | null;
+    },
+  ): string | null {
+    if (this.isEntitySyncUsable(accountId, providerKind, quality, entity)) return null;
+    if (quality.status === "partial" && quality.materialUnavailableAdIds?.length) {
+      return "素材列表本轮部分抓取失败，已隔离受影响对象，本条自动状态写入跳过。";
+    }
+    return `数据质量为 ${quality.status}，${entity.entityType} 层本轮未取全，自动状态写入跳过。`;
+  }
+
   private assertWriteAllowed(
     accountId: string,
     requireAutomatic: boolean,
+    entity?: Pick<StatusMutation, "entityType" | "externalId">,
   ): void {
     const account = this.store.getAccount(accountId);
     if (!account) throw new WriteBlockedBeforeDispatchError("账号不存在。");
@@ -1498,7 +1642,13 @@ export class AutomationService {
     if (latestSync.quality.status === "invalid") {
       throw new WriteBlockedBeforeDispatchError("同步契约已失效，所有真实 Provider 写入已阻止。");
     }
-    if (latestSync.quality.status !== "healthy") {
+    if (
+      latestSync.quality.status !== "healthy"
+      && (
+        !entity
+        || !this.isEntitySyncUsable(accountId, account.providerKind, latestSync.quality, entity)
+      )
+    ) {
       throw new WriteBlockedBeforeDispatchError(`同步数据为 ${latestSync.quality.status}，状态写入已阻止。`);
     }
     if (requireAutomatic) {
@@ -1905,6 +2055,10 @@ function buildAutomaticActionKey(
     thresholdValue: candidate.thresholdValue,
     metrics: candidate.entity.metrics,
   })).digest("hex");
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function connectionUnavailableMessage(

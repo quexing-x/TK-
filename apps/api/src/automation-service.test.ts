@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dateTimeSuffix, type ProviderEntity } from "@tk-auto/core";
+import { dateTimeSuffix, type ProviderEntity, type SyncEntityType } from "@tk-auto/core";
 import type { SyncDataQualityStatus } from "@tk-auto/core";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -66,6 +66,10 @@ class FakeProvider implements AdsProvider {
   adGroupSpend = 20;
   scenario: "default" | "parent-child" | "campaign-parent-child" | "disabled-parent" | "priority" | "recovery" | "appeal" | "ad-switch" | "material" = "default";
   qualityStatus: SyncDataQualityStatus = "healthy";
+  completeEntityTypes: SyncEntityType[] | undefined = undefined;
+  partialFailures: string[] | undefined = undefined;
+  materialUnavailableAdIds: string[] | undefined = undefined;
+  materialStatus = "enable";
   syncCount = 0;
 
   async checkHealth(): Promise<{
@@ -184,7 +188,7 @@ class FakeProvider implements AdsProvider {
           adgroup_id: "adgroup-1",
           creative_id: "ad-1",
           main_entity_name: "测试素材",
-          material_primary_status: "delivery_ok",
+          material_primary_status: this.materialStatus === "disable" ? "disabled" : "delivery_ok",
           row_data: {
             campaign_id: "campaign-1",
             adgroup_id: "adgroup-1",
@@ -199,7 +203,7 @@ class FakeProvider implements AdsProvider {
     }
     // 一个开着的广告，指标差到规则一定想关它——用来验证广告总开关不会被自动关掉。
     if (this.scenario === "ad-switch") {
-      defaultGroup.payload.ad_primary_status = "enabled";
+      defaultGroup.payload.ad_primary_status = this.adGroupStatus;
       entities.push({
         entityType: "ad",
         externalId: "ad-1",
@@ -312,11 +316,17 @@ class FakeProvider implements AdsProvider {
             timezone: "Asia/Shanghai",
           },
           missingMetrics: this.qualityStatus === "healthy" ? [] : ["cost_per_conversion"],
-          partialFailures: this.qualityStatus === "healthy" ? [] : ["test-quality"],
+          partialFailures: this.partialFailures
+            ?? (this.qualityStatus === "healthy" ? [] : ["test-quality"]),
           // 素材层只覆盖"当天有消耗的广告"，不跟着 healthy 无条件刷新，本轮取全了
           // 才声明——真 Provider 也是这么写的。
-          ...(entities.some((entity) => entity.entityType === "material")
-            ? { completeEntityTypes: ["material" as const] }
+          ...(this.completeEntityTypes
+            ? { completeEntityTypes: this.completeEntityTypes }
+            : entities.some((entity) => entity.entityType === "material")
+              ? { completeEntityTypes: ["material" as const] }
+              : {}),
+          ...(this.materialUnavailableAdIds
+            ? { materialUnavailableAdIds: this.materialUnavailableAdIds }
             : {}),
           lastHealthyAt: now,
         },
@@ -338,6 +348,9 @@ class FakeProvider implements AdsProvider {
         } else {
           this.adGroupStatus = status;
         }
+      }
+      if (mutation.entityType === "material" && this.statusFailureKind === null && !this.shouldFail && !this.ignoreStatusWrites) {
+        this.materialStatus = mutation.action === "enable" ? "enable" : "disable";
       }
     }
     if (this.failReadbackAfterStatus) this.failNextSync = true;
@@ -592,9 +605,102 @@ describe("AutomationService", () => {
     expect(provider.mutations).toHaveLength(0);
     expect(store.getAccount("demo-account")?.enabled).toBe(true);
     expect(store.listAutomationDecisions("demo-account")[0]).toMatchObject({
-      status: "preview",
+      status: "skipped",
       dataQualityStatus: "partial",
       dataQualityWarnings: expect.arrayContaining(["test-quality", "缺少指标 cost_per_conversion"]),
+    });
+    expect(store.listAutomationDecisions("demo-account")[0]?.errorMessage)
+      .toContain("数据质量");
+  });
+
+  it("continues unaffected parent writes when only material fetches are partial", async () => {
+    provider.qualityStatus = "partial";
+    provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
+    provider.partialFailures = ["material:request-failed"];
+    provider.materialUnavailableAdIds = ["ad-missing"];
+
+    const run = await service.runAccount("demo-account", "scheduler");
+
+    expect(run.successCount).toBe(1);
+    expect(provider.mutations).toMatchObject([
+      {
+        entityType: "ad-group",
+        externalId: "adgroup-1",
+        action: "disable",
+      },
+    ]);
+  });
+
+  it("does not block an ad group when material fetch failed for one of its ads", async () => {
+    provider.scenario = "ad-switch";
+    provider.qualityStatus = "partial";
+    provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
+    provider.partialFailures = ["material:request-failed"];
+    provider.materialUnavailableAdIds = ["ad-1"];
+
+    const run = await service.runAccount("demo-account", "scheduler");
+
+    expect(run.candidateCount).toBeGreaterThan(0);
+    expect(run.successCount).toBe(1);
+    expect(provider.mutations).toMatchObject([
+      {
+        entityType: "ad-group",
+        externalId: "adgroup-1",
+        action: "disable",
+      },
+    ]);
+    const groupDecision = store.listAutomationDecisions("demo-account").find(
+      (decision) => decision.entityType === "ad-group" && decision.externalId === "adgroup-1",
+    );
+    expect(groupDecision).toMatchObject({
+      status: "succeeded",
+      dataQualityStatus: "partial",
+    });
+  });
+
+  it("writes an unaffected material during partial sync and accepts partial readback", async () => {
+    provider.scenario = "material";
+    provider.qualityStatus = "partial";
+    provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
+    provider.partialFailures = ["material:request-failed"];
+    provider.materialUnavailableAdIds = ["ad-missing"];
+
+    const run = await service.runAccount("demo-account", "scheduler");
+
+    expect(run.successCount).toBe(1);
+    expect(provider.mutations).toMatchObject([
+      {
+        entityType: "material",
+        externalId: "1872777743628513",
+        action: "disable",
+        parentAdGroupId: "adgroup-1",
+      },
+    ]);
+    expect(store.listAutomationDecisions("demo-account").find(
+      (decision) => decision.entityType === "material",
+    )).toMatchObject({
+      status: "succeeded",
+      dataQualityStatus: "partial",
+    });
+  });
+
+  it("skips a material whose source ad material list failed", async () => {
+    provider.scenario = "material";
+    provider.qualityStatus = "partial";
+    provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
+    provider.partialFailures = ["material:request-failed"];
+    provider.materialUnavailableAdIds = ["ad-1"];
+
+    const run = await service.runAccount("demo-account", "scheduler");
+
+    expect(run.candidateCount).toBe(1);
+    expect(run.successCount).toBe(0);
+    expect(provider.mutations).toHaveLength(0);
+    expect(store.listAutomationDecisions("demo-account").find(
+      (decision) => decision.entityType === "material",
+    )).toMatchObject({
+      status: "skipped",
+      dataQualityStatus: "partial",
     });
   });
 
@@ -622,6 +728,29 @@ describe("AutomationService", () => {
       action: "disable",
     })).rejects.toThrow("状态写入已阻止");
     expect(provider.mutations).toHaveLength(0);
+  });
+
+  it("allows a manual ad-group write when only material fetches are partial", async () => {
+    provider.qualityStatus = "partial";
+    provider.completeEntityTypes = ["campaign", "ad-group", "ad"];
+    provider.partialFailures = ["material:request-failed"];
+    provider.materialUnavailableAdIds = ["ad-1"];
+    const partial = await provider.syncReadOnly();
+    const partialAt = new Date(Date.now() + 1_000).toISOString();
+    partial.result.startedAt = partialAt;
+    partial.result.finishedAt = partialAt;
+    store.saveReadOnlySync("demo-account", "cookie", partial.entities, partial.result);
+
+    const task = service.enqueueManualStatusChange("demo-account", {
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      action: "disable",
+    });
+
+    await vi.waitFor(() => expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]));
+    expect(store.getAdOperation(task.id).status).toBe("succeeded");
   });
 
   it("marks the status task unknown when status write readback fails", async () => {

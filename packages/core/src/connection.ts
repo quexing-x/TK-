@@ -225,6 +225,13 @@ export interface SyncDataQuality {
   coverage: SyncDataCoverage;
   missingMetrics: string[];
   partialFailures: string[];
+  /**
+   * 本轮素材列表没有取到的所属广告 ID。
+   *
+   * 素材列表是按广告逐个请求的，所以一次 partial 同步仍可能有一批素材完整可用。
+   * 记录到广告粒度，自动启停才能只隔离失败对象，不把整账户一起降级。
+   */
+  materialUnavailableAdIds?: string[];
   /** Most recent fully healthy sync, enriched by storage when available. */
   lastHealthyAt: string | null;
   /**

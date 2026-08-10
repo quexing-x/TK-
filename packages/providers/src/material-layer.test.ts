@@ -121,12 +121,26 @@ describe("素材同步", () => {
     ...patch,
   });
 
-  const stub = (adRows: Record<string, unknown>[], materialRows: Record<string, unknown>[]) => {
+  const stub = (
+    adRows: Record<string, unknown>[],
+    materialRows: Record<string, unknown>[],
+    failedAdIds: string[] = [],
+  ) => {
+    const failed = new Set(failedAdIds);
     const requested: Array<{ path: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ path: url.pathname, body });
+      if (url.pathname.includes("expand/material/list")) {
+        const commonReq = body.common_req as Record<string, unknown> | undefined;
+        const filters = commonReq?.filters as Array<Record<string, unknown>> | undefined;
+        const creativeFilter = filters?.find((item) => item.field === "creative_id");
+        const creativeId = (creativeFilter?.in_field_values as unknown[] | undefined)?.[0];
+        if (typeof creativeId === "string" && failed.has(creativeId)) {
+          throw new Error("material request failed");
+        }
+      }
       const table = url.pathname.includes("expand/material/list") ? materialRows : adRows;
       return new Response(
         JSON.stringify({ code: 0, data: { table, pagination: { page: 1, page_count: 1 } } }),
@@ -175,6 +189,29 @@ describe("素材同步", () => {
     const output = await new CookieAdsProvider().syncReadOnly!(context());
 
     expect(output.entities.filter((entity) => entity.entityType === "material")).toHaveLength(0);
+  });
+
+  it("记录素材请求失败的所属广告，并保持其他素材可用", async () => {
+    stub(
+      [
+        { campaign_id: "c1", ad_id: "g1", creative_id: "failed-ad", stat_cost: "5" },
+        { campaign_id: "c1", ad_id: "g1", creative_id: "healthy-ad", stat_cost: "5" },
+      ],
+      [materialRow({ creative_id: "healthy-ad" })],
+      ["failed-ad"],
+    );
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    expect(output.result.quality.status).toBe("partial");
+    expect(output.result.quality.partialFailures).toContain("material:request-failed");
+    expect(output.result.quality.materialUnavailableAdIds).toEqual(["failed-ad"]);
+    expect(output.result.quality.completeEntityTypes).toEqual(
+      expect.arrayContaining(["campaign", "ad-group", "ad"]),
+    );
+    expect(output.result.quality.completeEntityTypes).not.toContain("material");
+    expect(output.entities.find((entity) => entity.entityType === "material")?.payload)
+      .toMatchObject({ creative_id: "healthy-ad" });
   });
 
   it("素材带上自己的消耗与转化，规则才判得动", async () => {

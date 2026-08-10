@@ -1602,14 +1602,25 @@ export class AutomationStore {
           ? quality.completeEntityTypes ?? []
           : [],
     );
+    // partial 素材同步不能清空整层：本轮只查了当天有消耗的广告，失败或未轮到的
+    // 素材必须保留旧快照。但本轮成功返回的素材仍要写入当前快照，否则规则候选
+    // 进入 executeStatusTask 后无法从当前快照解析它的广告组 ID，也无法完成回读。
+    const persisted = new Set(refreshed);
+    if (
+      quality.status === "partial"
+      && !refreshed.has("material")
+      && entities.some((entity) => entity.entityType === "material")
+    ) {
+      persisted.add("material");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      if (refreshed.size > 0) {
+      if (persisted.size > 0) {
         for (const entityType of refreshed) {
           clearCurrentLayer.run(accountId, kind, entityType);
         }
         for (const entity of entities) {
-          if (!refreshed.has(entity.entityType)) continue;
+          if (!persisted.has(entity.entityType)) continue;
           insert.run(
             accountId,
             kind,
