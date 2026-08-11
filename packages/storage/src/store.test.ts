@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -1595,7 +1595,7 @@ describe("AutomationStore", () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it("backs up an existing database before migration and aborts on failure", () => {
+  it("aborts startup on an unreadable database without destroying the original file", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-failed-migration-"));
     const databasePath = join(directory, "automation.db");
     writeFileSync(databasePath, "not a sqlite database", "utf8");
@@ -1603,11 +1603,11 @@ describe("AutomationStore", () => {
     expect(() => new AutomationStore(databasePath)).toThrow(
       "数据库迁移失败，服务未启动",
     );
-    expect(
-      readdirSync(directory).some((name) =>
-        name.startsWith("automation.db.pre-migration-") && name.endsWith(".bak"),
-      ),
-    ).toBe(true);
+
+    // 迁移前备份改为按需（VACUUM INTO），一个根本打不开的文件既无法快照、也没有
+    // 有价值的数据可保——不再无脑复制一份垃圾。关键安全性质是：原文件原样保留，
+    // 供人工排查，而不是被启动流程改动或删掉。
+    expect(readFileSync(databasePath, "utf8")).toBe("not a sqlite database");
 
     rmSync(directory, { recursive: true, force: true });
   });
@@ -1767,27 +1767,59 @@ describe("AutomationStore", () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it("rolls the database file back when an old-version upgrade fails", () => {
+  it("keeps the database consistent and data intact when an upgrade migration fails", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-upgrade-rollback-"));
     const databasePath = join(directory, "automation.db");
     const original = new AutomationStore(databasePath);
     original.seed();
+    const account = original.createAccount({
+      displayName: "回滚哨兵",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
     original.close();
-    const legacy = new DatabaseSync(databasePath);
-    legacy.exec("DROP TABLE database_backups");
-    legacy.close();
 
+    // 模拟一次会失败的升级迁移。核心安全性质：失败必须让服务拒绝启动，且既有数据
+    // 不被破坏——迁移前的 CREATE TABLE/INDEX IF NOT EXISTS 都是非破坏性的，真正的
+    // 数据迁移在 apply 的事务里，失败即回滚。
     vi.spyOn(MigrationRunner.prototype, "apply").mockImplementationOnce(() => {
       throw new Error("simulated upgrade failure");
     });
     expect(() => new AutomationStore(databasePath)).toThrow("数据库迁移失败，服务未启动");
+    vi.restoreAllMocks();
 
     const inspected = new DatabaseSync(databasePath, { readOnly: true });
-    expect(inspected.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'database_backups'",
-    ).get()).toBeUndefined();
     expect(inspected.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
     inspected.close();
+    // 库仍能被正常打开，且哨兵账户还在——失败的升级没有吞掉数据。
+    const recovered = new AutomationStore(databasePath);
+    expect(recovered.getAccount(account.id)?.displayName).toBe("回滚哨兵");
+    recovered.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("skips the pre-migration backup on startups with no pending migration", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-lazy-backup-"));
+    const databasePath = join(directory, "automation.db");
+    const backupCount = () =>
+      readdirSync(directory).filter(
+        (name) => name.startsWith("automation.db.pre-migration-") && name.endsWith(".bak"),
+      ).length;
+
+    // 全新库首次初始化：没有既有数据要保护 → 不做迁移前备份（与旧的 !existsSync 一致）。
+    const first = new AutomationStore(databasePath);
+    first.seed();
+    first.close();
+    expect(backupCount()).toBe(0);
+
+    // 已迁移到最新的库再开一次：无待跑迁移 → 一次备份都不做。这正是 800MB 库不再
+    // 每次启动都拷贝 + VACUUM 整库、冷启动从 30 秒降到秒级的关键。
+    // （既有库遇到待跑迁移时仍会备份——由 rollback 与 snapshot-promotion 两个用例覆盖。）
+    const second = new AutomationStore(databasePath);
+    second.close();
+    expect(backupCount()).toBe(0);
+
     rmSync(directory, { recursive: true, force: true });
   });
 
