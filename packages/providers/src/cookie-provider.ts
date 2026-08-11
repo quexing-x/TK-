@@ -535,21 +535,49 @@ export class CookieAdsProvider implements AdsProvider {
         .filter((entity) => entitySpend(entity.payload) > 0)
         .map((entity) => entity.externalId);
       let materialFailures = 0;
+      // 失败原因必须留下来。原先这里是空 catch，素材整层拉不动时界面上只有
+      // 「N 个广告的素材列表拉取失败」，看不出是 Cookie 过期、超时，还是请求
+      // 体本身被 TikTok 拒收——2026-08-10 就是这样连查两轮都没抓到真因。
+      const materialFailureReasons = new Set<string>();
+      // 契约计数：响应里有行、却一行都解析不出素材 ID，说明字段形状变了。
+      // 这跟"这些广告本来就没有素材"必须分开——后者返回 0 行是正常的，前者
+      // 是整层失效，而两者在计数上都是 material:0。
+      let materialRowsSeen = 0;
+      let materialEntitiesExtracted = 0;
       const materialAdIdsToFetch = spendingAdIds.slice(0, MAX_MATERIAL_ADS_PER_SYNC);
       materialUnavailableAdIds.push(...spendingAdIds.slice(MAX_MATERIAL_ADS_PER_SYNC));
       for (const creativeId of materialAdIdsToFetch) {
         try {
+          // 过一遍 withTodayMetricWindow，和其它三层共用同一套日期改写 + 规则指标
+          // 保障（ensureStatisticsMetric）。日期在 materialListRequest 里已设成当天，
+          // 这里的改写是幂等的；真正的意义是：将来给规则加新指标时改
+          // ensureStatisticsMetric，素材层会自动跟上，不再各写各的、悄悄落下。
           const payload = await requestCookieJson(
-            materialListRequest(importedAdGroupRead, creativeId, {
-              startDate: formatDateInTimezone(materialNow, materialTimezone),
-              endDate: formatDateInTimezone(materialNow, materialTimezone),
-            }),
+            withTodayMetricWindow(
+              materialListRequest(importedAdGroupRead, creativeId, {
+                startDate: formatDateInTimezone(materialNow, materialTimezone),
+                endDate: formatDateInTimezone(materialNow, materialTimezone),
+              }),
+              materialTimezone,
+              materialNow,
+            ),
             credential,
           );
-          entities.push(...extractEntities(payload, "material"));
-        } catch {
+          const extracted = extractEntities(payload, "material");
+          materialRowsSeen += countEntityListRows(payload, "material");
+          materialEntitiesExtracted += extracted.length;
+          entities.push(...extracted);
+        } catch (cause) {
           materialFailures += 1;
           materialUnavailableAdIds.push(creativeId);
+          // 和上面派生请求失败那段用同一套：undici 把网络错误一律写成
+          // `fetch failed`，真正的 errno 挂在 cause 上，只取 message 会得到
+          // 一句和原来的空 catch 一样没信息的话。
+          materialFailureReasons.add(
+            cause instanceof Error
+              ? withCauseDetail(cause.message, cause).slice(0, 200)
+              : "未知错误。",
+          );
         }
       }
       if (spendingAdIds.length > MAX_MATERIAL_ADS_PER_SYNC) {
@@ -560,16 +588,43 @@ export class CookieAdsProvider implements AdsProvider {
         partialFailures.push("material:truncated");
       }
       if (materialFailures > 0) {
-        warnings.push(`${materialFailures} 个广告的素材列表拉取失败，这些广告的素材本轮不参与规则判定。`);
+        // 截断也要出声：只列前三类而不说还有别的，会让人把系统性拒收当成
+        // 偶发超时——正是这次要消灭的误判。
+        const shown = [...materialFailureReasons].slice(0, 3).join("；");
+        const rest = materialFailureReasons.size > 3
+          ? `（共 ${materialFailureReasons.size} 类，仅列前 3 类）`
+          : "";
+        warnings.push(
+          `${materialFailures} 个广告的素材列表拉取失败，这些广告的素材本轮不参与规则判定。失败原因${rest}：${shown}`,
+        );
         partialFailures.push("material:request-failed");
+      }
+      // 请求全部成功、响应里也有行，却一条素材都解析不出来 = 字段形状变了。
+      // 这一层其它三层有 hasRecognizedEntityList 兜着，素材层没有；不拦下来的
+      // 后果不只是漏判：completeEntityTypes 带上 material 会让 saveReadOnlySync
+      // 清空整层已存快照（storage/src/store.ts 的 clearCurrentLayer），规则从此
+      // 认为素材不存在，而同步质量仍然显示 healthy。
+      const materialContractBroken =
+        materialRowsSeen > 0 && materialEntitiesExtracted === 0;
+      if (materialContractBroken) {
+        warnings.push(
+          `素材列表返回了 ${materialRowsSeen} 行，但没有一行能解析出素材 ID（ad_material_draft_id），本轮素材层判为契约不符，不刷新已存素材。`,
+        );
+        partialFailures.push("material:contract-invalid");
       }
       if (
         spendingAdIds.length > 0
         && materialFailures === 0
         && materialUnavailableAdIds.length === 0
+        && !materialContractBroken
       ) {
         completeEntityTypes.push("material");
       }
+    } else {
+      // 素材请求是从广告组那条只读 cURL 派生出来的。没有它就整层不拉，
+      // 而计数里的 material:0 和其它层的空结果长得一模一样，必须说出来。
+      warnings.push("素材层尚未导入只读请求：素材请求由广告组列表 cURL 派生，缺它则整层不拉。");
+      partialFailures.push("material:request-missing");
     }
 
     const uniqueEntities = dedupeEntities(entities);
@@ -5985,19 +6040,36 @@ function deriveFinalAdReadRequest(
   return { ...adFinalListRequest(request), derived: true };
 }
 
+/**
+ * 响应里"看起来是列表"的行数，跟能不能解析出 ID 无关。
+ * 用来区分「这批广告本来就没有素材」（0 行，正常）和「字段形状变了」
+ * （有行但一条都解析不出来，整层失效）。
+ */
+function countEntityListRows(
+  payload: Record<string, unknown>,
+  entityType: SyncEntityType,
+): number {
+  const data = isRecord(payload.data) ? payload.data : payload;
+  for (const key of entityListKeys[entityType]) {
+    if (Array.isArray(data[key])) return data[key].length;
+  }
+  return 0;
+}
+
+const entityListKeys: Record<SyncEntityType, string[]> = {
+  material: ["table", "list", "items"],
+  campaign: ["campaigns", "campaign_list", "table", "list", "items"],
+  "ad-group": ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"],
+  ad: ["ads", "ad_list", "table", "list", "items"],
+};
+
 function extractEntities(
   payload: Record<string, unknown>,
   entityType: SyncEntityType,
 ): ProviderEntity[] {
   const data = isRecord(payload.data) ? payload.data : payload;
-  const typeKeys: Record<SyncEntityType, string[]> = {
-    material: ["table", "list", "items"],
-    campaign: ["campaigns", "campaign_list", "table", "list", "items"],
-    "ad-group": ["adgroups", "ad_groups", "adgroup_list", "table", "list", "items"],
-    ad: ["ads", "ad_list", "table", "list", "items"],
-  };
   let list: unknown[] = [];
-  for (const key of typeKeys[entityType]) {
+  for (const key of entityListKeys[entityType]) {
     if (Array.isArray(data[key])) {
       list = data[key];
       break;
@@ -6107,6 +6179,40 @@ function materializeMaterialStatusRequest(
   };
 }
 
+// 素材列表(expand/material/list, mix_material 报表)的请求形状，抽成命名常量做
+// 单一事实源——手搓字段散在函数里最容易悄悄漂移（当初就是这么漏了 report_id、
+// 整层从上线起一行没取到）。
+//
+// 注意：**不要**像 adFinalListRequest/campaignStatisticsListRequest 那样从广告组
+// 抓包体派生 common_req。mix_material 是另一套报表契约，它的 dimensions/filters/
+// metrics/sort 与广告组列表不同，继承广告组的字段（sort_stat=create_time、36 个
+// 广告组指标等）会被素材报表拒收；而当初漏掉的 report_id 本就不在广告组请求里，
+// 派生也救不了。能安全继承的只有 URL 查询参数（aadvid/msToken/风控串）与请求头，
+// 这两样已经通过 new URL(template.url) 和 ...template 继承了。
+const MATERIAL_LIST_DIMENSIONS = [
+  "main_entity_id", "main_entity_type", "creative_id", "ad_id", "campaign_id",
+] as const;
+
+const MATERIAL_ORIGIN_TYPES = [
+  "no_post_video", "post_video", "no_post_carousel", "post_carousel",
+  "catalog_manual_video", "catalog_tpl_carousel", "catalog_tpl_video",
+  "no_post_single_image", "catalog_tpl_multi_show",
+] as const;
+
+// 五个判定指标（消耗、转化、点击、加购、展示）+ 四个身份/状态字段，一个都不能删。
+// 后四个不是"界面用的"：`ad_material_draft_id` 是素材自己的 ID（extractEntities
+// 只认它，缺了整批行被当成没有 ID 丢掉）；`material_primary_status` 是启停状态
+// （缺了 normalizeStatus 判成 unknown，规则一条不执行）；`material_second_status_list`
+// 带审核态；`main_entity_name` 是素材名。真机 2026-08-10 验证：只发前十个指标时
+// 请求成功但返回行里没有 ID 和状态，素材数依旧是 0。material-layer.test 钉死这份清单。
+const MATERIAL_LIST_METRICS = [
+  "stat_cost", "cpc", "cpm", "show_cnt", "click_cnt", "ctr",
+  "time_attr_convert_cnt", "time_attr_conversion_cost",
+  "time_attr_on_web_cart", "time_attr_cost_per_on_web_cart",
+  "ad_material_draft_id", "material_primary_status",
+  "material_second_status_list", "main_entity_name",
+] as const;
+
 function materialListRequest(
   template: CapturedCookieRequest,
   creativeId: string,
@@ -6124,26 +6230,17 @@ function materialListRequest(
     url: url.toString(),
     body: JSON.stringify({
       common_req: {
-        dimensions: ["main_entity_id", "main_entity_type", "creative_id", "ad_id", "campaign_id"],
+        dimensions: [...MATERIAL_LIST_DIMENSIONS],
         filters: [
-          {
-            field: "origin_material_type",
-            filter_type: 0,
-            in_field_values: [
-              "no_post_video", "post_video", "no_post_carousel", "post_carousel",
-              "catalog_manual_video", "catalog_tpl_carousel", "catalog_tpl_video",
-              "no_post_single_image", "catalog_tpl_multi_show",
-            ],
-          },
-          { field: "is_del", filter_type: 0, in_field_values: ["0", "1"] },
+          { field: "origin_material_type", filter_type: 0, in_field_values: [...MATERIAL_ORIGIN_TYPES] },
+          // 只拉未删除的素材（is_del=0）。界面抓包发的是 ["0","1"]（列表里也显示
+          // 已删项），但自动化不能把已删素材当规则对象：删除态会被 normalizeStatus
+          // 误判成 enabled，零加购规则随即对已删素材发写入 → TikTok 拒收 → 连续
+          // 失败打开写入熔断器停整账户。真机 2026-08-11 验证 is_del=["0"] 被接受。
+          { field: "is_del", filter_type: 0, in_field_values: ["0"] },
           { field: "creative_id", filter_type: 0, in_field_values: [creativeId] },
         ],
-        // 规则要的五个指标：消耗、转化、点击、加购、展示。其余是界面用的，不要。
-        metrics: [
-          "stat_cost", "cpc", "cpm", "show_cnt", "click_cnt", "ctr",
-          "time_attr_convert_cnt", "time_attr_conversion_cost",
-          "time_attr_on_web_cart", "time_attr_cost_per_on_web_cart",
-        ],
+        metrics: [...MATERIAL_LIST_METRICS],
         st: window.startDate,
         et: window.endDate,
         lifetime: 0,
@@ -6153,6 +6250,10 @@ function materialListRequest(
         page_size: 100,
       },
       extra: { scene: "campaign_list_v2" },
+      // 素材列表选的是 mix_material 这张报表。少了它 TikTok 直接拒收整个请求
+      // （code 1300100001「无法加载。请尝试刷新。」），素材层从上线起一行都没
+      // 取到过。字段来自 2026-08-10 的真实抓包。
+      report_id: "mix_material",
     }),
   };
 }

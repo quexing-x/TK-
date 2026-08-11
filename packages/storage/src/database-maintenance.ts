@@ -31,29 +31,6 @@ export interface AppliedRestore {
   rollbackPath: string | null;
 }
 
-export function createRawPreMigrationBackup(databasePath: string): string | null {
-  if (databasePath === ":memory:" || !existsSync(databasePath)) return null;
-  const backupPath = `${databasePath}.pre-migration-${fileTimestamp()}.bak`;
-  copyFileSync(databasePath, backupPath);
-  for (const suffix of ["-wal", "-shm"] as const) {
-    const sidecarPath = `${databasePath}${suffix}`;
-    if (existsSync(sidecarPath)) copyFileSync(sidecarPath, `${backupPath}${suffix}`);
-  }
-  return backupPath;
-}
-
-export function promoteToConsistentSnapshot(
-  database: DatabaseSync,
-  backupPath: string,
-): void {
-  const temporaryPath = `${backupPath}.consistent.tmp`;
-  rmSync(temporaryPath, { force: true });
-  database.prepare("VACUUM INTO ?").run(temporaryPath);
-  renameSync(temporaryPath, backupPath);
-  rmSync(`${backupPath}-wal`, { force: true });
-  rmSync(`${backupPath}-shm`, { force: true });
-}
-
 export function createConsistentSnapshot(
   database: DatabaseSync,
   backupPath: string,

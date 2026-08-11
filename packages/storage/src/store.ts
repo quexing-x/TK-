@@ -6,12 +6,11 @@ import { DatabaseSync } from "node:sqlite";
 import { MigrationRunner } from "./migration-runner.js";
 import {
   createConsistentSnapshot,
-  createRawPreMigrationBackup,
   hasPendingDatabaseRestore,
   inspectDatabaseBackup,
-  promoteToConsistentSnapshot,
   restoreDatabaseFiles,
   stageDatabaseRestore,
+  type BackupInspection,
 } from "./database-maintenance.js";
 import {
   AccountConfigSchema,
@@ -190,27 +189,41 @@ export class AutomationStore {
       mkdirSync(dirname(databasePath), { recursive: true });
     }
 
-    const backupPath = createRawPreMigrationBackup(databasePath);
-    let backupReadyForRestore = false;
+    // 迁移前备份改为按需：只有真有待跑迁移时，MigrationRunner 才在第一条迁移落库
+    // 前回调下面这个钩子，对整库做一次一致性快照（VACUUM INTO）。schema 已最新的
+    // 常规启动一条迁移都不会跑、钩子不触发、备份也不做——此前每次启动都无条件
+    // 拷贝 + VACUUM 整库，800MB 库冷启动 30 秒的根源就在这。
+    //
+    // 备份失败会抛出，此时 backupPath 保持 null，下面的 catch 不会拿半成品去覆盖
+    // 源库；备份成功后才记录路径，供失败回滚与成功记账使用。
+    // 全新库（构造前文件不存在）没有既有数据要保护，跳过迁移前备份——旧的
+    // createRawPreMigrationBackup 也是靠 !existsSync 跳过的，保持一致，也免得给
+    // 空库记一条无意义的备份。
+    const databaseExistedBefore = databasePath !== ":memory:" && existsSync(databasePath);
+    let backupPath: string | null = null;
+    let backupInspection: BackupInspection | null = null;
+    let sourceSchemaVersion = "legacy-unversioned";
     let openedDatabase: DatabaseSync | null = null;
     try {
       openedDatabase = new DatabaseSync(databasePath);
       this.db = openedDatabase;
-      this.migrationRunner = new MigrationRunner(this.db);
       this.db.exec("PRAGMA foreign_keys = ON");
-      const sourceSchemaVersion = this.readSchemaVersion();
-      if (backupPath) {
-        promoteToConsistentSnapshot(this.db, backupPath);
-        backupReadyForRestore = true;
-      }
+      sourceSchemaVersion = this.readSchemaVersion();
       this.db.exec("PRAGMA journal_mode = WAL");
+      this.migrationRunner = new MigrationRunner(this.db, () => {
+        if (!databaseExistedBefore) return;
+        const path = `${databasePath}.pre-migration-${fileTimestamp()}.bak`;
+        const inspection = createConsistentSnapshot(this.db, path);
+        backupPath = path;
+        backupInspection = inspection;
+      });
       this.migrate();
-      if (backupPath && backupReadyForRestore) {
+      if (backupPath && backupInspection) {
         this.recordDatabaseBackup(
           "pre-migration",
           backupPath,
           sourceSchemaVersion,
-          inspectDatabaseBackup(backupPath),
+          backupInspection,
         );
         this.pruneDatabaseBackups();
       }
@@ -220,7 +233,7 @@ export class AutomationStore {
       } catch {
         // Preserve the original migration/opening error.
       }
-      if (backupPath && backupReadyForRestore) {
+      if (backupPath) {
         try {
           restoreDatabaseFiles(databasePath, backupPath);
         } catch {
