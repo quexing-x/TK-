@@ -21,6 +21,7 @@ export function filterEntitiesToRecentWindow(
   entities: ProviderEntity[],
   now = new Date(),
   lookbackHours = RULE_LOOKBACK_HOURS,
+  managedAdGroupIds: ReadonlySet<string> = new Set(),
 ): RecentWindowFilterResult {
   const cutoff = now.getTime() - lookbackHours * 60 * 60 * 1_000;
   const futureTolerance = now.getTime() + 5 * 60 * 1_000;
@@ -34,14 +35,19 @@ export function filterEntitiesToRecentWindow(
     adGroupCreatedAt.set(entity.externalId, createdAt);
     const normalized = normalizeProviderEntity(entity);
     const spend = normalized.metrics.spend;
-    // 超龄广告组的存活判据只看「今天有没有花钱」，**不能**再要求它当前是开着的。
-    // 同步取的是当天指标，spend > 0 已经等于「今天在投的活对象」；而叠加
-    // status === "enabled" 会把窗口变成单向门：老组还开着时关停规则能关它，
-    // 一旦被关掉就永久掉出评估集，开启规则再也够不着——归因延迟导致的
-    // 「先按零转化关掉、转化随后才回传」就永远开不回来了。
+    // 超龄广告组的存活判据有两条并列的路子：
+    // 1) 当天有消耗（spend>0）——「今天在投的活对象」。**不能**再叠加
+    //    status==="enabled"，否则窗口变单向门：老组被关掉就永久掉出评估集，
+    //    开启规则再也够不着（归因延迟：先按零转化关、转化随后才回传）。
+    // 2) 在持久管辖集里（managedAdGroupIds）——自动化自己关停、尚未被自动重开的
+    //    广告组。spend>0 是当天指标，过零点归零，跨天回传的转化就够不着 (1)；这条
+    //    用更长的归因窗口兜底，让这类组即便当天零消耗也留在评估范围，能被开回来。
+    //    人工暂停的组不在此集里，不会被自动开回。
     if (
       createdAt <= futureTolerance &&
-      (createdAt >= cutoff || (spend !== null && spend > 0))
+      (createdAt >= cutoff ||
+        (spend !== null && spend > 0) ||
+        managedAdGroupIds.has(entity.externalId))
     ) {
       eligibleAdGroups.add(entity.externalId);
     }
