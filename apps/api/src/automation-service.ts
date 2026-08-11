@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  AUTOMATION_MANAGED_LOOKBACK_HOURS,
   ProviderCredentialInputSchema,
   automationRuleDefinitions,
   dateTimeSuffix,
@@ -554,10 +555,20 @@ export class AutomationService {
           rulePredicate: buildRulePredicate(ruleConfiguration, candidate),
         },
       );
+      // 持久管辖集：自动化自己关停、尚未被自动重开的广告组。即便当天消耗归零，也留在
+      // 评估范围里，让归因延迟、关停之后才回传的转化仍能触发开启规则把它开回来——
+      // 只按当天 spend>0 判存活会在过零点后把这类组踢出、跨天再也开不回来。
+      const managedSince = new Date(
+        Date.now() - AUTOMATION_MANAGED_LOOKBACK_HOURS * 60 * 60_000,
+      ).toISOString();
+      const managedAdGroupIds = new Set(
+        this.store.listAutomationDisabledAdGroupIds(accountId, managedSince),
+      );
       const recent = filterEntitiesToRecentWindow(
         output.entities,
         new Date(),
         ruleConfiguration.lookbackHours,
+        managedAdGroupIds,
       );
       this.store.saveReadOnlySync(
         accountId,

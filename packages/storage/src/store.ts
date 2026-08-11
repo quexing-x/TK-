@@ -4860,6 +4860,32 @@ export class AutomationStore {
     return Boolean(row);
   }
 
+  /**
+   * 自动化自己关停、且此后未被自动化重新开启的广告组（限 since 之后关的）。
+   * 这些是"自动化在管、当前被自动关停"的对象——即便当天消耗已归零，也要留在评估
+   * 范围里，好让归因延迟、关停之后才回传的转化仍能触发开启规则把它开回来。
+   * 只认自动化自己的 succeeded 记录：人工暂停的广告组不在其中，不会被自动开回
+   *（人工接管的完整识别是另一件事）。
+   */
+  listAutomationDisabledAdGroupIds(accountId: string, since: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT d.external_id AS external_id
+         FROM automation_decisions d
+         WHERE d.account_id = ? AND d.entity_type = 'ad-group'
+           AND d.action = 'disable' AND d.status = 'succeeded'
+           AND d.executed_at >= ?
+           AND NOT EXISTS (
+             SELECT 1 FROM automation_decisions e
+             WHERE e.account_id = d.account_id AND e.entity_type = 'ad-group'
+               AND e.external_id = d.external_id AND e.action = 'enable'
+               AND e.status = 'succeeded' AND e.executed_at > d.executed_at
+           )`,
+      )
+      .all(accountId, since) as SqlRow[];
+    return rows.map((row) => String(row.external_id));
+  }
+
   hasUnknownDecision(
     accountId: string,
     entityType: ProviderEntity["entityType"],

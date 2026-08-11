@@ -137,6 +137,39 @@ describe("48 hour ad-group window", () => {
     expect(result.excludedCount).toBe(0);
   });
 
+  // 跨天场景：自动化自己关停的老广告组，次日当天消耗归零，只按 spend>0 会把它踢出
+  // 评估集，归因延迟晚到的转化再也开不回来。持久管辖集把它兜住。
+  it("keeps a zero-spend old ad group that automation still manages", () => {
+    const oldGroup = adGroup("managed", "2026-07-12T04:00:00.000Z", 0);
+    oldGroup.payload.ad_primary_status = "disable";
+
+    const excluded = filterEntitiesToRecentWindow([oldGroup], now);
+    expect(excluded.entities).toHaveLength(0);
+
+    const kept = filterEntitiesToRecentWindow(
+      [oldGroup],
+      now,
+      undefined,
+      new Set(["group-managed"]),
+    );
+    expect(kept.entities).toEqual([oldGroup]);
+    expect(kept.excludedCount).toBe(0);
+  });
+
+  it("does not keep a zero-spend old ad group outside the managed set", () => {
+    const oldGroup = adGroup("unmanaged", "2026-07-12T04:00:00.000Z", 0);
+    oldGroup.payload.ad_primary_status = "disable";
+
+    const result = filterEntitiesToRecentWindow(
+      [oldGroup],
+      now,
+      undefined,
+      new Set(["group-something-else"]),
+    );
+
+    expect(result.entities).toHaveLength(0);
+  });
+
   // 归因延迟的真实场景：老广告组上午按「零转化 + 消耗超上限」被自动关掉，
   // 转化随后才回传。窗口若要求对象当前开着，它就永久掉出评估集，开启规则
   // 再也够不着——线上 2026-08-10 的 `漆面去除_新-0807-085313-1` 就是这样

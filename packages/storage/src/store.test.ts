@@ -264,6 +264,80 @@ describe("AutomationStore", () => {
     expect(store.listDueNotificationDeliveries()).toHaveLength(1);
   });
 
+  describe("自动化在管的关停广告组", () => {
+    const recordDecision = (
+      externalId: string,
+      action: "disable" | "enable",
+      status: "succeeded" | "failed" = "succeeded",
+    ) => {
+      const run = store.createAutomationRun("demo-account", "cookie", "scheduler", true);
+      const decision = store.saveAutomationDecision(
+        run,
+        {
+          thresholdId: "NO_CONV_SPEND_CLOSE",
+          thresholdCode: "NO_CONV_SPEND_CLOSE",
+          entity: {
+            entityType: "ad-group",
+            externalId,
+            name: externalId,
+            status: "disabled",
+            parentCampaignId: null,
+            parentAdGroupId: null,
+            campaignBudget: null,
+            campaignBudgetOptimized: false,
+            metrics: {
+              cost_per_conversion: null, cost_per_click: null, cost_per_cart: null,
+              budget: null, spend: 0, conversions: 0, clicks: 0, carts: 0, impressions: 0,
+            },
+          },
+          action,
+          metric: "spend",
+          metricValue: 2,
+          operator: "gt",
+          thresholdValue: 2,
+          cooldownMinutes: 60,
+          reason: "test",
+        },
+        "pending",
+      );
+      store.updateAutomationDecision(decision.id, status);
+    };
+    const since = () => new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+
+    it("列出自动化关停、且此后未被自动重开的广告组", () => {
+      recordDecision("ag-still-closed", "disable");
+      expect(store.listAutomationDisabledAdGroupIds("demo-account", since()))
+        .toContain("ag-still-closed");
+    });
+
+    it("已被自动重新开启的不再算在管关停", () => {
+      // 真实场景里关停与重开相隔数分钟以上；用假时钟给出可区分的 executed_at，
+      // 否则同毫秒记录会让"enable 晚于 disable"的判定退化。
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T00:00:00.000Z"));
+      recordDecision("ag-reopened", "disable");
+      vi.setSystemTime(new Date("2026-08-11T01:00:00.000Z"));
+      recordDecision("ag-reopened", "enable");
+      const cutoff = new Date("2026-08-04T00:00:00.000Z").toISOString();
+      vi.useRealTimers();
+      expect(store.listAutomationDisabledAdGroupIds("demo-account", cutoff))
+        .not.toContain("ag-reopened");
+    });
+
+    it("关停失败的不算（只认 succeeded）", () => {
+      recordDecision("ag-failed", "disable", "failed");
+      expect(store.listAutomationDisabledAdGroupIds("demo-account", since()))
+        .not.toContain("ag-failed");
+    });
+
+    it("超出回看窗口的不再兜底", () => {
+      recordDecision("ag-old", "disable");
+      const futureSince = new Date(Date.now() + 60_000).toISOString();
+      expect(store.listAutomationDisabledAdGroupIds("demo-account", futureSince))
+        .not.toContain("ag-old");
+    });
+  });
+
   // 2026-08-06：三条自动申诉因 TikTok 后端解包失败被判 unknown，而 blocked 把
   // unknown 也当成永久占坑，于是这三条广告被永久踢出候选池。申诉是可安全重复提交
   // 的操作，代价远低于"永远不再申诉"，改为与明确失败一样受 retryLimit 约束。
