@@ -12,6 +12,7 @@ import {
   ListFilter,
   ListChecks,
   LayoutDashboard,
+  Layers3,
   Moon,
   Plus,
   Pencil,
@@ -22,6 +23,7 @@ import {
   Settings2,
   ShieldCheck,
   Search,
+  SlidersHorizontal,
   Sun,
   Trash2,
   UserRound,
@@ -40,6 +42,7 @@ import type {
   AccountConfig,
   AccountSettingsUpdate,
   AccountCreateInput,
+  PlatformKind,
   GlobalAutomationSettings,
   AutomationDecisionRecord,
   AutomationRunRecord,
@@ -71,6 +74,8 @@ import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
 import { LaunchPage } from "./LaunchPage";
 import { MaintenancePage } from "./MaintenancePage";
 import { OverviewPage } from "./OverviewPage";
+import { MetaAssetsPage } from "./MetaAssetsPage";
+import { MetaRulesPage } from "./MetaRulesPage";
 import {
   accountAccessStatus,
   canEnableAccountAutomation,
@@ -87,6 +92,11 @@ import { nextUiTheme, resolveUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from 
 import {
   secondsUntilLocalRefresh,
 } from "./local-refresh";
+import {
+  applyAccountPlatformSelection,
+  filterMetaAccounts,
+  filterTikTokOperationalAccounts,
+} from "./platform-account-view";
 import {
   ADS_MANAGEMENT_DEFAULT_LEVEL,
   ADS_MANAGEMENT_DEFAULT_STATUS,
@@ -105,6 +115,8 @@ export type PageKey =
   | "automation"
   | "ads"
   | "analytics"
+  | "meta-assets"
+  | "meta-rules"
   | "rules"
   | "notifications"
   | "launch"
@@ -120,6 +132,8 @@ export const pageHash: Record<PageKey, string> = {
   automation: "#automation",
   ads: "#ads",
   analytics: "#analytics",
+  "meta-assets": "#meta-assets",
+  "meta-rules": "#meta-rules",
   rules: "#rules",
   notifications: "#notifications",
   launch: "#launch",
@@ -190,6 +204,18 @@ const navItems: Array<{
     label: "广告分析",
     description: "指标快照与执行结果",
     icon: BarChart3,
+  },
+  {
+    key: "meta-assets",
+    label: "Meta 广告",
+    description: "Campaign、Ad Set 与 Ad 手动启停",
+    icon: Layers3,
+  },
+  {
+    key: "meta-rules",
+    label: "Meta 规则",
+    description: "独立三层规则与运行开关",
+    icon: SlidersHorizontal,
   },
   {
     key: "rules",
@@ -303,14 +329,19 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
   const loadBootstrap = useCallback(async () => {
     try {
       const payload = await api.bootstrap();
+      const operationalAccounts = filterTikTokOperationalAccounts(payload.accounts);
+      const operationalAccountIds = new Set(operationalAccounts.map((account) => account.id));
       setBootstrap(payload);
       setSelectedAccountId((current) => preferredAccountId(
-        payload.accounts,
-        payload.accountConnectionStates,
+        operationalAccounts,
+        payload.accountConnectionStates.filter((state) => operationalAccountIds.has(state.accountId)),
         current,
       ));
       setError(null);
       const staleConnections = payload.accountConnectionStates.filter((state) => {
+        // Meta health checks can reach Graph API. They must only run after an
+        // explicit user click in MetaConnectionPage, never during bootstrap.
+        if (!operationalAccountIds.has(state.accountId)) return false;
         const connection = state.connection;
         if (
           !connection?.hasCredential
@@ -381,8 +412,16 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
     return () => window.clearInterval(interval);
   }, [loadBootstrap]);
 
-  const pageAccountId = accountIdForPage(bootstrap?.accounts ?? [], selectedAccountId, page);
-  const account = bootstrap?.accounts.find(
+  const operationalAccounts = bootstrap
+    ? filterTikTokOperationalAccounts(bootstrap.accounts)
+    : [];
+  const operationalAccountIds = new Set(operationalAccounts.map((item) => item.id));
+  const operationalConnectionStates = bootstrap?.accountConnectionStates.filter((item) => operationalAccountIds.has(item.accountId)) ?? [];
+  const metaAccounts = bootstrap ? filterMetaAccounts(bootstrap.accounts) : [];
+  const metaAccountIds = new Set(metaAccounts.map((item) => item.id));
+  const metaConnectionStates = bootstrap?.accountConnectionStates.filter((item) => metaAccountIds.has(item.accountId)) ?? [];
+  const pageAccountId = accountIdForPage(operationalAccounts, selectedAccountId, page);
+  const account = operationalAccounts.find(
     (item) => item.id === pageAccountId,
   );
   const selectedConnection = bootstrap?.accountConnectionStates.find(
@@ -406,8 +445,8 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
   }
 
   const automationOverview = summarizeAccountConnections(
-    bootstrap.accounts,
-    bootstrap.accountConnectionStates,
+    operationalAccounts,
+    operationalConnectionStates,
   );
 
   const toggleSystemRuntime = async () => {
@@ -574,6 +613,19 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
           <SystemUsersPage onError={setError} />
         ) : page === "maintenance" ? (
           <MaintenancePage onError={setError} />
+        ) : page === "meta-assets" ? (
+          <MetaAssetsPage
+            accounts={metaAccounts}
+            connectionStates={metaConnectionStates}
+            onConnectionsChanged={loadBootstrap}
+            onError={setError}
+            onOpenAccounts={() => {
+              navigateTo("overview");
+              window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0);
+            }}
+          />
+        ) : page === "meta-rules" ? (
+          <MetaRulesPage accounts={metaAccounts} onError={setError} />
         ) : page === "rules" ? (
           <RulesPage
             settings={bootstrap.globalAutomationSettings}
@@ -584,11 +636,11 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
           <NotificationsPage onError={setError} />
         ) : page === "launch" ? (
           <LaunchPage
-            accounts={bootstrap.accounts}
+            accounts={operationalAccounts}
             accountCapabilities={Object.fromEntries(
-              bootstrap.accountConnectionStates.map((state) => [state.accountId, state.capabilities]),
+              operationalConnectionStates.map((state) => [state.accountId, state.capabilities]),
             )}
-            connectionStates={bootstrap.accountConnectionStates}
+            connectionStates={operationalConnectionStates}
             preferredAccountId={pageAccountId}
             onConnectionStatesChanged={loadBootstrap}
             onManageConnection={(accountId) => {
@@ -599,12 +651,12 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
             onError={setError}
           />
         ) : page === "ads" ? (
-          <AccountScopedPage accounts={bootstrap.accounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
+          <AccountScopedPage accounts={operationalAccounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
             {selectedAccountId === "all" ? (
               <AllAccountsAdsView
-                accounts={bootstrap.accounts}
+                accounts={operationalAccounts}
                 accountCapabilities={Object.fromEntries(
-                  bootstrap.accountConnectionStates.map((state) => [state.accountId, state.capabilities]),
+                  operationalConnectionStates.map((state) => [state.accountId, state.capabilities]),
                 )}
                 onError={setError}
               />
@@ -621,17 +673,17 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         ) : !account ? (
           <EmptyState text="请选择一个账户。" />
         ) : page === "automation" ? (
-          <section className="page-stack"><AccountScopedPage accounts={bootstrap.accounts} selectedId={pageAccountId} onSelect={selectAccount}>
-            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={bootstrap.accounts} connectionStates={bootstrap.accountConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} />
+          <section className="page-stack"><AccountScopedPage accounts={operationalAccounts} selectedId={pageAccountId} onSelect={selectAccount}>
+            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={operationalAccounts} connectionStates={operationalConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} />
           </AccountScopedPage></section>
         ) : page === "analytics" ? (
           <>
-            <AccountScopedPage accounts={bootstrap.accounts} selectedId={analyticsScope} onSelect={setAnalyticsScope} allowAll>
+            <AccountScopedPage accounts={operationalAccounts} selectedId={analyticsScope} onSelect={setAnalyticsScope} allowAll>
               {analyticsScope === "all" ? (
-                <AllAccountsAnalyticsView accounts={bootstrap.accounts} onError={setError} />
+                <AllAccountsAnalyticsView accounts={operationalAccounts} onError={setError} />
               ) : (() => {
-                const scopedAccount = bootstrap.accounts.find((item) => item.id === analyticsScope);
-                const scopedState = bootstrap.accountConnectionStates.find((state) => state.accountId === analyticsScope);
+                const scopedAccount = operationalAccounts.find((item) => item.id === analyticsScope);
+                const scopedState = operationalConnectionStates.find((state) => state.accountId === analyticsScope);
                 return scopedAccount
                   ? <AnalyticsPage account={scopedAccount} connection={scopedState?.connection ?? null} latestSync={scopedState?.latestSync ?? null} onError={setError} />
                   : <EmptyState text="请选择账户。" />;
@@ -648,6 +700,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
 
 const defaultAccountInput: AccountCreateInput = {
   displayName: "",
+  platform: "tiktok",
   accountType: "standard",
   enabled: false,
   providerKind: "cookie",
@@ -697,7 +750,11 @@ function automationConnectionMessage(
   account: AccountConfig,
   connection: ProviderConnection | null,
 ): string {
-  const providerLabel = account.providerKind === "cookie" ? "Cookie 接入" : "API 接入";
+  const providerLabel = account.providerKind === "meta-offline"
+    ? "Meta 离线架构"
+    : account.providerKind === "meta-marketing-api"
+      ? "Meta Marketing API"
+    : account.providerKind === "cookie" ? "Cookie 接入" : "API 接入";
   const stateLabel =
     !connection || connection.status === "not-configured"
       ? "尚未接入"
@@ -716,7 +773,9 @@ function connectionStatusSummary(
   connection: ProviderConnection | null | undefined,
 ): string {
   if (!connection || connection.status === "not-configured") {
-    return "尚未导入接入信息";
+    return account.providerKind === "meta-offline"
+      ? "离线架构已建立，API 尚未接入"
+      : "尚未导入接入信息";
   }
   if (connection.status === "untested") {
     return "已导入，等待后台连接检测";
@@ -727,6 +786,28 @@ function connectionStatusSummary(
       : "API 连接异常");
   }
   return "尚未通过连接检测";
+}
+
+function canEnableConfiguredAccountAutomation(
+  account: AccountConfig,
+  state: {
+    connection: ProviderConnection | null;
+    capabilities: AccountProviderCapabilities | undefined;
+  } | undefined,
+): boolean {
+  if (account.providerKind === "meta-offline") return false;
+  if (account.platform === "meta") {
+    const settings = state?.connection?.settings;
+    return state?.connection?.status === "ready"
+      && settings?.kind === "meta-marketing-api"
+      && settings.liveMode === "automation-status"
+      && hasProviderCapability(state.capabilities, "read-campaigns")
+      && hasProviderCapability(state.capabilities, "read-ad-groups")
+      && hasProviderCapability(state.capabilities, "read-ads")
+      && hasProviderCapability(state.capabilities, "change-status");
+  }
+  return state?.connection?.status === "ready"
+    && canEnableAccountAutomation(state.capabilities);
 }
 
 function UsersPage({
@@ -787,7 +868,7 @@ function UsersPage({
   const openEdit = (account: AccountConfig) => {
     if (!canManageAccounts) return;
     setEditing(account);
-    setForm(settingsFromAccount(account));
+    setForm({ ...settingsFromAccount(account), platform: account.platform });
     setShowForm(true);
   };
 
@@ -799,7 +880,10 @@ function UsersPage({
       const enablesAutomation = form.enabled && (!editing || !editing.enabled);
       if (
         enablesAutomation
-        && (!editing || !canEnableAccountAutomation(connectionStates[editing.id]?.capabilities))
+        && (!editing || !canEnableConfiguredAccountAutomation(
+          editing,
+          connectionStates[editing.id],
+        ))
       ) {
         throw new Error("账户缺少数据读取或广告启停能力，不能开启自动化。");
       }
@@ -820,7 +904,7 @@ function UsersPage({
     try {
       if (
         !account.enabled
-        && !canEnableAccountAutomation(connectionStates[account.id]?.capabilities)
+        && !canEnableConfiguredAccountAutomation(account, connectionStates[account.id])
       ) {
         throw new Error("账户缺少数据读取或广告启停能力，不能开启自动化。");
       }
@@ -836,6 +920,12 @@ function UsersPage({
 
   const enableAfterConnection = async (account: AccountConfig) => {
     if (!canManageAccounts) return;
+    if (account.platform === "meta") {
+      // Meta connection testing is explicit, but account automation remains a
+      // separate user decision after selecting automation-status liveMode.
+      await onChanged();
+      return;
+    }
     const capabilities = await api.getAccountCapabilities(account.id);
     if (!canEnableAccountAutomation(capabilities)) {
       await onChanged();
@@ -875,8 +965,8 @@ function UsersPage({
           <div>
             <span className="panel-icon"><UserRound size={18} /></span>
             <div>
-              <h2>TikTok 广告账户</h2>
-              <p>账户开启自动化后默认按全局规则执行；接入凭据仍按账户独立保存。</p>
+              <h2>广告平台账户</h2>
+              <p>TikTok 保持现有能力；Meta 可配置读取与启停合同，真实网络、API 写入入口和调度仍关闭。</p>
             </div>
           </div>
           <button className="primary-button" disabled={!canManageAccounts} onClick={openNew} title={canManageAccounts ? undefined : "需要 accounts:manage 权限"} type="button">
@@ -888,6 +978,7 @@ function UsersPage({
             <thead>
               <tr>
                 <th>账户名称</th>
+                <th>平台</th>
                 <th>账户类型</th>
                 <th>接入方式</th>
                 <th>接入状态</th>
@@ -899,11 +990,13 @@ function UsersPage({
             <tbody>
               {accounts.map((account) => (
                 <tr key={account.id}>{(() => {
-                  const capabilityProfile = connectionStates[account.id]?.capabilities;
-                  const automationReady = connectionStates[account.id]?.connection?.status === "ready"
-                    && canEnableAccountAutomation(capabilityProfile);
+                  const automationReady = canEnableConfiguredAccountAutomation(
+                    account,
+                    connectionStates[account.id],
+                  );
                   return <>
                   <td><strong>{account.displayName}</strong><br /><small className="account-id">{account.id}</small></td>
+                  <td><span className={account.platform === "meta" ? "status warning" : "status active"}>{platformLabel(account.platform)}</span></td>
                   <td>{accountTypeLabel(account.accountType)}</td>
                   <td>{providerLabel(account.providerKind)}</td>
                   <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
@@ -916,13 +1009,13 @@ function UsersPage({
                         label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
                         onChange={() => void toggleAccount(account)}
                       />
-                      <span className={automationReady && account.enabled ? "status active" : "status"}>{account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
+                      <span className={automationReady && account.enabled ? "status active" : "status"}>{account.platform === "meta" ? account.providerKind === "meta-offline" ? "离线架构不可开启" : account.enabled ? automationReady ? "Meta 账户已开启" : "已开启 · 接入异常" : automationReady ? "Meta 账户已关闭" : "需 Automation liveMode" : account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
                     </div>
                   </td>
                   <td>
                     <div className="row-actions">
                       <button disabled={!canManageAccounts} type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
-                      <button disabled={!canManageAccounts} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
+                      <button disabled={!canManageAccounts || account.providerKind === "meta-offline"} title={account.providerKind === "meta-offline" ? "Meta 离线 Provider 不接收任何凭据" : undefined} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> {account.providerKind === "meta-offline" ? "离线" : "接入"}</button>
                       <button className="danger-button" disabled={saving || !canManageAccounts} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
                     </div>
                   </td></>;
@@ -944,20 +1037,42 @@ function UsersPage({
               <Field label="账户名称">
                 <input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} />
               </Field>
+              <Field label="广告平台">
+                <select disabled={Boolean(editing)} value={form.platform ?? "tiktok"} onChange={(event) => {
+                  const platform = event.target.value as PlatformKind;
+                  setForm(applyAccountPlatformSelection(form, platform));
+                }}>
+                  <option value="tiktok">TikTok Ads</option>
+                  <option value="meta">Meta Ads（Facebook / Instagram）</option>
+                </select>
+              </Field>
               <Field label="账户类型">
                 <select value={form.accountType} onChange={(event) => setForm({ ...form, accountType: event.target.value as AccountCreateInput["accountType"] })}>
                   <option value="standard">普通广告账户</option>
                   <option value="agency">代理账户</option>
-                  <option value="shop">TikTok Shop</option>
+                  {(form.platform ?? "tiktok") === "tiktok" && <option value="shop">TikTok Shop</option>}
                 </select>
               </Field>
               <Field label="默认接入方式">
-                <select value={form.providerKind} onChange={(event) => setForm({ ...form, providerKind: event.target.value as ProviderKind })}>
-                  <option value="cookie">Cookie 会话</option>
-                  <option value="official-api">Marketing API</option>
+                <select value={form.providerKind} onChange={(event) => {
+                  const providerKind = event.target.value as ProviderKind;
+                  setForm({
+                    ...form,
+                    providerKind,
+                    enabled: providerKind === "meta-offline" ? false : form.enabled,
+                  });
+                }}>
+                  {(form.platform ?? "tiktok") === "meta" ? <>
+                    <option value="meta-marketing-api">Meta Marketing API（官方接入）</option>
+                    <option value="meta-offline">Meta 离线架构</option>
+                  </> : <>
+                    <option value="cookie">Cookie 会话</option>
+                    <option value="official-api">TikTok Marketing API</option>
+                  </>}
                 </select>
               </Field>
-              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} disabled={!form.enabled && (!editing || !canEnableAccountAutomation(connectionStates[editing.id]?.capabilities))} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
+              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} disabled={form.providerKind === "meta-offline" || (!form.enabled && (!editing || !canEnableConfiguredAccountAutomation(editing, connectionStates[editing.id])))} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
+              {(form.platform ?? "tiktok") === "meta" && <p className="retention-note">Meta Marketing API 账户可在完成共享 App 档案、Automation liveMode 与能力检测后独立开启；Meta 离线架构始终关闭。</p>}
             </div>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
@@ -2133,6 +2248,9 @@ function connectionStateLabel(
     | undefined,
   kind: ProviderKind,
 ): ReactNode {
+  if (kind === "meta-offline") {
+    return <span className="status warning">离线架构 · 无网络</span>;
+  }
   const connection = state?.connection;
   const cookieReadiness = state?.readiness;
   const latestSync = state?.latestSync;
@@ -2179,7 +2297,16 @@ function connectionStateLabel(
 }
 
 function providerLabel(kind: ProviderKind): string {
-  return kind === "cookie" ? "Cookie 会话" : "Marketing API";
+  return {
+    cookie: "Cookie 会话",
+    "official-api": "TikTok Marketing API",
+    "meta-offline": "Meta 离线架构",
+    "meta-marketing-api": "Meta Marketing API（官方接入）",
+  }[kind];
+}
+
+function platformLabel(platform: PlatformKind): string {
+  return platform === "meta" ? "Meta Ads" : "TikTok Ads";
 }
 
 function accountTypeLabel(type: AccountConfig["accountType"]): string {

@@ -21,6 +21,7 @@ import type {
 import { api, type BootstrapPayload } from "./api";
 import { selectPendingAutomationDecisions } from "./automation-decision-view";
 import { accountAccessStatus } from "./provider-capability-view";
+import { filterTikTokOperationalAccounts } from "./platform-account-view";
 
 type OverviewDestination = "launch" | "ads" | "users";
 
@@ -37,6 +38,18 @@ export function OverviewPage({
   onNavigate: (destination: OverviewDestination) => void;
   children?: ReactNode;
 }) {
+  const operationalAccounts = useMemo(
+    () => filterTikTokOperationalAccounts(accounts),
+    [accounts],
+  );
+  const operationalAccountIds = useMemo(
+    () => new Set(operationalAccounts.map((account) => account.id)),
+    [operationalAccounts],
+  );
+  const operationalConnectionStates = useMemo(
+    () => connectionStates.filter((state) => operationalAccountIds.has(state.accountId)),
+    [connectionStates, operationalAccountIds],
+  );
   const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
   const [entities, setEntities] = useState<Array<ManagedEntityRecord & { accountId: string }>>([]);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
@@ -45,7 +58,7 @@ export function OverviewPage({
   const loadDecisions = useCallback(async () => {
     try {
       const results = await Promise.all(
-        accounts.map(async (account) => {
+        operationalAccounts.map(async (account) => {
           const [nextDecisions, nextEntities, nextOperations] = await Promise.all([
           api.getAutomationDecisions(account.id).catch(() => []),
           api.getManagedEntities(account.id).catch(() => []),
@@ -60,14 +73,14 @@ export function OverviewPage({
     } finally {
       setLoading(false);
     }
-  }, [accounts]);
+  }, [operationalAccounts]);
 
   useEffect(() => {
     void loadDecisions();
   }, [loadDecisions]);
 
-  const readyCount = connectionStates.filter((state) => state.connection?.status === "ready").length;
-  const enabledCount = accounts.filter((account) => account.enabled).length;
+  const readyCount = operationalConnectionStates.filter((state) => state.connection?.status === "ready").length;
+  const enabledCount = operationalAccounts.filter((account) => account.enabled).length;
   const pending = useMemo(() => selectPendingAutomationDecisions({
     decisions,
     entities,
@@ -80,25 +93,25 @@ export function OverviewPage({
       .slice(0, 5),
     [decisions],
   );
-  const accountExceptions = useMemo(() => connectionStates.flatMap((state) => {
-    const accountName = accounts.find((account) => account.id === state.accountId)?.displayName ?? "未命名账户";
+  const accountExceptions = useMemo(() => operationalConnectionStates.flatMap((state) => {
+    const accountName = operationalAccounts.find((account) => account.id === state.accountId)?.displayName ?? "未命名账户";
     const access = accountAccessStatus(state);
     return access.tone === "healthy"
       ? []
       : [`${accountName}：${access.blockers[0] ?? "账户能力尚未就绪。"}`];
-  }), [accounts, connectionStates]);
-  const accountHealth = useMemo(() => accounts.map((account) => {
-    const state = connectionStates.find((item) => item.accountId === account.id);
+  }), [operationalAccounts, operationalConnectionStates]);
+  const accountHealth = useMemo(() => operationalAccounts.map((account) => {
+    const state = operationalConnectionStates.find((item) => item.accountId === account.id);
     const access = state
       ? accountAccessStatus(state)
       : { tone: "danger" as const, label: "异常" as const };
     return { id: account.id, name: account.displayName, tone: access.tone, label: access.label };
-  }), [accounts, connectionStates]);
+  }), [operationalAccounts, operationalConnectionStates]);
   const healthyAccountCount = accountHealth.filter((account) => account.tone === "healthy").length;
   const warningAccountCount = accountHealth.filter((account) => account.tone === "warning").length;
   const dangerAccountCount = accountHealth.filter((account) => account.tone === "danger").length;
-  const healthyEnd = accounts.length ? (healthyAccountCount / accounts.length) * 360 : 0;
-  const warningEnd = accounts.length ? ((healthyAccountCount + warningAccountCount) / accounts.length) * 360 : 0;
+  const healthyEnd = operationalAccounts.length ? (healthyAccountCount / operationalAccounts.length) * 360 : 0;
+  const warningEnd = operationalAccounts.length ? ((healthyAccountCount + warningAccountCount) / operationalAccounts.length) * 360 : 0;
 
   return (
     <section className="overview-page">
@@ -112,7 +125,7 @@ export function OverviewPage({
           <p>{runtime.enabled ? "自动检测、决策与定时规则正在运行" : "自动任务已暂停；广告创建与人工操作仍可使用"}</p>
         </div>
         <div className="runtime-stat-grid">
-          <OverviewStat label="已接入账户" value={String(readyCount)} meta={`共 ${accounts.length} 个`} />
+          <OverviewStat label="TikTok 已接入" value={String(readyCount)} meta={`共 ${operationalAccounts.length} 个`} />
           <OverviewStat label="自动化账户" value={String(enabledCount)} meta="当前启用" />
           <OverviewStat label="自动执行" value={String(stream.length)} meta="最近完成" />
           <OverviewStat label="执行记录" value={String(decisions.length)} meta="本地可追溯" />
@@ -142,7 +155,7 @@ export function OverviewPage({
           </header>
           <div className="health-visual">
             <div className="health-ring" style={{ "--healthy-end": `${healthyEnd}deg`, "--warning-end": `${warningEnd}deg` } as CSSProperties}>
-              <div><strong>{accounts.length}</strong><span>总账户</span></div>
+              <div><strong>{operationalAccounts.length}</strong><span>TikTok 账户</span></div>
             </div>
             <div className="health-breakdown">
               <span><i className="healthy" />健康<strong>{healthyAccountCount}</strong></span>
@@ -181,7 +194,7 @@ export function OverviewPage({
         <article className="overview-zone connection-health-zone">
           <header className="zone-heading"><div><h2>连接健康</h2><span>本地服务状态</span></div></header>
           <div className="connection-health-list">
-            <ConnectionHealth icon={<ShieldCheck size={17} />} label="账户接入" detail={`${readyCount}/${accounts.length} 正常`} healthy={readyCount === accounts.length} />
+            <ConnectionHealth icon={<ShieldCheck size={17} />} label="TikTok 接入" detail={operationalAccounts.length ? `${readyCount}/${operationalAccounts.length} 正常` : "暂无账户"} healthy={operationalAccounts.length > 0 && readyCount === operationalAccounts.length} />
             <ConnectionHealth icon={<Database size={17} />} label="本地数据" detail="读取正常" healthy />
             <ConnectionHealth icon={<Activity size={17} />} label="自动任务" detail={runtime.enabled ? "运行中" : "已暂停"} healthy={runtime.enabled} />
           </div>

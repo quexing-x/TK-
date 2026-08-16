@@ -9,6 +9,11 @@ import {
 } from "@tk-auto/core";
 import { CookieAdsProvider } from "./cookie-provider.js";
 import { OfficialApiAdsProvider } from "./official-api-provider.js";
+import { MetaOfflineAdsProvider } from "./meta-offline-provider.js";
+import {
+  MetaMarketingApiAdsProvider,
+  type MetaMarketingApiTransportFactory,
+} from "./meta-marketing-api-provider.js";
 import { RetryableCreationError } from "./types.js";
 import type {
   AdsProvider,
@@ -24,6 +29,8 @@ import type {
   DeleteAdGroupMutationResult,
   NewCreationMutation,
   TemplateCopyMutation,
+  MetaAdAccountDiscoveryContext,
+  DiscoveredMetaAdAccount,
 } from "./types.js";
 
 export interface CopyCampaignInput {
@@ -48,11 +55,19 @@ export interface CopyCampaignResult {
   retrySafe?: boolean;
 }
 
+export interface ProviderRegistryOptions {
+  /** Omitted in the desktop default so Meta remains physically unable to use the network. */
+  metaMarketingApiTransportFactory?: MetaMarketingApiTransportFactory;
+}
+
 export class ProviderRegistry {
   private readonly providers = new Map<ProviderKind, AdsProvider>();
 
-  constructor(providers: AdsProvider[] = defaultProviders()) {
-    for (const provider of providers) {
+  constructor(
+    providers?: AdsProvider[],
+    options: ProviderRegistryOptions = {},
+  ) {
+    for (const provider of providers ?? defaultProviders(options)) {
       this.providers.set(provider.kind, provider);
     }
   }
@@ -68,8 +83,9 @@ export class ProviderRegistry {
   list(): ProviderDescriptor[] {
     return [...this.providers.values()].map((provider) => ({
       kind: provider.kind,
+      platform: provider.platform,
       displayName: provider.displayName,
-      implementationStatus: "available",
+      implementationStatus: provider.implementationStatus,
       capabilityVersion: provider.capabilityVersion,
       capabilities: [...provider.capabilities],
     }));
@@ -167,6 +183,20 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持读取广告数据。`);
     }
     return provider.syncReadOnly(context);
+  }
+
+  discoverMetaAdAccounts(
+    context: MetaAdAccountDiscoveryContext,
+  ): Promise<DiscoveredMetaAdAccount[]> {
+    const provider = this.get("meta-marketing-api") as AdsProvider & {
+      discoverAdAccounts?: (
+        input: MetaAdAccountDiscoveryContext,
+      ) => Promise<DiscoveredMetaAdAccount[]>;
+    };
+    if (!provider.discoverAdAccounts) {
+      throw new Error("Meta Marketing API Provider 未实现广告账户发现。");
+    }
+    return provider.discoverAdAccounts(context);
   }
 
   readAdGroupOriginalPosts(
@@ -323,6 +353,11 @@ export class ProviderRegistry {
   }
 }
 
-function defaultProviders(): AdsProvider[] {
-  return [new CookieAdsProvider(), new OfficialApiAdsProvider()];
+function defaultProviders(options: ProviderRegistryOptions): AdsProvider[] {
+  return [
+    new CookieAdsProvider(),
+    new OfficialApiAdsProvider(),
+    new MetaOfflineAdsProvider(),
+    new MetaMarketingApiAdsProvider(options.metaMarketingApiTransportFactory),
+  ];
 }

@@ -10,6 +10,8 @@ describe("application navigation contract", () => {
       automation: "#automation",
       ads: "#ads",
       analytics: "#analytics",
+      "meta-assets": "#meta-assets",
+      "meta-rules": "#meta-rules",
       rules: "#rules",
       notifications: "#notifications",
       launch: "#launch",

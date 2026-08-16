@@ -25,6 +25,7 @@ import type {
 import { api, type CookieConnectionReadiness } from "./api";
 import { useAuth } from "./AuthGate";
 import { useOverlays } from "./ui/overlays";
+import { MetaConnectionPage } from "./MetaConnectionPage";
 import { hasProviderCapability, providerCapabilityReason } from "./provider-capability-view";
 import {
   canSubmitCookieImport,
@@ -74,7 +75,17 @@ const capabilityLabels = [
   ["appeal-ads", "广告申诉", "写入"],
 ] as const;
 
-export function ConnectionPage({
+export function ConnectionPage(props: {
+  account: AccountConfig;
+  onConnectionReady?: () => Promise<void>;
+  onError: (message: string | null) => void;
+}) {
+  return props.account.platform === "meta"
+    ? <MetaConnectionPage {...props} />
+    : <TikTokConnectionPage {...props} />;
+}
+
+function TikTokConnectionPage({
   account,
   onConnectionReady,
   onError,

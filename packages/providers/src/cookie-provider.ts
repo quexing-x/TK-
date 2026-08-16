@@ -72,7 +72,9 @@ type ParsedCookieCredential = ReturnType<
 
 export class CookieAdsProvider implements AdsProvider {
   readonly kind = "cookie" as const;
+  readonly platform = "tiktok" as const;
   readonly displayName = "Cookie 会话";
+  readonly implementationStatus = "available" as const;
   // v4：新增 copy-campaigns（系列级复制）。契约版本变更会让所有已接入账户显示
   // “能力契约已更新，请重新检测连接”，重新检测后才会开放新能力。
   readonly capabilityVersion = "cookie-capabilities-v4-2026-07";

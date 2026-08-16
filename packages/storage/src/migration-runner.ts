@@ -39,6 +39,32 @@ export class MigrationRunner {
     }
   }
 
+  applyWithForeignKeysDisabled(key: string, migrate: () => void): void {
+    const applied = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE migration_key = ?")
+      .get(key);
+    if (applied) return;
+    this.triggerBeforeFirstMigration();
+    this.db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+      migrate();
+      const violations = this.db.prepare("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(`Foreign key check failed during migration ${key}`);
+      }
+      this.db.prepare(
+        "INSERT INTO schema_migrations (migration_key, applied_at) VALUES (?, ?)",
+      ).run(key, new Date().toISOString());
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    } finally {
+      this.db.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
   ensureColumn(table: string, column: string, definition: string): void {
     if (!/^[a-z_]+$/.test(table) || !/^[a-z_]+$/.test(column)) {
       throw new Error("Unsafe schema identifier");

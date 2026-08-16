@@ -1,8 +1,10 @@
 import type {
   ProviderConnectionSettings,
   ProviderCredentialInput,
+  MetaAccessSecretBundleInput,
   ProviderEntity,
   ProviderKind,
+  PlatformKind,
   ReadOnlySyncResult,
   AutomationAction,
   SyncEntityType,
@@ -17,11 +19,32 @@ import type {
 
 export type { ProviderCapability } from "@tk-auto/core";
 
+export interface ResolvedMetaAccessProfile {
+  profileId: string;
+  appId: string;
+  businessId?: string | null;
+  graphApiVersion: string;
+}
+
 export interface ProviderContext {
   accountId: string;
   settings: ProviderConnectionSettings;
-  credential: ProviderCredentialInput;
+  credential: ProviderCredentialInput | (MetaAccessSecretBundleInput & { kind?: never });
   timezone?: string;
+  resolvedMetaAccessProfile?: ResolvedMetaAccessProfile;
+}
+
+export interface MetaAdAccountDiscoveryContext {
+  credential: MetaAccessSecretBundleInput;
+  resolvedMetaAccessProfile: ResolvedMetaAccessProfile;
+}
+
+export interface DiscoveredMetaAdAccount {
+  adAccountId: string;
+  name: string;
+  currency: string;
+  timezone: string;
+  accountStatus: number;
 }
 
 export interface ProviderHealth {
@@ -126,7 +149,9 @@ export class UnknownCreationStateError extends Error {
 
 export interface ProviderContract {
   readonly kind: ProviderKind;
+  readonly platform: PlatformKind;
   readonly displayName: string;
+  readonly implementationStatus: ProviderImplementationStatus;
   readonly capabilityVersion: string;
   readonly capabilities: ReadonlySet<ProviderCapability>;
   resolveCapabilities?(context: ProviderContext): ReadonlySet<ProviderCapability>;
@@ -230,8 +255,11 @@ export type AdsProvider = ProviderContract
 
 export interface ProviderDescriptor {
   kind: ProviderKind;
+  platform: PlatformKind;
   displayName: string;
-  implementationStatus: "scaffolded" | "available";
+  implementationStatus: ProviderImplementationStatus;
   capabilityVersion: string;
   capabilities: ProviderCapability[];
 }
+
+export type ProviderImplementationStatus = "scaffolded" | "available";

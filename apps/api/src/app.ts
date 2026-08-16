@@ -12,6 +12,7 @@ import {
   ProviderConnectionSettingsSchema,
   ProviderCredentialInputSchema,
   ProviderKindSchema,
+  providerBelongsToPlatform,
   RuleConfigurationInputSchema,
   SyncEntityTypeSchema,
   IgnoreEntityInputSchema,
@@ -20,9 +21,13 @@ import {
   NotificationChannelSettingsSchema,
   NotificationCredentialInputSchema,
   InitialDeveloperInputSchema,
+  MetaAutomationRuntimeInputSchema,
+  MetaRuleConfigurationInputSchema,
   LocalUserCreateInputSchema,
   LocalUserUpdateInputSchema,
   LoginInputSchema,
+  MetaAccessProfileInputSchema,
+  MetaAccessSecretBundleInputSchema,
   PasswordChangeInputSchema,
   SystemRuntimeUpdateSchema,
   OneTimeScheduleInputSchema,
@@ -46,11 +51,15 @@ import {
   parseTikTokReadCurl,
   parseTikTokStatusCurl,
   getTikTokCookieImportReadiness,
+  MetaMarketingApiHttpTransport,
   ProviderRegistry,
   TikTokCurlImportError,
   type ProviderContext,
 } from "@tk-auto/providers";
-import { AutomationStore } from "@tk-auto/storage";
+import {
+  AutomationStore,
+  PlatformConfigurationConflictError,
+} from "@tk-auto/storage";
 import {
   AutomationBusyError,
   AutomationScheduler,
@@ -84,6 +93,13 @@ declare module "fastify" {
 const AccountParamsSchema = z.object({ accountId: z.string().min(1) });
 const ProviderParamsSchema = AccountParamsSchema.extend({
   providerKind: ProviderKindSchema,
+});
+const MetaAccessProfileParamsSchema = z.object({ profileId: z.string().uuid() });
+const MetaRuleConfigurationUpdateRequestSchema = MetaRuleConfigurationInputSchema.and(
+  z.object({ expectedUpdatedAt: z.string().datetime() }),
+);
+const MetaAutomationRuntimeUpdateRequestSchema = MetaAutomationRuntimeInputSchema.extend({
+  expectedUpdatedAt: z.string().datetime(),
 });
 const CurlImportBodySchema = z.object({
   command: z.string().min(1).max(262_144),
@@ -143,7 +159,10 @@ export async function createApp(
   dependencies: AppDependencies,
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
-  const providers = dependencies.providers ?? new ProviderRegistry();
+  const providers = dependencies.providers ?? new ProviderRegistry(undefined, {
+    metaMarketingApiTransportFactory: ({ allowedMutationExternalIds }) =>
+      new MetaMarketingApiHttpTransport(allowedMutationExternalIds),
+  });
   const launchService = new LaunchService(
     dependencies.store,
     dependencies.vault,
@@ -250,13 +269,15 @@ export async function createApp(
         message: "当前账户没有执行此操作的权限。",
       });
     }
-    if (
-      !dependencies.store.getSystemRuntimeState().enabled &&
-      isRuntimeOperation(request.method, request.url)
-    ) {
+    const runtimePauseMessage = getRuntimePauseMessage(
+      dependencies.store,
+      request.method,
+      request.url,
+    );
+    if (runtimePauseMessage) {
       return reply.status(423).send({
         error: "SYSTEM_PAUSED",
-        message: "自动化总开关已关闭，后台自动化已暂停。",
+        message: runtimePauseMessage,
       });
     }
   });
@@ -588,10 +609,17 @@ export async function createApp(
 
   app.post("/api/launch-plans", async (request, reply) => {
     try {
+      const input = MultiAccountLaunchPlanInputSchema.parse(request.body);
+      if (hasMetaOfflineAccount(dependencies.store, [
+        input.sourceAccountId,
+        ...input.targetAccountIds,
+      ])) {
+        return reply.status(409).send(metaOfflineMessage());
+      }
       const user = request.authSession?.user;
       return reply.status(201).send(
         dependencies.store.createMultiAccountLaunchPlan(
-          MultiAccountLaunchPlanInputSchema.parse(request.body),
+          input,
           user
             ? { id: user.id, name: user.username, kind: "user" }
             : { id: "local-user", name: "本地用户", kind: "user" },
@@ -604,10 +632,15 @@ export async function createApp(
 
   app.post("/api/launch-plans/copy-preview", async (request, reply) => {
     try {
+      const input = LaunchCopyPreviewInputSchema.parse(request.body);
+      if (hasMetaOfflineAccount(dependencies.store, [
+        input.sourceAccountId,
+        ...input.targetAccountIds,
+      ])) {
+        return reply.status(409).send(metaOfflineMessage());
+      }
       return reply.status(201).send(
-        await launchService.createCopyPreview(
-          LaunchCopyPreviewInputSchema.parse(request.body),
-        ),
+        await launchService.createCopyPreview(input),
       );
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
@@ -627,6 +660,9 @@ export async function createApp(
       launchImmediately: z.boolean(),
       sameCampaign: z.boolean().optional(),
     }).parse(request.body);
+    if (hasMetaOfflineAccount(dependencies.store, [accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
     try {
       const results = await launchService.copyAdGroupWithinAccount({ accountId, ...input });
       return reply.send({ results });
@@ -649,6 +685,9 @@ export async function createApp(
       campaignBudget: z.number().positive().nullable().default(null),
       bid: z.number().nonnegative().nullable().default(null),
     }).parse(request.body);
+    if (hasMetaOfflineAccount(dependencies.store, [input.accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
     try {
       return reply.send(await launchService.copyCampaign(input));
     } catch (cause) {
@@ -669,6 +708,9 @@ export async function createApp(
       accountId: z.string().min(1),
       taskKey: z.string().min(1),
     }).parse(request.params);
+    if (hasMetaOfflineAccount(dependencies.store, [accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
     const reset = dependencies.store.resetCampaignCopyTask(accountId, taskKey);
     if (!reset) {
       return reply.status(404).send({ message: "该系列复制任务不存在，或已不处于结果未知状态。" });
@@ -692,6 +734,12 @@ export async function createApp(
       sameCampaign: z.boolean().default(true),
       scheduledStartAt: z.string().datetime().nullable().default(null),
     }).parse(request.body);
+    if (hasMetaOfflineAccount(
+      dependencies.store,
+      input.sources.map((source) => source.accountId),
+    )) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
     try {
       const result = await launchService.batchExpandAdGroups(input);
       return reply.send(result);
@@ -705,6 +753,12 @@ export async function createApp(
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
     if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
+    }
+    if (hasMetaOfflineAccount(dependencies.store, [
+      plan.sourceAccountId,
+      ...plan.targetAccountIds,
+    ])) {
+      return reply.status(409).send(metaOfflineMessage());
     }
     const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
     if (!readiness.ready) {
@@ -725,6 +779,12 @@ export async function createApp(
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
     if (!plan) {
       return reply.status(404).send({ message: "投放计划不存在。" });
+    }
+    if (hasMetaOfflineAccount(dependencies.store, [
+      plan.sourceAccountId,
+      ...plan.targetAccountIds,
+    ])) {
+      return reply.status(409).send(metaOfflineMessage());
     }
     const readiness = getCreationTemplateReadiness(plan.presetSnapshot?.creationConfig ?? {});
     if (!readiness.ready) {
@@ -750,6 +810,13 @@ export async function createApp(
       planId: z.string().min(1),
       itemId: z.string().min(1),
     }).parse(request.params);
+    const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
+    if (plan && hasMetaOfflineAccount(dependencies.store, [
+      plan.sourceAccountId,
+      ...plan.targetAccountIds,
+    ])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
     try {
       const user = request.authSession?.user;
       return await launchService.retryItem(planId, itemId, user
@@ -887,6 +954,207 @@ export async function createApp(
     return dependencies.store.updateRuleConfiguration(body);
   });
 
+  app.get("/api/platforms/meta/rules", async () =>
+    dependencies.store.getMetaRuleConfiguration(),
+  );
+
+  app.put("/api/platforms/meta/rules", async (request, reply) => {
+    const { expectedUpdatedAt, ...body } =
+      MetaRuleConfigurationUpdateRequestSchema.parse(request.body);
+    try {
+      return dependencies.store.updateMetaRuleConfiguration(body, expectedUpdatedAt);
+    } catch (cause) {
+      if (cause instanceof PlatformConfigurationConflictError) {
+        return reply.status(409).send({
+          error: cause.code,
+          message: "Meta 规则已被其他操作更新，请刷新后再保存。",
+        });
+      }
+      throw cause;
+    }
+  });
+
+  app.get("/api/platforms/meta/runtime", async () =>
+    dependencies.store.getMetaAutomationRuntime(),
+  );
+
+  app.put("/api/platforms/meta/runtime", async (request, reply) => {
+    const { expectedUpdatedAt, ...body } =
+      MetaAutomationRuntimeUpdateRequestSchema.parse(request.body);
+    try {
+      return dependencies.store.updateMetaAutomationRuntime(body, expectedUpdatedAt);
+    } catch (cause) {
+      if (cause instanceof PlatformConfigurationConflictError) {
+        return reply.status(409).send({
+          error: cause.code,
+          message: "Meta 运行设置已被其他操作更新，请刷新后再保存。",
+        });
+      }
+      throw cause;
+    }
+  });
+
+  app.get("/api/platforms/meta/access-profiles", async () =>
+    dependencies.store.listMetaAccessProfiles(),
+  );
+
+  app.post("/api/platforms/meta/access-profiles", async (request, reply) => {
+    try {
+      return reply.status(201).send(dependencies.store.createMetaAccessProfile(
+        MetaAccessProfileInputSchema.parse(request.body),
+      ));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.put("/api/platforms/meta/access-profiles/:profileId", async (request, reply) => {
+    const { profileId } = MetaAccessProfileParamsSchema.parse(request.params);
+    try {
+      const result = dependencies.store.updateMetaAccessProfile(
+        profileId,
+        MetaAccessProfileInputSchema.parse(request.body),
+      );
+      if (!result) return reply.status(404).send({ message: "Meta 共享凭据不存在。" });
+      if (result.invalidatedSecretRef) {
+        try {
+          await dependencies.vault.delete(result.invalidatedSecretRef);
+        } catch (cleanupCause) {
+          request.log.error(
+            {
+              profileId,
+              error: getSafeProviderError(cleanupCause),
+            },
+            "Meta App ID 已更新并解除旧共享凭据引用，但旧密文文件清理失败。",
+          );
+        }
+      }
+      return result.profile;
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  app.put(
+    "/api/platforms/meta/access-profiles/:profileId/secret",
+    async (request, reply) => {
+      const { profileId } = MetaAccessProfileParamsSchema.parse(request.params);
+      const profile = dependencies.store.getStoredMetaAccessProfile(profileId);
+      if (!profile) return reply.status(404).send({ message: "Meta 共享凭据不存在。" });
+      const bundle = MetaAccessSecretBundleInputSchema.parse(request.body);
+      const reference = await dependencies.vault.create(JSON.stringify(bundle));
+      let updated;
+      try {
+        updated = dependencies.store.setMetaAccessProfileSecretReference(
+          profileId,
+          reference,
+          { appId: profile.appId, updatedAt: profile.updatedAt },
+        );
+      } catch (cause) {
+        try {
+          await dependencies.vault.delete(reference);
+        } catch (cleanupCause) {
+          request.log.error(
+            {
+              profileId,
+              error: getSafeProviderError(cleanupCause),
+            },
+            "Meta 新共享凭据回滚清理失败。",
+          );
+        }
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
+      if (profile.secretRef) {
+        try {
+          await dependencies.vault.delete(profile.secretRef);
+        } catch (cleanupCause) {
+          request.log.error(
+            {
+              profileId,
+              error: getSafeProviderError(cleanupCause),
+            },
+            "Meta 旧共享凭据清理失败；新凭据仍保持生效。",
+          );
+        }
+      }
+      return updated;
+    },
+  );
+
+  app.delete(
+    "/api/platforms/meta/access-profiles/:profileId/secret",
+    async (request, reply) => {
+      const { profileId } = MetaAccessProfileParamsSchema.parse(request.params);
+      if (!dependencies.store.getMetaAccessProfile(profileId)) {
+        return reply.status(404).send({ message: "Meta 共享凭据不存在。" });
+      }
+      const reference = dependencies.store.clearMetaAccessProfileSecret(profileId);
+      if (reference) await dependencies.vault.delete(reference);
+      return reply.status(204).send();
+    },
+  );
+
+  app.post(
+    "/api/platforms/meta/access-profiles/:profileId/discover-ad-accounts",
+    async (request, reply) => {
+      const { profileId } = MetaAccessProfileParamsSchema.parse(request.params);
+      const profile = dependencies.store.getStoredMetaAccessProfile(profileId);
+      if (!profile) {
+        return reply.status(404).send({ message: "Meta 共享凭据不存在。" });
+      }
+      if (!profile.secretRef) {
+        return reply.status(409).send({
+          message: "请先为 Meta 共享凭据保存 App Secret 与 Access Token。",
+        });
+      }
+      const secret = await dependencies.vault.read(profile.secretRef);
+      if (!secret) {
+        return reply.status(409).send({
+          message: "Meta 共享凭据引用已失效，请重新保存。",
+        });
+      }
+      try {
+        return await providers.discoverMetaAdAccounts({
+          credential: MetaAccessSecretBundleInputSchema.parse(JSON.parse(secret)),
+          resolvedMetaAccessProfile: {
+            profileId: profile.id,
+            appId: profile.appId,
+            businessId: profile.businessId,
+            graphApiVersion: profile.graphApiVersion,
+          },
+        });
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
+    },
+  );
+
+  app.delete("/api/platforms/meta/access-profiles/:profileId", async (request, reply) => {
+    const { profileId } = MetaAccessProfileParamsSchema.parse(request.params);
+    const profile = dependencies.store.getStoredMetaAccessProfile(profileId);
+    if (!profile) return reply.status(404).send({ message: "Meta 共享凭据不存在。" });
+    let deletedSecretRef: string | null;
+    try {
+      deletedSecretRef = dependencies.store.deleteMetaAccessProfile(profileId);
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+    if (deletedSecretRef) {
+      try {
+        await dependencies.vault.delete(deletedSecretRef);
+      } catch (cleanupCause) {
+        request.log.error(
+          {
+            profileId,
+            error: getSafeProviderError(cleanupCause),
+          },
+          "Meta 共享凭据档案已删除并解除密文引用，但旧密文文件清理失败。",
+        );
+      }
+    }
+    return reply.status(204).send();
+  });
+
   app.post("/api/accounts", async (request, reply) => {
     const body = AccountCreateInputSchema.parse(request.body);
     return reply.status(201).send(dependencies.store.createAccount(body));
@@ -927,9 +1195,13 @@ export async function createApp(
   app.put("/api/accounts/:accountId/settings", async (request, reply) => {
     const { accountId } = AccountParamsSchema.parse(request.params);
     const body = AccountSettingsUpdateSchema.parse(request.body);
-    const account = dependencies.store.updateAccountSettings(accountId, body);
-    if (!account) return reply.status(404).send({ message: "账号不存在。" });
-    return account;
+    try {
+      const account = dependencies.store.updateAccountSettings(accountId, body);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      return account;
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
   });
 
   app.get("/api/accounts/:accountId/write-circuit", async (request) => {
@@ -1156,8 +1428,18 @@ export async function createApp(
         request.params,
       );
       const settings = ProviderConnectionSettingsSchema.parse(request.body);
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
       if (settings.kind !== providerKind) {
         return reply.status(400).send({ message: "Provider 类型不一致。" });
+      }
+      if (!providerBelongsToPlatform(account.platform, providerKind)) {
+        return reply.status(409).send({ message: "接入方式与账户平台不匹配。" });
+      }
+      if (providerKind === "meta-offline") {
+        return reply.status(409).send({
+          message: "Meta 当前仅提供离线架构，不接收 API 参数或凭据。",
+        });
       }
       return dependencies.store.saveProviderConnectionSettings(
         accountId,
@@ -1172,9 +1454,24 @@ export async function createApp(
       const { accountId, providerKind } = ProviderParamsSchema.parse(
         request.params,
       );
+      if (providerKind === "meta-marketing-api") {
+        return reply.status(409).send({
+          message: "Meta App Secret 与 Access Token 由共享凭据 Profile 统一管理，不再按广告账户重复保存。",
+        });
+      }
       const credential = ProviderCredentialInputSchema.parse(request.body);
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
       if (credential.kind !== providerKind) {
         return reply.status(400).send({ message: "凭据类型不一致。" });
+      }
+      if (!providerBelongsToPlatform(account.platform, providerKind)) {
+        return reply.status(409).send({ message: "接入方式与账户平台不匹配。" });
+      }
+      if (providerKind === "meta-offline") {
+        return reply.status(409).send({
+          message: "Meta 当前仅提供离线架构，不接收 API 参数或凭据。",
+        });
       }
       const existing = dependencies.store.getProviderConnection(
         accountId,
@@ -1209,6 +1506,16 @@ export async function createApp(
       const { accountId, providerKind } = ProviderParamsSchema.parse(
         request.params,
       );
+      if (providerKind === "meta-offline") {
+        return reply.status(409).send({
+          message: "Meta Marketing API 尚未接入；当前仅提供零网络离线架构。",
+        });
+      }
+      if (providerKind === "meta-marketing-api") {
+        return reply.status(409).send({
+          message: "请在 Meta 共享凭据 Profile 中删除 App Secret 与 Access Token。",
+        });
+      }
       const reference = dependencies.store.clearProviderCredential(
         accountId,
         providerKind,
@@ -1248,8 +1555,12 @@ export async function createApp(
     "/api/accounts/:accountId/automation/preview",
     async (request, reply) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
+      }
+      if (account.providerKind === "meta-offline") {
+        return reply.status(409).send(metaOfflineMessage());
       }
       return automation.runAccount(accountId, "preview");
     },
@@ -1262,6 +1573,11 @@ export async function createApp(
       const account = dependencies.store.getAccount(accountId);
       if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
+      }
+      if (account.platform === "meta") {
+        return reply.status(409).send({
+          message: "Meta 启停的失败或 unknown 操作禁止自动重放，请先只读对账。",
+        });
       }
       if (!account.enabled) {
         return reply.status(409).send({ message: "账户自动化已关闭，请先在用户管理中开启。" });
@@ -1284,10 +1600,26 @@ export async function createApp(
     "/api/accounts/:accountId/entities/status",
     async (request, reply) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
       const body = ManualStatusInputSchema.parse(request.body);
+      if (account.platform === "meta") {
+        if (account.providerKind !== "meta-marketing-api") {
+          return reply.status(409).send(metaOfflineMessage());
+        }
+        try {
+          providers.requireAccountCapability(
+            accountId,
+            account.providerKind,
+            dependencies.store.getProviderConnection(accountId, account.providerKind),
+            "change-status",
+          );
+        } catch (cause) {
+          return reply.status(409).send({ message: getSafeProviderError(cause) });
+        }
+      }
       const user = request.authSession?.user;
       try {
         return automation.enqueueManualStatusChange(accountId, body, user
@@ -1303,8 +1635,14 @@ export async function createApp(
     "/api/accounts/:accountId/status-operations/:operationId/retry",
     async (request, reply) => {
       const { accountId, operationId } = OperationParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
+      }
+      if (account.platform === "meta") {
+        return reply.status(409).send({
+          message: "Meta 启停的失败或 unknown 操作禁止自动重放，请先只读对账。",
+        });
       }
       const user = request.authSession?.user;
       try {
@@ -1321,6 +1659,11 @@ export async function createApp(
     "/api/accounts/:accountId/status-operations/:operationId/verify",
     async (request, reply) => {
       const { accountId, operationId } = OperationParamsSchema.parse(request.params);
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      if (account.providerKind === "meta-offline") {
+        return reply.status(409).send(metaOfflineMessage());
+      }
       let task;
       try {
         task = dependencies.store.getAdOperationByOperationId(operationId);
@@ -1357,6 +1700,7 @@ export async function createApp(
       );
       const account = dependencies.store.getAccount(accountId);
       if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      if (account.platform === "meta") return reply.status(409).send(metaOfflineMessage());
       const body = IgnoreEntityInputSchema.parse({
         ...(request.body as object),
         entityType,
@@ -1380,6 +1724,7 @@ export async function createApp(
       );
       const account = dependencies.store.getAccount(accountId);
       if (!account) return reply.status(404).send({ message: "账号不存在。" });
+      if (account.platform === "meta") return reply.status(409).send(metaOfflineMessage());
       const removed = dependencies.store.removeEntityIgnored(
         accountId,
         account.providerKind,
@@ -1391,11 +1736,31 @@ export async function createApp(
     },
   );
 
+  app.post(
+    "/api/accounts/:accountId/meta/status-operations/:operationId/reconcile",
+    async (request, reply) => {
+      const { accountId, operationId } = OperationParamsSchema.parse(request.params);
+      const user = request.authSession?.user;
+      try {
+        return await automation.reconcileMetaStatusOperation(
+          accountId,
+          operationId,
+          user
+            ? { id: user.id, name: user.username, kind: "user" }
+            : { id: "meta-readback-reconcile", name: "Meta 只读回读核验", kind: "system" },
+        );
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
+    },
+  );
+
   app.get(
     "/api/accounts/:accountId/ad-operations",
     async (request, reply) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
       return dependencies.store.listAdOperations(accountId);
@@ -1414,9 +1779,11 @@ export async function createApp(
     "/api/accounts/:accountId/schedules/once",
     async (request, reply) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
+      if (account.platform === "meta") return reply.status(409).send(metaOfflineMessage());
       return reply.status(201).send(
         dependencies.store.createOneTimeSchedule(
           accountId,
@@ -1430,9 +1797,11 @@ export async function createApp(
     "/api/accounts/:accountId/schedules/overnight",
     async (request, reply) => {
       const { accountId } = AccountParamsSchema.parse(request.params);
-      if (!dependencies.store.getAccount(accountId)) {
+      const account = dependencies.store.getAccount(accountId);
+      if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
+      if (account.platform === "meta") return reply.status(409).send(metaOfflineMessage());
       return reply.status(201).send(
         dependencies.store.createOvernightSchedule(
           accountId,
@@ -1517,6 +1886,11 @@ export async function createApp(
       const { accountId, providerKind } = ProviderParamsSchema.parse(
         request.params,
       );
+      if (providerKind === "meta-offline") {
+        return reply.status(409).send({
+          message: "Meta Marketing API 尚未接入；当前不会发起同步请求。",
+        });
+      }
       const checkedConnection = dependencies.store.getProviderConnection(
         accountId,
         providerKind,
@@ -1627,7 +2001,36 @@ async function loadProviderContext(
   providerKind: ProviderKind,
 ): Promise<ProviderContext> {
   const connection = store.getProviderConnection(accountId, providerKind);
-  if (!connection || !connection.credentialRef) {
+  if (!connection) {
+    throw new Error("接入参数或凭据尚未配置。");
+  }
+  if (providerKind === "meta-marketing-api") {
+    if (
+      connection.settings.kind !== "meta-marketing-api"
+      || !connection.settings.profileId
+    ) {
+      throw new Error("Meta 广告账户尚未绑定共享凭据 Profile。");
+    }
+    const profile = store.getStoredMetaAccessProfile(connection.settings.profileId);
+    if (!profile?.secretRef) {
+      throw new Error("Meta 共享凭据 Profile 尚未保存 App Secret 与 Access Token。");
+    }
+    const secret = await vault.read(profile.secretRef);
+    if (!secret) throw new Error("Meta 共享凭据引用已失效，请重新保存。");
+    return {
+      accountId,
+      settings: connection.settings,
+      credential: MetaAccessSecretBundleInputSchema.parse(JSON.parse(secret)),
+      resolvedMetaAccessProfile: {
+        profileId: profile.id,
+        appId: profile.appId,
+        businessId: profile.businessId,
+        graphApiVersion: profile.graphApiVersion,
+      },
+      timezone: store.getAccount(accountId)?.timezone ?? "UTC",
+    };
+  }
+  if (!connection.credentialRef) {
     throw new Error("接入参数或凭据尚未配置。");
   }
   const secret = await vault.read(connection.credentialRef);
@@ -1644,6 +2047,21 @@ function getSafeProviderError(cause: unknown): string {
   if (!(cause instanceof Error)) return "连接检测失败。";
   if (cause.name === "TimeoutError") return "连接检测超时。";
   return withCauseDetail(cause.message, cause);
+}
+
+function metaOfflineMessage(): { message: string } {
+  return {
+    message: "Meta 离线账户不允许真实操作；请切换到 Meta Marketing API，按账户选择只读、人工启停或自动启停模式并通过授权检测。",
+  };
+}
+
+function hasMetaOfflineAccount(
+  store: AutomationStore,
+  accountIds: Iterable<string>,
+): boolean {
+  return [...new Set(accountIds)].some(
+    (accountId) => store.getAccount(accountId)?.platform === "meta",
+  );
 }
 
 function isMutation(method: string): boolean {
@@ -1664,6 +2082,34 @@ function isRuntimeOperation(method: string, rawUrl: string): boolean {
   return path.endsWith("/automation/run");
 }
 
+function getRuntimePauseMessage(
+  store: AutomationStore,
+  method: string,
+  rawUrl: string,
+): string | null {
+  if (!isRuntimeOperation(method, rawUrl)) return null;
+  const path = rawUrl.split("?", 1)[0] ?? rawUrl;
+  const match = path.match(/^\/api\/accounts\/([^/]+)\/automation\/run$/);
+  if (match?.[1]) {
+    let accountId: string;
+    try {
+      accountId = decodeURIComponent(match[1]);
+    } catch {
+      accountId = match[1];
+    }
+    const account = store.getAccount(accountId);
+    if (account?.providerKind === "meta-offline") return null;
+    if (account?.platform === "meta") {
+      return store.getMetaAutomationRuntime().enabled
+        ? null
+        : "Meta 自动化总开关已关闭，Meta 后台执行已暂停。";
+    }
+  }
+  return store.getSystemRuntimeState().enabled
+    ? null
+    : "自动化总开关已关闭，后台自动化已暂停。";
+}
+
 export function requiredPermission(
   method: string,
   rawUrl: string,
@@ -1674,9 +2120,12 @@ export function requiredPermission(
     return path.startsWith("/api/local-users") ? "users:manage" : null;
   }
   if (path.startsWith("/api/local-users")) return "users:manage";
+  if (path.startsWith("/api/platforms/meta/access-profiles")) return "accounts:manage";
   if (path.startsWith("/api/system/")) return "system:control";
+  if (path === "/api/platforms/meta/runtime") return "system:control";
   if (
     path === "/api/rules" ||
+    path === "/api/platforms/meta/rules" ||
     path.startsWith("/api/automation/settings") ||
     path.startsWith("/api/automation/features")
   ) {

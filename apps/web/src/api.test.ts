@@ -52,6 +52,52 @@ describe("web API client", () => {
     );
   });
 
+  it("keeps the Meta ad-account discovery response contract aligned with the API", async () => {
+    const payload = [{
+      adAccountId: "act_300000000000003",
+      name: "Meta 上海测试账户",
+      currency: "USD",
+      timezone: "Asia/Shanghai",
+      accountStatus: 1,
+    }];
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.discoverMetaAdAccounts("profile-1")).resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/platforms/meta/access-profiles/profile-1/discover-ad-accounts",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("requests Meta unknown-operation reconciliation through its read-only endpoint", async () => {
+    const payload = {
+      operation: { status: "succeeded" },
+      asset: { externalId: "meta-ad-1", status: "disabled" },
+      resolution: "succeeded",
+      message: "只读回读确认目标状态 disabled 已生效。",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.reconcileMetaStatusOperation("account-1", "operation-1"))
+      .resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/accounts/account-1/meta/status-operations/operation-1/reconcile",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("deletes an advertising account through the account endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);

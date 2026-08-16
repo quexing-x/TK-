@@ -11,6 +11,7 @@ import type {
   ProviderConnectionSettings,
   ProviderCredentialInput,
   ProviderKind,
+  PlatformKind,
   ReadOnlySyncResult,
   RuleConfiguration,
   RuleConfigurationInput,
@@ -59,6 +60,13 @@ import type {
   UpdateRuntimeStatus,
   AccountProviderCapabilities,
   ProviderCapability,
+  MetaAccessProfile,
+  MetaAccessProfileInput,
+  MetaAccessSecretBundleInput,
+  MetaAutomationRuntime,
+  MetaAutomationRuntimeInput,
+  MetaRuleConfiguration,
+  MetaRuleConfigurationInput,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -66,10 +74,39 @@ export type { CookieConnectionReadiness };
 
 export interface ProviderDescriptor {
   kind: ProviderKind;
+  platform: PlatformKind;
   displayName: string;
   implementationStatus: "scaffolded" | "available";
   capabilityVersion: string;
   capabilities: ProviderCapability[];
+}
+
+export type MetaAssetEntityType = "campaign" | "ad-group" | "ad";
+
+/**
+ * Meta keeps configured status and delivery-effective status separate. The
+ * normalized `status` remains available for shared task handling, while these
+ * fields prevent the UI from treating propagation states as write failures.
+ */
+export interface MetaAssetRecord extends Omit<ManagedEntityRecord, "entityType"> {
+  entityType: MetaAssetEntityType;
+  configuredStatus?: string | null;
+  effectiveStatus?: string | null;
+}
+
+export interface MetaStatusReconcileResult {
+  operation: AdOperationRecord;
+  asset: MetaAssetRecord | null;
+  resolution: "succeeded" | "failed" | "unknown";
+  message: string;
+}
+
+export interface MetaDiscoveredAdAccount {
+  adAccountId: string;
+  name: string;
+  currency: string;
+  timezone: string;
+  accountStatus: number;
 }
 
 export interface BootstrapPayload {
@@ -491,6 +528,70 @@ export const api = {
     ),
   getManagedEntities: (accountId: string) =>
     request<ManagedEntityRecord[]>(`/api/accounts/${accountId}/entities`),
+  getMetaAssets: (accountId: string) =>
+    request<MetaAssetRecord[]>(`/api/accounts/${accountId}/entities`),
+  changeMetaEntityStatus: (
+    accountId: string,
+    input: Pick<ManualStatusInput, "externalId" | "action"> & {
+      entityType: MetaAssetEntityType;
+    },
+  ) => request<AdOperationRecord>(`/api/accounts/${accountId}/entities/status`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  reconcileMetaStatusOperation: (accountId: string, operationId: string) =>
+    request<MetaStatusReconcileResult>(
+      `/api/accounts/${accountId}/meta/status-operations/${operationId}/reconcile`,
+      { method: "POST" },
+    ),
+  getMetaAccessProfiles: () =>
+    request<MetaAccessProfile[]>("/api/platforms/meta/access-profiles"),
+  createMetaAccessProfile: (input: MetaAccessProfileInput) =>
+    request<MetaAccessProfile>("/api/platforms/meta/access-profiles", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateMetaAccessProfile: (profileId: string, input: MetaAccessProfileInput) =>
+    request<MetaAccessProfile>(`/api/platforms/meta/access-profiles/${profileId}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  deleteMetaAccessProfile: (profileId: string) =>
+    request<void>(`/api/platforms/meta/access-profiles/${profileId}`, { method: "DELETE" }),
+  saveMetaAccessProfileSecret: (
+    profileId: string,
+    input: MetaAccessSecretBundleInput,
+  ) => request<MetaAccessProfile>(`/api/platforms/meta/access-profiles/${profileId}/secret`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  }),
+  deleteMetaAccessProfileSecret: (profileId: string) =>
+    request<void>(`/api/platforms/meta/access-profiles/${profileId}/secret`, { method: "DELETE" }),
+  discoverMetaAdAccounts: (profileId: string) =>
+    request<MetaDiscoveredAdAccount[]>(
+      `/api/platforms/meta/access-profiles/${profileId}/discover-ad-accounts`,
+      { method: "POST" },
+    ),
+  getMetaRuleConfiguration: () =>
+    request<MetaRuleConfiguration>("/api/platforms/meta/rules"),
+  updateMetaRuleConfiguration: (
+    input: MetaRuleConfigurationInput,
+    expectedUpdatedAt: string,
+  ) =>
+    request<MetaRuleConfiguration>("/api/platforms/meta/rules", {
+      method: "PUT",
+      body: JSON.stringify({ ...input, expectedUpdatedAt }),
+    }),
+  getMetaAutomationRuntime: () =>
+    request<MetaAutomationRuntime>("/api/platforms/meta/runtime"),
+  updateMetaAutomationRuntime: (
+    input: MetaAutomationRuntimeInput,
+    expectedUpdatedAt: string,
+  ) =>
+    request<MetaAutomationRuntime>("/api/platforms/meta/runtime", {
+      method: "PUT",
+      body: JSON.stringify({ ...input, expectedUpdatedAt }),
+    }),
   batchExpandAdGroups: (input: {
     sources: Array<{
       accountId: string;

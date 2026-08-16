@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ProviderKind } from "./account.js";
 import type { AutomationSwitchKey, AutomationSwitches } from "./automation.js";
 import type { ProviderEntity, SyncEntityType } from "./connection.js";
 import type { ThresholdConfig } from "./threshold.js";
@@ -36,7 +37,7 @@ export type AutomationRunStatus = "running" | "completed" | "failed";
 export interface AutomationRunRecord {
   id: string;
   accountId: string;
-  providerKind: "cookie" | "official-api";
+  providerKind: ProviderKind;
   trigger: AutomationTrigger;
   automatic: boolean;
   status: AutomationRunStatus;
@@ -53,7 +54,7 @@ export interface AutomationDecisionRecord {
   id: string;
   runId: string;
   accountId: string;
-  providerKind: "cookie" | "official-api";
+  providerKind: ProviderKind;
   thresholdId: string;
   thresholdCode: string;
   entityType: SyncEntityType;

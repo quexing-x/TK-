@@ -52,6 +52,31 @@ describe("local API", () => {
     vi.restoreAllMocks();
   });
 
+  function createMetaOfflineAccount() {
+    return store.createAccount({
+      displayName: "Meta 离线测试账户",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-offline",
+    });
+  }
+
+  function seedMetaOfflineAdGroup(accountId: string, externalId = "meta-group-1") {
+    const now = new Date().toISOString();
+    store.saveReadOnlySync(accountId, "meta-offline", [{
+      entityType: "ad-group",
+      externalId,
+      payload: { ad_name: "Meta 离线广告组", status: "ENABLE" },
+    }], {
+      startedAt: now,
+      finishedAt: now,
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
+      warnings: [],
+      quality: testSyncQuality(now),
+    });
+  }
+
   it("returns bootstrap configuration", async () => {
     const response = await app.inject({ method: "GET", url: "/api/bootstrap" });
 
@@ -60,7 +85,19 @@ describe("local API", () => {
     expect(response.json().accountConnectionStates).toEqual([
       expect.objectContaining({ accountId: "demo-account" }),
     ]);
-    expect(response.json().providers).toHaveLength(2);
+    expect(response.json().providers).toHaveLength(4);
+    expect(response.json().providers).toContainEqual(expect.objectContaining({
+      kind: "meta-offline",
+      platform: "meta",
+      implementationStatus: "scaffolded",
+      capabilities: [],
+    }));
+    expect(response.json().providers).toContainEqual(expect.objectContaining({
+      kind: "meta-marketing-api",
+      platform: "meta",
+      implementationStatus: "available",
+      capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status"],
+    }));
     expect(response.json()).not.toHaveProperty("switchDefinitions");
     expect(response.json().globalAutomationSettings).toMatchObject({
       pollingIntervalMinutes: 5,
@@ -887,6 +924,989 @@ describe("local API", () => {
     });
     expect(run.statusCode).toBe(409);
     expect(run.json().message).toContain("账户自动化已关闭");
+  });
+
+  it("creates a Meta offline account but rejects API access and automation", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/accounts",
+      payload: {
+        displayName: "Meta 内部测试",
+        platform: "meta",
+        accountType: "standard",
+        enabled: false,
+        providerKind: "meta-offline",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const account = created.json();
+    expect(account).toMatchObject({ platform: "meta", providerKind: "meta-offline", enabled: false });
+
+    const settings = await app.inject({
+      method: "PUT",
+      url: `/api/accounts/${account.id}/connections/meta-offline/settings`,
+      payload: { kind: "meta-offline", businessId: "", adAccountId: "" },
+    });
+    expect(settings.statusCode).toBe(409);
+    expect(store.listProviderConnections(account.id)).toEqual([]);
+
+    const testConnection = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/connections/meta-offline/test`,
+    });
+    const sync = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/connections/meta-offline/sync`,
+    });
+    const run = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/automation/run`,
+    });
+    expect(testConnection.statusCode).toBe(409);
+    expect(sync.statusCode).toBe(409);
+    expect(run.statusCode).toBe(409);
+
+    const unsafe = await app.inject({
+      method: "POST",
+      url: "/api/accounts",
+      payload: {
+        displayName: "Meta unsafe",
+        platform: "meta",
+        accountType: "standard",
+        enabled: true,
+        providerKind: "meta-offline",
+      },
+    });
+    expect(unsafe.statusCode).toBe(400);
+  });
+
+  it("keeps Meta provider configuration, credentials, tests, and sync fail-closed", async () => {
+    const account = createMetaOfflineAccount();
+    const vaultCreate = vi.spyOn(vault, "create");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Meta offline tests must not use the network"),
+    );
+
+    const settings = await app.inject({
+      method: "PUT",
+      url: `/api/accounts/${account.id}/connections/meta-offline/settings`,
+      payload: { kind: "meta-offline", businessId: "business-local", adAccountId: "act-local" },
+    });
+    const credential = await app.inject({
+      method: "PUT",
+      url: `/api/accounts/${account.id}/connections/meta-offline/credential`,
+      payload: { kind: "meta-offline" },
+    });
+    const tested = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/connections/meta-offline/test`,
+    });
+    const synced = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/connections/meta-offline/sync`,
+    });
+
+    expect({
+      statuses: [settings.statusCode, credential.statusCode, tested.statusCode, synced.statusCode],
+      connections: store.listProviderConnections(account.id),
+      vaultWrites: vaultCreate.mock.calls.length,
+      networkCalls: fetchMock.mock.calls.length,
+    }).toEqual({
+      statuses: [409, 409, 409, 409],
+      connections: [],
+      vaultWrites: 0,
+      networkCalls: 0,
+    });
+  });
+
+  it("manages shared Meta access profiles without exposing the secret bundle", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/platforms/meta/access-profiles",
+      payload: {
+        name: "上海测试 Profile",
+        appId: "100000000000001",
+        businessId: null,
+        graphApiVersion: "v23.0",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      hasAppSecret: false,
+      hasAccessToken: false,
+      referenceCount: 0,
+    });
+    const profileId = created.json().id as string;
+
+    const saved = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${profileId}/secret`,
+      payload: {
+        appSecret: "fixture-app-secret",
+        accessToken: "fixture-access-token-long-enough",
+      },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ hasAppSecret: true, hasAccessToken: true });
+    expect(saved.body).not.toContain("fixture-app-secret");
+    expect(saved.body).not.toContain("fixture-access-token");
+    expect(saved.body).not.toContain("secretRef");
+    expect(saved.body).not.toContain("credentialRef");
+
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/platforms/meta/access-profiles",
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual([expect.objectContaining({ id: profileId })]);
+    expect(listed.body).not.toContain("fixture-app-secret");
+    expect(listed.body).not.toContain("fixture-access-token");
+  });
+
+  it("invalidates the old Meta secret bundle when the App ID changes", async () => {
+    const profile = store.createMetaAccessProfile({
+      name: "App ID 变更测试",
+      appId: "100000000000071",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    const previousReference = await vault.create(JSON.stringify({
+      appSecret: "previous-fixture-app-secret",
+      accessToken: "previous-fixture-access-token-long-enough",
+    }));
+    store.setMetaAccessProfileSecretReference(profile.id, previousReference);
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${profile.id}`,
+      payload: {
+        name: "App ID 变更测试",
+        appId: "100000000000072",
+        businessId: null,
+        graphApiVersion: "v26.0",
+      },
+    });
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      appId: "100000000000072",
+      hasAppSecret: false,
+      hasAccessToken: false,
+    });
+    expect(updated.body).not.toContain("secretRef");
+    expect(store.getStoredMetaAccessProfile(profile.id)?.secretRef).toBeNull();
+    expect(await vault.read(previousReference)).toBeNull();
+  });
+
+  it("rejects deleting a referenced Meta access profile before touching its secret bundle", async () => {
+    const profile = store.createMetaAccessProfile({
+      name: "被引用的 Meta Profile",
+      appId: "100000000000075",
+      businessId: "200000000000075",
+      graphApiVersion: "v26.0",
+    });
+    const reference = await vault.create(JSON.stringify({
+      appSecret: "referenced-fixture-app-secret",
+      accessToken: "referenced-fixture-access-token-long-enough",
+    }));
+    store.setMetaAccessProfileSecretReference(profile.id, reference);
+    const account = store.createAccount({
+      displayName: "引用 Profile 的 Meta 账户",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: profile.id,
+      adAccountId: "act_300000000000075",
+      pageId: null,
+      liveMode: "disabled",
+      allowedStatusEntityTypes: [],
+    });
+    const deleteSecret = vi.spyOn(vault, "delete");
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/api/platforms/meta/access-profiles/${profile.id}`,
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(store.getMetaAccessProfile(profile.id)).toMatchObject({
+      referenceCount: 1,
+      hasAppSecret: true,
+      hasAccessToken: true,
+    });
+    expect(await vault.read(reference)).not.toBeNull();
+    expect(deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it("reconciles an unknown Meta status operation through the API without replaying a write", async () => {
+    const account = store.createAccount({
+      displayName: "Meta reconcile account",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    const profile = store.createMetaAccessProfile({
+      name: "Meta reconcile profile",
+      appId: "100000000000073",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    store.setMetaAccessProfileSecretReference(profile.id, await vault.create(JSON.stringify({
+      appSecret: "fixture-app-secret",
+      accessToken: "fixture-access-token-long-enough",
+    })));
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: profile.id,
+      adAccountId: "act_300000000000073",
+      pageId: null,
+      liveMode: "manual-status",
+      allowedStatusEntityTypes: ["ad"],
+    });
+    store.updateProviderStatus(account.id, "meta-marketing-api", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "meta-marketing-api", {
+      status: "active",
+      capabilityVersion: "fixture-meta-v1",
+      capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status"],
+    });
+    store.updateProviderStatus(
+      account.id,
+      "meta-marketing-api",
+      "failed",
+      "fixture post-write readback failure",
+    );
+    const task = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-marketing-api",
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      entityName: "Meta Ad",
+      action: "disable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(task.id, "executor-a", "pending");
+    store.completeStatusWriteTask(task.id, "executor-a", "unknown", "response lost");
+    const changeStatus = vi.fn();
+    const finishedAt = new Date().toISOString();
+    const localDate = new Intl.DateTimeFormat("en-CA", {
+      timeZone: account.timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(finishedAt));
+    const syncReadOnly = vi.fn(async () => ({
+      entities: [{
+        entityType: "ad" as const,
+        externalId: "meta-ad-1",
+        payload: {
+          name: "Meta Ad",
+          campaign_id: "meta-campaign-1",
+          adgroup_id: "meta-adset-1",
+          operation_status: "PAUSED",
+        },
+      }],
+      result: {
+        startedAt: finishedAt,
+        finishedAt,
+        counts: { campaign: 0, "ad-group": 0, ad: 1, material: 0 },
+        warnings: [],
+        quality: {
+          ...testSyncQuality(finishedAt),
+          coverage: { startDate: localDate, endDate: localDate, timezone: account.timezone },
+          completeEntityTypes: ["ad" as const],
+        },
+      },
+    }));
+    const capabilities = new Set([
+      "read-campaigns",
+      "read-ad-groups",
+      "read-ads",
+      "change-status",
+    ] as const);
+    const provider = {
+      kind: "meta-marketing-api",
+      platform: "meta",
+      implementationStatus: "available",
+      displayName: "Meta reconcile fixture",
+      capabilityVersion: "fixture-meta-v1",
+      capabilities,
+      resolveCapabilities() {
+        return capabilities;
+      },
+      syncReadOnly,
+      changeStatus,
+    } as unknown as AdsProvider;
+    await app.close();
+    app = await createApp({
+      store,
+      vault,
+      providers: new ProviderRegistry([provider]),
+      disableAuth: true,
+    });
+
+    const reconciled = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta/status-operations/${task.operationId}/reconcile`,
+    });
+
+    expect(reconciled.statusCode).toBe(200);
+    expect(reconciled.json()).toMatchObject({
+      resolution: "succeeded",
+      operation: { status: "succeeded", phase: "readback" },
+      asset: { entityType: "ad", externalId: "meta-ad-1", status: "disabled" },
+    });
+    expect(syncReadOnly).toHaveBeenCalledTimes(1);
+    expect(changeStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps the rotated Meta secret active when cleanup of the previous bundle fails", async () => {
+    const profile = store.createMetaAccessProfile({
+      name: "轮换测试 Profile",
+      appId: "100000000000099",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    const previousReference = await vault.create(JSON.stringify({
+      appSecret: "previous-fixture-app-secret",
+      accessToken: "previous-fixture-access-token-long-enough",
+    }));
+    store.setMetaAccessProfileSecretReference(profile.id, previousReference);
+    const originalDelete = vault.delete.bind(vault);
+    vi.spyOn(vault, "delete").mockImplementation(async (reference) => {
+      if (reference === previousReference) {
+        throw new Error("fixture old bundle cleanup failure");
+      }
+      await originalDelete(reference);
+    });
+
+    const rotated = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${profile.id}/secret`,
+      payload: {
+        appSecret: "rotated-fixture-app-secret",
+        accessToken: "rotated-fixture-access-token-long-enough",
+      },
+    });
+
+    expect(rotated.statusCode).toBe(200);
+    expect(rotated.body).not.toContain("rotated-fixture-app-secret");
+    expect(rotated.body).not.toContain("rotated-fixture-access-token");
+    expect(rotated.body).not.toContain("secretRef");
+    const stored = store.getStoredMetaAccessProfile(profile.id);
+    expect(stored?.secretRef).toBeTruthy();
+    expect(stored?.secretRef).not.toBe(previousReference);
+    expect(JSON.parse(await vault.read(stored?.secretRef as string) as string)).toEqual({
+      appSecret: "rotated-fixture-app-secret",
+      accessToken: "rotated-fixture-access-token-long-enough",
+    });
+    expect(await vault.read(previousReference)).not.toBeNull();
+  });
+
+  it("rejects a stale Meta secret save when the App ID changes concurrently", async () => {
+    const profile = store.createMetaAccessProfile({
+      name: "并发 App ID 测试",
+      appId: "100000000000074",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    const originalCreate = vault.create.bind(vault);
+    let staleReference = "";
+    vi.spyOn(vault, "create").mockImplementation(async (secret) => {
+      staleReference = await originalCreate(secret);
+      store.updateMetaAccessProfile(profile.id, {
+        name: "并发 App ID 测试",
+        appId: "100000000000075",
+        businessId: null,
+        graphApiVersion: "v26.0",
+      });
+      return staleReference;
+    });
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${profile.id}/secret`,
+      payload: {
+        appSecret: "stale-fixture-app-secret",
+        accessToken: "stale-fixture-access-token-long-enough",
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().message).toContain("已发生变化");
+    expect(response.body).not.toContain("stale-fixture-app-secret");
+    expect(response.body).not.toContain("stale-fixture-access-token");
+    expect(store.getStoredMetaAccessProfile(profile.id)).toMatchObject({
+      appId: "100000000000075",
+      secretRef: null,
+    });
+    expect(await vault.read(staleReference)).toBeNull();
+  });
+
+  it("returns a conflict when Meta access profiles reuse the same App ID", async () => {
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/platforms/meta/access-profiles",
+      payload: {
+        name: "唯一 App Profile",
+        appId: "100000000000088",
+        businessId: null,
+        graphApiVersion: "v26.0",
+      },
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/platforms/meta/access-profiles",
+      payload: {
+        name: "待更新 Profile",
+        appId: "100000000000089",
+        businessId: null,
+        graphApiVersion: "v26.0",
+      },
+    });
+    const duplicateCreate = await app.inject({
+      method: "POST",
+      url: "/api/platforms/meta/access-profiles",
+      payload: {
+        name: "重复 App Profile",
+        appId: "100000000000088",
+        businessId: "200000000000088",
+        graphApiVersion: "v26.0",
+      },
+    });
+    const duplicateUpdate = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${second.json().id as string}`,
+      payload: {
+        name: "更新为重复 App Profile",
+        appId: "100000000000088",
+        businessId: null,
+        graphApiVersion: "v26.0",
+      },
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    expect(duplicateCreate.statusCode).toBe(409);
+    expect(duplicateUpdate.statusCode).toBe(409);
+    expect(duplicateCreate.body).not.toContain("secretRef");
+    expect(duplicateUpdate.body).not.toContain("secretRef");
+  });
+
+  it("discovers Meta ad accounts only through the explicit profile action", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        data: [{
+          id: "act_300000000000003",
+          name: "上海测试账户",
+          currency: "USD",
+          timezone_name: "Asia/Shanghai",
+          account_status: 1,
+        }],
+        paging: {},
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const profile = store.createMetaAccessProfile({
+      name: "发现测试 Profile",
+      appId: "100000000000002",
+      businessId: null,
+      graphApiVersion: "v23.0",
+    });
+    const reference = await vault.create(JSON.stringify({
+      appSecret: "fixture-app-secret",
+      accessToken: "fixture-access-token-long-enough",
+    }));
+    store.setMetaAccessProfileSecretReference(profile.id, reference);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/platforms/meta/access-profiles",
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const discovered = await app.inject({
+      method: "POST",
+      url: `/api/platforms/meta/access-profiles/${profile.id}/discover-ad-accounts`,
+    });
+    expect(discovered.statusCode).toBe(200);
+    expect(discovered.json()).toEqual([{
+      adAccountId: "act_300000000000003",
+      name: "上海测试账户",
+      currency: "USD",
+      timezone: "Asia/Shanghai",
+      accountStatus: 1,
+    }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(requestUrl.pathname).toBe("/v23.0/me/adaccounts");
+    expect(requestUrl.searchParams.get("fields"))
+      .toBe("id,name,currency,timezone_name,account_status");
+    expect(requestUrl.searchParams.get("appsecret_proof")).toMatch(/^[a-f0-9]{64}$/);
+    expect(discovered.body).not.toContain("fixture-app-secret");
+    expect(discovered.body).not.toContain("fixture-access-token");
+  });
+
+  it("discovers owned Meta ad accounts through the optional Business Portfolio ID", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        data: [{
+          id: "act_300000000000099",
+          name: "Business 下属账户",
+          currency: "USD",
+          timezone_name: "Asia/Shanghai",
+          account_status: 1,
+        }],
+        paging: {},
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const profile = store.createMetaAccessProfile({
+      name: "Business 发现测试 Profile",
+      appId: "100000000000099",
+      businessId: "200000000000099",
+      graphApiVersion: "v26.0",
+    });
+    const reference = await vault.create(JSON.stringify({
+      appSecret: "fixture-business-app-secret",
+      accessToken: "fixture-business-access-token-long-enough",
+    }));
+    store.setMetaAccessProfileSecretReference(profile.id, reference);
+
+    const discovered = await app.inject({
+      method: "POST",
+      url: `/api/platforms/meta/access-profiles/${profile.id}/discover-ad-accounts`,
+    });
+
+    expect(discovered.statusCode).toBe(200);
+    expect(discovered.json()).toEqual([expect.objectContaining({
+      adAccountId: "act_300000000000099",
+      name: "Business 下属账户",
+    })]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(requestUrl.pathname).toBe(
+      "/v26.0/200000000000099/owned_ad_accounts",
+    );
+    expect(requestUrl.searchParams.get("appsecret_proof")).toMatch(/^[a-f0-9]{64}$/);
+    expect(discovered.body).not.toContain("fixture-business-app-secret");
+    expect(discovered.body).not.toContain("fixture-business-access-token");
+  });
+
+  it("rejects stale concurrent Meta rules and runtime updates", async () => {
+    const rules = store.getMetaRuleConfiguration();
+    const runtime = store.getMetaAutomationRuntime();
+    const firstRules = await app.inject({
+      method: "PUT",
+      url: "/api/platforms/meta/rules",
+      payload: { ...rules, expectedUpdatedAt: rules.updatedAt },
+    });
+    const staleRules = await app.inject({
+      method: "PUT",
+      url: "/api/platforms/meta/rules",
+      payload: { ...rules, expectedUpdatedAt: rules.updatedAt },
+    });
+    const firstRuntime = await app.inject({
+      method: "PUT",
+      url: "/api/platforms/meta/runtime",
+      payload: { ...runtime, expectedUpdatedAt: runtime.updatedAt },
+    });
+    const staleRuntime = await app.inject({
+      method: "PUT",
+      url: "/api/platforms/meta/runtime",
+      payload: { ...runtime, expectedUpdatedAt: runtime.updatedAt },
+    });
+
+    expect(firstRules.statusCode).toBe(200);
+    expect(firstRuntime.statusCode).toBe(200);
+    expect(staleRules.statusCode).toBe(409);
+    expect(staleRuntime.statusCode).toBe(409);
+    expect(staleRules.json().error).toBe("PLATFORM_CONFIGURATION_CONFLICT");
+    expect(staleRuntime.json().error).toBe("PLATFORM_CONFIGURATION_CONFLICT");
+  });
+
+  it("stores the shared Meta provider contract while disabled mode keeps network and writes closed", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/accounts",
+      payload: {
+        displayName: "Meta read-only fixture",
+        platform: "meta",
+        accountType: "standard",
+        enabled: false,
+        providerKind: "meta-marketing-api",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const account = created.json();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Meta architecture test must not use the network"),
+    );
+
+    const profileResponse = await app.inject({
+      method: "POST",
+      url: "/api/platforms/meta/access-profiles",
+      payload: {
+        name: "Meta fixture profile",
+        appId: "100000000000001",
+        businessId: "200000000000002",
+        graphApiVersion: "v99.0",
+      },
+    });
+    expect(profileResponse.statusCode).toBe(201);
+    const profileId = profileResponse.json().id as string;
+    const secret = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${profileId}/secret`,
+      payload: {
+        appSecret: "fixture-meta-app-secret",
+        accessToken: "fixture-meta-token-with-enough-length",
+      },
+    });
+    expect(secret.statusCode).toBe(200);
+    expect(secret.body).not.toContain("fixture-meta-app-secret");
+    expect(secret.body).not.toContain("fixture-meta-token");
+
+    const settings = await app.inject({
+      method: "PUT",
+      url: `/api/accounts/${account.id}/connections/meta-marketing-api/settings`,
+      payload: {
+        kind: "meta-marketing-api",
+        profileId,
+        adAccountId: "act_300000000000003",
+        pageId: null,
+        liveMode: "disabled",
+        allowedStatusEntityTypes: [],
+      },
+    });
+    const credential = await app.inject({
+      method: "PUT",
+      url: `/api/accounts/${account.id}/connections/meta-marketing-api/credential`,
+      payload: {
+        appSecret: "must-not-be-accepted-here",
+        accessToken: "must-not-be-accepted-here-either",
+      },
+    });
+    const tested = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/connections/meta-marketing-api/test`,
+    });
+    const synced = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/connections/meta-marketing-api/sync`,
+    });
+    const run = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/automation/run`,
+    });
+    const statusWrite = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/entities/status`,
+      payload: {
+        entityType: "campaign",
+        externalId: "500000000000005",
+        action: "disable",
+      },
+    });
+
+    expect(settings.statusCode).toBe(200);
+    expect(settings.json()).toMatchObject({ hasCredential: true, status: "untested" });
+    expect(credential.statusCode).toBe(409);
+    expect(credential.body).not.toContain("fixture-meta-token");
+    expect(tested.statusCode).toBe(200);
+    expect(tested.json()).toMatchObject({
+      status: "failed",
+      authorizationStatus: "failed",
+      authorizedCapabilities: [],
+    });
+    expect(tested.json().lastMessage).toContain("真实网络总开关仍关闭");
+    expect(synced.statusCode).toBe(409);
+    expect(run.statusCode).toBe(409);
+    expect(statusWrite.statusCode).toBe(409);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.listProviderConnections(account.id)).toHaveLength(1);
+    expect(store.listAdOperations(account.id)).toEqual([]);
+  });
+
+  it("keeps every launch and copy entry point fail-closed for Meta accounts", async () => {
+    const account = createMetaOfflineAccount();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Meta offline launch tests must not use the network"),
+    );
+    const copyPreviewSpy = vi.spyOn(LaunchService.prototype, "createCopyPreview");
+    const sameAccountSpy = vi.spyOn(LaunchService.prototype, "copyAdGroupWithinAccount");
+    const campaignCopySpy = vi.spyOn(LaunchService.prototype, "copyCampaign");
+    const batchExpandSpy = vi.spyOn(LaunchService.prototype, "batchExpandAdGroups");
+    const executeSpy = vi.spyOn(LaunchService.prototype, "execute");
+    const retrySpy = vi.spyOn(LaunchService.prototype, "retryItem");
+    const launchRow = apiLaunchRow(2);
+    const planPayload = {
+      mode: "single" as const,
+      sourceAccountId: account.id,
+      sourceAdGroupId: null,
+      targetAccountIds: [account.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchRow],
+    };
+    const plansBefore = store.listMultiAccountLaunchPlans(10_000);
+
+    const createPlan = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans",
+      payload: planPayload,
+    });
+    const copyPreview = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans/copy-preview",
+      payload: {
+        sourceAccountId: account.id,
+        sourceAdGroupId: "source-group",
+        targetAccountIds: [account.id],
+        launchPresetId: "default-launch-preset",
+        launchRows: [launchRow],
+      },
+    });
+    const sameAccount = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/ad-groups/copy-same-account`,
+      payload: {
+        sourceCampaignId: "source-campaign",
+        sourceCampaignName: "source",
+        sourceAdGroupId: "source-group",
+        baseAdGroupName: "copy",
+        count: 1,
+        dailyBudget: 10,
+        bid: null,
+        launchImmediately: false,
+        sameCampaign: true,
+      },
+    });
+    const campaignCopy = await app.inject({
+      method: "POST",
+      url: "/api/campaigns/copy",
+      payload: {
+        accountId: account.id,
+        sources: [{ sourceCampaignId: "source-campaign", sourceAdGroupIds: ["source-group"] }],
+        campaignCopies: 1,
+        groupsPerCampaign: 1,
+        initialStatus: "disabled",
+      },
+    });
+    const batchExpand = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand",
+      payload: {
+        sources: [{
+          accountId: account.id,
+          sourceCampaignId: "source-campaign",
+          sourceCampaignName: "source",
+          sourceAdGroupId: "source-group",
+          sourceAdGroupName: "source group",
+        }],
+        count: 1,
+        dailyBudget: 10,
+        bid: null,
+        launchImmediately: false,
+        sameCampaign: true,
+      },
+    });
+
+    expect([
+      createPlan.statusCode,
+      copyPreview.statusCode,
+      sameAccount.statusCode,
+      campaignCopy.statusCode,
+      batchExpand.statusCode,
+    ]).toEqual([409, 409, 409, 409, 409]);
+    expect(store.listMultiAccountLaunchPlans(10_000)).toEqual(plansBefore);
+
+    const persistedPlan = store.createMultiAccountLaunchPlan(planPayload);
+    const planBefore = store.getMultiAccountLaunchPlan(persistedPlan.id);
+    const itemsBefore = store.listLaunchPlanItems(persistedPlan.id);
+    const execute = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${persistedPlan.id}/execute`,
+    });
+    const queue = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${persistedPlan.id}/queue`,
+    });
+    const retry = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${persistedPlan.id}/items/${itemsBefore[0]!.itemId}/retry`,
+    });
+    const resetCopyTask = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/campaign-copy-tasks/offline-task/reset`,
+    });
+
+    expect([execute.statusCode, queue.statusCode, retry.statusCode, resetCopyTask.statusCode])
+      .toEqual([409, 409, 409, 409]);
+    expect(store.getMultiAccountLaunchPlan(persistedPlan.id)).toEqual(planBefore);
+    expect(store.listLaunchPlanItems(persistedPlan.id)).toEqual(itemsBefore);
+    expect({
+      copyPreviewCalls: copyPreviewSpy.mock.calls.length,
+      sameAccountCalls: sameAccountSpy.mock.calls.length,
+      campaignCopyCalls: campaignCopySpy.mock.calls.length,
+      batchExpandCalls: batchExpandSpy.mock.calls.length,
+      executeCalls: executeSpy.mock.calls.length,
+      retryCalls: retrySpy.mock.calls.length,
+      networkCalls: fetchMock.mock.calls.length,
+    }).toEqual({
+      copyPreviewCalls: 0,
+      sameAccountCalls: 0,
+      campaignCopyCalls: 0,
+      batchExpandCalls: 0,
+      executeCalls: 0,
+      retryCalls: 0,
+      networkCalls: 0,
+    });
+  });
+
+  it("rejects Meta automation preview and run without persisting runs", async () => {
+    const account = createMetaOfflineAccount();
+
+    const preview = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/automation/preview`,
+    });
+    const run = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/automation/run`,
+    });
+
+    expect({
+      statuses: [preview.statusCode, run.statusCode],
+      runs: store.listAutomationRuns(account.id),
+    }).toEqual({ statuses: [409, 409], runs: [] });
+  });
+
+  it("rejects Meta entity status writes without creating an operation", async () => {
+    const account = createMetaOfflineAccount();
+    seedMetaOfflineAdGroup(account.id);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/entities/status`,
+      payload: { entityType: "ad-group", externalId: "meta-group-1", action: "disable" },
+    });
+
+    expect({ status: response.statusCode, operations: store.listAdOperations(account.id) })
+      .toEqual({ status: 409, operations: [] });
+  });
+
+  it("rejects Meta ignore writes without creating ignore or operation records", async () => {
+    const account = createMetaOfflineAccount();
+    seedMetaOfflineAdGroup(account.id);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/entities/ad-group/meta-group-1/ignore`,
+      payload: { reason: "Meta offline boundary" },
+    });
+
+    expect({
+      status: response.statusCode,
+      ignored: store.listIgnoredEntities(account.id, "meta-offline"),
+      operations: store.listAdOperations(account.id),
+    }).toEqual({ status: 409, ignored: [], operations: [] });
+  });
+
+  it("rejects Meta one-time schedules without persisting a schedule", async () => {
+    const account = createMetaOfflineAccount();
+    seedMetaOfflineAdGroup(account.id);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/schedules/once`,
+      payload: {
+        externalId: "meta-group-1",
+        action: "disable",
+        runAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+
+    expect({ status: response.statusCode, schedules: store.listScheduledActions(account.id) })
+      .toEqual({ status: 409, schedules: [] });
+  });
+
+  it("rejects Meta overnight schedules without persisting either schedule", async () => {
+    const account = createMetaOfflineAccount();
+    seedMetaOfflineAdGroup(account.id);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/schedules/overnight`,
+      payload: {
+        externalId: "meta-group-1",
+        disableAt: new Date(Date.now() + 60_000).toISOString(),
+        enableAt: new Date(Date.now() + 120_000).toISOString(),
+      },
+    });
+
+    expect({ status: response.statusCode, schedules: store.listScheduledActions(account.id) })
+      .toEqual({ status: 409, schedules: [] });
+  });
+
+  it("rejects retrying a Meta status task without changing the failed task", async () => {
+    const account = createMetaOfflineAccount();
+    const task = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-offline",
+      entityType: "ad-group",
+      externalId: "meta-group-1",
+      entityName: "Meta 离线广告组",
+      action: "disable",
+      source: "manual",
+    }, { id: "offline-test", name: "Offline Test", kind: "user" });
+    store.claimStatusWriteTask(task.id, "offline-executor");
+    store.completeStatusWriteTask(task.id, "offline-executor", "failed", "offline boundary");
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/status-operations/${task.operationId}/retry`,
+    });
+
+    expect({
+      status: response.statusCode,
+      taskStatus: store.getAdOperation(task.id).status,
+      operationCount: store.listAdOperations(account.id).length,
+    }).toEqual({ status: 409, taskStatus: "failed", operationCount: 1 });
+  });
+
+  it("rejects verifying a Meta status task without changing the unknown task", async () => {
+    const account = createMetaOfflineAccount();
+    const task = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-offline",
+      entityType: "ad-group",
+      externalId: "meta-group-1",
+      entityName: "Meta 离线广告组",
+      action: "disable",
+      source: "manual",
+    }, { id: "offline-test", name: "Offline Test", kind: "user" });
+    store.claimStatusWriteTask(task.id, "offline-executor");
+    store.completeStatusWriteTask(task.id, "offline-executor", "unknown", "offline boundary");
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/status-operations/${task.operationId}/verify`,
+      payload: {
+        decision: "confirmed-succeeded",
+        observedStatus: "disabled",
+        evidence: "Meta offline verification must be rejected",
+        note: "offline boundary",
+      },
+    });
+
+    expect({
+      status: response.statusCode,
+      taskStatus: store.getAdOperation(task.id).status,
+      verificationCount: store.listStatusWriteTaskVerifications(task.id).length,
+    }).toEqual({ status: 409, taskStatus: "unknown", verificationCount: 0 });
   });
 
   it("deletes only the selected account and its encrypted credentials", async () => {
@@ -3023,6 +4043,8 @@ describe("local API", () => {
     });
     const provider: AdsProvider = {
       kind: "cookie",
+      platform: "tiktok",
+      implementationStatus: "available",
       displayName: "launch test provider",
       capabilityVersion: "launch-test-v1",
       capabilities: new Set(["read-campaigns", "create-campaigns", "copy-ads", "change-status"]),
@@ -3143,6 +4165,8 @@ describe("local API", () => {
     });
     const provider: AdsProvider = {
       kind: "cookie",
+      platform: "tiktok",
+      implementationStatus: "available",
       displayName: "copy test provider",
       capabilityVersion: "copy-test-v1",
       capabilities: new Set(["read-campaigns", "read-ad-groups", "create-campaigns"]),
