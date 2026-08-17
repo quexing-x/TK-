@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ProviderKind } from "./account.js";
 import { AutomationActionSchema, type ManagedEntitySnapshot } from "./decision.js";
 import { SyncEntityTypeSchema, type SyncEntityType } from "./connection.js";
 import type {
@@ -31,11 +32,15 @@ export type AppealQueueInput = z.infer<typeof AppealQueueInputSchema>;
 export interface ManagedEntityRecord extends ManagedEntitySnapshot {
   ignored: boolean;
   syncedAt: string;
+  /** Meta configured status returned by the object endpoint (for example ACTIVE/PAUSED). */
+  configuredStatus?: string | null;
+  /** Meta effective delivery status after parent-level effects are applied. */
+  effectiveStatus?: string | null;
 }
 
 export interface IgnoredEntityRecord {
   accountId: string;
-  providerKind: "cookie" | "official-api";
+  providerKind: ProviderKind;
   entityType: SyncEntityType;
   externalId: string;
   reason: string;
@@ -45,7 +50,7 @@ export interface IgnoredEntityRecord {
 export interface AdOperationRecord extends WriteTaskIdentity {
   id: string;
   accountId: string;
-  providerKind: "cookie" | "official-api";
+  providerKind: ProviderKind;
   entityType: SyncEntityType;
   externalId: string;
   entityName: string;
@@ -98,7 +103,7 @@ export interface StatusManualVerificationRecord extends StatusManualVerification
 export interface EntityMetricSnapshotRecord {
   id: string;
   accountId: string;
-  providerKind: "cookie" | "official-api";
+  providerKind: ProviderKind;
   entityType: SyncEntityType;
   externalId: string;
   entityName: string;

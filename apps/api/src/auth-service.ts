@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import {
   InitialDeveloperInputSchema,
   LocalUserCreateInputSchema,
+  LocalUserRecordSchema,
   LocalUserUpdateInputSchema,
   LoginInputSchema,
   PasswordChangeInputSchema,
@@ -63,7 +64,7 @@ export class AuthService {
     return {
       setupRequired: this.store.countLocalUsers() === 0,
       authenticated: session !== null,
-      user: session?.user ?? null,
+      user: session ? LocalUserRecordSchema.parse(session.user) : null,
       permissions: session?.permissions ?? [],
       csrfToken: session?.csrfToken ?? null,
     };

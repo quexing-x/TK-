@@ -7,6 +7,7 @@ import {
   type AppealMutation,
   type AdsProvider,
   type DeleteAdGroupMutation,
+  type ProviderContext,
   type StatusMutation,
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
@@ -38,6 +39,8 @@ function futureShanghaiTime(hour: number, minute = 0): Date {
 
 class FakeProvider implements AdsProvider {
   readonly kind = "cookie" as const;
+  readonly platform = "tiktok" as const;
+  readonly implementationStatus = "available" as const;
   readonly displayName = "Fake Cookie";
   readonly capabilityVersion = "fake-cookie-v1";
   readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status", "appeal-ads", "copy-ads", "delete-ad-groups"] as const);
@@ -424,6 +427,145 @@ class FakeProvider implements AdsProvider {
   }
 }
 
+class FakeMetaProvider implements AdsProvider {
+  readonly kind = "meta-marketing-api" as const;
+  readonly platform = "meta" as const;
+  readonly implementationStatus = "available" as const;
+  readonly displayName = "Fake Meta Marketing API";
+  readonly capabilityVersion = "fake-meta-v1";
+  readonly capabilities = new Set([
+    "read-campaigns",
+    "read-ad-groups",
+    "read-ads",
+    "change-status",
+  ] as const);
+  readonly mutations: StatusMutation[] = [];
+  readonly statusByKey = new Map<string, "ACTIVE" | "PAUSED">([
+    ["campaign:meta-campaign-1", "ACTIVE"],
+    ["ad-group:meta-adset-1", "ACTIVE"],
+    ["ad:meta-ad-1", "ACTIVE"],
+  ]);
+  shouldSyncFail = false;
+  shouldFailStatus = false;
+  syncCalls = 0;
+  syncBarrier: Promise<void> | null = null;
+
+  resolveCapabilities() {
+    return this.capabilities;
+  }
+
+  async checkHealth() {
+    if (this.shouldSyncFail) throw new Error("Meta fixture health failed");
+    return { ok: true, status: "ready" as const, message: "ready" };
+  }
+
+  async syncReadOnly() {
+    this.syncCalls += 1;
+    if (this.syncBarrier) await this.syncBarrier;
+    if (this.shouldSyncFail) throw new Error("Meta fixture sync failed");
+    const metrics = {
+      spend: 20,
+      cpc: 1.5,
+      conversions: 0,
+      carts: 0,
+      cost_per_conversion: 0,
+    };
+    const entities: ProviderEntity[] = [
+      {
+        entityType: "campaign",
+        externalId: "meta-campaign-1",
+        payload: {
+          name: "Meta Campaign",
+          operation_status: this.statusByKey.get("campaign:meta-campaign-1"),
+          ...metrics,
+        },
+      },
+      {
+        entityType: "ad-group",
+        externalId: "meta-adset-1",
+        payload: {
+          name: "Meta Ad Set",
+          campaign_id: "meta-campaign-1",
+          operation_status: this.statusByKey.get("ad-group:meta-adset-1"),
+          ...metrics,
+        },
+      },
+      {
+        entityType: "ad",
+        externalId: "meta-ad-1",
+        payload: {
+          name: "Meta Ad",
+          campaign_id: "meta-campaign-1",
+          adgroup_id: "meta-adset-1",
+          operation_status: this.statusByKey.get("ad:meta-ad-1"),
+          ...metrics,
+        },
+      },
+      {
+        entityType: "material",
+        externalId: "meta-material-never-write",
+        payload: {
+          name: "Meta material must remain unsupported",
+          campaign_id: "meta-campaign-1",
+          adgroup_id: "meta-adset-1",
+          material_primary_status: "enabled",
+          ...metrics,
+        },
+      },
+    ];
+    const now = new Date().toISOString();
+    return {
+      entities,
+      result: {
+        startedAt: now,
+        finishedAt: now,
+        counts: { campaign: 1, "ad-group": 1, ad: 1, material: 1 },
+        warnings: [],
+        quality: {
+          status: "healthy" as const,
+          paginationComplete: true,
+          requiredMetricsComplete: true,
+          contractValid: true,
+          providerContractVersion: "fake-meta-account-today-v1",
+          coverage: {
+            startDate: dateKeyInTimeZoneForTest(new Date(now), "Asia/Shanghai"),
+            endDate: dateKeyInTimeZoneForTest(new Date(now), "Asia/Shanghai"),
+            timezone: "Asia/Shanghai",
+          },
+          missingMetrics: [],
+          partialFailures: [],
+          completeEntityTypes: ["campaign", "ad-group", "ad"] as SyncEntityType[],
+          lastHealthyAt: now,
+        },
+      },
+    };
+  }
+
+  async changeStatus(context: ProviderContext, mutations: StatusMutation[]) {
+    const settings = context.settings.kind === "meta-marketing-api"
+      ? context.settings
+      : null;
+    this.mutations.push(...mutations);
+    return mutations.map((mutation) => {
+      const allowed = mutation.entityType !== "material"
+        && Boolean(settings?.allowedStatusEntityTypes?.includes(mutation.entityType));
+      const ok = allowed && !this.shouldFailStatus;
+      if (ok) {
+        this.statusByKey.set(
+          `${mutation.entityType}:${mutation.externalId}`,
+          mutation.action === "enable" ? "ACTIVE" : "PAUSED",
+        );
+      }
+      return {
+        ...mutation,
+        ok,
+        ...(!ok ? { failureKind: "retryable" as const } : {}),
+        message: ok ? "accepted" : "rejected",
+      };
+    });
+  }
+}
+
 function alignSyncTo(
   output: Awaited<ReturnType<FakeProvider["syncReadOnly"]>>,
   asOf: Date,
@@ -504,6 +646,74 @@ describe("AutomationService", () => {
 
   });
 
+  async function setupMetaAccount(input: {
+    enabled: boolean;
+    liveMode: "read-only" | "manual-status" | "automation-status";
+    allowedStatusEntityTypes?: Array<"campaign" | "ad-group" | "ad">;
+  }) {
+    const metaProvider = new FakeMetaProvider();
+    service = new AutomationService(
+      store,
+      vault,
+      new ProviderRegistry([provider, metaProvider]),
+    );
+    const account = store.createAccount({
+      displayName: "Meta 上海测试账户",
+      platform: "meta",
+      accountType: "standard",
+      enabled: input.enabled,
+      providerKind: "meta-marketing-api",
+    });
+    const profile = store.createMetaAccessProfile({
+      name: "Meta test profile",
+      appId: "100000000000001",
+      businessId: null,
+      graphApiVersion: "v23.0",
+    });
+    const secretReference = await vault.create(JSON.stringify({
+      appSecret: "fixture-app-secret",
+      accessToken: "fixture-access-token-long-enough",
+    }));
+    store.setMetaAccessProfileSecretReference(profile.id, secretReference);
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: profile.id,
+      adAccountId: "act_300000000000003",
+      pageId: null,
+      liveMode: input.liveMode,
+      allowedStatusEntityTypes: input.allowedStatusEntityTypes
+        ?? ["campaign", "ad-group", "ad"],
+    });
+    store.updateProviderStatus(account.id, "meta-marketing-api", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "meta-marketing-api", {
+      status: "active",
+      capabilityVersion: metaProvider.capabilityVersion,
+      capabilities: [
+        "read-campaigns",
+        "read-ad-groups",
+        "read-ads",
+        "change-status",
+      ],
+    });
+    const sync = await metaProvider.syncReadOnly();
+    store.saveReadOnlySync(
+      account.id,
+      "meta-marketing-api",
+      sync.entities,
+      sync.result,
+    );
+    const rules = store.getMetaRuleConfiguration();
+    store.updateMetaRuleConfiguration({
+      schemaVersion: rules.schemaVersion,
+      metricWindow: rules.metricWindow,
+      layers: { campaign: true, adGroup: true, ad: true },
+      rules: rules.rules.map((rule) => rule.code === "NO_CONV_SPEND_CLOSE"
+        ? { ...rule, enabled: true, values: { conversions: 0, spend: 2 } }
+        : { ...rule, enabled: false }),
+    }, rules.updatedAt);
+    return { account, metaProvider };
+  }
+
   afterEach(() => {
     vi.useRealTimers();
     store.close();
@@ -517,6 +727,280 @@ describe("AutomationService", () => {
     expect(store.listAutomationDecisions("demo-account")[0]?.status).toBe(
       "preview",
     );
+  });
+
+  it("previews Meta rules while both runtime and account automation are off", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "read-only",
+    });
+
+    const run = await service.runAccount(account.id, "preview");
+
+    expect(store.getMetaAutomationRuntime().enabled).toBe(false);
+    expect(run).toMatchObject({
+      status: "completed",
+      candidateCount: 3,
+      actionCount: 0,
+      successCount: 0,
+      failureCount: 0,
+    });
+    expect(metaProvider.mutations).toEqual([]);
+    expect(store.listAutomationDecisions(account.id)).toHaveLength(3);
+    expect(store.listAutomationDecisions(account.id).some(
+      (decision) => decision.entityType === "material",
+    )).toBe(false);
+  });
+
+  it("allows manual Meta Campaign, Ad Set and Ad writes but rejects material before provider dispatch", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "manual-status",
+    });
+
+    await expect(service.changeStatusManually(account.id, {
+      entityType: "campaign",
+      externalId: "meta-campaign-1",
+      action: "disable",
+    })).resolves.toMatchObject({ ok: true });
+    await expect(service.changeStatusManually(account.id, {
+      entityType: "ad-group",
+      externalId: "meta-adset-1",
+      action: "disable",
+    })).resolves.toMatchObject({ ok: true });
+    await expect(service.changeStatusManually(account.id, {
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      action: "disable",
+    })).resolves.toMatchObject({ ok: true });
+    await expect(service.changeStatusManually(account.id, {
+      entityType: "material",
+      externalId: "meta-material-never-write",
+      action: "disable",
+    })).rejects.toThrow("状态写入已阻止");
+
+    expect(metaProvider.mutations).toEqual([
+      { entityType: "campaign", externalId: "meta-campaign-1", action: "disable" },
+      { entityType: "ad-group", externalId: "meta-adset-1", action: "disable" },
+      { entityType: "ad", externalId: "meta-ad-1", action: "disable" },
+    ]);
+  });
+
+  it("reconciles an unknown Meta status operation through read-only sync without replaying the write", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "manual-status",
+    });
+    const task = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-marketing-api",
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      entityName: "Meta Ad",
+      action: "disable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(task.id, "executor-a", "pending");
+    store.completeStatusWriteTask(task.id, "executor-a", "unknown", "response lost");
+    metaProvider.statusByKey.set("ad:meta-ad-1", "PAUSED");
+
+    await expect(service.reconcileMetaStatusOperation(account.id, task.operationId))
+      .resolves.toMatchObject({
+        resolution: "succeeded",
+        operation: { status: "succeeded", phase: "readback" },
+        asset: { entityType: "ad", externalId: "meta-ad-1", status: "disabled" },
+      });
+    expect(metaProvider.mutations).toEqual([]);
+  });
+
+  it("serializes Meta readback reconciliation against writes on the same account", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "manual-status",
+    });
+    const task = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-marketing-api",
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      entityName: "Meta Ad",
+      action: "disable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(task.id, "executor-a", "pending");
+    store.completeStatusWriteTask(task.id, "executor-a", "unknown", "response lost");
+    metaProvider.statusByKey.set("ad:meta-ad-1", "PAUSED");
+    let releaseSync!: () => void;
+    metaProvider.syncBarrier = new Promise<void>((resolve) => {
+      releaseSync = resolve;
+    });
+
+    const reconciliation = service.reconcileMetaStatusOperation(account.id, task.operationId);
+    await vi.waitFor(() => expect(metaProvider.syncCalls).toBe(2));
+    await expect(service.changeStatusManually(account.id, {
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      action: "enable",
+    })).rejects.toThrow("已有任务正在执行");
+    releaseSync();
+
+    await expect(reconciliation).resolves.toMatchObject({ resolution: "succeeded" });
+    expect(metaProvider.mutations).toEqual([]);
+  });
+
+  it("does not queue an opposite Meta write while the same entity has a pending operation", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "manual-status",
+    });
+    const first = service.enqueueManualStatusChange(account.id, {
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      action: "disable",
+    });
+
+    expect(first.status).toBe("pending");
+    expect(() => service.enqueueManualStatusChange(account.id, {
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      action: "enable",
+    })).toThrow("结果待确认");
+    await vi.waitFor(() => expect(store.getAdOperation(first.id).status).toBe("succeeded"));
+    expect(metaProvider.mutations).toEqual([
+      { entityType: "ad", externalId: "meta-ad-1", action: "disable" },
+    ]);
+  });
+
+  it("keeps contradicted and incomplete Meta readbacks unknown without replaying writes", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "manual-status",
+    });
+    const contradicted = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-marketing-api",
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      entityName: "Meta Ad",
+      action: "disable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(contradicted.id, "executor-a", "pending");
+    store.completeStatusWriteTask(contradicted.id, "executor-a", "unknown", "response lost");
+
+    await expect(service.reconcileMetaStatusOperation(account.id, contradicted.operationId))
+      .resolves.toMatchObject({
+        resolution: "unknown",
+        operation: { status: "unknown" },
+        asset: { status: "enabled" },
+      });
+
+    await expect(service.changeStatusManually(account.id, {
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      action: "enable",
+    })).rejects.toThrow("结果待确认");
+
+    metaProvider.statusByKey.set("ad:meta-ad-1", "PAUSED");
+    await expect(service.reconcileMetaStatusOperation(account.id, contradicted.operationId))
+      .resolves.toMatchObject({
+        resolution: "succeeded",
+        operation: { status: "succeeded", phase: "readback" },
+        asset: { status: "disabled" },
+      });
+    const incomplete = store.createStatusWriteTask({
+      accountId: account.id,
+      providerKind: "meta-marketing-api",
+      entityType: "ad",
+      externalId: "meta-ad-1",
+      entityName: "Meta Ad",
+      action: "disable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(incomplete.id, "executor-b", "pending");
+    store.completeStatusWriteTask(incomplete.id, "executor-b", "unknown", "response lost");
+    metaProvider.statusByKey.delete("ad:meta-ad-1");
+
+    await expect(service.reconcileMetaStatusOperation(account.id, incomplete.operationId))
+      .resolves.toMatchObject({
+        resolution: "unknown",
+        operation: { status: "unknown" },
+      });
+    expect(metaProvider.mutations).toEqual([]);
+  });
+
+  it("requires Meta runtime, account enablement and automation-status before a three-layer automatic run", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: false,
+      liveMode: "manual-status",
+    });
+
+    await expect(service.runAccount(account.id, "scheduler"))
+      .rejects.toThrow("Meta 自动化总开关已关闭");
+    const runtime = store.getMetaAutomationRuntime();
+    store.updateMetaAutomationRuntime({
+      enabled: true,
+      pollingIntervalMinutes: runtime.pollingIntervalMinutes,
+      maxActionsPerRun: runtime.maxActionsPerRun,
+    }, runtime.updatedAt);
+    await expect(service.runAccount(account.id, "scheduler"))
+      .rejects.toThrow("账户自动化已关闭");
+
+    expect(() => store.updateAccountSettings(account.id, {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+    })).toThrow("Automation status");
+    const current = store.getProviderConnection(account.id, "meta-marketing-api")!;
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: current.settings.kind === "meta-marketing-api"
+        ? current.settings.profileId!
+        : "",
+      adAccountId: "act_300000000000003",
+      pageId: null,
+      liveMode: "automation-status",
+      allowedStatusEntityTypes: ["campaign", "ad-group", "ad"],
+    });
+    store.updateProviderStatus(account.id, "meta-marketing-api", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "meta-marketing-api", {
+      status: "active",
+      capabilityVersion: metaProvider.capabilityVersion,
+      capabilities: [
+        "read-campaigns",
+        "read-ad-groups",
+        "read-ads",
+        "change-status",
+      ],
+    });
+    store.updateAccountSettings(account.id, {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+    });
+
+    store.updateSystemRuntimeState({ enabled: false });
+    await expect(service.runAccount(account.id, "scheduler"))
+      .rejects.toThrow("全局自动化已关闭");
+    store.updateSystemRuntimeState({ enabled: true });
+
+    const run = await service.runAccount(account.id, "scheduler");
+
+    expect(run).toMatchObject({
+      status: "completed",
+      candidateCount: 3,
+      actionCount: 3,
+      successCount: 3,
+      failureCount: 0,
+    });
+    expect(metaProvider.mutations).toEqual([
+      { entityType: "campaign", externalId: "meta-campaign-1", action: "disable" },
+      { entityType: "ad-group", externalId: "meta-adset-1", action: "disable" },
+      { entityType: "ad", externalId: "meta-ad-1", action: "disable" },
+    ]);
+    expect(store.listScheduledActions(account.id)).toEqual([]);
   });
 
   it("evaluates an old ad group when it has spend today", async () => {
@@ -1987,6 +2471,79 @@ describe("AutomationService", () => {
       enabledCount: 0,
       disabledCount: 1,
     });
+  });
+
+  it("keeps Meta on its own scheduler lane without TikTok-only schedules, appeals, deletion or copy", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: true,
+      liveMode: "automation-status",
+    });
+    const demo = store.getAccount("demo-account")!;
+    store.updateAccountSettings("demo-account", {
+      displayName: demo.displayName,
+      accountType: demo.accountType,
+      enabled: false,
+      providerKind: demo.providerKind,
+    });
+    const runtime = store.getMetaAutomationRuntime();
+    store.updateMetaAutomationRuntime({
+      enabled: true,
+      pollingIntervalMinutes: 1,
+      maxActionsPerRun: runtime.maxActionsPerRun,
+    }, runtime.updatedAt);
+    const nightly = vi.spyOn(service, "enrollNightlyAdGroups");
+    const appeals = vi.spyOn(service, "runScheduledAppeals");
+    const schedules = vi.spyOn(service, "runDueScheduledActions");
+    const deletions = vi.spyOn(service, "runScheduledDeletions");
+    const copies = vi.spyOn(service, "runScheduledAutoCopies");
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 10 * 60_000));
+
+    store.updateSystemRuntimeState({ enabled: false });
+    await scheduler.tick();
+    expect(metaProvider.mutations).toEqual([]);
+    store.updateSystemRuntimeState({ enabled: true });
+
+    await scheduler.tick();
+
+    expect(metaProvider.mutations).toHaveLength(3);
+    for (const spy of [nightly, appeals, schedules, deletions, copies]) {
+      expect(spy.mock.calls.some(([accountId]) => accountId === account.id)).toBe(false);
+    }
+    expect(store.listScheduledActions(account.id)).toEqual([]);
+  });
+
+  it("continues the TikTok scheduler lane when the Meta lane health check fails", async () => {
+    const { account, metaProvider } = await setupMetaAccount({
+      enabled: true,
+      liveMode: "automation-status",
+    });
+    const runtime = store.getMetaAutomationRuntime();
+    store.updateMetaAutomationRuntime({
+      enabled: true,
+      pollingIntervalMinutes: 1,
+      maxActionsPerRun: runtime.maxActionsPerRun,
+    }, runtime.updatedAt);
+    metaProvider.shouldSyncFail = true;
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.tick();
+
+    expect(store.getProviderConnection(account.id, "meta-marketing-api"))
+      .toMatchObject({ status: "failed" });
+    expect(store.listAutomationRuns("demo-account")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "completed" })]),
+    );
+    expect(provider.mutations).toEqual([
+      { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    ]);
+    expect(store.listPollCycles()[0]?.accounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accountId: account.id, status: "failed" }),
+      expect.objectContaining({ accountId: "demo-account", status: "changed" }),
+    ]));
   });
 
   // 回归：删除执行器曾经被放在「轮询到期」过滤之后的循环里，只有恰好在计划时刻到期的

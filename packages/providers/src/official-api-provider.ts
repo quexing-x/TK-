@@ -41,7 +41,9 @@ export const OFFICIAL_REPORT_METRICS = [
 
 export class OfficialApiAdsProvider implements AdsProvider {
   readonly kind = "official-api" as const;
+  readonly platform = "tiktok" as const;
   readonly displayName = "TikTok Marketing API";
+  readonly implementationStatus = "available" as const;
   readonly capabilityVersion = "official-api-capabilities-v1-2026-07";
   readonly capabilities = capabilities;
 

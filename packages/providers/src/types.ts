@@ -1,8 +1,10 @@
 import type {
   ProviderConnectionSettings,
   ProviderCredentialInput,
+  MetaAccessSecretBundleInput,
   ProviderEntity,
   ProviderKind,
+  PlatformKind,
   ReadOnlySyncResult,
   AutomationAction,
   SyncEntityType,
@@ -13,15 +15,38 @@ import type {
   ProviderCapability,
   LaunchOriginalPost,
   LaunchProductInfo,
+  MetaAdCreationInput,
+  MetaCreationProgress,
 } from "@tk-auto/core";
 
 export type { ProviderCapability } from "@tk-auto/core";
 
+export interface ResolvedMetaAccessProfile {
+  profileId: string;
+  appId: string;
+  businessId?: string | null;
+  graphApiVersion: string;
+}
+
 export interface ProviderContext {
   accountId: string;
   settings: ProviderConnectionSettings;
-  credential: ProviderCredentialInput;
+  credential: ProviderCredentialInput | (MetaAccessSecretBundleInput & { kind?: never });
   timezone?: string;
+  resolvedMetaAccessProfile?: ResolvedMetaAccessProfile;
+}
+
+export interface MetaAdAccountDiscoveryContext {
+  credential: MetaAccessSecretBundleInput;
+  resolvedMetaAccessProfile: ResolvedMetaAccessProfile;
+}
+
+export interface DiscoveredMetaAdAccount {
+  adAccountId: string;
+  name: string;
+  currency: string;
+  timezone: string;
+  accountStatus: number;
 }
 
 export interface ProviderHealth {
@@ -49,6 +74,28 @@ export interface StatusMutation {
 
 export interface StatusMutationResult extends StatusMutation {
   ok: boolean;
+  message: string;
+  failureKind?: "retryable" | "unknown";
+}
+
+export interface MetaAdCreationMutation {
+  input: MetaAdCreationInput;
+  existing: {
+    campaignId?: string;
+    adSetId?: string;
+    creativeId?: string;
+    adId?: string;
+  };
+  onBeforeDispatch?: () => void;
+  onProgress?: (progress: MetaCreationProgress) => void;
+}
+
+export interface MetaAdCreationResult {
+  ok: boolean;
+  campaignId?: string;
+  adSetId?: string;
+  creativeId?: string;
+  adId?: string;
   message: string;
   failureKind?: "retryable" | "unknown";
 }
@@ -126,7 +173,9 @@ export class UnknownCreationStateError extends Error {
 
 export interface ProviderContract {
   readonly kind: ProviderKind;
+  readonly platform: PlatformKind;
   readonly displayName: string;
+  readonly implementationStatus: ProviderImplementationStatus;
   readonly capabilityVersion: string;
   readonly capabilities: ReadonlySet<ProviderCapability>;
   resolveCapabilities?(context: ProviderContext): ReadonlySet<ProviderCapability>;
@@ -153,6 +202,17 @@ export interface StatusMutationProvider extends ProviderContract {
     context: ProviderContext,
     mutations: StatusMutation[],
   ): Promise<StatusMutationResult[]>;
+}
+
+export interface MetaAdCreationProvider extends ProviderContract {
+  createMetaAd(
+    context: ProviderContext,
+    mutation: MetaAdCreationMutation,
+  ): Promise<MetaAdCreationResult>;
+  reconcileMetaAd(
+    context: ProviderContext,
+    mutation: Pick<MetaAdCreationMutation, "input" | "existing">,
+  ): Promise<MetaAdCreationResult>;
 }
 
 export type NewCreationMutation = Omit<
@@ -223,6 +283,7 @@ export type AdsProvider = ProviderContract
   & Partial<ReadProvider>
   & Partial<OriginalPostMigrationProvider>
   & Partial<StatusMutationProvider>
+  & Partial<MetaAdCreationProvider>
   & Partial<CreationProvider>
   & Partial<TemplateCopyProvider>
   & Partial<AppealProvider>
@@ -230,8 +291,11 @@ export type AdsProvider = ProviderContract
 
 export interface ProviderDescriptor {
   kind: ProviderKind;
+  platform: PlatformKind;
   displayName: string;
-  implementationStatus: "scaffolded" | "available";
+  implementationStatus: ProviderImplementationStatus;
   capabilityVersion: string;
   capabilities: ProviderCapability[];
 }
+
+export type ProviderImplementationStatus = "scaffolded" | "available";

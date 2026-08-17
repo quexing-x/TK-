@@ -14,6 +14,9 @@ import {
 } from "./database-maintenance.js";
 import {
   AccountConfigSchema,
+  AccountCreateInputSchema,
+  platformForProvider,
+  providerBelongsToPlatform,
   GlobalAutomationSettingsSchema,
   type AccountConfig,
   type AccountSettingsUpdate,
@@ -66,6 +69,26 @@ import {
   RuleConfigurationSchema,
   type RuleConfiguration,
   type RuleConfigurationInput,
+  defaultMetaAutomationRuntime,
+  defaultMetaRuleConfiguration,
+  MetaAutomationRuntimeInputSchema,
+  MetaAutomationRuntimeSchema,
+  MetaRuleConfigurationInputSchema,
+  MetaRuleConfigurationSchema,
+  type MetaAutomationRuntime,
+  type MetaAutomationRuntimeInput,
+  type MetaRuleConfiguration,
+  type MetaRuleConfigurationInput,
+  MetaAccessProfileInputSchema,
+  MetaAccessProfileSchema,
+  type MetaAccessProfile,
+  type MetaAccessProfileInput,
+  MetaAdCreationInputSchema,
+  MetaCreationProgressSchema,
+  MetaCreationTaskRecordSchema,
+  type MetaCreationProgress,
+  type MetaCreationTaskRecord,
+  type MetaCreationTaskStatus,
   METRIC_RETENTION_DAYS,
   SystemRuntimeStateSchema,
   type SystemRuntimeState,
@@ -168,6 +191,64 @@ export interface StoredAuthSession {
 
 export interface StoredNotificationChannel extends NotificationChannelRecord {
   credentialRef: string | null;
+}
+
+export interface StoredMetaAccessProfile extends MetaAccessProfile {
+  secretRef: string | null;
+}
+
+export class MetaAccessProfileInUseError extends Error {
+  readonly code = "META_ACCESS_PROFILE_IN_USE";
+
+  constructor(readonly profileId: string, readonly referenceCount: number) {
+    super(`Meta access profile is still referenced by ${referenceCount} account(s).`);
+    this.name = "MetaAccessProfileInUseError";
+  }
+}
+
+export class MetaAccessProfileAppIdConflictError extends Error {
+  readonly code = "META_ACCESS_PROFILE_APP_ID_CONFLICT";
+
+  constructor(readonly appId: string) {
+    super(`Meta App ID ${appId} already has an access profile.`);
+    this.name = "MetaAccessProfileAppIdConflictError";
+  }
+}
+
+export class MetaAccessProfileAppIdLockedError extends Error {
+  readonly code = "META_ACCESS_PROFILE_APP_ID_LOCKED";
+
+  constructor(readonly profileId: string) {
+    super("当前 App ID 已绑定加密密钥，不会因普通档案保存而自动清除。请先明确执行密钥轮换后再更换 App 身份。");
+    this.name = "MetaAccessProfileAppIdLockedError";
+  }
+}
+
+export class MetaAccessProfileVersionConflictError extends Error {
+  readonly code = "META_ACCESS_PROFILE_VERSION_CONFLICT";
+
+  constructor(readonly profileId: string) {
+    super("Meta App 档案已发生变化，请刷新后重新保存 Secret 与 Token。");
+    this.name = "MetaAccessProfileVersionConflictError";
+  }
+}
+
+export class PlatformConfigurationConflictError extends Error {
+  readonly code = "PLATFORM_CONFIGURATION_CONFLICT";
+
+  constructor(readonly platform: "meta", readonly resource: "rules" | "runtime") {
+    super(`${platform} ${resource} configuration was updated by another request.`);
+    this.name = "PlatformConfigurationConflictError";
+  }
+}
+
+export class MetaCreationIdempotencyConflictError extends Error {
+  readonly code = "META_CREATION_IDEMPOTENCY_CONFLICT";
+
+  constructor(readonly accountId: string, readonly idempotencyKey: string) {
+    super("相同幂等键已用于不同的 Meta 创建请求，请更换幂等键后重试。");
+    this.name = "MetaCreationIdempotencyConflictError";
+  }
 }
 
 /** 操作历史保留天数。指标快照不走这个口径，它有自己的 90 天日历。 */
@@ -436,14 +517,15 @@ export class AutomationStore {
     this.db
       .prepare(
         `INSERT INTO accounts (
-          id, display_name, account_type, enabled, provider_kind, credential_ref,
+          id, display_name, platform, account_type, enabled, provider_kind, credential_ref,
           timezone, polling_interval_minutes, max_actions_per_run,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         accountId,
         "演示广告账户",
+        "tiktok",
         "standard",
         1,
         "cookie",
@@ -469,22 +551,25 @@ export class AutomationStore {
   }
 
   createAccount(input: AccountCreateInput): AccountConfig {
+    const parsed = AccountCreateInputSchema.parse(input);
+    const platform = parsed.platform ?? platformForProvider(parsed.providerKind);
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db
       .prepare(
         `INSERT INTO accounts (
-          id, display_name, account_type, enabled, provider_kind,
+          id, display_name, platform, account_type, enabled, provider_kind,
           credential_ref, timezone, polling_interval_minutes,
           max_actions_per_run, updated_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       )
       .run(
         id,
-        input.displayName,
-        input.accountType,
-        toSqlBoolean(input.enabled),
-        input.providerKind,
+        parsed.displayName,
+        platform,
+        parsed.accountType,
+        toSqlBoolean(parsed.enabled),
+        parsed.providerKind,
         "Asia/Shanghai",
         5,
         15,
@@ -492,8 +577,9 @@ export class AutomationStore {
       );
     this.writeSwitches(id, createDefaultAutomationSwitches(), false);
     this.writeAudit("local-user", id, "account.created", {
-      displayName: input.displayName,
-      accountType: input.accountType,
+      displayName: parsed.displayName,
+      platform,
+      accountType: parsed.accountType,
     });
     return this.getAccount(id) as AccountConfig;
   }
@@ -569,6 +655,37 @@ export class AutomationStore {
     const now = new Date().toISOString();
     const current = this.getAccount(accountId);
     if (!current) return null;
+    if (!providerBelongsToPlatform(current.platform, settings.providerKind)) {
+      throw new Error("接入方式与账户平台不匹配，账户平台不可在编辑时切换。");
+    }
+    if (settings.providerKind === "meta-offline" && settings.enabled) {
+      throw new Error("Meta 离线架构不能开启账户自动化。");
+    }
+    if (
+      current.platform === "meta"
+      && settings.providerKind === "meta-marketing-api"
+      && settings.enabled
+    ) {
+      const connection = this.getProviderConnection(accountId, "meta-marketing-api");
+      const authorized = new Set(connection?.authorizedCapabilities ?? []);
+      const requiredCapabilities: ProviderCapability[] = [
+        "read-campaigns",
+        "read-ad-groups",
+        "read-ads",
+        "change-status",
+      ];
+      if (
+        connection?.status !== "ready"
+        || connection.authorizationStatus !== "active"
+        || connection.settings.kind !== "meta-marketing-api"
+        || connection.settings.liveMode !== "automation-status"
+        || requiredCapabilities.some((capability) => !authorized.has(capability))
+      ) {
+        throw new Error(
+          "Meta 账户自动化只能在连接检测通过、Automation status 模式且读写能力完整时开启。",
+        );
+      }
+    }
     const result = this.db
       .prepare(
         `UPDATE accounts SET
@@ -1040,6 +1157,349 @@ export class AutomationStore {
     return this.getRuleConfiguration();
   }
 
+  getMetaRuleConfiguration(): MetaRuleConfiguration {
+    this.ensureGlobalDefaults();
+    const row = this.db
+      .prepare(
+        "SELECT * FROM platform_rule_configurations WHERE platform = 'meta'",
+      )
+      .get() as SqlRow;
+    return MetaRuleConfigurationSchema.parse({
+      schemaVersion: row.schema_version,
+      metricWindow: row.metric_window,
+      layers: JSON.parse(String(row.layers_json)),
+      rules: JSON.parse(String(row.rules_json)),
+      updatedAt: row.updated_at,
+    });
+  }
+
+  updateMetaRuleConfiguration(
+    input: MetaRuleConfigurationInput,
+    expectedUpdatedAt?: string,
+  ): MetaRuleConfiguration {
+    const configuration = MetaRuleConfigurationInputSchema.parse(input);
+    const current = this.getMetaRuleConfiguration();
+    const expected = expectedUpdatedAt ?? current.updatedAt;
+    const now = nextIsoTimestamp(current.updatedAt);
+    const result = this.db
+      .prepare(
+        `UPDATE platform_rule_configurations
+         SET schema_version = ?, metric_window = ?, layers_json = ?, rules_json = ?, updated_at = ?
+         WHERE platform = 'meta' AND updated_at = ?`,
+      )
+      .run(
+        configuration.schemaVersion,
+        configuration.metricWindow,
+        JSON.stringify(configuration.layers),
+        JSON.stringify(configuration.rules),
+        now,
+        expected,
+      );
+    if (result.changes === 0) {
+      throw new PlatformConfigurationConflictError("meta", "rules");
+    }
+    this.writeSystemAudit("platform.meta.rules.updated", configuration);
+    return this.getMetaRuleConfiguration();
+  }
+
+  getMetaAutomationRuntime(): MetaAutomationRuntime {
+    this.ensureGlobalDefaults();
+    const row = this.db
+      .prepare(
+        "SELECT * FROM platform_automation_runtime WHERE platform = 'meta'",
+      )
+      .get() as SqlRow;
+    return MetaAutomationRuntimeSchema.parse({
+      enabled: fromSqlBoolean(row.enabled),
+      pollingIntervalMinutes: row.polling_interval_minutes,
+      maxActionsPerRun: row.max_actions_per_run,
+      updatedAt: row.updated_at,
+    });
+  }
+
+  updateMetaAutomationRuntime(
+    input: MetaAutomationRuntimeInput,
+    expectedUpdatedAt?: string,
+  ): MetaAutomationRuntime {
+    const runtime = MetaAutomationRuntimeInputSchema.parse(input);
+    const current = this.getMetaAutomationRuntime();
+    const expected = expectedUpdatedAt ?? current.updatedAt;
+    const now = nextIsoTimestamp(current.updatedAt);
+    const result = this.db
+      .prepare(
+        `UPDATE platform_automation_runtime
+         SET enabled = ?, polling_interval_minutes = ?, max_actions_per_run = ?, updated_at = ?
+         WHERE platform = 'meta' AND updated_at = ?`,
+      )
+      .run(
+        toSqlBoolean(runtime.enabled),
+        runtime.pollingIntervalMinutes,
+        runtime.maxActionsPerRun,
+        now,
+        expected,
+      );
+    if (result.changes === 0) {
+      throw new PlatformConfigurationConflictError("meta", "runtime");
+    }
+    this.writeSystemAudit("platform.meta.runtime.updated", runtime);
+    return this.getMetaAutomationRuntime();
+  }
+
+  createMetaCreationTask(
+    accountId: string,
+    rawInput: unknown,
+  ): MetaCreationTaskRecord {
+    const account = this.getAccount(accountId);
+    if (!account || account.platform !== "meta" || account.providerKind !== "meta-marketing-api") {
+      throw new Error("只有 Meta Marketing API 账户可以创建 Meta 广告任务。");
+    }
+    const input = MetaAdCreationInputSchema.parse(rawInput);
+    const existing = this.db.prepare(
+      "SELECT * FROM meta_creation_tasks WHERE account_id = ? AND idempotency_key = ?",
+    ).get(accountId, input.idempotencyKey) as SqlRow | undefined;
+    if (existing) {
+      const task = mapMetaCreationTask(existing);
+      if (JSON.stringify(task.input) !== JSON.stringify(input)) {
+        throw new MetaCreationIdempotencyConflictError(accountId, input.idempotencyKey);
+      }
+      return task;
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const inserted = this.db.prepare(
+      `INSERT OR IGNORE INTO meta_creation_tasks (
+        id, account_id, idempotency_key, input_json, status, phase,
+        campaign_id, ad_set_id, creative_id, ad_id, message,
+        attempt_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', 'pending', NULL, NULL, NULL, NULL, NULL, 0, ?, ?)`,
+    ).run(id, accountId, input.idempotencyKey, JSON.stringify(input), now, now);
+    if (inserted.changes === 0) {
+      const concurrent = this.db.prepare(
+        "SELECT * FROM meta_creation_tasks WHERE account_id = ? AND idempotency_key = ?",
+      ).get(accountId, input.idempotencyKey) as SqlRow | undefined;
+      if (!concurrent) throw new Error("Meta 创建任务保存失败。");
+      const task = mapMetaCreationTask(concurrent);
+      if (JSON.stringify(task.input) !== JSON.stringify(input)) {
+        throw new MetaCreationIdempotencyConflictError(accountId, input.idempotencyKey);
+      }
+      return task;
+    }
+    this.writeAudit("local-user", accountId, "meta.creation.created", {
+      taskId: id,
+      idempotencyKey: input.idempotencyKey,
+    });
+    return this.getMetaCreationTask(id);
+  }
+
+  getMetaCreationTask(taskId: string): MetaCreationTaskRecord {
+    const row = this.db.prepare(
+      "SELECT * FROM meta_creation_tasks WHERE id = ?",
+    ).get(taskId) as SqlRow | undefined;
+    if (!row) throw new Error("Meta 创建任务不存在。");
+    return mapMetaCreationTask(row);
+  }
+
+  listMetaCreationTasks(accountId: string, limit = 50): MetaCreationTaskRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM meta_creation_tasks
+       WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+    ).all(accountId, Math.max(1, Math.min(200, Math.floor(limit)))) as SqlRow[];
+    return rows.map(mapMetaCreationTask);
+  }
+
+  claimMetaCreationTask(taskId: string): MetaCreationTaskRecord | null {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks
+       SET status = 'running', attempt_count = attempt_count + 1, message = NULL, updated_at = ?
+       WHERE id = ? AND status IN ('pending', 'failed')`,
+    ).run(now, taskId);
+    return result.changes > 0 ? this.getMetaCreationTask(taskId) : null;
+  }
+
+  markMetaCreationTaskDispatching(taskId: string): void {
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks
+       SET message = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(
+      "Meta 远端写入请求即将发送；若执行中断，任务将先转为 unknown 并要求只读对账。",
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
+  }
+
+  recoverInterruptedMetaCreationTasks(staleBefore: string): number {
+    const staleAt = new Date(staleBefore);
+    if (Number.isNaN(staleAt.getTime())) {
+      throw new Error("Meta 创建任务恢复时间无效。");
+    }
+    const cutoff = staleAt.toISOString();
+    const now = new Date().toISOString();
+    const message = "执行进程中断，无法确认 Meta 是否已完成远端创建；任务已转为 unknown，请先执行只读对账。";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db.prepare(
+        `SELECT id, account_id, phase FROM meta_creation_tasks
+         WHERE status = 'running' AND updated_at <= ?`,
+      ).all(cutoff) as SqlRow[];
+      let recovered = 0;
+      for (const row of rows) {
+        const result = this.db.prepare(
+          `UPDATE meta_creation_tasks
+           SET status = 'unknown', message = ?, updated_at = ?
+           WHERE id = ? AND status = 'running' AND updated_at <= ?`,
+        ).run(message, now, String(row.id), cutoff);
+        if (result.changes === 0) continue;
+        recovered += 1;
+        this.writeAudit("system", String(row.account_id), "meta.creation.interrupted", {
+          taskId: String(row.id),
+          phase: String(row.phase),
+        });
+      }
+      this.db.exec("COMMIT");
+      return recovered;
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  updateMetaCreationProgress(
+    taskId: string,
+    rawProgress: MetaCreationProgress,
+  ): MetaCreationTaskRecord {
+    const progress = MetaCreationProgressSchema.parse(rawProgress);
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks SET
+        phase = ?,
+        campaign_id = COALESCE(?, campaign_id),
+        ad_set_id = COALESCE(?, ad_set_id),
+        creative_id = COALESCE(?, creative_id),
+        ad_id = COALESCE(?, ad_id),
+        message = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(
+      progress.phase,
+      progress.campaignId ?? null,
+      progress.adSetId ?? null,
+      progress.creativeId ?? null,
+      progress.adId ?? null,
+      progress.message,
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
+    return this.getMetaCreationTask(taskId);
+  }
+
+  completeMetaCreationTask(
+    taskId: string,
+    status: Extract<MetaCreationTaskStatus, "succeeded" | "failed" | "unknown">,
+    message: string,
+    ids: {
+      campaignId?: string;
+      adSetId?: string;
+      creativeId?: string;
+      adId?: string;
+    } = {},
+  ): MetaCreationTaskRecord {
+    const phase = status === "succeeded" ? "completed" : undefined;
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks SET
+        status = ?, phase = COALESCE(?, phase),
+        campaign_id = COALESCE(?, campaign_id),
+        ad_set_id = COALESCE(?, ad_set_id),
+        creative_id = COALESCE(?, creative_id),
+        ad_id = COALESCE(?, ad_id),
+        message = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(
+      status,
+      phase ?? null,
+      ids.campaignId ?? null,
+      ids.adSetId ?? null,
+      ids.creativeId ?? null,
+      ids.adId ?? null,
+      message,
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
+    const task = this.getMetaCreationTask(taskId);
+    this.writeAudit("local-user", task.accountId, `meta.creation.${status}`, {
+      taskId,
+      phase: task.phase,
+      campaignId: task.campaignId,
+      adSetId: task.adSetId,
+      creativeId: task.creativeId,
+      adId: task.adId,
+    });
+    return task;
+  }
+
+  resolveUnknownMetaCreationTask(
+    taskId: string,
+    resolution: "succeeded" | "failed" | "unknown",
+    message: string,
+    ids: {
+      campaignId?: string;
+      adSetId?: string;
+      creativeId?: string;
+      adId?: string;
+    } = {},
+  ): MetaCreationTaskRecord {
+    const current = this.getMetaCreationTask(taskId);
+    if (current.status !== "unknown") {
+      throw new Error("只有 unknown 的 Meta 创建任务可以执行只读对账。");
+    }
+    const merged = {
+      campaignId: ids.campaignId ?? current.campaignId,
+      adSetId: ids.adSetId ?? current.adSetId,
+      creativeId: ids.creativeId ?? current.creativeId,
+      adId: ids.adId ?? current.adId,
+    };
+    const phase = resolution === "succeeded"
+      ? "completed"
+      : merged.adId
+        ? "ad"
+        : merged.creativeId
+          ? "creative"
+          : merged.adSetId
+            ? "ad-set"
+            : merged.campaignId
+              ? "campaign"
+              : "pending";
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks SET
+        status = ?, phase = ?, campaign_id = ?, ad_set_id = ?,
+        creative_id = ?, ad_id = ?, message = ?, updated_at = ?
+       WHERE id = ? AND status = 'unknown'`,
+    ).run(
+      resolution,
+      phase,
+      merged.campaignId,
+      merged.adSetId,
+      merged.creativeId,
+      merged.adId,
+      message,
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务状态已变化。");
+    const task = this.getMetaCreationTask(taskId);
+    this.writeAudit("local-user", task.accountId, `meta.creation.reconciled.${resolution}`, {
+      taskId,
+      phase: task.phase,
+      campaignId: task.campaignId,
+      adSetId: task.adSetId,
+      creativeId: task.creativeId,
+      adId: task.adId,
+    });
+    return task;
+  }
+
   getSystemRuntimeState(): SystemRuntimeState {
     this.ensureGlobalDefaults();
     const row = this.db
@@ -1318,7 +1778,223 @@ export class AutomationStore {
         "SELECT * FROM provider_connections WHERE account_id = ? ORDER BY provider_kind",
       )
       .all(accountId) as SqlRow[];
-    return rows.map((row) => mapProviderConnection(row));
+    return rows.map((row) => toPublicProviderConnection(
+      this.hydrateMetaConnectionCredential(mapStoredProviderConnection(row)),
+    ));
+  }
+
+  listMetaAccessProfiles(): MetaAccessProfile[] {
+    const rows = this.db
+      .prepare("SELECT * FROM meta_access_profiles ORDER BY name COLLATE NOCASE, id")
+      .all() as SqlRow[];
+    return rows.map((row) => toPublicMetaAccessProfile(
+      mapStoredMetaAccessProfile(row, this.countMetaAccessProfileReferences(String(row.id))),
+    ));
+  }
+
+  getMetaAccessProfile(profileId: string): MetaAccessProfile | null {
+    const stored = this.getStoredMetaAccessProfile(profileId);
+    return stored ? toPublicMetaAccessProfile(stored) : null;
+  }
+
+  getStoredMetaAccessProfile(profileId: string): StoredMetaAccessProfile | null {
+    const row = this.db
+      .prepare("SELECT * FROM meta_access_profiles WHERE id = ?")
+      .get(profileId) as SqlRow | undefined;
+    return row
+      ? mapStoredMetaAccessProfile(row, this.countMetaAccessProfileReferences(profileId))
+      : null;
+  }
+
+  createMetaAccessProfile(input: MetaAccessProfileInput): MetaAccessProfile {
+    const profile = MetaAccessProfileInputSchema.parse(input);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO meta_access_profiles (
+            id, name, app_id, business_id, graph_api_version, secret_ref, updated_at
+          ) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(
+          id,
+          profile.name,
+          profile.appId,
+          profile.businessId,
+          profile.graphApiVersion,
+          now,
+        );
+    } catch (cause) {
+      if (isSqliteUniqueConstraint(cause)) {
+        throw new MetaAccessProfileAppIdConflictError(profile.appId);
+      }
+      throw cause;
+    }
+    this.writeSystemAudit("platform.meta.access-profile.created", {
+      profileId: id,
+      appId: profile.appId,
+      hasBusinessId: profile.businessId !== null,
+    });
+    return this.getMetaAccessProfile(id) as MetaAccessProfile;
+  }
+
+  updateMetaAccessProfile(
+    profileId: string,
+    input: MetaAccessProfileInput,
+  ): {
+    profile: MetaAccessProfile;
+    invalidatedSecretRef: string | null;
+  } | null {
+    const profile = MetaAccessProfileInputSchema.parse(input);
+    const current = this.getStoredMetaAccessProfile(profileId);
+    if (!current) return null;
+    const appIdChanged = current.appId !== profile.appId;
+    if (appIdChanged && current.secretRef !== null) {
+      throw new MetaAccessProfileAppIdLockedError(profileId);
+    }
+    const connectionConfigurationChanged = appIdChanged
+      || current.businessId !== profile.businessId
+      || current.graphApiVersion !== profile.graphApiVersion;
+    const now = nextIsoTimestamp(current.updatedAt);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          `UPDATE meta_access_profiles
+           SET name = ?, app_id = ?, business_id = ?, graph_api_version = ?,
+               secret_ref = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          profile.name,
+          profile.appId,
+          profile.businessId,
+          profile.graphApiVersion,
+          current.secretRef,
+          now,
+          profileId,
+        );
+      if (connectionConfigurationChanged) {
+        this.markMetaAccessProfileConnectionsUntested(
+          profileId,
+          current.secretRef === null ? "not-configured" : "untested",
+        );
+      }
+      this.writeSystemAudit("platform.meta.access-profile.updated", {
+        profileId,
+        appId: profile.appId,
+        hasBusinessId: profile.businessId !== null,
+        secretBundleInvalidated: false,
+      });
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      if (isSqliteUniqueConstraint(cause)) {
+        throw new MetaAccessProfileAppIdConflictError(profile.appId);
+      }
+      throw cause;
+    }
+    return {
+      profile: this.getMetaAccessProfile(profileId) as MetaAccessProfile,
+      invalidatedSecretRef: null,
+    };
+  }
+
+  setMetaAccessProfileSecretReference(
+    profileId: string,
+    secretRef: string,
+    expected?: { appId: string; updatedAt: string },
+  ): MetaAccessProfile {
+    const current = this.getStoredMetaAccessProfile(profileId);
+    if (!current) throw new Error("Meta access profile not found.");
+    const result = expected
+      ? this.db.prepare(
+        `UPDATE meta_access_profiles SET secret_ref = ?, updated_at = ?
+         WHERE id = ? AND app_id = ? AND updated_at = ?`,
+      ).run(
+        secretRef,
+        nextIsoTimestamp(current.updatedAt),
+        profileId,
+        expected.appId,
+        expected.updatedAt,
+      )
+      : this.db
+        .prepare("UPDATE meta_access_profiles SET secret_ref = ?, updated_at = ? WHERE id = ?")
+        .run(secretRef, nextIsoTimestamp(current.updatedAt), profileId);
+    if (result.changes === 0) {
+      throw new MetaAccessProfileVersionConflictError(profileId);
+    }
+    this.markMetaAccessProfileConnectionsUntested(profileId, "untested");
+    this.writeSystemAudit("platform.meta.access-profile.secret.updated", {
+      profileId,
+    });
+    return this.getMetaAccessProfile(profileId) as MetaAccessProfile;
+  }
+
+  clearMetaAccessProfileSecret(profileId: string): string | null {
+    const current = this.getStoredMetaAccessProfile(profileId);
+    if (!current) return null;
+    this.db
+      .prepare("UPDATE meta_access_profiles SET secret_ref = NULL, updated_at = ? WHERE id = ?")
+      .run(nextIsoTimestamp(current.updatedAt), profileId);
+    this.markMetaAccessProfileConnectionsUntested(profileId, "not-configured");
+    this.writeSystemAudit("platform.meta.access-profile.secret.deleted", {
+      profileId,
+    });
+    return current.secretRef;
+  }
+
+  deleteMetaAccessProfile(profileId: string): string | null {
+    const current = this.getStoredMetaAccessProfile(profileId);
+    if (!current) return null;
+    if (current.referenceCount > 0) {
+      throw new MetaAccessProfileInUseError(profileId, current.referenceCount);
+    }
+    this.db.prepare("DELETE FROM meta_access_profiles WHERE id = ?").run(profileId);
+    this.writeSystemAudit("platform.meta.access-profile.deleted", {
+      profileId,
+      appId: current.appId,
+      hadSecretBundle: current.hasAccessToken,
+    });
+    return current.secretRef;
+  }
+
+  private countMetaAccessProfileReferences(profileId: string): number {
+    return this.listMetaAccessProfileAccountIds(profileId).length;
+  }
+
+  private listMetaAccessProfileAccountIds(profileId: string): string[] {
+    const rows = this.db
+      .prepare(
+        "SELECT account_id, settings_json FROM provider_connections WHERE provider_kind = 'meta-marketing-api'",
+      )
+      .all() as SqlRow[];
+    return rows.flatMap((row) => {
+      try {
+        const settings = JSON.parse(String(row.settings_json)) as Record<string, unknown>;
+        return settings.profileId === profileId ? [String(row.account_id)] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  private markMetaAccessProfileConnectionsUntested(
+    profileId: string,
+    status: "not-configured" | "untested",
+  ): void {
+    const accountIds = this.listMetaAccessProfileAccountIds(profileId);
+    const update = this.db.prepare(
+      `UPDATE provider_connections SET
+        status = ?, authorization_status = 'not-authorized',
+        capability_version = 'legacy-unversioned', authorized_capabilities_json = '[]',
+        authorized_at = NULL, authorization_expires_at = NULL,
+        last_message = NULL, last_tested_at = NULL, updated_at = ?
+       WHERE account_id = ? AND provider_kind = 'meta-marketing-api'`,
+    );
+    const now = new Date().toISOString();
+    for (const accountId of accountIds) update.run(status, now, accountId);
   }
 
   getProviderConnection(
@@ -1330,14 +2006,55 @@ export class AutomationStore {
         "SELECT * FROM provider_connections WHERE account_id = ? AND provider_kind = ?",
       )
       .get(accountId, kind) as SqlRow | undefined;
-    return row ? mapStoredProviderConnection(row) : null;
+    return row
+      ? this.hydrateMetaConnectionCredential(mapStoredProviderConnection(row))
+      : null;
+  }
+
+  private hydrateMetaConnectionCredential(
+    connection: StoredProviderConnection,
+  ): StoredProviderConnection {
+    if (connection.kind !== "meta-marketing-api") return connection;
+    const profileId = connection.settings.kind === "meta-marketing-api"
+      ? connection.settings.profileId
+      : undefined;
+    if (!profileId) {
+      return {
+        ...connection,
+        credentialRef: null,
+        hasCredential: false,
+        status: "not-configured",
+      };
+    }
+    const profile = this.getStoredMetaAccessProfile(profileId);
+    return {
+      ...connection,
+      credentialRef: profile?.secretRef ?? null,
+      hasCredential: Boolean(profile?.secretRef),
+      status: profile?.secretRef ? connection.status : "not-configured",
+    };
   }
 
   saveProviderConnectionSettings(
     accountId: string,
     settings: ProviderConnectionSettings,
   ): ProviderConnection {
-    this.assertAccount(accountId);
+    const account = this.getAccount(accountId);
+    if (!account) throw new Error(`Unknown account: ${accountId}`);
+    if (settings.kind === "meta-offline") {
+      throw new Error("Meta 当前仅提供离线架构，不能保存接入参数。");
+    }
+    if (!providerBelongsToPlatform(account.platform, settings.kind)) {
+      throw new Error("接入方式与账户平台不匹配。");
+    }
+    const metaProfile = settings.kind === "meta-marketing-api"
+      ? settings.profileId
+        ? this.getStoredMetaAccessProfile(settings.profileId)
+        : null
+      : null;
+    if (settings.kind === "meta-marketing-api" && !metaProfile) {
+      throw new Error("请先选择有效的 Meta 共享凭据档案。");
+    }
     const now = new Date().toISOString();
     this.db
       .prepare(
@@ -1360,6 +2077,12 @@ export class AutomationStore {
           updated_at = excluded.updated_at`,
       )
       .run(accountId, settings.kind, JSON.stringify(settings), now);
+    if (settings.kind === "meta-marketing-api") {
+      this.db.prepare(
+        `UPDATE provider_connections SET status = ?, last_tested_at = NULL, updated_at = ?
+         WHERE account_id = ? AND provider_kind = 'meta-marketing-api'`,
+      ).run(metaProfile?.secretRef ? "untested" : "not-configured", now, accountId);
+    }
     this.writeAudit("local-user", accountId, "provider.settings.updated", {
       providerKind: settings.kind,
       settings,
@@ -1374,6 +2097,10 @@ export class AutomationStore {
     kind: ProviderKind,
     credentialRef: string,
   ): ProviderConnection {
+    if (kind === "meta-marketing-api") {
+      throw new Error("Meta App Secret 与 Token 必须通过共享凭据档案管理。");
+    }
+    assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const result = this.db
       .prepare(
         `UPDATE provider_connections SET
@@ -1399,6 +2126,10 @@ export class AutomationStore {
     accountId: string,
     kind: ProviderKind,
   ): string | null {
+    if (kind === "meta-marketing-api") {
+      throw new Error("Meta App Secret 与 Token 必须通过共享凭据档案管理。");
+    }
+    assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const existing = this.getProviderConnection(accountId, kind);
     if (!existing) return null;
     this.db
@@ -1423,6 +2154,7 @@ export class AutomationStore {
     status: "ready" | "failed",
     message: string,
   ): ProviderConnection {
+    assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const now = new Date().toISOString();
     this.db
       .prepare(
@@ -1446,6 +2178,7 @@ export class AutomationStore {
       expiresAt?: string | null;
     },
   ): ProviderConnection {
+    assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const now = new Date().toISOString();
     const result = this.db.prepare(
       `UPDATE provider_connections SET
@@ -1491,6 +2224,23 @@ export class AutomationStore {
       expiresAt?: string | null;
     },
   ): ProviderConnection | null {
+    assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
+    let expectedConnectionCredentialRef = expected.credentialRef;
+    if (kind === "meta-marketing-api") {
+      const profileId = expected.settings.kind === "meta-marketing-api"
+        ? expected.settings.profileId
+        : undefined;
+      const profile = profileId
+        ? this.getStoredMetaAccessProfile(profileId)
+        : null;
+      if (!profile || profile.secretRef !== expected.credentialRef) return null;
+      const raw = this.db.prepare(
+        "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND provider_kind = ?",
+      ).get(accountId, kind) as SqlRow | undefined;
+      expectedConnectionCredentialRef = typeof raw?.credential_ref === "string"
+        ? raw.credential_ref
+        : null;
+    }
     const now = new Date().toISOString();
     const capabilities = input.authorizationStatus === "active"
       ? input.capabilities
@@ -1525,7 +2275,7 @@ export class AutomationStore {
       now,
       accountId,
       kind,
-      expected.credentialRef,
+      expectedConnectionCredentialRef,
       JSON.stringify(expected.settings),
       expected.status,
       expected.authorizationStatus,
@@ -1769,15 +2519,26 @@ export class AutomationStore {
       )
       .all(accountId, kind) as SqlRow[];
     return rows.map((row) => {
+      const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
       const snapshot = normalizeProviderEntity({
         entityType: row.entity_type as ProviderEntity["entityType"],
         externalId: String(row.external_id),
-        payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
+        payload,
       });
       return {
         ...snapshot,
         ignored: ignored.has(`${snapshot.entityType}:${snapshot.externalId}`),
         syncedAt: String(row.synced_at),
+        ...(kind === "meta-marketing-api"
+          ? {
+              configuredStatus:
+                typeof payload.status === "string" ? payload.status : null,
+              effectiveStatus:
+                typeof payload.effective_status === "string"
+                  ? payload.effective_status
+                  : null,
+            }
+          : {}),
       };
     });
   }
@@ -3427,6 +4188,62 @@ export class AutomationStore {
     return mapStatusManualVerification(row);
   }
 
+  resolveUnknownStatusWriteTaskFromReadback(
+    taskId: string,
+    observedStatus: "enabled" | "disabled",
+    actor: WriteTaskActor,
+  ): AdOperationRecord {
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare(
+        "SELECT * FROM ad_operations WHERE id = ? AND status = 'unknown'",
+      ).get(taskId) as SqlRow | undefined;
+      if (!current) throw new Error("只有结果未知的状态写任务可以执行只读回读核验。");
+      if (current.action !== "enable" && current.action !== "disable") {
+        throw new Error("只有广告启停写入任务可以执行只读回读核验。");
+      }
+      const desiredStatus = current.action === "enable" ? "enabled" : "disabled";
+      if (observedStatus !== desiredStatus) {
+        this.writeAudit(actor.name, String(current.account_id), "status-task.readback-inconclusive", {
+          taskId,
+          operationId: current.operation_id,
+          desiredStatus,
+          observedStatus,
+          resolution: "unknown",
+          reason: "opposite-state-can-be-stale",
+        });
+        this.db.exec("COMMIT");
+        return mapAdOperation(current);
+      }
+      const message = `只读回读确认目标状态 ${desiredStatus} 已生效。`;
+      const row = this.db.prepare(
+        `UPDATE ad_operations SET status = ?, phase = 'readback', message = ?,
+         sync_warning = NULL, claimed_by = NULL, claimed_at = NULL,
+         completed_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'unknown' RETURNING *`,
+      ).get("succeeded", message, now, now, taskId) as SqlRow | undefined;
+      if (!row) throw new Error("状态写任务已被其他核验操作更新。");
+      this.db.prepare(
+        `UPDATE ad_operation_attempts SET status = ?, phase = 'readback', message = ?,
+         completed_at = ?, updated_at = ?
+         WHERE attempt_id = ? AND status = 'unknown'`,
+      ).run("succeeded", message, now, now, String(row.attempt_id));
+      this.writeAudit(actor.name, String(row.account_id), "status-task.readback-reconciled", {
+        taskId,
+        operationId: row.operation_id,
+        desiredStatus,
+        observedStatus,
+        resolution: "succeeded",
+      });
+      this.db.exec("COMMIT");
+      return mapAdOperation(row);
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
   listStatusWriteTaskVerifications(taskId: string): StatusManualVerificationRecord[] {
     return (this.db.prepare(
       "SELECT * FROM status_operation_verifications WHERE task_id = ? ORDER BY created_at",
@@ -4914,6 +5731,24 @@ export class AutomationStore {
     return Boolean(row);
   }
 
+  hasBlockingStatusOperationForEntity(
+    accountId: string,
+    providerKind: ProviderKind,
+    entityType: ProviderEntity["entityType"],
+    externalId: string,
+  ): boolean {
+    const statuses = providerKind === "meta-marketing-api"
+      ? "('pending', 'running', 'unknown')"
+      : "('running', 'unknown')";
+    const row = this.db.prepare(
+      `SELECT 1 FROM ad_operations
+       WHERE account_id = ? AND provider_kind = ? AND entity_type = ? AND external_id = ?
+         AND action IN ('enable', 'disable')
+         AND status IN ${statuses} LIMIT 1`,
+    ).get(accountId, providerKind, entityType, externalId);
+    return Boolean(row);
+  }
+
   wasDisabledByAutomation(
     accountId: string,
     entityType: ProviderEntity["entityType"],
@@ -5438,9 +6273,10 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS accounts (
         id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
+        platform TEXT NOT NULL DEFAULT 'tiktok' CHECK (platform IN ('tiktok', 'meta')),
         account_type TEXT NOT NULL DEFAULT 'standard',
         enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-        provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api')),
+        provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api', 'meta-offline', 'meta-marketing-api')),
         credential_ref TEXT,
         timezone TEXT NOT NULL,
         polling_interval_minutes INTEGER NOT NULL,
@@ -5499,6 +6335,54 @@ export class AutomationStore {
         rules_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS platform_rule_configurations (
+        platform TEXT PRIMARY KEY CHECK (platform = 'meta'),
+        schema_version TEXT NOT NULL,
+        metric_window TEXT NOT NULL,
+        layers_json TEXT NOT NULL,
+        rules_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS platform_automation_runtime (
+        platform TEXT PRIMARY KEY CHECK (platform = 'meta'),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        polling_interval_minutes INTEGER NOT NULL CHECK (polling_interval_minutes BETWEEN 1 AND 60),
+        max_actions_per_run INTEGER NOT NULL CHECK (max_actions_per_run BETWEEN 1 AND 100),
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS meta_access_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        app_id TEXT NOT NULL UNIQUE,
+        business_id TEXT,
+        graph_api_version TEXT NOT NULL,
+        secret_ref TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS meta_creation_tasks (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'unknown')),
+        phase TEXT NOT NULL CHECK (phase IN ('pending', 'campaign', 'ad-set', 'creative', 'ad', 'completed')),
+        campaign_id TEXT,
+        ad_set_id TEXT,
+        creative_id TEXT,
+        ad_id TEXT,
+        message TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (account_id, idempotency_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS meta_creation_tasks_account_created
+      ON meta_creation_tasks (account_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS global_runtime_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -5592,7 +6476,7 @@ export class AutomationStore {
 
       CREATE TABLE IF NOT EXISTS provider_connections (
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api')),
+        provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api', 'meta-marketing-api')),
         settings_json TEXT NOT NULL,
         credential_ref TEXT,
         status TEXT NOT NULL CHECK (status IN ('not-configured', 'untested', 'ready', 'failed')),
@@ -6442,6 +7326,115 @@ export class AutomationStore {
         this.db.exec("ALTER TABLE automation_runs DROP COLUMN execution_mode");
       }
     });
+    this.migrationRunner.applyWithForeignKeysDisabled(
+      "accounts-platform-meta-provider-v1",
+      () => {
+        const definition = this.db.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'",
+        ).get() as SqlRow | undefined;
+        const sql = String(definition?.sql ?? "");
+        if (sql.includes("platform TEXT") && sql.includes("'meta-offline'")) return;
+        const columns = this.db.prepare("PRAGMA table_info(accounts)").all() as SqlRow[];
+        const hasPlatform = columns.some((column) => column.name === "platform");
+        this.db.exec(`
+          CREATE TABLE accounts_platform_migration (
+            id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'tiktok' CHECK (platform IN ('tiktok', 'meta')),
+            account_type TEXT NOT NULL DEFAULT 'standard',
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api', 'meta-offline')),
+            credential_ref TEXT,
+            timezone TEXT NOT NULL,
+            polling_interval_minutes INTEGER NOT NULL,
+            max_actions_per_run INTEGER NOT NULL DEFAULT 15,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO accounts_platform_migration (
+            id, display_name, platform, account_type, enabled, provider_kind,
+            credential_ref, timezone, polling_interval_minutes, max_actions_per_run, updated_at
+          ) SELECT
+            id, display_name, ${hasPlatform ? "platform" : "'tiktok'"}, account_type,
+            enabled, provider_kind, credential_ref, timezone,
+            polling_interval_minutes, max_actions_per_run, updated_at
+          FROM accounts;
+          DROP TABLE accounts;
+          ALTER TABLE accounts_platform_migration RENAME TO accounts;
+        `);
+      },
+    );
+    this.migrationRunner.applyWithForeignKeysDisabled(
+      "meta-marketing-api-provider-v1",
+      () => {
+        const accountDefinition = this.db.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'",
+        ).get() as SqlRow | undefined;
+        const accountSql = String(accountDefinition?.sql ?? "");
+        if (!accountSql.includes("'meta-marketing-api'")) {
+          this.db.exec(`
+            CREATE TABLE accounts_meta_marketing_migration (
+              id TEXT PRIMARY KEY,
+              display_name TEXT NOT NULL,
+              platform TEXT NOT NULL DEFAULT 'tiktok' CHECK (platform IN ('tiktok', 'meta')),
+              account_type TEXT NOT NULL DEFAULT 'standard',
+              enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+              provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api', 'meta-offline', 'meta-marketing-api')),
+              credential_ref TEXT,
+              timezone TEXT NOT NULL,
+              polling_interval_minutes INTEGER NOT NULL,
+              max_actions_per_run INTEGER NOT NULL DEFAULT 15,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO accounts_meta_marketing_migration (
+              id, display_name, platform, account_type, enabled, provider_kind,
+              credential_ref, timezone, polling_interval_minutes, max_actions_per_run, updated_at
+            ) SELECT
+              id, display_name, platform, account_type, enabled, provider_kind,
+              credential_ref, timezone, polling_interval_minutes, max_actions_per_run, updated_at
+            FROM accounts;
+            DROP TABLE accounts;
+            ALTER TABLE accounts_meta_marketing_migration RENAME TO accounts;
+          `);
+        }
+
+        const connectionDefinition = this.db.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_connections'",
+        ).get() as SqlRow | undefined;
+        const connectionSql = String(connectionDefinition?.sql ?? "");
+        if (!connectionSql.includes("'meta-marketing-api'")) {
+          this.db.exec(`
+            CREATE TABLE provider_connections_meta_marketing_migration (
+              account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+              provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api', 'meta-marketing-api')),
+              settings_json TEXT NOT NULL,
+              credential_ref TEXT,
+              status TEXT NOT NULL CHECK (status IN ('not-configured', 'untested', 'ready', 'failed')),
+              authorization_status TEXT NOT NULL DEFAULT 'not-authorized'
+                CHECK (authorization_status IN ('not-authorized', 'active', 'expired', 'revoked', 'failed')),
+              capability_version TEXT NOT NULL DEFAULT 'legacy-unversioned',
+              authorized_capabilities_json TEXT NOT NULL DEFAULT '[]',
+              authorized_at TEXT,
+              authorization_expires_at TEXT,
+              last_message TEXT,
+              last_tested_at TEXT,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (account_id, provider_kind)
+            );
+            INSERT INTO provider_connections_meta_marketing_migration (
+              account_id, provider_kind, settings_json, credential_ref, status,
+              authorization_status, capability_version, authorized_capabilities_json,
+              authorized_at, authorization_expires_at, last_message, last_tested_at, updated_at
+            ) SELECT
+              account_id, provider_kind, settings_json, credential_ref, status,
+              authorization_status, capability_version, authorized_capabilities_json,
+              authorized_at, authorization_expires_at, last_message, last_tested_at, updated_at
+            FROM provider_connections;
+            DROP TABLE provider_connections;
+            ALTER TABLE provider_connections_meta_marketing_migration RENAME TO provider_connections;
+          `);
+        }
+      },
+    );
     this.ensureGlobalDefaults();
   }
 
@@ -6479,6 +7472,33 @@ export class AutomationStore {
       .run(
         JSON.stringify(defaultRuleConfiguration.layers),
         JSON.stringify(defaultRuleConfiguration.rules),
+        now,
+      );
+
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO platform_rule_configurations (
+          platform, schema_version, metric_window, layers_json, rules_json, updated_at
+        ) VALUES ('meta', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        defaultMetaRuleConfiguration.schemaVersion,
+        defaultMetaRuleConfiguration.metricWindow,
+        JSON.stringify(defaultMetaRuleConfiguration.layers),
+        JSON.stringify(defaultMetaRuleConfiguration.rules),
+        now,
+      );
+
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO platform_automation_runtime (
+          platform, enabled, polling_interval_minutes, max_actions_per_run, updated_at
+        ) VALUES ('meta', ?, ?, ?, ?)`,
+      )
+      .run(
+        toSqlBoolean(defaultMetaAutomationRuntime.enabled),
+        defaultMetaAutomationRuntime.pollingIntervalMinutes,
+        defaultMetaAutomationRuntime.maxActionsPerRun,
         now,
       );
 
@@ -6615,6 +7635,7 @@ function mapAccount(row: SqlRow): AccountConfig {
   return AccountConfigSchema.parse({
     id: row.id,
     displayName: row.display_name,
+    platform: row.platform ?? "tiktok",
     accountType: row.account_type,
     enabled: fromSqlBoolean(row.enabled),
     providerKind: row.provider_kind,
@@ -7142,6 +8163,24 @@ function mapLaunchPreset(row: SqlRow): LaunchPresetRecord {
   });
 }
 
+function mapMetaCreationTask(row: SqlRow): MetaCreationTaskRecord {
+  return MetaCreationTaskRecordSchema.parse({
+    id: row.id,
+    accountId: row.account_id,
+    input: JSON.parse(String(row.input_json)),
+    status: row.status,
+    phase: row.phase,
+    campaignId: row.campaign_id ?? null,
+    adSetId: row.ad_set_id ?? null,
+    creativeId: row.creative_id ?? null,
+    adId: row.ad_id ?? null,
+    message: row.message ?? null,
+    attemptCount: Number(row.attempt_count),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
 function mapProviderConnection(row: SqlRow): ProviderConnection {
   return ProviderConnectionSchema.parse({
     accountId: row.account_id,
@@ -7168,11 +8207,49 @@ function mapStoredProviderConnection(row: SqlRow): StoredProviderConnection {
   };
 }
 
+function mapStoredMetaAccessProfile(
+  row: SqlRow,
+  referenceCount: number,
+): StoredMetaAccessProfile {
+  const secretRef = typeof row.secret_ref === "string" ? row.secret_ref : null;
+  const record = MetaAccessProfileSchema.parse({
+    id: row.id,
+    name: row.name,
+    appId: row.app_id,
+    businessId: row.business_id ?? null,
+    graphApiVersion: row.graph_api_version,
+    hasAppSecret: secretRef !== null,
+    hasAccessToken: secretRef !== null,
+    referenceCount,
+    updatedAt: row.updated_at,
+  });
+  return { ...record, secretRef };
+}
+
+function toPublicMetaAccessProfile(
+  profile: StoredMetaAccessProfile,
+): MetaAccessProfile {
+  const { secretRef: _secretRef, ...publicProfile } = profile;
+  return publicProfile;
+}
+
 function toPublicProviderConnection(
   connection: StoredProviderConnection,
 ): ProviderConnection {
   const { credentialRef: _credentialRef, ...publicConnection } = connection;
   return publicConnection;
+}
+
+function assertProviderConnectionMutationAllowed(
+  account: AccountConfig | null,
+  kind: ProviderKind,
+): void {
+  if (account?.providerKind === "meta-offline" || kind === "meta-offline") {
+    throw new Error("Meta 当前仅提供离线架构，不能修改接入连接。");
+  }
+  if (account && !providerBelongsToPlatform(account.platform, kind)) {
+    throw new Error("接入方式与账户平台不匹配。");
+  }
 }
 
 function toSqlBoolean(value: boolean): number {
@@ -7181,6 +8258,17 @@ function toSqlBoolean(value: boolean): number {
 
 function fromSqlBoolean(value: unknown): boolean {
   return Number(value) === 1;
+}
+
+function nextIsoTimestamp(previous: string): string {
+  const previousTime = Date.parse(previous);
+  return new Date(
+    Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0),
+  ).toISOString();
+}
+
+function isSqliteUniqueConstraint(cause: unknown): boolean {
+  return cause instanceof Error && /UNIQUE constraint failed/i.test(cause.message);
 }
 
 function sameStringSet(left: string[], right: string[]): boolean {

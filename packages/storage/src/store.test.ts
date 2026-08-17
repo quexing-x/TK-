@@ -39,6 +39,459 @@ describe("AutomationStore", () => {
     vi.restoreAllMocks();
   });
 
+  it("creates Meta offline accounts disabled and preserves the platform", () => {
+    const account = store.createAccount({
+      displayName: "Meta 内部测试",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-offline",
+    });
+
+    expect(account).toMatchObject({
+      platform: "meta",
+      providerKind: "meta-offline",
+      enabled: false,
+    });
+    expect(() => store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-offline",
+      businessId: "business-1",
+      adAccountId: "act-1",
+    })).toThrow("Meta 当前仅提供离线架构，不能保存接入参数。");
+    expect(() => store.setProviderCredentialReference(
+      account.id,
+      "meta-offline",
+      "meta-credential-ref",
+    )).toThrow("Meta 当前仅提供离线架构，不能修改接入连接。");
+    expect(() => store.setProviderCredentialReference(
+      account.id,
+      "cookie",
+      "cross-platform-credential-ref",
+    )).toThrow("Meta 当前仅提供离线架构，不能修改接入连接。");
+    expect(() => store.clearProviderCredential(account.id, "meta-offline"))
+      .toThrow("Meta 当前仅提供离线架构，不能修改接入连接。");
+    expect(() => store.updateProviderStatus(account.id, "meta-offline", "ready", "ready"))
+      .toThrow("Meta 当前仅提供离线架构，不能修改接入连接。");
+    expect(() => store.updateProviderAuthorization(account.id, "meta-offline", {
+      status: "active",
+      capabilityVersion: "meta-offline-v1",
+      capabilities: [],
+    })).toThrow("Meta 当前仅提供离线架构，不能修改接入连接。");
+    expect(() => store.completeProviderHealthCheckIfCurrent(
+      account.id,
+      "meta-offline",
+      {} as never,
+      {
+        connectionStatus: "ready",
+        message: "ready",
+        authorizationStatus: "active",
+        capabilityVersion: "meta-offline-v1",
+        capabilities: [],
+      },
+    )).toThrow("Meta 当前仅提供离线架构，不能修改接入连接。");
+    expect(store.listProviderConnections(account.id)).toEqual([]);
+    expect(() => store.updateAccountSettings(account.id, {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+    })).toThrow("Meta 离线架构不能开启账户自动化");
+  });
+
+  it("binds Meta accounts to a reusable App credential profile", () => {
+    const account = store.createAccount({
+      displayName: "Meta 只读测试",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    const profile = store.createMetaAccessProfile({
+      name: "主 Meta App",
+      appId: "100000000000001",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    store.setMetaAccessProfileSecretReference(profile.id, "vault-meta-secret-bundle");
+    const settings = {
+      kind: "meta-marketing-api" as const,
+      profileId: profile.id,
+      adAccountId: "act_300000000000003",
+      pageId: "400000000000004",
+      liveMode: "read-only" as const,
+      allowedStatusEntityTypes: [] as ("campaign" | "ad-group" | "ad")[],
+    };
+
+    expect(store.saveProviderConnectionSettings(account.id, settings)).toMatchObject({
+      kind: "meta-marketing-api",
+      settings,
+      hasCredential: true,
+      status: "untested",
+    });
+    expect(() => store.setProviderCredentialReference(
+      account.id,
+      "meta-marketing-api",
+      "legacy-account-token",
+    )).toThrow("必须通过共享凭据档案管理");
+    expect(() => store.updateAccountSettings(account.id, {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+    })).toThrow("连接检测通过");
+    const automaticSettings = {
+      ...settings,
+      liveMode: "automation-status" as const,
+      allowedStatusEntityTypes: ["campaign", "ad-group", "ad"] as (
+        "campaign" | "ad-group" | "ad"
+      )[],
+    };
+    store.saveProviderConnectionSettings(account.id, automaticSettings);
+    store.updateProviderStatus(account.id, "meta-marketing-api", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "meta-marketing-api", {
+      status: "active",
+      capabilityVersion: "test-meta-v1",
+      capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status"],
+    });
+    expect(store.updateAccountSettings(account.id, {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: account.providerKind,
+    })).toMatchObject({ enabled: true, providerKind: "meta-marketing-api" });
+    expect(() => store.setProviderCredentialReference(
+      account.id,
+      "cookie",
+      "cross-platform-ref",
+    )).toThrow("接入方式与账户平台不匹配");
+    expect(store.listMetaAccessProfiles()).toMatchObject([{
+      id: profile.id,
+      appId: "100000000000001",
+      businessId: null,
+      hasAppSecret: true,
+      hasAccessToken: true,
+      referenceCount: 1,
+    }]);
+    expect(JSON.stringify(store.listMetaAccessProfiles())).not.toContain(
+      "vault-meta-secret-bundle",
+    );
+    expect(() => store.deleteMetaAccessProfile(profile.id)).toThrow(
+      "still referenced by 1 account",
+    );
+  });
+
+  it("enforces one reusable profile per Meta App ID", () => {
+    const first = store.createMetaAccessProfile({
+      name: "App A",
+      appId: "100000000000001",
+      businessId: "200000000000002",
+      graphApiVersion: "v26.0",
+    });
+
+    expect(() => store.createMetaAccessProfile({
+      name: "Duplicate App",
+      appId: first.appId,
+      businessId: null,
+      graphApiVersion: "v26.0",
+    })).toThrow("already has an access profile");
+    store.setMetaAccessProfileSecretReference(first.id, "vault-secret-bundle");
+    expect(store.clearMetaAccessProfileSecret(first.id)).toBe("vault-secret-bundle");
+    expect(store.deleteMetaAccessProfile(first.id)).toBeNull();
+  });
+
+  it("preserves the shared secret bundle and blocks ordinary App ID replacement", () => {
+    const profile = store.createMetaAccessProfile({
+      name: "App A",
+      appId: "100000000000010",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    store.setMetaAccessProfileSecretReference(profile.id, "vault-secret-bundle");
+
+    expect(store.updateMetaAccessProfile(profile.id, {
+      name: "App A with BM",
+      appId: profile.appId,
+      businessId: "200000000000010",
+      graphApiVersion: "v26.0",
+    })).toMatchObject({
+      profile: { hasAppSecret: true, hasAccessToken: true },
+      invalidatedSecretRef: null,
+    });
+    expect(store.getStoredMetaAccessProfile(profile.id)?.secretRef).toBe("vault-secret-bundle");
+
+    expect(() => store.updateMetaAccessProfile(profile.id, {
+      name: "App B",
+      appId: "100000000000011",
+      businessId: "200000000000010",
+      graphApiVersion: "v26.0",
+    })).toThrow("不会因普通档案保存而自动清除");
+    expect(store.getStoredMetaAccessProfile(profile.id)).toMatchObject({
+      appId: "100000000000010",
+      secretRef: "vault-secret-bundle",
+    });
+  });
+
+  it("keeps Meta connections ready for a profile rename but retests discovery changes", () => {
+    const profile = store.createMetaAccessProfile({
+      name: "Meta Profile",
+      appId: "100000000000012",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    store.setMetaAccessProfileSecretReference(profile.id, "vault-meta-secret-bundle");
+    const account = store.createAccount({
+      displayName: "Meta Profile rename account",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: profile.id,
+      adAccountId: "act_300000000000012",
+      pageId: null,
+      liveMode: "read-only",
+      allowedStatusEntityTypes: [],
+    });
+    store.updateProviderStatus(account.id, "meta-marketing-api", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "meta-marketing-api", {
+      status: "active",
+      capabilityVersion: "test-meta-v1",
+      capabilities: ["read-campaigns", "read-ad-groups", "read-ads"],
+    });
+
+    store.updateMetaAccessProfile(profile.id, {
+      name: "Meta Profile renamed",
+      appId: profile.appId,
+      businessId: profile.businessId,
+      graphApiVersion: profile.graphApiVersion,
+    });
+    expect(store.getProviderConnection(account.id, "meta-marketing-api")?.status)
+      .toBe("ready");
+
+    store.updateMetaAccessProfile(profile.id, {
+      name: "Meta Profile renamed",
+      appId: profile.appId,
+      businessId: "200000000000012",
+      graphApiVersion: profile.graphApiVersion,
+    });
+    expect(store.getProviderConnection(account.id, "meta-marketing-api")?.status)
+      .toBe("untested");
+  });
+
+  it("preserves Meta configured and effective status as separate read-model fields", () => {
+    const account = store.createAccount({
+      displayName: "Meta status read model",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    const profile = store.createMetaAccessProfile({
+      name: "Meta status app",
+      appId: "100000000000009",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    store.setMetaAccessProfileSecretReference(profile.id, "vault-meta-bundle");
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: profile.id,
+      adAccountId: "act_300000000000009",
+      pageId: null,
+      liveMode: "read-only",
+      allowedStatusEntityTypes: [],
+    });
+    const finishedAt = new Date().toISOString();
+    store.saveReadOnlySync(account.id, "meta-marketing-api", [{
+      entityType: "ad",
+      externalId: "900000000000001",
+      payload: {
+        name: "Meta ad",
+        operation_status: "ACTIVE",
+        status: "ACTIVE",
+        effective_status: "CAMPAIGN_PAUSED",
+      },
+    }], {
+      startedAt: finishedAt,
+      finishedAt,
+      counts: { campaign: 0, "ad-group": 0, ad: 1, material: 0 },
+      warnings: [],
+      quality: healthySyncQuality(finishedAt),
+    });
+
+    expect(store.listCurrentManagedEntities(account.id, "meta-marketing-api")).toMatchObject([{
+      externalId: "900000000000001",
+      status: "enabled",
+      configuredStatus: "ACTIVE",
+      effectiveStatus: "CAMPAIGN_PAUSED",
+    }]);
+  });
+
+  it("migrates existing TikTok accounts to the explicit platform without data loss", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-platform-migration-"));
+    const databasePath = join(directory, "legacy.db");
+    const original = new AutomationStore(databasePath);
+    original.seed();
+    original.close();
+
+    const legacy = new DatabaseSync(databasePath);
+    const childRecord = legacy.prepare(
+      `SELECT account_id, switch_key, enabled, updated_at
+       FROM automation_switches
+       WHERE account_id = 'demo-account'
+       ORDER BY switch_key
+       LIMIT 1`,
+    ).get();
+    expect(childRecord).toBeDefined();
+    legacy.prepare("DELETE FROM schema_migrations WHERE migration_key IN ('accounts-platform-meta-provider-v1', 'meta-marketing-api-provider-v1')").run();
+    legacy.exec("PRAGMA foreign_keys = OFF");
+    legacy.exec(`
+      CREATE TABLE accounts_legacy (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        account_type TEXT NOT NULL DEFAULT 'standard',
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api')),
+        credential_ref TEXT,
+        timezone TEXT NOT NULL,
+        polling_interval_minutes INTEGER NOT NULL,
+        max_actions_per_run INTEGER NOT NULL DEFAULT 15,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO accounts_legacy (
+        id, display_name, account_type, enabled, provider_kind, credential_ref,
+        timezone, polling_interval_minutes, max_actions_per_run, updated_at
+      ) SELECT id, display_name, account_type, enabled, provider_kind, credential_ref,
+        timezone, polling_interval_minutes, max_actions_per_run, updated_at FROM accounts;
+      DROP TABLE accounts;
+      ALTER TABLE accounts_legacy RENAME TO accounts;
+    `);
+    legacy.close();
+
+    const migrated = new AutomationStore(databasePath);
+    expect(migrated.getAccount("demo-account")).toMatchObject({
+      platform: "tiktok",
+      providerKind: "cookie",
+      displayName: "演示广告账户",
+    });
+    const migratedDatabase = (migrated as unknown as { db: DatabaseSync }).db;
+    expect(migratedDatabase.prepare(
+      `SELECT account_id, switch_key, enabled, updated_at
+       FROM automation_switches
+       WHERE account_id = 'demo-account' AND switch_key = ?`,
+    ).get(String((childRecord as Record<string, unknown>).switch_key))).toEqual(childRecord);
+    expect(migratedDatabase.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(migratedDatabase.prepare("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
+    expect(migratedDatabase.prepare(
+      "SELECT migration_key FROM schema_migrations WHERE migration_key = 'accounts-platform-meta-provider-v1'",
+    ).get()).toEqual({ migration_key: "accounts-platform-meta-provider-v1" });
+    expect(migratedDatabase.prepare(
+      "SELECT migration_key FROM schema_migrations WHERE migration_key = 'meta-marketing-api-provider-v1'",
+    ).get()).toEqual({ migration_key: "meta-marketing-api-provider-v1" });
+    migrated.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("migrates historical provider connections for Meta Marketing API without losing credentials", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-meta-provider-migration-"));
+    const databasePath = join(directory, "historical.db");
+    const original = new AutomationStore(databasePath);
+    original.seed();
+    original.saveProviderConnectionSettings("demo-account", {
+      kind: "official-api",
+      advertiserId: "historical-advertiser",
+    });
+    original.setProviderCredentialReference(
+      "demo-account",
+      "official-api",
+      "historical-vault-reference",
+    );
+    original.close();
+
+    const historical = new DatabaseSync(databasePath);
+    historical.prepare(
+      "DELETE FROM schema_migrations WHERE migration_key = 'meta-marketing-api-provider-v1'",
+    ).run();
+    historical.exec(`
+      PRAGMA foreign_keys = OFF;
+      CREATE TABLE provider_connections_historical (
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        provider_kind TEXT NOT NULL CHECK (provider_kind IN ('cookie', 'official-api')),
+        settings_json TEXT NOT NULL,
+        credential_ref TEXT,
+        status TEXT NOT NULL CHECK (status IN ('not-configured', 'untested', 'ready', 'failed')),
+        authorization_status TEXT NOT NULL DEFAULT 'not-authorized'
+          CHECK (authorization_status IN ('not-authorized', 'active', 'expired', 'revoked', 'failed')),
+        capability_version TEXT NOT NULL DEFAULT 'legacy-unversioned',
+        authorized_capabilities_json TEXT NOT NULL DEFAULT '[]',
+        authorized_at TEXT,
+        authorization_expires_at TEXT,
+        last_message TEXT,
+        last_tested_at TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, provider_kind)
+      );
+      INSERT INTO provider_connections_historical SELECT * FROM provider_connections;
+      DROP TABLE provider_connections;
+      ALTER TABLE provider_connections_historical RENAME TO provider_connections;
+    `);
+    historical.close();
+
+    const migrated = new AutomationStore(databasePath);
+    expect(migrated.getProviderConnection("demo-account", "official-api")).toMatchObject({
+      credentialRef: "historical-vault-reference",
+      hasCredential: true,
+      settings: { kind: "official-api", advertiserId: "historical-advertiser" },
+    });
+    const migratedDatabase = (migrated as unknown as { db: DatabaseSync }).db;
+    const providerTableSql = String((migratedDatabase.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_connections'",
+    ).get() as { sql: string }).sql);
+    expect(providerTableSql).toContain("'meta-marketing-api'");
+    expect(migratedDatabase.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(migratedDatabase.prepare(
+      "SELECT migration_key FROM schema_migrations WHERE migration_key = 'meta-marketing-api-provider-v1'",
+    ).get()).toEqual({ migration_key: "meta-marketing-api-provider-v1" });
+    migrated.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("rolls back foreign-key migrations and restores enforcement when validation fails", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations (
+        migration_key TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      CREATE TABLE migration_parents (id TEXT PRIMARY KEY);
+      CREATE TABLE migration_children (
+        id TEXT PRIMARY KEY,
+        parent_id TEXT NOT NULL REFERENCES migration_parents(id)
+      );
+      INSERT INTO migration_parents (id) VALUES ('parent-1');
+      INSERT INTO migration_children (id, parent_id) VALUES ('child-1', 'parent-1');
+    `);
+
+    const runner = new MigrationRunner(database);
+    expect(() => runner.applyWithForeignKeysDisabled("failing-foreign-key-migration", () => {
+      database.prepare("DELETE FROM migration_parents WHERE id = 'parent-1'").run();
+    })).toThrow("Foreign key check failed during migration failing-foreign-key-migration");
+
+    expect(database.prepare("SELECT * FROM migration_parents").all()).toEqual([{ id: "parent-1" }]);
+    expect(database.prepare("SELECT * FROM migration_children").all()).toEqual([
+      { id: "child-1", parent_id: "parent-1" },
+    ]);
+    expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(database.prepare("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
+    expect(database.prepare(
+      "SELECT migration_key FROM schema_migrations WHERE migration_key = 'failing-foreign-key-migration'",
+    ).get()).toBeUndefined();
+    database.close();
+  });
+
   it("seeds an account and the fixed global rules", () => {
     expect(store.listAccounts()).toHaveLength(1);
     expect(store.getRuleConfiguration()).toMatchObject({
@@ -212,6 +665,229 @@ describe("AutomationStore", () => {
       enabled: false,
       values: { cpc: 0.9 },
     });
+  });
+
+  it("keeps Meta rules and runtime independent from TikTok", () => {
+    const tiktokBefore = store.getRuleConfiguration();
+    const metaBefore = store.getMetaRuleConfiguration();
+    const runtimeBefore = store.getMetaAutomationRuntime();
+
+    expect(metaBefore).toMatchObject({
+      schemaVersion: "meta-v1",
+      metricWindow: "account-today",
+      layers: { campaign: false, adGroup: false, ad: false },
+    });
+    expect(metaBefore.rules).toHaveLength(9);
+    expect(metaBefore.rules.every((rule) => !rule.enabled)).toBe(true);
+    expect(runtimeBefore).toMatchObject({
+      enabled: false,
+      pollingIntervalMinutes: 5,
+      maxActionsPerRun: 15,
+    });
+
+    const metaInput = structuredClone(metaBefore);
+    metaInput.layers.campaign = true;
+    metaInput.rules[0]!.enabled = true;
+    const metaAfter = store.updateMetaRuleConfiguration(
+      metaInput,
+      metaBefore.updatedAt,
+    );
+    const runtimeAfter = store.updateMetaAutomationRuntime(
+      {
+        enabled: true,
+        pollingIntervalMinutes: 10,
+        maxActionsPerRun: 6,
+      },
+      runtimeBefore.updatedAt,
+    );
+
+    expect(metaAfter.layers.campaign).toBe(true);
+    expect(metaAfter.rules[0]!.enabled).toBe(true);
+    expect(runtimeAfter).toMatchObject({
+      enabled: true,
+      pollingIntervalMinutes: 10,
+      maxActionsPerRun: 6,
+    });
+    expect(store.getRuleConfiguration()).toEqual(tiktokBefore);
+  });
+
+  it("rejects stale Meta rule and runtime updates", () => {
+    const meta = store.getMetaRuleConfiguration();
+    const runtime = store.getMetaAutomationRuntime();
+
+    store.updateMetaRuleConfiguration(meta, meta.updatedAt);
+    store.updateMetaAutomationRuntime(runtime, runtime.updatedAt);
+
+    expect(() => store.updateMetaRuleConfiguration(meta, meta.updatedAt)).toThrow(
+      "configuration was updated by another request",
+    );
+    expect(() => store.updateMetaAutomationRuntime(runtime, runtime.updatedAt)).toThrow(
+      "configuration was updated by another request",
+    );
+  });
+
+  it("persists idempotent Meta creation progress and resumes only explicit failures", () => {
+    const account = store.createAccount({
+      displayName: "Meta creation fixture",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    const input = {
+      idempotencyKey: "meta-create-fixture-0001",
+      campaignName: "campaign",
+      adSetName: "ad set",
+      creativeName: "creative",
+      adName: "ad",
+      objective: "OUTCOME_TRAFFIC" as const,
+      optimizationGoal: "LINK_CLICKS" as const,
+      billingEvent: "IMPRESSIONS" as const,
+      destinationType: "WEBSITE" as const,
+      dailyBudgetMinorUnits: 500,
+      countries: ["US"],
+      destinationUrl: "https://example.com/product",
+      primaryText: "primary text",
+      headline: "headline",
+      description: "description",
+      callToAction: "LEARN_MORE" as const,
+      imageHash: null,
+    };
+
+    const created = store.createMetaCreationTask(account.id, input);
+    expect(created.input.targetLevel).toBe("ad");
+    const database = (store as unknown as { db: DatabaseSync }).db;
+    database.prepare(
+      "UPDATE meta_creation_tasks SET input_json = ? WHERE id = ?",
+    ).run(JSON.stringify(input), created.id);
+    expect(store.getMetaCreationTask(created.id).input.targetLevel).toBe("ad");
+    expect(store.createMetaCreationTask(account.id, input).id).toBe(created.id);
+    expect(() => store.createMetaCreationTask(account.id, {
+      targetLevel: "ad-set",
+      idempotencyKey: input.idempotencyKey,
+      campaignName: input.campaignName,
+      adSetName: input.adSetName,
+      objective: input.objective,
+      optimizationGoal: input.optimizationGoal,
+      billingEvent: input.billingEvent,
+      destinationType: input.destinationType,
+      dailyBudgetMinorUnits: input.dailyBudgetMinorUnits,
+      countries: input.countries,
+    })).toThrow("相同幂等键已用于不同的 Meta 创建请求");
+    expect(() => store.createMetaCreationTask(account.id, {
+      ...input,
+      headline: "different headline",
+    })).toThrow("相同幂等键已用于不同的 Meta 创建请求");
+    expect(store.claimMetaCreationTask(created.id)).toMatchObject({
+      status: "running",
+      attemptCount: 1,
+    });
+    store.updateMetaCreationProgress(created.id, {
+      phase: "campaign",
+      campaignId: "120000000000101",
+      message: "campaign confirmed",
+    });
+    expect(store.completeMetaCreationTask(created.id, "failed", "ad set rejected"))
+      .toMatchObject({
+        status: "failed",
+        phase: "campaign",
+        campaignId: "120000000000101",
+      });
+    expect(store.claimMetaCreationTask(created.id)).toMatchObject({
+      status: "running",
+      attemptCount: 2,
+      campaignId: "120000000000101",
+    });
+    store.updateMetaCreationProgress(created.id, {
+      phase: "ad",
+      adSetId: "120000000000102",
+      creativeId: "120000000000103",
+      adId: "120000000000104",
+      message: "ad confirmed",
+    });
+    expect(store.completeMetaCreationTask(created.id, "succeeded", "done"))
+      .toMatchObject({
+        status: "succeeded",
+        phase: "completed",
+        campaignId: "120000000000101",
+        adId: "120000000000104",
+      });
+    expect(store.claimMetaCreationTask(created.id)).toBeNull();
+    expect(store.listMetaCreationTasks(account.id)).toHaveLength(1);
+
+    const twoLevel = store.createMetaCreationTask(account.id, {
+      targetLevel: "ad-set",
+      idempotencyKey: "meta-create-fixture-two-level-0002",
+      campaignName: input.campaignName,
+      adSetName: input.adSetName,
+      objective: input.objective,
+      optimizationGoal: input.optimizationGoal,
+      billingEvent: input.billingEvent,
+      destinationType: input.destinationType,
+      dailyBudgetMinorUnits: input.dailyBudgetMinorUnits,
+      countries: input.countries,
+    });
+    expect(store.claimMetaCreationTask(twoLevel.id)).toMatchObject({
+      status: "running",
+      input: { targetLevel: "ad-set" },
+    });
+    store.updateMetaCreationProgress(twoLevel.id, {
+      phase: "ad-set",
+      campaignId: "120000000000151",
+      adSetId: "120000000000152",
+      message: "two layers confirmed",
+    });
+    expect(store.completeMetaCreationTask(twoLevel.id, "succeeded", "done"))
+      .toMatchObject({
+        status: "succeeded",
+        phase: "completed",
+        campaignId: "120000000000151",
+        adSetId: "120000000000152",
+        creativeId: null,
+        adId: null,
+      });
+
+    const unknown = store.createMetaCreationTask(account.id, {
+      ...input,
+      idempotencyKey: "meta-create-fixture-unknown-0002",
+    });
+    store.claimMetaCreationTask(unknown.id);
+    store.updateMetaCreationProgress(unknown.id, {
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+      message: "ad set confirmed",
+    });
+    store.completeMetaCreationTask(unknown.id, "unknown", "creative readback unknown");
+    expect(store.resolveUnknownMetaCreationTask(
+      unknown.id,
+      "failed",
+      "creative confirmed absent",
+    )).toMatchObject({
+      status: "failed",
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+    });
+    expect(store.claimMetaCreationTask(unknown.id)).toMatchObject({
+      status: "running",
+      attemptCount: 2,
+    });
+
+    const notStaleBefore = new Date(Date.now() - 1_000).toISOString();
+    expect(store.recoverInterruptedMetaCreationTasks(notStaleBefore)).toBe(0);
+    expect(store.getMetaCreationTask(unknown.id).status).toBe("running");
+    const staleBefore = new Date(Date.now() + 1_000).toISOString();
+    expect(store.recoverInterruptedMetaCreationTasks(staleBefore)).toBe(1);
+    expect(store.getMetaCreationTask(unknown.id)).toMatchObject({
+      status: "unknown",
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+      attemptCount: 2,
+    });
+    expect(store.getMetaCreationTask(unknown.id).message).toContain("只读对账");
+    expect(store.recoverInterruptedMetaCreationTasks(staleBefore)).toBe(0);
   });
 
   it("stores notification settings without exposing credential references", () => {
@@ -2458,6 +3134,57 @@ describe("AutomationStore", () => {
     });
     expect(store.listStatusWriteTaskVerifications(task.id)).toEqual([record]);
     expect(store.claimStatusWriteTask(task.id, "executor-b", "failed")).toBeNull();
+  });
+
+  it("resolves an unknown status write from a read-only provider readback", () => {
+    const succeededTask = store.createStatusWriteTask({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "group-readback-success",
+      entityName: "readback success group",
+      action: "disable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(succeededTask.id, "executor-a", "pending");
+    store.completeStatusWriteTask(succeededTask.id, "executor-a", "unknown", "response lost");
+
+    expect(store.resolveUnknownStatusWriteTaskFromReadback(
+      succeededTask.id,
+      "disabled",
+      { id: "meta-readback", name: "Meta readback", kind: "system" },
+    )).toMatchObject({
+      status: "succeeded",
+      phase: "readback",
+      syncWarning: null,
+      message: expect.stringContaining("只读回读确认"),
+    });
+
+    const failedTask = store.createStatusWriteTask({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "group-readback-failed",
+      entityName: "readback failed group",
+      action: "enable",
+      source: "manual",
+    }, { id: "operator-1", name: "Operator", kind: "user" });
+    store.claimStatusWriteTask(failedTask.id, "executor-b", "pending");
+    store.completeStatusWriteTask(failedTask.id, "executor-b", "unknown", "response lost");
+
+    expect(store.resolveUnknownStatusWriteTaskFromReadback(
+      failedTask.id,
+      "disabled",
+      { id: "meta-readback", name: "Meta readback", kind: "system" },
+    )).toMatchObject({
+      status: "unknown",
+    });
+    expect(store.hasBlockingStatusOperationForEntity(
+      "demo-account",
+      "cookie",
+      "ad-group",
+      "group-readback-failed",
+    )).toBe(true);
   });
 
   it("exposes filtered task history and never claims cancelled launch work", () => {
