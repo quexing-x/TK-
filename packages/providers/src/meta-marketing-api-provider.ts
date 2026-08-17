@@ -8,6 +8,7 @@ import {
   type SyncEntityType,
 } from "@tk-auto/core";
 import { buildSyncDataQuality, formatDateInTimezone } from "./sync-quality.js";
+import type { CopyCampaignInput, CopyCampaignResult } from "./registry.js";
 import {
   RetryableStatusMutationError,
   UnknownStatusMutationStateError,
@@ -63,6 +64,7 @@ const capabilities: ReadonlySet<ProviderCapability> = new Set([
   ...readCapabilities,
   "change-status",
   "create-campaigns",
+  "copy-campaigns",
 ]);
 
 export interface MetaMarketingApiStatusTestScope {
@@ -184,6 +186,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
       }
       if (settings.creationMode === "paused-only") {
         resolved.add("create-campaigns");
+        resolved.add("copy-campaigns");
       }
       return resolved;
     } catch {
@@ -816,6 +819,256 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
           ? "retryable"
           : "unknown",
         message: cause instanceof Error ? cause.message : "Meta 创建结果待确认。",
+      };
+    }
+  }
+
+  /**
+   * Meta 系列级扩组只复制 Campaign + Ad Set。
+   *
+   * 这里故意不读取或创建 Ads / Creatives，因此不需要 Page ID、Page Token
+   * 或任何新帖子权限。Campaign 与 Ad Set 先以 PAUSED 创建并逐层回读；用户
+   * 选择立即/定时投放时，再走独立的对象级状态写入门禁。
+   */
+  async copyCampaign(
+    context: ProviderContext,
+    input: CopyCampaignInput,
+  ): Promise<CopyCampaignResult> {
+    let settings: ReturnType<typeof MetaMarketingApiConnectionSettingsSchema.parse>;
+    let credential: ReturnType<typeof MetaAccessSecretBundleInputSchema.parse>;
+    let profile: NonNullable<ProviderContext["resolvedMetaAccessProfile"]>;
+    let appSecretProof: string;
+    try {
+      settings = MetaMarketingApiConnectionSettingsSchema.parse(context.settings);
+      credential = MetaAccessSecretBundleInputSchema.parse(context.credential);
+      profile = resolveMetaAccessProfile(context, settings);
+      appSecretProof = await createMetaAppSecretProof(
+        credential.appSecret,
+        credential.accessToken,
+      );
+      if (settings.creationMode !== "paused-only") {
+        throw new Error("Meta 账户未开启 PAUSED-only 创建模式。");
+      }
+      if (input.createNewPosts !== false) {
+        throw new Error("Meta 系列复制禁止创建新帖子、素材与广告；本次未发送请求。");
+      }
+      if (!/^\d+$/.test(input.sourceCampaignId)
+        || input.adGroups.length === 0
+        || input.adGroups.some((group) => !/^\d+$/.test(group.sourceAdGroupId))) {
+        throw new Error("Meta 系列复制源对象无效；需要数字 Campaign ID 和至少一个 Ad Set ID。");
+      }
+      if (input.scheduledStartAt && !Number.isFinite(Date.parse(input.scheduledStartAt))) {
+        throw new Error("Meta 系列复制的定时投放时间无效。");
+      }
+      if (input.initialStatus === "enabled" && !this.resolveCapabilities(context).has("change-status")) {
+        throw new Error("Meta 立即/定时投放需要账户同时开启 Campaign 与 Ad Set 状态写入；未发送创建请求。");
+      }
+    } catch (cause) {
+      return {
+        ok: false,
+        failureKind: "failed",
+        retrySafe: true,
+        message: cause instanceof Error ? cause.message : "Meta 系列复制参数无效。",
+      };
+    }
+
+    const accountPath = normalizeAdAccountId(settings.adAccountId);
+    const creationPaths = [
+      `${accountPath}/campaigns`,
+      `${accountPath}/adsets`,
+    ];
+    let transport: MetaMarketingApiTransport;
+    try {
+      transport = this.resolveTransport(context, settings, [], creationPaths);
+    } catch (cause) {
+      return {
+        ok: false,
+        failureKind: "failed",
+        retrySafe: true,
+        message: cause instanceof Error ? cause.message : "Meta 系列复制 Transport 初始化失败。",
+      };
+    }
+
+    // Once the first Campaign create POST is dispatched, a later validation,
+    // network, or readback failure can leave a real remote object behind. From
+    // that point the result is unknown and must never be auto-retried.
+    let dispatchStarted = false;
+
+    const read = async (path: string, fields: string): Promise<Record<string, unknown>> =>
+      asRecord(await transport.get({
+        version: profile.graphApiVersion,
+        path,
+        params: { fields },
+        accessToken: credential.accessToken,
+        appSecretProof,
+      }));
+    const validate = async (edge: "campaigns" | "adsets", body: Record<string, string>): Promise<void> => {
+      const payload = asRecord(await transport.post({
+        version: profile.graphApiVersion,
+        path: `${accountPath}/${edge}`,
+        body: { ...body, execution_options: '["validate_only"]' },
+        accessToken: credential.accessToken,
+        appSecretProof,
+      }));
+      if (payload.success !== true) {
+        throw new MetaMarketingApiMutationUnknownError(
+          `Meta ${edge} validate_only 未返回 success=true。`,
+        );
+      }
+    };
+    const createAndRead = async (
+      edge: "campaigns" | "adsets",
+      body: Record<string, string>,
+      expectedName: string,
+      fields: string,
+      phase: "campaign" | "ad-set",
+    ): Promise<string> => {
+      input.onBeforeDispatch?.();
+      dispatchStarted = true;
+      const payload = asRecord(await transport.post({
+        version: profile.graphApiVersion,
+        path: `${accountPath}/${edge}`,
+        body,
+        accessToken: credential.accessToken,
+        appSecretProof,
+      }));
+      const id = readCreatedId(payload, phase);
+      const readback = await read(id, fields);
+      if (
+        readEntityId(readback) !== id
+        || !createdObjectNameMatches(readback.name, expectedName, false)
+        || readback.status !== "PAUSED"
+      ) {
+        throw new MetaMarketingApiMutationUnknownError(
+          `Meta ${phase} 复制已返回 ID，但写后回读不一致。`,
+        );
+      }
+      return id;
+    };
+
+    try {
+      const sourceCampaign = await read(
+        input.sourceCampaignId,
+        "id,name,objective,buying_type,special_ad_categories,is_adset_budget_sharing_enabled,daily_budget,lifetime_budget",
+      );
+      if (readEntityId(sourceCampaign) !== input.sourceCampaignId) {
+        throw new Error("Meta 源 Campaign 回读 ID 不一致。");
+      }
+      const sourceObjective = typeof sourceCampaign.objective === "string"
+        ? sourceCampaign.objective
+        : "OUTCOME_TRAFFIC";
+      if (sourceObjective !== "OUTCOME_TRAFFIC") {
+        throw new Error(`Meta 系列复制当前只支持 OUTCOME_TRAFFIC，源系列为 ${sourceObjective}。`);
+      }
+
+      const sourceAdSets = await Promise.all(input.adGroups.map(async (group) => {
+        const adSet = await read(
+          group.sourceAdGroupId,
+          "id,name,campaign_id,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,targeting,bid_strategy,bid_amount,start_time,end_time",
+        );
+        if (
+          readEntityId(adSet) !== group.sourceAdGroupId
+          || adSet.campaign_id !== input.sourceCampaignId
+        ) {
+          throw new Error(`Meta Ad Set ${group.sourceAdGroupId} 不属于源 Campaign。`);
+        }
+        return { input: group, source: adSet };
+      }));
+
+      const campaignBody: Record<string, string> = {
+        name: input.campaignName,
+        objective: sourceObjective,
+        status: "PAUSED",
+        buying_type: typeof sourceCampaign.buying_type === "string" ? sourceCampaign.buying_type : "AUCTION",
+        special_ad_categories: stringifyMetaField(sourceCampaign.special_ad_categories, "[]"),
+        is_adset_budget_sharing_enabled: stringifyMetaBoolean(sourceCampaign.is_adset_budget_sharing_enabled),
+      };
+      const sourceCampaignBudget = stringifyMetaNumber(sourceCampaign.daily_budget);
+      const campaignBudget = input.campaignBudget != null
+        ? String(Math.round(input.campaignBudget * 100))
+        : sourceCampaignBudget;
+      if (campaignBudget) campaignBody.daily_budget = campaignBudget;
+      const sourceLifetimeBudget = stringifyMetaNumber(sourceCampaign.lifetime_budget);
+      if (!campaignBudget && sourceLifetimeBudget) campaignBody.lifetime_budget = sourceLifetimeBudget;
+      await validate("campaigns", campaignBody);
+      const campaignId = await createAndRead(
+        "campaigns",
+        campaignBody,
+        input.campaignName,
+        "id,name,status,effective_status",
+        "campaign",
+      );
+
+      const adGroupIds: string[] = [];
+      for (const { input: group, source } of sourceAdSets) {
+        const adSetBody: Record<string, string> = {
+          name: group.name,
+          campaign_id: campaignId,
+          billing_event: typeof source.billing_event === "string" ? source.billing_event : "IMPRESSIONS",
+          optimization_goal: typeof source.optimization_goal === "string" ? source.optimization_goal : "LINK_CLICKS",
+          destination_type: typeof source.destination_type === "string" ? source.destination_type : "WEBSITE",
+          targeting: stringifyMetaField(source.targeting, "{}"),
+          bid_strategy: typeof source.bid_strategy === "string" ? source.bid_strategy : "LOWEST_COST_WITHOUT_CAP",
+          status: "PAUSED",
+        };
+        const dailyBudget = stringifyMetaNumber(source.daily_budget);
+        const lifetimeBudget = stringifyMetaNumber(source.lifetime_budget);
+        if (dailyBudget) adSetBody.daily_budget = dailyBudget;
+        else if (lifetimeBudget) adSetBody.lifetime_budget = lifetimeBudget;
+        const bidAmount = input.bid != null
+          ? String(Math.round(input.bid * 100))
+          : stringifyMetaNumber(source.bid_amount);
+        if (bidAmount) adSetBody.bid_amount = bidAmount;
+        if (input.scheduledStartAt) adSetBody.start_time = new Date(input.scheduledStartAt).toISOString();
+        await validate("adsets", adSetBody);
+        adGroupIds.push(await createAndRead(
+          "adsets",
+          adSetBody,
+          group.name,
+          "id,name,campaign_id,status,effective_status",
+          "ad-set",
+        ));
+      }
+
+      if (input.initialStatus === "enabled") {
+        const statusResults = [campaignId, ...adGroupIds].map(async (externalId) => {
+          const [result] = await this.changeStatus(context, [{
+            entityType: externalId === campaignId ? "campaign" : "ad-group",
+            externalId,
+            action: "enable",
+          }]);
+          return result;
+        });
+        const statuses = await Promise.all(statusResults);
+        const failed = statuses.find((result) => !result?.ok);
+        if (failed) {
+          throw new MetaMarketingApiMutationUnknownError(
+            failed.message ?? "Meta 复制后的对象启用结果待确认。",
+          );
+        }
+      }
+
+      return {
+        ok: true,
+        campaignId,
+        adGroupIds,
+        message: input.initialStatus === "enabled"
+          ? input.scheduledStartAt
+            ? "Meta Campaign 与 Ad Set 已复制，已写入定时投放并完成状态回读；未创建新帖子。"
+            : "Meta Campaign 与 Ad Set 已复制并开启；未创建新帖子。"
+          : "Meta Campaign 与 Ad Set 已按 PAUSED 状态复制并回读确认；未创建新帖子。",
+      };
+    } catch (cause) {
+      const retryable = !dispatchStarted && (
+        cause instanceof MetaMarketingApiMutationRejectedError
+        || cause instanceof MetaMarketingApiNetworkDisabledError
+      );
+      const unknown = dispatchStarted || cause instanceof MetaMarketingApiMutationUnknownError;
+      return {
+        ok: false,
+        failureKind: unknown ? "unknown" : "failed",
+        retrySafe: retryable,
+        message: cause instanceof Error ? cause.message : "Meta 系列复制失败，结果待确认。",
       };
     }
   }
@@ -1501,6 +1754,35 @@ function readOptionalNonNegativeNumber(value: unknown): {
   return Number.isFinite(parsed) && parsed >= 0
     ? { valid: true, value: parsed }
     : { valid: false, value: null };
+}
+
+function stringifyMetaNumber(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return String(value);
+  if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value)) return value;
+  return null;
+}
+
+function stringifyMetaBoolean(value: unknown): string {
+  return value === true || value === "true" ? "true" : "false";
+}
+
+function stringifyMetaField(value: unknown, fallback: string): string {
+  if (typeof value === "string") {
+    try {
+      JSON.parse(value);
+      return value;
+    } catch {
+      return fallback;
+    }
+  }
+  if (value !== undefined && value !== null) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
 }
 
 function readMetaActionMap(value: unknown): {

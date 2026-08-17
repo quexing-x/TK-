@@ -3,28 +3,22 @@ import {
   ArrowRight,
   CheckCircle2,
   CircleAlert,
-  CircleGauge,
-  Database,
-  Plus,
-  Radio,
+  Link2,
+  Play,
   ShieldCheck,
+  SlidersHorizontal,
   Users,
 } from "lucide-react";
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import type {
-  AccountConfig,
-  AdOperationRecord,
-  AutomationDecisionRecord,
-  ManagedEntityRecord,
-  SystemRuntimeState,
-} from "@tk-auto/core";
-import { api, type BootstrapPayload } from "./api";
-import { selectPendingAutomationDecisions } from "./automation-decision-view";
-import { accountAccessStatus } from "./provider-capability-view";
-import { filterTikTokOperationalAccounts } from "./platform-account-view";
+import type { ReactNode } from "react";
+import type { AccountConfig, SystemRuntimeState } from "@tk-auto/core";
+import type { BootstrapPayload } from "./api";
 
-type OverviewDestination = "launch" | "ads" | "users";
+type OverviewDestination = "ads" | "meta-assets" | "meta-rules";
 
+/**
+ * The overview intentionally stays connection-only. Platform metrics,
+ * decisions and operations belong to their isolated TikTok or Meta modules.
+ */
 export function OverviewPage({
   accounts,
   connectionStates,
@@ -38,213 +32,122 @@ export function OverviewPage({
   onNavigate: (destination: OverviewDestination) => void;
   children?: ReactNode;
 }) {
-  const operationalAccounts = useMemo(
-    () => filterTikTokOperationalAccounts(accounts),
-    [accounts],
-  );
-  const operationalAccountIds = useMemo(
-    () => new Set(operationalAccounts.map((account) => account.id)),
-    [operationalAccounts],
-  );
-  const operationalConnectionStates = useMemo(
-    () => connectionStates.filter((state) => operationalAccountIds.has(state.accountId)),
-    [connectionStates, operationalAccountIds],
-  );
-  const [decisions, setDecisions] = useState<AutomationDecisionRecord[]>([]);
-  const [entities, setEntities] = useState<Array<ManagedEntityRecord & { accountId: string }>>([]);
-  const [operations, setOperations] = useState<AdOperationRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const loadDecisions = useCallback(async () => {
-    try {
-      const results = await Promise.all(
-        operationalAccounts.map(async (account) => {
-          const [nextDecisions, nextEntities, nextOperations] = await Promise.all([
-          api.getAutomationDecisions(account.id).catch(() => []),
-          api.getManagedEntities(account.id).catch(() => []),
-          api.getAdOperations(account.id).catch(() => []),
-          ]);
-          return { accountId: account.id, nextDecisions, nextEntities, nextOperations };
-        }),
-      );
-      setDecisions(results.flatMap((result) => result.nextDecisions).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
-      setEntities(results.flatMap((result) => result.nextEntities.map((entity) => ({ ...entity, accountId: result.accountId }))));
-      setOperations(results.flatMap((result) => result.nextOperations));
-    } finally {
-      setLoading(false);
-    }
-  }, [operationalAccounts]);
-
-  useEffect(() => {
-    void loadDecisions();
-  }, [loadDecisions]);
-
-  const readyCount = operationalConnectionStates.filter((state) => state.connection?.status === "ready").length;
-  const enabledCount = operationalAccounts.filter((account) => account.enabled).length;
-  const pending = useMemo(() => selectPendingAutomationDecisions({
-    decisions,
-    entities,
-    operations,
-    statuses: ["preview", "pending"],
-  }), [decisions, entities, operations]);
-  const stream = useMemo(
-    () => decisions
-      .filter((decision) => ["succeeded", "failed", "unknown"].includes(decision.status))
-      .slice(0, 5),
-    [decisions],
-  );
-  const accountExceptions = useMemo(() => operationalConnectionStates.flatMap((state) => {
-    const accountName = operationalAccounts.find((account) => account.id === state.accountId)?.displayName ?? "未命名账户";
-    const access = accountAccessStatus(state);
-    return access.tone === "healthy"
-      ? []
-      : [`${accountName}：${access.blockers[0] ?? "账户能力尚未就绪。"}`];
-  }), [operationalAccounts, operationalConnectionStates]);
-  const accountHealth = useMemo(() => operationalAccounts.map((account) => {
-    const state = operationalConnectionStates.find((item) => item.accountId === account.id);
-    const access = state
-      ? accountAccessStatus(state)
-      : { tone: "danger" as const, label: "异常" as const };
-    return { id: account.id, name: account.displayName, tone: access.tone, label: access.label };
-  }), [operationalAccounts, operationalConnectionStates]);
-  const healthyAccountCount = accountHealth.filter((account) => account.tone === "healthy").length;
-  const warningAccountCount = accountHealth.filter((account) => account.tone === "warning").length;
-  const dangerAccountCount = accountHealth.filter((account) => account.tone === "danger").length;
-  const healthyEnd = operationalAccounts.length ? (healthyAccountCount / operationalAccounts.length) * 360 : 0;
-  const warningEnd = operationalAccounts.length ? ((healthyAccountCount + warningAccountCount) / operationalAccounts.length) * 360 : 0;
+  const stateByAccountId = new Map(connectionStates.map((state) => [state.accountId, state]));
+  const groups = [
+    {
+      key: "tiktok" as const,
+      title: "TikTok 接入",
+      description: "Cookie / Marketing API 账户连接与能力",
+      accounts: accounts.filter((account) => account.platform === "tiktok"),
+      action: () => onNavigate("ads"),
+      actionLabel: "进入 TikTok 广告管理",
+    },
+    {
+      key: "meta" as const,
+      title: "Meta 接入",
+      description: "Marketing API 账户连接与权限",
+      accounts: accounts.filter((account) => account.platform === "meta"),
+      action: () => onNavigate("meta-assets"),
+      actionLabel: "进入 Meta 广告管理",
+    },
+  ];
 
   return (
-    <section className="overview-page">
-      <section className="overview-runtime-strip" aria-label="自动化运行概览">
+    <section className="overview-page connection-overview-page">
+      <section className="overview-runtime-strip connection-runtime-strip" aria-label="本地运行状态">
         <div className={`runtime-orbit ${runtime.enabled ? "active" : "paused"}`}>
-          <Activity size={36} strokeWidth={1.8} />
+          <Activity size={30} strokeWidth={1.8} />
         </div>
         <div className="runtime-copy">
-          <span className="section-kicker">AUTOMATION STATUS</span>
-          <h2>{runtime.enabled ? "自动化运行中" : "自动化已暂停"}</h2>
-          <p>{runtime.enabled ? "自动检测、决策与定时规则正在运行" : "自动任务已暂停；广告创建与人工操作仍可使用"}</p>
-        </div>
-        <div className="runtime-stat-grid">
-          <OverviewStat label="TikTok 已接入" value={String(readyCount)} meta={`共 ${operationalAccounts.length} 个`} />
-          <OverviewStat label="自动化账户" value={String(enabledCount)} meta="当前启用" />
-          <OverviewStat label="自动执行" value={String(stream.length)} meta="最近完成" />
-          <OverviewStat label="执行记录" value={String(decisions.length)} meta="本地可追溯" />
+          <span className="section-kicker">CONNECTION OVERVIEW</span>
+          <h2>平台接入总览</h2>
+          <p>这里只展示账户连接、权限与自动化开关；TikTok 与 Meta 的指标和规则互不混用。</p>
         </div>
         <div className={`runtime-state-card ${runtime.enabled ? "active" : "paused"}`}>
-          <span>自动化状态</span>
-          <strong><i />{runtime.enabled ? "正在运行" : "已暂停"}</strong>
-          <small>控制入口位于页面右上角</small>
+          <span>全局自动化</span>
+          <strong><i />{runtime.enabled ? "运行中" : "已暂停"}</strong>
+          <small>平台规则仍由各自模块独立控制</small>
         </div>
       </section>
 
-      {accountExceptions.length > 0 && (
-        <section className="overview-exception-bar">
-          <div><CircleAlert size={18} /><strong>发现 {accountExceptions.length} 项账户接入异常</strong></div>
-          <span>{accountExceptions[0]}</span>
-          <button className="text-button" type="button" onClick={() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" })}>
-            处理账户 <ArrowRight size={14} />
-          </button>
-        </section>
-      )}
-
-      <section className="overview-workspace-grid">
-        <article className="overview-zone account-health-zone">
-          <header className="zone-heading">
-            <div><h2>账户健康</h2><span>连接与执行能力</span></div>
-            <button className="icon-text-link" type="button" onClick={() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" })}>查看详情 <ArrowRight size={14} /></button>
-          </header>
-          <div className="health-visual">
-            <div className="health-ring" style={{ "--healthy-end": `${healthyEnd}deg`, "--warning-end": `${warningEnd}deg` } as CSSProperties}>
-              <div><strong>{operationalAccounts.length}</strong><span>TikTok 账户</span></div>
-            </div>
-            <div className="health-breakdown">
-              <span><i className="healthy" />健康<strong>{healthyAccountCount}</strong></span>
-              <span><i className="warning" />待完善<strong>{warningAccountCount}</strong></span>
-              <span><i className="danger" />异常<strong>{dangerAccountCount}</strong></span>
-            </div>
-          </div>
-          <div className="account-health-bars" aria-label="账户健康状态">
-            {accountHealth.length ? accountHealth.map((account) => (
-              <div className="account-health-row" key={account.id}>
-                <span title={account.name}>{account.name}</span>
-                <i><b className={account.tone} /></i>
-                <strong className={account.tone}>{account.label}</strong>
-              </div>
-            )) : <p className="account-health-empty">尚未添加账户</p>}
-          </div>
-        </article>
-
-        <article className="overview-zone decision-zone">
-          <header className="zone-heading">
-            <div><h2>待处理决策</h2><span>{pending.length} 项需要确认</span></div>
-            <button className="icon-text-link" type="button" onClick={() => onNavigate("ads")}>查看全部 <ArrowRight size={14} /></button>
-          </header>
-          <div className="decision-list">
-            {loading ? <p className="overview-empty">正在汇总决策记录…</p> : pending.length ? pending.slice(0, 5).map((decision, index) => (
-              <div className="decision-row" key={decision.id}>
-                <span className={`priority-tag ${index === 0 ? "high" : index < 3 ? "medium" : "low"}`}>{index === 0 ? "高" : index < 3 ? "中" : "低"}</span>
-                <div><strong>{decision.entityName}</strong><small>{decision.reason}</small></div>
-                <time>{new Date(decision.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>
-                <button type="button" onClick={() => onNavigate("ads")}>处理</button>
-              </div>
-            )) : <p className="overview-empty"><CheckCircle2 size={17} /> 当前没有待处理建议</p>}
-          </div>
-        </article>
-
-        <article className="overview-zone connection-health-zone">
-          <header className="zone-heading"><div><h2>连接健康</h2><span>本地服务状态</span></div></header>
-          <div className="connection-health-list">
-            <ConnectionHealth icon={<ShieldCheck size={17} />} label="TikTok 接入" detail={operationalAccounts.length ? `${readyCount}/${operationalAccounts.length} 正常` : "暂无账户"} healthy={operationalAccounts.length > 0 && readyCount === operationalAccounts.length} />
-            <ConnectionHealth icon={<Database size={17} />} label="本地数据" detail="读取正常" healthy />
-            <ConnectionHealth icon={<Activity size={17} />} label="自动任务" detail={runtime.enabled ? "运行中" : "已暂停"} healthy={runtime.enabled} />
-          </div>
-        </article>
-
-        <article className="overview-zone activity-zone">
-          <header className="zone-heading">
-            <div><h2>最近执行</h2><span>自动化操作记录</span></div>
-          </header>
-          <div className="activity-list">
-            {stream.length ? stream.map((decision) => (
-              <div className="activity-row" key={decision.id}>
-                <span className={`activity-icon ${decision.status === "succeeded" ? "success" : decision.status === "failed" || decision.status === "unknown" ? "danger" : "info"}`}>
-                  {decision.status === "succeeded" ? <CheckCircle2 size={15} /> : decision.status === "failed" || decision.status === "unknown" ? <CircleAlert size={15} /> : <Radio size={15} />}
-                </span>
-                <div><strong>{decision.entityName}</strong><small>{decision.action === "enable" ? "自动开启" : "自动关闭"} · {decision.reason}</small></div>
-                <time>{new Date(decision.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>
-              </div>
-            )) : <p className="overview-empty"><Activity size={17} /> 暂无自动执行记录</p>}
-          </div>
-        </article>
+      <section className="connection-overview-heading">
+        <div>
+          <span className="section-kicker">PLATFORM ACCESS</span>
+          <h2>接入状态</h2>
+          <p>先在这里确认连接是否正常，再进入对应平台处理广告对象和规则。</p>
+        </div>
+        <div className="connection-overview-legend" aria-label="接入状态图例">
+          <span><i className="healthy" />健康</span>
+          <span><i className="warning" />待完善</span>
+          <span><i className="danger" />异常</span>
+        </div>
       </section>
 
-      <section className="overview-account-section">
+      <div className="platform-access-grid">
+        {groups.map((group) => {
+          const readyCount = group.accounts.filter((account) => {
+            const state = stateByAccountId.get(account.id);
+            return connectionOverviewStatus(state).tone === "healthy";
+          }).length;
+          return (
+            <article className={`platform-access-card platform-${group.key}`} key={group.key}>
+              <header>
+                <div className="platform-access-icon">{group.key === "meta" ? <Link2 size={19} /> : <ShieldCheck size={19} />}</div>
+                <div><h3>{group.title}</h3><p>{group.description}</p></div>
+                <span className="platform-access-count">{readyCount}/{group.accounts.length} 正常</span>
+              </header>
+              <div className="platform-access-list">
+                {group.accounts.length === 0 ? (
+                  <div className="platform-access-empty"><CircleAlert size={16} /><span>暂无已建立的{group.key === "meta" ? " Meta" : " TikTok"}账户接入</span></div>
+                ) : group.accounts.map((account) => {
+                  const state = stateByAccountId.get(account.id);
+                  const access = connectionOverviewStatus(state);
+                  return (
+                    <div className="platform-access-row" key={account.id}>
+                      <div className="platform-access-account"><strong>{account.displayName}</strong><small>{account.providerKind === "meta-marketing-api" ? "Meta Marketing API" : account.providerKind === "cookie" ? "Cookie 会话" : "官方 API"}</small></div>
+                      <span className={`status ${access.tone === "healthy" ? "active" : access.tone === "danger" ? "danger" : "warning"}`}><i />{access.label}</span>
+                      <span className="platform-access-detail">{account.enabled ? "自动化已开启" : "自动化未开启"}</span>
+                      {access.tone !== "healthy" && <small className="platform-access-blocker" title={access.blocker}>{access.blocker}</small>}
+                    </div>
+                  );
+                })}
+              </div>
+              <footer><button className="icon-text-link" type="button" onClick={group.action}>{group.actionLabel}<ArrowRight size={14} /></button>{group.key === "meta" && <button className="icon-text-link secondary-link" type="button" onClick={() => onNavigate("meta-rules")}><SlidersHorizontal size={14} />Meta 规则</button>}</footer>
+            </article>
+          );
+        })}
+      </div>
+
+      <section className="overview-account-section connection-account-section" id="account-management">
         <header className="account-section-heading">
-          <div><span className="section-kicker">ACCOUNT OPERATIONS</span><h2>账户管理</h2></div>
-          <p>账户默认自动执行；人工接管仅作用于广告管理中的单一广告组。</p>
+          <div><span className="section-kicker">ACCOUNT ACCESS</span><h2>账户接入与权限</h2></div>
+          <p><Users size={15} /> 凭据、账户绑定和能力检测统一在这里管理；广告数据请进入对应平台模块。</p>
         </header>
         {children}
       </section>
 
-      <section className="overview-lower-grid">
-        <article className="quick-action-zone">
-          <header className="zone-heading"><div><h2>快捷操作</h2><span>保持原有操作结果</span></div></header>
-          <div className="quick-action-grid">
-            <button type="button" onClick={() => onNavigate("launch")}><Plus size={22} /><strong>创建广告</strong><span>批量导入与发布</span></button>
-            <button type="button" onClick={() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" })}><Users size={22} /><strong>管理账户</strong><span>接入与能力检测</span></button>
-            <button type="button" onClick={() => onNavigate("ads")}><CircleGauge size={22} /><strong>广告管理</strong><span>筛选与人工启停</span></button>
-          </div>
-        </article>
-
-      </section>
+      <div className="connection-overview-note"><CheckCircle2 size={16} /><span>Meta 与 TikTok 的规则引擎、自动启停和广告对象列表已在页面层隔离；总览不再混合展示平台指标。</span><Play size={15} /></div>
     </section>
   );
 }
 
-function OverviewStat({ label, value, meta, tone }: { label: string; value: string; meta: string; tone?: "warning" | undefined }) {
-  return <div className={`overview-stat ${tone ?? ""}`}><span>{label}</span><strong>{value}</strong><small>{meta}</small></div>;
-}
-
-function ConnectionHealth({ icon, label, detail, healthy }: { icon: ReactNode; label: string; detail: string; healthy: boolean }) {
-  return <div><span className="connection-health-icon">{icon}</span><strong>{label}</strong><em className={healthy ? "healthy" : "warning"}>{healthy ? "正常" : "注意"}</em><small>{detail}</small><i className="mini-trend">⌁</i></div>;
+function connectionOverviewStatus(
+  state: BootstrapPayload["accountConnectionStates"][number] | undefined,
+): { tone: "healthy" | "warning" | "danger"; label: "正常" | "待检测" | "异常"; blocker: string } {
+  const connection = state?.connection;
+  if (!connection) return { tone: "danger", label: "异常", blocker: "尚未建立账户接入。" };
+  const authorizationFailed = ["expired", "revoked", "failed"].includes(
+    state.capabilities.authorizationStatus,
+  );
+  if (connection.status === "ready" && state.capabilities.authorizationStatus === "active") {
+    return { tone: "healthy", label: "正常", blocker: "" };
+  }
+  if (connection.status === "failed" || authorizationFailed) {
+    return { tone: "danger", label: "异常", blocker: connection.lastMessage || "账户授权失败，请重新检测。" };
+  }
+  return {
+    tone: "warning",
+    label: "待检测",
+    blocker: connection.hasCredential ? "凭据已保存，请检测连接。" : "尚未保存接入凭据。",
+  };
 }

@@ -172,7 +172,7 @@ export function MetaRulesPage({
           <div><dt>Schema</dt><dd>{configuration.schemaVersion}</dd></div>
           <div><dt>Metric Window</dt><dd>{configuration.metricWindow}</dd></div>
           <div><dt>规则</dt><dd>{enabledRules}/{configuration.rules.length} 已启用</dd></div>
-          <div><dt>运行</dt><dd>{runtime.enabled ? "ACTIVE" : "PAUSED"}</dd></div>
+          <div><dt>运行</dt><dd>{runtime.enabled ? "运行中" : "已暂停"}</dd></div>
         </dl>
       </header>
 
@@ -189,9 +189,9 @@ export function MetaRulesPage({
       <section className="panel meta-layer-panel">
         <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>参与自动化的对象层级</h2><p>三层均独立关闭；保存规则不会自动打开层级或运行开关</p></div></div></div>
         <div className="meta-layer-grid">
-          <LayerToggle label="Campaign" note="系列层配置状态" checked={configuration.layers.campaign} disabled={!canManageRules} onChange={(checked) => updateLayer("campaign", checked)} />
-          <LayerToggle label="Ad Set" note="广告组层配置状态" checked={configuration.layers.adGroup} disabled={!canManageRules} onChange={(checked) => updateLayer("adGroup", checked)} />
-          <LayerToggle label="Ad" note="广告层配置状态" checked={configuration.layers.ad} disabled={!canManageRules} onChange={(checked) => updateLayer("ad", checked)} />
+          <LayerToggle label="广告系列" note="系列层配置状态" checked={configuration.layers.campaign} disabled={!canManageRules} onChange={(checked) => updateLayer("campaign", checked)} />
+          <LayerToggle label="广告组" note="广告组层配置状态" checked={configuration.layers.adGroup} disabled={!canManageRules} onChange={(checked) => updateLayer("adGroup", checked)} />
+          <LayerToggle label="广告" note="广告层配置状态" checked={configuration.layers.ad} disabled={!canManageRules} onChange={(checked) => updateLayer("ad", checked)} />
         </div>
       </section>
 
@@ -204,7 +204,7 @@ export function MetaRulesPage({
             return <article className={rule.enabled ? "meta-rule-row enabled" : "meta-rule-row"} key={definition.code}>
               <header><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{definition.label}</strong><small>{definition.description}</small></div><label className="meta-rule-toggle"><input checked={rule.enabled} disabled={!canManageRules} onChange={(event) => updateRuleEnabled(definition.code, event.target.checked)} type="checkbox" /><i /></label></header>
               <div className="meta-rule-parameters">{definition.parameters.map((parameter) => <label className="field" key={parameter.key}><span>{parameter.label}</span><div><input min={0} step={parameter.step} type="number" value={rule.values[parameter.key] ?? 0} onChange={(event) => updateRuleValue(definition.code, parameter.key, Number(event.target.value))} /><small>{parameter.unit}</small></div></label>)}</div>
-              <span className={definition.action === "enable" ? "meta-rule-action enable" : "meta-rule-action disable"}>{definition.action === "enable" ? "ACTIVE" : "PAUSED"}</span>
+              <span className={definition.action === "enable" ? "meta-rule-action enable" : "meta-rule-action disable"}>{definition.action === "enable" ? "开启" : "暂停"}</span>
             </article>;
           })}
         </div>
