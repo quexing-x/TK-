@@ -116,6 +116,28 @@ describe("MetaMarketingApiHttpTransport", () => {
       appSecretProof: APP_SECRET_PROOF,
     })).resolves.toEqual({ id: "120000000000099" });
 
+    const adSetsPath = "act_123/adsets";
+    const adSetsTransport = new MetaMarketingApiHttpTransport({
+      allowedCreationPaths: [adSetsPath],
+    });
+    await expect(adSetsTransport.post({
+      version: "v26.0",
+      path: adSetsPath,
+      body: {
+        name: "paused ad set validation",
+        campaign_id: "120000000000099",
+        billing_event: "IMPRESSIONS",
+        optimization_goal: "LINK_CLICKS",
+        destination_type: "WEBSITE",
+        targeting: "{}",
+        bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+        status: "PAUSED",
+        execution_options: '["validate_only"]',
+      },
+      accessToken: "fixture-sensitive-token",
+      appSecretProof: APP_SECRET_PROOF,
+    })).resolves.toEqual({ id: "120000000000099" });
+
     const adsPath = "act_123/ads";
     const adsTransport = new MetaMarketingApiHttpTransport({
       allowedCreationPaths: [adsPath],
@@ -157,7 +179,7 @@ describe("MetaMarketingApiHttpTransport", () => {
       accessToken: "fixture-sensitive-token",
       appSecretProof: APP_SECRET_PROOF,
     })).rejects.toThrow("allowlist");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("rejects paths and mutation bodies outside the fixed scope before fetch", async () => {

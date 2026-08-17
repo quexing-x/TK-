@@ -206,11 +206,11 @@ function assertStatusMutationBody(body: Readonly<Record<string, string>>): void 
 const creationBodyKeys: Record<string, ReadonlySet<string>> = {
   campaigns: new Set([
     "name", "objective", "status", "buying_type", "special_ad_categories",
-    "is_adset_budget_sharing_enabled", "execution_options",
+    "is_adset_budget_sharing_enabled", "daily_budget", "lifetime_budget", "execution_options",
   ]),
   adsets: new Set([
     "name", "campaign_id", "daily_budget", "billing_event", "optimization_goal",
-    "destination_type", "targeting", "bid_strategy", "status",
+    "lifetime_budget", "destination_type", "targeting", "bid_strategy", "bid_amount", "start_time", "status", "execution_options",
   ]),
   adcreatives: new Set(["name", "object_story_spec", "execution_options"]),
   ads: new Set(["name", "adset_id", "creative", "status", "execution_options"]),
@@ -246,9 +246,22 @@ function assertCreationBody(
       "Meta 创建当前只支持 OUTCOME_TRAFFIC，未发送请求。",
     );
   }
+  if (edge === "campaigns") {
+    for (const key of ["daily_budget", "lifetime_budget"]) {
+      if (body[key] !== undefined && !/^\d+$/.test(body[key] ?? "")) {
+        throw new MetaMarketingApiMutationRejectedError("Meta Campaign 预算无效，未发送请求。");
+      }
+    }
+  }
   if (edge === "adsets") {
-    if (!/^\d+$/.test(body.campaign_id ?? "") || !/^\d+$/.test(body.daily_budget ?? "")) {
-      throw new MetaMarketingApiMutationRejectedError("Meta Ad Set 创建 ID 或预算无效，未发送请求。");
+    if (!/^\d+$/.test(body.campaign_id ?? "")) {
+      throw new MetaMarketingApiMutationRejectedError("Meta Ad Set 创建 ID 无效，未发送请求。");
+    }
+    if (
+      (body.daily_budget !== undefined && !/^\d+$/.test(body.daily_budget))
+      || (body.lifetime_budget !== undefined && !/^\d+$/.test(body.lifetime_budget))
+    ) {
+      throw new MetaMarketingApiMutationRejectedError("Meta Ad Set 创建预算无效，未发送请求。");
     }
     parseJsonObject(body.targeting, "Meta Ad Set targeting 无效，未发送请求。");
   }

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  MetaAccessSecretBundleInputSchema,
   ProviderCredentialInputSchema,
   assertCampaignNameAvailable,
   dateTimeSuffix,
@@ -683,6 +684,33 @@ export class LaunchService {
     providerKind: ProviderKind,
   ): Promise<ProviderContext> {
     const connection = this.store.getProviderConnection(accountId, providerKind);
+    if (providerKind === "meta-marketing-api") {
+      if (
+        !connection
+        || connection.settings.kind !== "meta-marketing-api"
+        || !connection.settings.profileId
+      ) {
+        throw new Error("Meta 广告账户尚未绑定共享凭据 Profile。");
+      }
+      const profile = this.store.getStoredMetaAccessProfile(connection.settings.profileId);
+      if (!profile?.secretRef) {
+        throw new Error("Meta 共享凭据 Profile 尚未保存 App Secret 与 Access Token。");
+      }
+      const secret = await this.vault.read(profile.secretRef);
+      if (!secret) throw new Error("Meta 共享凭据引用已失效，请重新保存。");
+      return {
+        accountId,
+        settings: connection.settings,
+        credential: MetaAccessSecretBundleInputSchema.parse(JSON.parse(secret)),
+        resolvedMetaAccessProfile: {
+          profileId: profile.id,
+          appId: profile.appId,
+          businessId: profile.businessId,
+          graphApiVersion: profile.graphApiVersion,
+        },
+        timezone: this.store.getAccount(accountId)?.timezone ?? "UTC",
+      };
+    }
     if (!connection?.credentialRef) throw new Error("接入参数或凭据尚未配置。");
     const secret = await this.vault.read(connection.credentialRef);
     if (!secret) throw new Error("凭据引用已经失效，请重新保存凭据。");
@@ -836,6 +864,8 @@ export class LaunchService {
     groupsPerCampaign: number;
     initialStatus: "enabled" | "disabled";
     scheduledStartAt?: string | null;
+    /** Meta 复制必须显式关闭新帖子/广告创建；TK 旧调用默认保持原行为。 */
+    createNewPosts?: boolean;
     /** 覆盖系列日预算；留空继承源系列。 */
     campaignBudget?: number | null;
     bid?: number | null;
@@ -852,6 +882,10 @@ export class LaunchService {
   }> {
     const account = this.store.getAccount(input.accountId);
     if (!account) throw new Error("账号不存在。");
+    const createNewPosts = input.createNewPosts ?? true;
+    if (account.platform === "meta" && createNewPosts) {
+      throw new Error("Meta 系列复制禁止创建新帖子、素材与广告；请显式使用仅复制 Campaign + Ad Set 的模式。");
+    }
     const connection = this.store.getProviderConnection(input.accountId, account.providerKind);
     if (!connection || connection.status !== "ready") {
       throw new Error("账户未通过连接检测，已阻止系列复制。");
@@ -948,6 +982,7 @@ export class LaunchService {
         groups: campaign.groups,
         initialStatus: input.initialStatus,
         scheduledStartAt,
+        createNewPosts,
         campaignBudget: input.campaignBudget ?? null,
         bid: input.bid ?? null,
       })).digest("hex");
@@ -989,6 +1024,7 @@ export class LaunchService {
             adGroups: campaign.groups,
             initialStatus: input.initialStatus,
             scheduledStartAt,
+            createNewPosts,
             ...(input.campaignBudget !== undefined ? { campaignBudget: input.campaignBudget } : {}),
             ...(input.bid !== undefined ? { bid: input.bid } : {}),
             onBeforeDispatch: () => this.store.markCampaignCopyTaskDispatching(taskKey),

@@ -70,8 +70,12 @@ export function CopyCampaignPanel(props: {
   accounts: AccountOption[];
   busy: boolean;
   onError: (message: string | null) => void;
+  platform?: "tiktok" | "meta";
+  onCompleted?: () => void | Promise<void>;
 }) {
   const { confirm, toast } = useOverlays();
+  const isMeta = props.platform === "meta";
+  const platformName = isMeta ? "Meta" : "TikTok";
   const [accountId, setAccountId] = useState<string>(props.accounts[0]?.id ?? "");
   const [entities, setEntities] = useState<ManagedEntityRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -118,7 +122,7 @@ export function CopyCampaignPanel(props: {
   const resetStuckTask = async (task: StuckCampaignCopyTask) => {
     const confirmed = await confirm({
       title: "重置该系列复制任务",
-      message: `请先在 TikTok 广告后台核实「${task.campaignName}」的真实状态（是否已创建成功、是否为无用草稿）。确认无误后重置，才会允许系统重新领取并执行该任务，否则可能产生重复系列。确认重置？`,
+      message: `请先在 ${platformName} 广告后台核实「${task.campaignName}」的真实状态（是否已创建成功、是否为无用草稿）。确认无误后重置，才会允许系统重新领取并执行该任务，否则可能产生重复系列。确认重置？`,
       confirmLabel: "已核实，确认重置",
       danger: true,
     });
@@ -287,12 +291,13 @@ export function CopyCampaignPanel(props: {
         groupsPerCampaign,
         initialStatus,
         scheduledStartAt,
+        createNewPosts: !isMeta,
         campaignBudget,
         bid,
       });
       const parts = [`已创建 ${result.createdCampaigns} 个系列、${result.createdGroups} 个广告组`];
       if (scheduledStartAt && result.createdCampaigns > 0) {
-        parts.push(`已设置 TikTok 原生定时投放：${new Date(scheduledStartAt).toLocaleString()}`);
+        parts.push(`已设置 ${platformName} 原生定时投放：${new Date(scheduledStartAt).toLocaleString()}`);
       }
       if (result.skipped > 0) parts.push(`跳过 ${result.skipped} 个重复任务`);
       if (result.failed.length > 0) {
@@ -302,6 +307,7 @@ export function CopyCampaignPanel(props: {
       toast(result.failed.length === 0 ? "系列复制完成" : "系列复制部分失败", result.failed.length === 0 ? "success" : "error");
       load(accountId);
       loadStuckTasks(accountId);
+      void props.onCompleted?.();
     } catch (cause) {
       props.onError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -318,18 +324,25 @@ export function CopyCampaignPanel(props: {
         <div>
           <span className="panel-icon"><Copy size={18} /></span>
           <div>
-            <h2>系列复制</h2>
-            <p>把推广系列复制成多个新系列，并决定每个新系列放几个广告组。系列预算的系列请用这里放量——往同一个系列里加广告组只会摊薄原有预算。</p>
+            <h2>{isMeta ? "Meta 广告系列一键扩组" : "系列复制"}</h2>
+            <p>{isMeta
+              ? "以广告系列为优先目标，只复制 Campaign + Ad Set，不读取或创建 Ads、Creatives 与新帖子；无 Page ID 也可先执行两层复制。"
+              : "把推广系列复制成多个新系列，并决定每个新系列放几个广告组。系列预算的系列请用这里放量——往同一个系列里加广告组只会摊薄原有预算。"}</p>
           </div>
         </div>
         <button className="secondary-button compact-button" disabled={disabled} type="button"
           onClick={() => load(accountId)}><RefreshCcw size={14} /> 重新读取</button>
       </div>
 
+      {isMeta && <div className="sheet-issues success meta-copy-post-gate">
+        <strong>Meta 复制门禁已启用</strong>
+        <span>本次只允许新建 Campaign 与 Ad Set，强制禁止创建新帖子、Creative 与 Ad。创建请求不依赖 Page ID 或 Page Token。</span>
+      </div>}
+
       {stuckTasks.length > 0 && (
         <div className="sheet-issues warning campaign-copy-stuck-tasks">
           <strong>{stuckTasks.length} 个任务结果未知，已暂停自动重试</strong>
-          <span>网络中断导致系统无法确认这些任务是否已在 TikTok 侧创建成功，为避免产生重复系列，已停止自动重试。请先到 TikTok 广告后台核实真实状态，再逐个重置。</span>
+          <span>网络中断导致系统无法确认这些任务是否已在 {platformName} 侧创建成功，为避免产生重复系列，已停止自动重试。请先到 {platformName} 广告后台核实真实状态，再逐个重置。</span>
           <div className="table-wrap">
             <table>
               <thead><tr><th>新系列名称</th><th>源系列 ID</th><th>最近更新</th><th>已生成的系列 ID</th><th></th></tr></thead>
@@ -387,7 +400,7 @@ export function CopyCampaignPanel(props: {
             <button aria-pressed={launchTiming === "scheduled"} className={launchTiming === "scheduled" ? "active" : ""} disabled={disabled} onClick={() => setLaunchTiming("scheduled")} type="button">定时投放</button>
           </div>
           {launchTiming === "scheduled"
-            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。默认次日 06:00，可改。</small></label>
+            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>{isMeta ? "Meta 会先创建两层对象，完成状态写入门禁后按该时间启用；全程不创建新帖子。" : "新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。"} 默认次日 06:00，可改。</small></label>
             : <small>一次会创建多个系列，默认关闭以避免误花费。</small>}
         </div>
       </div>

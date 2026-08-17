@@ -721,6 +721,7 @@ export const api = {
     groupsPerCampaign: number;
     initialStatus: "enabled" | "disabled";
     scheduledStartAt?: string | null;
+    createNewPosts?: boolean;
     campaignBudget?: number | null;
     bid?: number | null;
   }) =>

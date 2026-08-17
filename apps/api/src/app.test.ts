@@ -103,6 +103,7 @@ describe("local API", () => {
         "read-ads",
         "change-status",
         "create-campaigns",
+        "copy-campaigns",
       ],
     }));
     expect(response.json()).not.toHaveProperty("switchDefinitions");
@@ -298,6 +299,7 @@ describe("local API", () => {
     // 每个系列副本各拿一个源组，创意不会串组。
     expect(copyCampaign.mock.calls[0]?.[1]).toMatchObject({
       adGroups: [{ sourceAdGroupId: "adgroup-1" }],
+      createNewPosts: true,
     });
     expect(copyCampaign.mock.calls[1]?.[1]).toMatchObject({
       adGroups: [{ sourceAdGroupId: "adgroup-2" }],

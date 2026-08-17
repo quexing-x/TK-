@@ -715,6 +715,7 @@ export async function createApp(
       groupsPerCampaign: z.number().int().min(1).max(20),
       initialStatus: z.enum(["enabled", "disabled"]).default("disabled"),
       scheduledStartAt: z.string().datetime().nullable().default(null),
+      createNewPosts: z.boolean().default(true),
       campaignBudget: z.number().positive().nullable().default(null),
       bid: z.number().nonnegative().nullable().default(null),
     }).parse(request.body);
@@ -2143,7 +2144,7 @@ function hasMetaOfflineAccount(
   accountIds: Iterable<string>,
 ): boolean {
   return [...new Set(accountIds)].some(
-    (accountId) => store.getAccount(accountId)?.platform === "meta",
+    (accountId) => store.getAccount(accountId)?.providerKind === "meta-offline",
   );
 }
 

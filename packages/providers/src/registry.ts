@@ -42,6 +42,8 @@ export interface CopyCampaignInput {
   adGroups: Array<{ sourceAdGroupId: string; name: string }>;
   initialStatus: "enabled" | "disabled";
   scheduledStartAt?: string | null;
+  /** Meta 复制硬门禁：只能显式关闭新帖/广告创建。旧 TK 调用默认保持原行为。 */
+  createNewPosts?: boolean;
   /** 覆盖系列日预算；留空表示继承源系列。 */
   campaignBudget?: number | null;
   bid?: number | null;

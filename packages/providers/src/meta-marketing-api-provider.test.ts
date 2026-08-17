@@ -305,6 +305,7 @@ describe("MetaMarketingApiAdsProvider", () => {
       "read-ads",
       "change-status",
       "create-campaigns",
+      "copy-campaigns",
     ]));
     expect(provider.resolveCapabilities(context)).not.toContain("change-status");
     const statusTestProvider = new MetaMarketingApiAdsProvider(
@@ -1049,6 +1050,183 @@ describe("MetaMarketingApiAdsProvider", () => {
         "act_300000000000003/adsets",
       ],
     }));
+  });
+
+  it("copies Campaign + Ad Set without a Page ID and never reads or creates posts", async () => {
+    const sourceCampaignId = "120000000000201";
+    const sourceAdSetId = "120000000000202";
+    const remoteIds = {
+      campaigns: "120000000000211",
+      adsets: "120000000000212",
+    } as const;
+    const post = vi.fn(async (input: MetaMarketingApiTransportMutationRequest) => (
+      input.body.execution_options ? { success: true } : { id: remoteIds[input.path.split("/").at(-1) as keyof typeof remoteIds] }
+    ));
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => {
+      if (input.path === sourceCampaignId) {
+        return {
+          id: sourceCampaignId,
+          name: "source campaign",
+          objective: "OUTCOME_TRAFFIC",
+          buying_type: "AUCTION",
+          special_ad_categories: [],
+          is_adset_budget_sharing_enabled: true,
+          daily_budget: "1000",
+        };
+      }
+      if (input.path === sourceAdSetId) {
+        return {
+          id: sourceAdSetId,
+          name: "source ad set",
+          campaign_id: sourceCampaignId,
+          billing_event: "IMPRESSIONS",
+          optimization_goal: "LINK_CLICKS",
+          destination_type: "WEBSITE",
+          targeting: { geo_locations: { countries: ["US"] } },
+          bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+          daily_budget: "500",
+        };
+      }
+      if (input.path === remoteIds.campaigns) {
+        return { id: remoteIds.campaigns, name: "copied campaign", status: "PAUSED", effective_status: "PAUSED" };
+      }
+      if (input.path === remoteIds.adsets) {
+        return { id: remoteIds.adsets, name: "copied ad set", campaign_id: remoteIds.campaigns, status: "PAUSED", effective_status: "CAMPAIGN_PAUSED" };
+      }
+      throw new Error(`unexpected GET ${input.path}`);
+    });
+    const factory = vi.fn((): MetaMarketingApiTransport => ({ get, post }));
+    const provider = new MetaMarketingApiAdsProvider(factory);
+
+    const result = await provider.copyCampaign({
+      ...context,
+      settings: {
+        kind: "meta-marketing-api",
+        profileId: context.settings.profileId,
+        adAccountId: context.settings.adAccountId,
+        pageId: null,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      sourceCampaignId,
+      campaignName: "copied campaign",
+      adGroups: [{ sourceAdGroupId: sourceAdSetId, name: "copied ad set" }],
+      initialStatus: "disabled",
+      createNewPosts: false,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      campaignId: remoteIds.campaigns,
+      adGroupIds: [remoteIds.adsets],
+      message: "Meta Campaign 与 Ad Set 已按 PAUSED 状态复制并回读确认；未创建新帖子。",
+    });
+    expect(get.mock.calls.map(([request]) => request.path)).not.toContain("me/accounts");
+    expect(get.mock.calls.map(([request]) => request.path)).not.toContain("ads");
+    expect(post.mock.calls.map(([request]) => request.path)).toEqual([
+      "act_300000000000003/campaigns",
+      "act_300000000000003/campaigns",
+      "act_300000000000003/adsets",
+      "act_300000000000003/adsets",
+    ]);
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({
+      allowedCreationPaths: [
+        "act_300000000000003/campaigns",
+        "act_300000000000003/adsets",
+      ],
+    }));
+  });
+
+  it("rejects Meta copy when the new-post gate is not explicitly closed", async () => {
+    const get = vi.fn();
+    const post = vi.fn();
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+
+    const result = await provider.copyCampaign({
+      ...context,
+      settings: {
+        ...context.settings,
+        pageId: null,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      sourceCampaignId: "120000000000201",
+      campaignName: "copy blocked",
+      adGroups: [{ sourceAdGroupId: "120000000000202", name: "copy blocked group" }],
+      initialStatus: "disabled",
+      createNewPosts: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "failed",
+      message: expect.stringContaining("禁止创建新帖子"),
+    });
+    expect(get).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("marks a partial Campaign copy unknown and never auto-retryable", async () => {
+    const sourceCampaignId = "120000000000301";
+    const sourceAdSetId = "120000000000302";
+    const createdCampaignId = "120000000000311";
+    const post = vi.fn(async (input: MetaMarketingApiTransportMutationRequest) => {
+      if (input.path.endsWith("/campaigns") && input.body.execution_options) return { success: true };
+      if (input.path.endsWith("/campaigns")) return { id: createdCampaignId };
+      throw new MetaMarketingApiMutationRejectedError("fixture Ad Set validate rejected");
+    });
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => {
+      if (input.path === sourceCampaignId) return {
+        id: sourceCampaignId,
+        name: "source campaign",
+        objective: "OUTCOME_TRAFFIC",
+        special_ad_categories: [],
+        daily_budget: "1000",
+      };
+      if (input.path === sourceAdSetId) return {
+        id: sourceAdSetId,
+        name: "source ad set",
+        campaign_id: sourceCampaignId,
+        targeting: {},
+      };
+      if (input.path === createdCampaignId) return {
+        id: createdCampaignId,
+        name: "partial campaign",
+        status: "PAUSED",
+      };
+      throw new Error(`unexpected GET ${input.path}`);
+    });
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+
+    const result = await provider.copyCampaign({
+      ...context,
+      settings: {
+        ...context.settings,
+        pageId: null,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      sourceCampaignId,
+      campaignName: "partial campaign",
+      adGroups: [{ sourceAdGroupId: sourceAdSetId, name: "partial ad set" }],
+      initialStatus: "disabled",
+      createNewPosts: false,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "unknown",
+      retrySafe: false,
+      message: "fixture Ad Set validate rejected",
+    });
+    expect(post.mock.calls.map(([request]) => request.path)).toEqual([
+      "act_300000000000003/campaigns",
+      "act_300000000000003/campaigns",
+      "act_300000000000003/adsets",
+    ]);
   });
 
   it("reconciles a two-level task as complete at a PAUSED Ad Set", async () => {

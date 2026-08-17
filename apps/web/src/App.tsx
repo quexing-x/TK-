@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  Fragment,
   type FormEvent,
   type ReactNode,
   useCallback,
@@ -180,72 +181,84 @@ const navItems: Array<{
   label: string;
   description: string;
   icon: typeof Settings2;
+  section: "基础" | "TikTok" | "Meta" | "系统";
 }> = [
   {
     key: "overview",
     label: "总览",
-    description: "运行状态、待处理决策与快捷操作",
+    description: "TikTok / Meta 接入状态",
     icon: LayoutDashboard,
+    section: "基础",
   },
   {
     key: "automation",
     label: "自动化中心",
     description: "检测、预览与执行记录",
     icon: Play,
+    section: "TikTok",
   },
   {
     key: "ads",
     label: "广告管理",
     description: "筛选、忽略与手动启停",
     icon: ListFilter,
+    section: "TikTok",
   },
   {
     key: "analytics",
     label: "广告分析",
     description: "指标快照与执行结果",
     icon: BarChart3,
-  },
-  {
-    key: "meta-assets",
-    label: "Meta 广告",
-    description: "Campaign、Ad Set 与 Ad 手动启停",
-    icon: Layers3,
-  },
-  {
-    key: "meta-rules",
-    label: "Meta 规则",
-    description: "独立三层规则与运行开关",
-    icon: SlidersHorizontal,
-  },
-  {
-    key: "rules",
-    label: "规则配置",
-    description: "九条全局自动化规则",
-    icon: Gauge,
-  },
-  {
-    key: "notifications",
-    label: "消息推送",
-    description: "邮箱、企业微信与飞书",
-    icon: BellRing,
+    section: "TikTok",
   },
   {
     key: "launch",
     label: "创建广告",
     description: "相同广告多账户投放",
     icon: Plus,
+    section: "TikTok",
+  },
+  {
+    key: "meta-assets",
+    label: "Meta 广告",
+    description: "广告系列、广告组与广告独立管理",
+    icon: Layers3,
+    section: "Meta",
+  },
+  {
+    key: "meta-rules",
+    label: "Meta 规则",
+    description: "独立三层规则与运行开关",
+    icon: SlidersHorizontal,
+    section: "Meta",
+  },
+  {
+    key: "rules",
+    label: "规则配置",
+    description: "九条全局自动化规则",
+    icon: Gauge,
+    section: "系统",
+  },
+  {
+    key: "notifications",
+    label: "消息推送",
+    description: "邮箱、企业微信与飞书",
+    icon: BellRing,
+    section: "系统",
   },
   {
     key: "system-users",
     label: "系统权限",
     description: "登录账户与角色权限",
     icon: ShieldCheck,
+    section: "系统",
   },
   {
     key: "maintenance",
     label: "运维中心",
     description: "审计、备份、恢复与升级",
     icon: Settings2,
+    section: "系统",
   },
 ];
 
@@ -500,23 +513,25 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         </div>
 
         <nav className="nav-list">
-          {navItems.filter((item) => canAccessNavigationItem(item.key, auth.status.permissions)).map((item) => {
+          {navItems.filter((item) => canAccessNavigationItem(item.key, auth.status.permissions)).map((item, index, visibleItems) => {
             const Icon = item.icon;
             return (
-              <button
-                className={page === item.key ? "nav-item active" : "nav-item"}
-                key={item.key}
-                aria-label={item.label}
-                onClick={() => navigateTo(item.key)}
-                title={item.label}
-                type="button"
-              >
-                <Icon size={19} />
-                <span>
-                  <strong>{item.label}</strong>
-                  <small>{item.description}</small>
-                </span>
-              </button>
+              <Fragment key={item.key}>
+                {(index === 0 || visibleItems[index - 1]?.section !== item.section) && <div className="nav-section-label">{item.section}</div>}
+                <button
+                  className={page === item.key ? "nav-item active" : "nav-item"}
+                  aria-label={item.label}
+                  onClick={() => navigateTo(item.key)}
+                  title={item.label}
+                  type="button"
+                >
+                  <Icon size={19} />
+                  <span>
+                    <strong>{item.label}</strong>
+                    <small>{item.description}</small>
+                  </span>
+                </button>
+              </Fragment>
             );
           })}
         </nav>
@@ -958,6 +973,71 @@ function UsersPage({
     }
   };
 
+  const renderAccountRows = (platform: PlatformKind) => {
+    const platformAccounts = accounts.filter((account) => account.platform === platform);
+    if (platformAccounts.length === 0) {
+      return <tr><td colSpan={7} className="account-platform-empty">暂无 {platformLabel(platform)} 账户。</td></tr>;
+    }
+    return platformAccounts.map((account) => {
+      const automationReady = canEnableConfiguredAccountAutomation(
+        account,
+        connectionStates[account.id],
+      );
+      return (
+        <tr key={account.id}>
+          <td><strong>{account.displayName}</strong><br /><small className="account-id">{account.id}</small></td>
+          <td>{accountTypeLabel(account.accountType)}</td>
+          <td>{providerLabel(account.providerKind)}</td>
+          <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
+          <td>{providerCapabilitySummary(connectionStates[account.id]?.capabilities)}</td>
+          <td>
+            <div className="account-automation-toggle">
+              <Toggle
+                checked={account.enabled}
+                disabled={!canManageAccounts || (!account.enabled && !automationReady)}
+                label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
+                onChange={() => void toggleAccount(account)}
+              />
+              <span className={automationReady && account.enabled ? "status active" : "status"}>{account.platform === "meta" ? account.providerKind === "meta-offline" ? "离线架构不可开启" : account.enabled ? automationReady ? "Meta 账户已开启" : "已开启 · 接入异常" : automationReady ? "Meta 账户已关闭" : "需 Automation liveMode" : account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
+            </div>
+          </td>
+          <td>
+            <div className="row-actions">
+              <button disabled={!canManageAccounts} type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
+              <button disabled={!canManageAccounts || account.providerKind === "meta-offline"} title={account.providerKind === "meta-offline" ? "Meta 离线 Provider 不接收任何凭据" : undefined} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> {account.providerKind === "meta-offline" ? "离线" : "接入"}</button>
+              <button className="danger-button" disabled={saving || !canManageAccounts} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
+            </div>
+          </td>
+        </tr>
+      );
+    });
+  };
+
+  const renderPlatformAccountGroup = (
+    platform: PlatformKind,
+    title: string,
+    description: string,
+  ) => {
+    const count = accounts.filter((account) => account.platform === platform).length;
+    return (
+      <section className={`account-platform-group account-platform-${platform}`}>
+        <header className="account-platform-heading">
+          <div>
+            <span className={platform === "meta" ? "status warning" : "status active"}>{platformLabel(platform)}</span>
+            <div><h3>{title}</h3><p>{description}</p></div>
+          </div>
+          <strong>{count} 个账户</strong>
+        </header>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>账户名称</th><th>账户类型</th><th>接入方式</th><th>接入状态</th><th>可用能力</th><th>自动化开关</th><th>操作</th></tr></thead>
+            <tbody>{renderAccountRows(platform)}</tbody>
+          </table>
+        </div>
+      </section>
+    );
+  };
+
   return (
     <section className="page-stack" id="account-management">
       <div className="panel table-panel">
@@ -966,63 +1046,16 @@ function UsersPage({
             <span className="panel-icon"><UserRound size={18} /></span>
             <div>
               <h2>广告平台账户</h2>
-              <p>TikTok 保持现有能力；Meta 可配置读取与启停合同，真实网络、API 写入入口和调度仍关闭。</p>
+              <p>TikTok 与 Meta 账户分区管理；接入、能力与自动化状态互不混用。</p>
             </div>
           </div>
           <button className="primary-button" disabled={!canManageAccounts} onClick={openNew} title={canManageAccounts ? undefined : "需要 accounts:manage 权限"} type="button">
             <Plus size={17} /> 新增账户
           </button>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>账户名称</th>
-                <th>平台</th>
-                <th>账户类型</th>
-                <th>接入方式</th>
-                <th>接入状态</th>
-                <th>可用能力</th>
-                <th>自动化开关</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map((account) => (
-                <tr key={account.id}>{(() => {
-                  const automationReady = canEnableConfiguredAccountAutomation(
-                    account,
-                    connectionStates[account.id],
-                  );
-                  return <>
-                  <td><strong>{account.displayName}</strong><br /><small className="account-id">{account.id}</small></td>
-                  <td><span className={account.platform === "meta" ? "status warning" : "status active"}>{platformLabel(account.platform)}</span></td>
-                  <td>{accountTypeLabel(account.accountType)}</td>
-                  <td>{providerLabel(account.providerKind)}</td>
-                  <td>{connectionStateLabel(connectionStates[account.id], account.providerKind)}</td>
-                  <td>{providerCapabilitySummary(connectionStates[account.id]?.capabilities)}</td>
-                  <td>
-                    <div className="account-automation-toggle">
-                      <Toggle
-                        checked={account.enabled}
-                        disabled={!canManageAccounts || (!account.enabled && !automationReady)}
-                        label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
-                        onChange={() => void toggleAccount(account)}
-                      />
-                      <span className={automationReady && account.enabled ? "status active" : "status"}>{account.platform === "meta" ? account.providerKind === "meta-offline" ? "离线架构不可开启" : account.enabled ? automationReady ? "Meta 账户已开启" : "已开启 · 接入异常" : automationReady ? "Meta 账户已关闭" : "需 Automation liveMode" : account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="row-actions">
-                      <button disabled={!canManageAccounts} type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
-                      <button disabled={!canManageAccounts || account.providerKind === "meta-offline"} title={account.providerKind === "meta-offline" ? "Meta 离线 Provider 不接收任何凭据" : undefined} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> {account.providerKind === "meta-offline" ? "离线" : "接入"}</button>
-                      <button className="danger-button" disabled={saving || !canManageAccounts} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
-                    </div>
-                  </td></>;
-                })()}</tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="account-platform-groups">
+          {renderPlatformAccountGroup("tiktok", "TikTok Ads 账户", "Cookie / 官方 API 接入与 TikTok 自动化")}
+          {renderPlatformAccountGroup("meta", "Meta Ads 账户", "Marketing API 接入与 Meta 独立自动化")}
         </div>
       </div>
 

@@ -33,19 +33,19 @@ describe("Meta creation view", () => {
   it("defaults new creation tasks to Campaign + Ad Set", () => {
     expect(defaultMetaCreationTargetLevel).toBe("ad-set");
     expect(metaCreationTargetCopy(defaultMetaCreationTargetLevel)).toEqual({
-      button: "创建 Campaign + Ad Set",
-      description: "只创建 Campaign 与 Ad Set；两层固定 PAUSED，不创建 Creative 或 Ad",
+      button: "创建广告系列 + 广告组",
+      description: "只创建广告系列与广告组；两层固定为已暂停，不创建素材或广告",
       label: "两层",
-      success: "Meta Campaign 与 Ad Set 已全部以 PAUSED 创建",
+      success: "Meta 广告系列与广告组已全部以已暂停状态创建",
     });
   });
 
   it("keeps the full four-level creation option explicit", () => {
     expect(metaCreationTargetCopy("ad")).toEqual({
-      button: "创建四层 PAUSED 广告",
-      description: "创建 Campaign、Ad Set、Creative 与 Ad；四层固定 PAUSED，不会开始投放",
+      button: "创建四层已暂停广告",
+      description: "创建广告系列、广告组、素材与广告；四层固定为已暂停，不会开始投放",
       label: "四层",
-      success: "Meta Campaign、Ad Set、Creative、Ad 已全部以 PAUSED 创建",
+      success: "Meta 广告系列、广告组、素材与广告已全部以已暂停状态创建",
     });
   });
 

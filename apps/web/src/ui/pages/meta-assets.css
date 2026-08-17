@@ -1,5 +1,12 @@
 .meta-assets-page { gap: 20px; }
 
+.meta-create-module { display: grid; gap: 14px; }
+.meta-create-module-heading { padding: 4px 4px 12px; border-bottom: 1px solid var(--line); }
+.meta-create-module-heading p { display: block; max-width: 680px; line-height: 1.5; }
+.meta-create-module > .campaign-copy-panel { margin: 0; }
+.meta-copy-post-gate { margin: 0; }
+.meta-copy-post-gate { color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, var(--line)); background: var(--success-tint); }
+
 .meta-create-panel { display: grid; gap: 18px; }
 .meta-create-panel .panel-heading p { display: block; max-width: 620px; line-height: 1.5; }
 .meta-create-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -77,20 +84,39 @@
   border-block: 1px solid var(--line);
 }
 
-.meta-asset-summary article { min-height: 78px; display: grid; align-content: center; gap: 3px; padding: 12px 20px; border-right: 1px solid var(--line); }
+.meta-asset-summary article { min-height: 92px; display: grid; align-content: center; gap: 3px; padding: 12px 20px; border-right: 1px solid var(--line); position: relative; }
 .meta-asset-summary article:last-child { border-right: 0; }
 .meta-asset-summary small, .meta-asset-summary span { color: var(--ink-faint); font-size: 9px; }
 .meta-asset-summary strong { color: var(--ink); font: 22px "IBM Plex Mono", Consolas, monospace; }
+.meta-asset-summary .meta-summary-icon { position: absolute; top: 12px; right: 16px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--primary-tint); color: var(--primary); }
+.meta-asset-summary .meta-summary-icon svg { width: 15px; height: 15px; }
 
 .meta-filter-panel { display: grid; grid-template-columns: minmax(280px, 2fr) repeat(2, minmax(180px, 1fr)); gap: 16px; padding: 18px; }
 .meta-search-input { position: relative; }
 .meta-search-input svg { position: absolute; top: 50%; left: 11px; z-index: 1; color: var(--ink-faint); transform: translateY(-50%); pointer-events: none; }
 .meta-search-input input { width: 100%; padding-left: 34px; }
-.meta-assets-table-panel table { min-width: 1120px; }
+.meta-assets-table-panel table { min-width: 1560px; }
 .meta-assets-table-panel td:nth-child(1) { min-width: 190px; }
-.meta-assets-table-panel td:nth-child(7) { min-width: 210px; max-width: 300px; }
-.meta-assets-table-panel td:nth-child(7) small { display: block; margin-top: 4px; color: var(--ink-faint); line-height: 1.45; }
+.meta-assets-table-panel td:nth-child(11) { min-width: 150px; }
+.meta-assets-table-panel td:nth-child(12) { min-width: 210px; max-width: 300px; }
+.meta-assets-table-panel td:nth-child(12) small { display: block; margin-top: 4px; color: var(--ink-faint); line-height: 1.45; }
+.meta-assets-table-panel .meta-metric-cell { font-family: "IBM Plex Mono", Consolas, monospace; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.meta-assets-table-panel tbody tr:hover { background: var(--primary-tint); }
 .meta-assets-table-panel .row-actions { flex-wrap: nowrap; }
+.meta-assets-pagination { display: flex; align-items: center; justify-content: space-between; color: var(--ink-faint); font-size: 10px; }
+.meta-assets-pagination .row-actions { flex-wrap: nowrap; }
+
+.meta-execution-report-panel table { min-width: 1120px; }
+.meta-execution-report-panel td:first-child { min-width: 190px; }
+.meta-execution-report-panel td:nth-child(3) { min-width: 360px; max-width: 520px; }
+.meta-execution-report-panel td:nth-child(5) { min-width: 190px; }
+.meta-execution-report-panel td:last-child { min-width: 160px; }
+.meta-report-condition { line-height: 1.55; }
+.meta-report-condition small,
+.meta-execution-report-panel td:nth-child(5) small { display: block; margin-top: 4px; color: var(--ink-faint); line-height: 1.45; }
+.meta-execution-report-panel .meta-report-error { color: var(--danger); }
+.meta-report-time { font-family: "IBM Plex Mono", Consolas, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.meta-execution-report-panel tbody tr:hover { background: var(--surface-active); }
 
 .meta-empty-state { min-height: 360px; display: grid; place-content: center; justify-items: center; gap: 12px; text-align: center; }
 .meta-empty-state > svg { color: var(--primary); }
@@ -116,6 +142,9 @@
   .meta-asset-summary article:nth-child(2) { border-right: 0; }
   .meta-status-strip { grid-template-columns: 1fr; }
   .meta-status-strip > span { border-right: 0; border-bottom: 1px solid var(--line); }
+  .meta-assets-pagination { align-items: stretch; flex-direction: column; }
+  .meta-assets-pagination .row-actions { width: 100%; }
+  .meta-assets-pagination button { min-height: 44px; flex: 1; justify-content: center; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -52,7 +52,7 @@ describe("ProviderRegistry", () => {
         kind: "meta-marketing-api",
         platform: "meta",
         implementationStatus: "scaffolded",
-        capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status", "create-campaigns"],
+        capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status", "create-campaigns", "copy-campaigns"],
       }),
     ]));
     expect(registry.get("meta-offline")).not.toBe(registry.get("official-api"));
