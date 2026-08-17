@@ -67,6 +67,8 @@ import type {
   MetaAutomationRuntimeInput,
   MetaRuleConfiguration,
   MetaRuleConfigurationInput,
+  MetaAdCreationInput,
+  MetaCreationTaskRecord,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -160,6 +162,82 @@ export interface WriteTaskFilters {
 let csrfToken: string | null = null;
 let unauthorizedHandler: (() => void) | null = null;
 
+export type ApiValidationFieldErrors = Record<string, string[]>;
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly fieldErrors: ApiValidationFieldErrors;
+
+  constructor(
+    message: string,
+    status: number,
+    code: string | null = null,
+    fieldErrors: ApiValidationFieldErrors = {},
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+    this.fieldErrors = fieldErrors;
+  }
+
+  getFieldMessage(field: string): string | null {
+    const message = this.fieldErrors[field]?.[0];
+    return message ? describeValidationIssue(field, message) : null;
+  }
+}
+
+const validationFieldLabels: Record<string, string> = {
+  name: "档案名称",
+  appId: "App ID",
+  businessId: "Business Portfolio ID",
+  graphApiVersion: "Graph API 版本",
+  appSecret: "App Secret",
+  accessToken: "Access Token",
+  profileId: "共享 App 档案",
+  adAccountId: "广告账户 ID",
+  pageId: "Facebook Page ID",
+  liveMode: "Live Mode",
+  allowedStatusEntityTypes: "允许启停层级",
+};
+
+function normalizeFieldErrors(value: unknown): ApiValidationFieldErrors {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: ApiValidationFieldErrors = {};
+  for (const [field, messages] of Object.entries(value)) {
+    if (!Array.isArray(messages)) continue;
+    const safeMessages = messages.filter((message): message is string => typeof message === "string");
+    if (safeMessages.length > 0) result[field] = safeMessages;
+  }
+  return result;
+}
+
+function describeValidationIssue(field: string, message: string): string {
+  const label = validationFieldLabels[field] ?? field;
+  if (message.includes(label)) return message;
+  const minimum = /^String must contain at least (\d+) character\(s\)$/.exec(message);
+  if (minimum) return `${label} 至少需要 ${minimum[1]} 个字符`;
+  const maximum = /^String must contain at most (\d+) character\(s\)$/.exec(message);
+  if (maximum) return `${label} 最多允许 ${maximum[1]} 个字符`;
+  return `${label}：${message}`;
+}
+
+function validationErrorMessage(
+  fieldErrors: ApiValidationFieldErrors,
+  formErrors: unknown,
+): string | null {
+  const fieldIssue = Object.entries(fieldErrors)
+    .flatMap(([field, messages]) => messages.map((message) => describeValidationIssue(field, message)))
+    .at(0);
+  if (fieldIssue) return fieldIssue;
+  if (Array.isArray(formErrors)) {
+    const formIssue = formErrors.find((message): message is string => typeof message === "string");
+    if (formIssue) return formIssue;
+  }
+  return null;
+}
+
 export function setAuthSession(status: AuthStatus | null): void {
   csrfToken = status?.csrfToken ?? null;
 }
@@ -190,11 +268,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     if (response.status === 401) unauthorizedHandler?.();
     const payload = (await response.json().catch(() => null)) as {
+      error?: string;
       message?: string;
+      details?: {
+        formErrors?: unknown;
+        fieldErrors?: unknown;
+      };
     } | null;
-    const message = payload?.message ?? `请求失败 (${response.status})`;
+    const fieldErrors = normalizeFieldErrors(payload?.details?.fieldErrors);
+    const message = validationErrorMessage(fieldErrors, payload?.details?.formErrors)
+      ?? payload?.message
+      ?? `请求失败 (${response.status})`;
     if (typeof window !== "undefined" && !["GET", "HEAD", "OPTIONS"].includes(method)) window.dispatchEvent(new CustomEvent("tk-api-write", { detail: { ok: false, message } }));
-    throw new Error(message);
+    throw new ApiRequestError(message, response.status, payload?.error ?? null, fieldErrors);
   }
 
   if (
@@ -530,6 +616,23 @@ export const api = {
     request<ManagedEntityRecord[]>(`/api/accounts/${accountId}/entities`),
   getMetaAssets: (accountId: string) =>
     request<MetaAssetRecord[]>(`/api/accounts/${accountId}/entities`),
+  getMetaCreationTasks: (accountId: string) =>
+    request<MetaCreationTaskRecord[]>(`/api/accounts/${accountId}/meta-creations`),
+  createMetaAd: (accountId: string, input: MetaAdCreationInput) =>
+    request<MetaCreationTaskRecord>(`/api/accounts/${accountId}/meta-creations`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  retryMetaAdCreation: (accountId: string, taskId: string) =>
+    request<MetaCreationTaskRecord>(
+      `/api/accounts/${accountId}/meta-creations/${taskId}/retry`,
+      { method: "POST" },
+    ),
+  reconcileMetaAdCreation: (accountId: string, taskId: string) =>
+    request<MetaCreationTaskRecord>(
+      `/api/accounts/${accountId}/meta-creations/${taskId}/reconcile`,
+      { method: "POST" },
+    ),
   changeMetaEntityStatus: (
     accountId: string,
     input: Pick<ManualStatusInput, "externalId" | "action"> & {

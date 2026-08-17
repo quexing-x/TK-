@@ -52,7 +52,7 @@ describe("ProviderRegistry", () => {
         kind: "meta-marketing-api",
         platform: "meta",
         implementationStatus: "scaffolded",
-        capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status"],
+        capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status", "create-campaigns"],
       }),
     ]));
     expect(registry.get("meta-offline")).not.toBe(registry.get("official-api"));
@@ -210,6 +210,7 @@ describe("ProviderRegistry", () => {
       profileId: "11111111-1111-4111-8111-111111111111",
       liveMode: "manual-status",
       allowedMutationExternalIds: ["500000000000005"],
+      allowedCreationPaths: [],
     });
   });
 
@@ -253,6 +254,7 @@ describe("ProviderRegistry", () => {
       profileId: "11111111-1111-4111-8111-111111111111",
       liveMode: "read-only",
       allowedMutationExternalIds: [],
+      allowedCreationPaths: [],
     });
   });
 

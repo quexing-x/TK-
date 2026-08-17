@@ -31,6 +31,8 @@ import type {
   TemplateCopyMutation,
   MetaAdAccountDiscoveryContext,
   DiscoveredMetaAdAccount,
+  MetaAdCreationMutation,
+  MetaAdCreationResult,
 } from "./types.js";
 
 export interface CopyCampaignInput {
@@ -233,6 +235,28 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持广告启停。`);
     }
     return provider.changeStatus(context, mutations);
+  }
+
+  createMetaAd(
+    context: ProviderContext,
+    mutation: MetaAdCreationMutation,
+  ): Promise<MetaAdCreationResult> {
+    const provider = this.get("meta-marketing-api");
+    if (!provider.createMetaAd || !provider.capabilities.has("create-campaigns")) {
+      throw new RetryableCreationError("Meta Marketing API Provider 尚未实现广告创建。");
+    }
+    return provider.createMetaAd(context, mutation);
+  }
+
+  reconcileMetaAd(
+    context: ProviderContext,
+    mutation: Pick<MetaAdCreationMutation, "input" | "existing">,
+  ): Promise<MetaAdCreationResult> {
+    const provider = this.get("meta-marketing-api");
+    if (!provider.reconcileMetaAd || !provider.capabilities.has("create-campaigns")) {
+      throw new RetryableCreationError("Meta Marketing API Provider 尚未实现创建结果对账。");
+    }
+    return provider.reconcileMetaAd(context, mutation);
   }
 
   deleteAdGroups(

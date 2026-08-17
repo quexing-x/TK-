@@ -51,6 +51,8 @@ describe("local authentication and authorization", () => {
       user: { username: "developer", role: "developer" },
     });
     expect(setup.body).not.toContain(developerPassword);
+    expect(setup.json().user).not.toHaveProperty("passwordHash");
+    expect(setup.json().user).not.toHaveProperty("passwordSalt");
     expect(setup.headers["set-cookie"]).toContain("HttpOnly");
     expect(setup.headers["set-cookie"]).toContain("SameSite=Strict");
   });

@@ -1,7 +1,9 @@
 import {
   MetaMarketingApiConnectionSettingsSchema,
   MetaAccessSecretBundleInputSchema,
+  MetaAdCreationInputSchema,
   type MetaMarketingApiLiveMode,
+  type MetaCreationProgress,
   type ProviderEntity,
   type SyncEntityType,
 } from "@tk-auto/core";
@@ -21,6 +23,8 @@ import type {
   ResolvedMetaAccessProfile,
   StatusMutation,
   StatusMutationResult,
+  MetaAdCreationMutation,
+  MetaAdCreationResult,
 } from "./types.js";
 
 export const META_MARKETING_API_NETWORK_DISABLED_MESSAGE =
@@ -58,6 +62,7 @@ const noCapabilities: ReadonlySet<ProviderCapability> = new Set();
 const capabilities: ReadonlySet<ProviderCapability> = new Set([
   ...readCapabilities,
   "change-status",
+  "create-campaigns",
 ]);
 
 export interface MetaMarketingApiStatusTestScope {
@@ -103,6 +108,8 @@ export interface MetaMarketingApiTransportFactoryInput {
   liveMode: Exclude<MetaMarketingApiLiveMode, "disabled">;
   /** Exact object ids authorized for this single provider operation. */
   allowedMutationExternalIds: readonly string[];
+  /** Exact account edges authorized for this single paused-only create task. */
+  allowedCreationPaths?: readonly string[];
 }
 
 export type MetaMarketingApiTransportFactory = (
@@ -138,7 +145,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
   readonly platform = "meta" as const;
   readonly displayName: string;
   readonly implementationStatus: "scaffolded" | "available";
-  readonly capabilityVersion = "meta-marketing-api-live-status-v1-2026-08";
+  readonly capabilityVersion = "meta-marketing-api-live-create-v3-2026-08";
   readonly capabilities = capabilities;
   private readonly transport: MetaMarketingApiTransport | null;
   private readonly transportFactory: MetaMarketingApiTransportFactory | null;
@@ -168,10 +175,17 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
           ? readCapabilities
           : capabilities;
       }
-      return isStatusLiveMode(settings.liveMode)
+      const resolved = new Set<ProviderCapability>(readCapabilities);
+      if (
+        isStatusLiveMode(settings.liveMode)
         && (settings.allowedStatusEntityTypes?.length ?? 0) > 0
-        ? capabilities
-        : readCapabilities;
+      ) {
+        resolved.add("change-status");
+      }
+      if (settings.creationMode === "paused-only") {
+        resolved.add("create-campaigns");
+      }
+      return resolved;
     } catch {
       return noCapabilities;
     }
@@ -191,6 +205,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
     if (scopeIssue) throw new Error(scopeIssue);
     const statusEnabled = this.statusTestScope !== null
       || isStatusLiveMode(settings.liveMode);
+    const creationEnabled = settings.creationMode === "paused-only";
     const transport = this.resolveTransport(context, settings, []);
     const permissionPayload = asRecord(await transport.get({
       version: profile.graphApiVersion,
@@ -200,12 +215,20 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
       appSecretProof,
     }));
     const grantedPermissions = readGrantedPermissions(permissionPayload);
-    if (!grantedPermissions.has("ads_read")) {
-      throw new Error("Meta Token 未授予 ads_read。");
+    if (
+      !grantedPermissions.has("ads_read")
+      && !grantedPermissions.has("ads_management")
+    ) {
+      throw new Error("Meta Token 未授予 ads_read 或 ads_management。");
     }
-    if (statusEnabled && !grantedPermissions.has("ads_management")) {
-      throw new Error("Meta 状态启停 Token 未授予 ads_management。");
+    if ((statusEnabled || creationEnabled) && !grantedPermissions.has("ads_management")) {
+      throw new Error("Meta 写入 Token 未授予 ads_management。");
     }
+    const verifiedPermission = statusEnabled || creationEnabled
+      ? "ads_management"
+      : grantedPermissions.has("ads_read")
+        ? "ads_read"
+        : "ads_management（含读取）";
     const discovered = await this.readDiscoveredAdAccounts(
       transport,
       profile,
@@ -240,9 +263,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
     return {
       ok: true,
       status: "ready",
-      message: statusEnabled
-        ? `Meta 广告账户、ads_read 与 ads_management 验证成功（${account.currency} / ${account.timezone}）。`
-        : `Meta 广告账户与 ads_read 验证成功（${account.currency} / ${account.timezone}）。`,
+      message: `Meta 广告账户与 ${verifiedPermission} 验证成功（${account.currency} / ${account.timezone}）。`,
     };
   }
 
@@ -511,6 +532,529 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
     return results;
   }
 
+  async createMetaAd(
+    context: ProviderContext,
+    mutation: MetaAdCreationMutation,
+  ): Promise<MetaAdCreationResult> {
+    let settings: ReturnType<typeof MetaMarketingApiConnectionSettingsSchema.parse>;
+    let credential: ReturnType<typeof MetaAccessSecretBundleInputSchema.parse>;
+    let profile: NonNullable<ProviderContext["resolvedMetaAccessProfile"]>;
+    let input: ReturnType<typeof MetaAdCreationInputSchema.parse>;
+    let appSecretProof: string;
+    try {
+      settings = MetaMarketingApiConnectionSettingsSchema.parse(context.settings);
+      credential = MetaAccessSecretBundleInputSchema.parse(context.credential);
+      profile = resolveMetaAccessProfile(context, settings);
+      input = MetaAdCreationInputSchema.parse(mutation.input);
+      appSecretProof = await createMetaAppSecretProof(
+        credential.appSecret,
+        credential.accessToken,
+      );
+      if (settings.creationMode !== "paused-only") {
+        throw new Error("Meta 账户未开启 PAUSED-only 创建模式。");
+      }
+      if (input.targetLevel === "ad" && !settings.pageId) {
+        throw new Error("Meta 创建广告必须绑定 Page ID。");
+      }
+    } catch (cause) {
+      return {
+        ok: false,
+        failureKind: "retryable",
+        message: cause instanceof Error ? cause.message : "Meta 创建参数无效。",
+      };
+    }
+
+    const accountPath = normalizeAdAccountId(settings.adAccountId);
+    const creationPaths = (input.targetLevel === "ad"
+      ? ["campaigns", "adsets", "adcreatives", "ads"]
+      : ["campaigns", "adsets"])
+      .map((edge) => `${accountPath}/${edge}`);
+    let transport: MetaMarketingApiTransport;
+    try {
+      transport = this.resolveTransport(context, settings, [], creationPaths);
+    } catch (cause) {
+      return {
+        ok: false,
+        failureKind: "retryable",
+        message: cause instanceof Error ? cause.message : "Meta 创建 Transport 初始化失败。",
+      };
+    }
+
+    const ids = { ...mutation.existing };
+    const campaignBody = {
+      name: input.campaignName,
+      objective: input.objective,
+      status: "PAUSED",
+      buying_type: "AUCTION",
+      special_ad_categories: "[]",
+      is_adset_budget_sharing_enabled: "false",
+    };
+    const progress = (value: MetaCreationProgress): void => mutation.onProgress?.(value);
+    const create = async (
+      edge: "campaigns" | "adsets" | "adcreatives" | "ads",
+      body: Record<string, string>,
+      phase: MetaCreationProgress["phase"],
+      rememberAcceptedId: (id: string) => void,
+      readbackFields: string,
+      requestToken = credential.accessToken,
+      requestProof = appSecretProof,
+    ): Promise<void> => {
+      const expectedName = body.name;
+      if (!expectedName) {
+        throw new MetaMarketingApiMutationRejectedError("Meta 创建名称为空，未发送请求。");
+      }
+      mutation.onBeforeDispatch?.();
+      const payload = asRecord(await transport.post({
+        version: profile.graphApiVersion,
+        path: `${accountPath}/${edge}`,
+        body,
+        accessToken: requestToken,
+        appSecretProof: requestProof,
+      }));
+      const id = readCreatedId(payload, phase);
+      rememberAcceptedId(id);
+      progress({
+        phase,
+        ...ids,
+        message: `Meta ${phase} 已返回 ID，正在执行写后回读。`,
+      });
+      const readback = asRecord(await transport.get({
+        version: profile.graphApiVersion,
+        path: id,
+        params: { fields: readbackFields },
+        accessToken: requestToken,
+        appSecretProof: requestProof,
+      }));
+      if (
+        readEntityId(readback) !== id
+        || !createdObjectNameMatches(readback.name, expectedName, phase === "creative")
+        || (phase !== "creative" && readback.status !== "PAUSED")
+      ) {
+        throw new MetaMarketingApiMutationUnknownError(
+          `Meta ${phase} 创建已返回 ID，但写后回读不一致。`,
+        );
+      }
+    };
+
+    try {
+      const validate = async (
+        edge: "campaigns" | "adcreatives" | "ads",
+        body: Record<string, string>,
+        requestToken: string,
+        requestProof: string,
+      ): Promise<void> => {
+        const payload = asRecord(await transport.post({
+          version: profile.graphApiVersion,
+          path: `${accountPath}/${edge}`,
+          body: { ...body, execution_options: '["validate_only"]' },
+          accessToken: requestToken,
+          appSecretProof: requestProof,
+        }));
+        if (payload.success !== true) {
+          throw new MetaMarketingApiMutationUnknownError(
+            `Meta ${edge} validate_only 未返回 success=true。`,
+          );
+        }
+      };
+      await validate("campaigns", campaignBody, credential.accessToken, appSecretProof);
+
+      let adContext: {
+        creativeBody: Record<string, string>;
+        pageAccessToken: string;
+        pageAppSecretProof: string;
+      } | null = null;
+      if (input.targetLevel === "ad") {
+        if (!settings.pageId) {
+          throw new MetaMarketingApiMutationRejectedError("Meta 创建广告必须绑定 Page ID。");
+        }
+        const pageAccessToken = await this.readPageAccessToken(
+          transport,
+          profile.graphApiVersion,
+          settings.pageId,
+          credential.accessToken,
+          appSecretProof,
+        );
+        const pageAppSecretProof = await createMetaAppSecretProof(
+          credential.appSecret,
+          pageAccessToken,
+        );
+        const linkData: Record<string, unknown> = {
+          link: input.destinationUrl,
+          message: input.primaryText,
+          name: input.headline,
+          description: input.description,
+          ...(input.callToAction === "NO_BUTTON"
+            ? {}
+            : {
+                call_to_action: {
+                  type: input.callToAction,
+                  value: { link: input.destinationUrl },
+                },
+              }),
+          ...(input.imageHash ? { image_hash: input.imageHash } : {}),
+        };
+        const creativeBody = {
+          name: input.creativeName,
+          object_story_spec: JSON.stringify({
+            page_id: settings.pageId,
+            link_data: linkData,
+          }),
+        };
+        await validate("adcreatives", creativeBody, pageAccessToken, pageAppSecretProof);
+        adContext = { creativeBody, pageAccessToken, pageAppSecretProof };
+      }
+
+      if (!ids.campaignId) {
+        await create(
+          "campaigns",
+          campaignBody,
+          "campaign",
+          (id) => { ids.campaignId = id; },
+          "id,name,status,effective_status",
+        );
+        progress({
+          phase: "campaign",
+          campaignId: ids.campaignId,
+          message: "Campaign 已创建并回读确认。",
+        });
+      }
+      if (!ids.campaignId) {
+        throw new MetaMarketingApiMutationUnknownError("Meta Campaign ID 未能持久化。");
+      }
+      if (!ids.adSetId) {
+        await create("adsets", {
+          name: input.adSetName,
+          campaign_id: ids.campaignId,
+          daily_budget: String(input.dailyBudgetMinorUnits),
+          billing_event: input.billingEvent,
+          optimization_goal: input.optimizationGoal,
+          destination_type: input.destinationType,
+          targeting: JSON.stringify({ geo_locations: { countries: input.countries } }),
+          bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+          status: "PAUSED",
+        }, "ad-set", (id) => { ids.adSetId = id; }, "id,name,status,effective_status");
+        progress({
+          phase: "ad-set",
+          campaignId: ids.campaignId,
+          adSetId: ids.adSetId,
+          message: "Ad Set 已创建并回读确认。",
+        });
+      }
+      if (!ids.adSetId) {
+        throw new MetaMarketingApiMutationUnknownError("Meta Ad Set ID 未能持久化。");
+      }
+      if (input.targetLevel === "ad-set") {
+        return {
+          ok: true,
+          campaignId: ids.campaignId,
+          adSetId: ids.adSetId,
+          message: "Meta Campaign 与 Ad Set 已按 PAUSED 状态创建并回读确认。",
+        };
+      }
+      if (!adContext) {
+        throw new MetaMarketingApiMutationRejectedError("Meta Ad 创建前置校验未完成。");
+      }
+      const { creativeBody, pageAccessToken, pageAppSecretProof } = adContext;
+      if (!ids.creativeId) {
+        await create(
+          "adcreatives",
+          creativeBody,
+          "creative",
+          (id) => { ids.creativeId = id; },
+          "id,name",
+          pageAccessToken,
+          pageAppSecretProof,
+        );
+        progress({
+          phase: "creative",
+          campaignId: ids.campaignId,
+          adSetId: ids.adSetId,
+          creativeId: ids.creativeId,
+          message: "Creative 已创建并回读确认。",
+        });
+      }
+      if (!ids.creativeId) {
+        throw new MetaMarketingApiMutationUnknownError("Meta Creative ID 未能持久化。");
+      }
+      if (!ids.adId) {
+        const adBody = {
+          name: input.adName,
+          adset_id: ids.adSetId,
+          creative: JSON.stringify({ creative_id: ids.creativeId }),
+          status: "PAUSED",
+        };
+        await validate("ads", adBody, pageAccessToken, pageAppSecretProof);
+        await create(
+          "ads",
+          adBody,
+          "ad",
+          (id) => { ids.adId = id; },
+          "id,name,status,effective_status",
+          pageAccessToken,
+          pageAppSecretProof,
+        );
+        progress({
+          phase: "ad",
+          campaignId: ids.campaignId,
+          adSetId: ids.adSetId,
+          creativeId: ids.creativeId,
+          adId: ids.adId,
+          message: "Ad 已创建并回读确认。",
+        });
+      }
+      return {
+        ok: true,
+        ...ids,
+        message: "Meta Campaign、Ad Set、Creative 与 Ad 已按 PAUSED 状态创建并回读确认。",
+      };
+    } catch (cause) {
+      return {
+        ok: false,
+        ...ids,
+        failureKind: cause instanceof MetaMarketingApiMutationRejectedError
+          || cause instanceof MetaMarketingApiNetworkDisabledError
+          ? "retryable"
+          : "unknown",
+        message: cause instanceof Error ? cause.message : "Meta 创建结果待确认。",
+      };
+    }
+  }
+
+  async reconcileMetaAd(
+    context: ProviderContext,
+    mutation: Pick<MetaAdCreationMutation, "input" | "existing">,
+  ): Promise<MetaAdCreationResult> {
+    let settings: ReturnType<typeof MetaMarketingApiConnectionSettingsSchema.parse>;
+    let credential: ReturnType<typeof MetaAccessSecretBundleInputSchema.parse>;
+    let profile: NonNullable<ProviderContext["resolvedMetaAccessProfile"]>;
+    let input: ReturnType<typeof MetaAdCreationInputSchema.parse>;
+    let appSecretProof: string;
+    try {
+      settings = MetaMarketingApiConnectionSettingsSchema.parse(context.settings);
+      credential = MetaAccessSecretBundleInputSchema.parse(context.credential);
+      profile = resolveMetaAccessProfile(context, settings);
+      input = MetaAdCreationInputSchema.parse(mutation.input);
+      appSecretProof = await createMetaAppSecretProof(
+        credential.appSecret,
+        credential.accessToken,
+      );
+      if (settings.creationMode !== "paused-only") {
+        throw new Error("Meta 账户未开启 PAUSED-only 创建模式。");
+      }
+    } catch (cause) {
+      return {
+        ok: false,
+        failureKind: "unknown",
+        message: cause instanceof Error ? cause.message : "Meta 创建对账参数无效。",
+      };
+    }
+
+    const ids = { ...mutation.existing };
+    let transport: MetaMarketingApiTransport;
+    try {
+      transport = this.resolveTransport(context, settings, []);
+      const resolveOne = async (
+        edge: "campaigns" | "adsets" | "adcreatives" | "ads",
+        expectedName: string,
+        fields: string,
+        currentId: string | undefined,
+      ): Promise<Record<string, unknown> | null> => {
+        if (currentId) {
+          const record = asRecord(await transport.get({
+            version: profile.graphApiVersion,
+            path: currentId,
+            params: { fields },
+            accessToken: credential.accessToken,
+            appSecretProof,
+          }));
+          if (
+            readEntityId(record) !== currentId
+            || !createdObjectNameMatches(record.name, expectedName, edge === "adcreatives")
+          ) {
+            throw new Error(`Meta ${edge} 已记录 ID 与远端对象不一致。`);
+          }
+          return record;
+        }
+        const matches = await this.readExactNameMatches(
+          transport,
+          profile.graphApiVersion,
+          settings.adAccountId,
+          edge,
+          expectedName,
+          fields,
+          credential.accessToken,
+          appSecretProof,
+        );
+        if (matches.length > 1) {
+          throw new Error(`Meta ${edge} 存在多个同名对象，创建结果保持 unknown。`);
+        }
+        return matches[0] ?? null;
+      };
+
+      const campaign = await resolveOne(
+        "campaigns",
+        input.campaignName,
+        "id,name,status,effective_status",
+        ids.campaignId,
+      );
+      if (!campaign) {
+        return { ok: false, failureKind: "retryable", message: "只读对账确认 Campaign 不存在，可以安全继续创建。" };
+      }
+      ids.campaignId = readEntityId(campaign);
+      if (campaign.status !== "PAUSED") throw new Error("对账 Campaign 已不再是 PAUSED。 ");
+
+      const adSet = await resolveOne(
+        "adsets",
+        input.adSetName,
+        "id,name,campaign_id,status,effective_status",
+        ids.adSetId,
+      );
+      if (!adSet) {
+        return { ok: false, ...ids, failureKind: "retryable", message: "只读对账确认 Ad Set 不存在，可以从 Campaign 继续。" };
+      }
+      ids.adSetId = readEntityId(adSet);
+      if (adSet.status !== "PAUSED" || adSet.campaign_id !== ids.campaignId) {
+        throw new Error("对账 Ad Set 的状态或父级不一致。");
+      }
+
+      if (input.targetLevel === "ad-set") {
+        return {
+          ok: true,
+          campaignId: ids.campaignId,
+          adSetId: ids.adSetId,
+          message: "Meta Campaign 与 Ad Set 已通过只读对账确认，且均保持 PAUSED。",
+        };
+      }
+
+      const creative = await resolveOne(
+        "adcreatives",
+        input.creativeName,
+        "id,name",
+        ids.creativeId,
+      );
+      if (!creative) {
+        return { ok: false, ...ids, failureKind: "retryable", message: "只读对账确认 Creative 不存在，可以从 Ad Set 继续。" };
+      }
+      ids.creativeId = readEntityId(creative);
+
+      const ad = await resolveOne(
+        "ads",
+        input.adName,
+        "id,name,adset_id,creative,status,effective_status",
+        ids.adId,
+      );
+      if (!ad) {
+        return { ok: false, ...ids, failureKind: "retryable", message: "只读对账确认 Ad 不存在，可以从 Creative 继续。" };
+      }
+      ids.adId = readEntityId(ad);
+      const adCreative = isRecord(ad.creative) ? ad.creative : null;
+      if (
+        ad.status !== "PAUSED"
+        || ad.adset_id !== ids.adSetId
+        || adCreative?.id !== ids.creativeId
+      ) {
+        throw new Error("对账 Ad 的状态、Ad Set 或 Creative 不一致。");
+      }
+      return {
+        ok: true,
+        ...ids,
+        message: "Meta 四层对象已通过只读对账确认，且 Ad 保持 PAUSED。",
+      };
+    } catch (cause) {
+      return {
+        ok: false,
+        ...ids,
+        failureKind: "unknown",
+        message: cause instanceof Error ? cause.message : "Meta 创建只读对账仍无法确认。",
+      };
+    }
+  }
+
+  private async readExactNameMatches(
+    transport: MetaMarketingApiTransport,
+    version: string,
+    adAccountId: string,
+    edge: "campaigns" | "adsets" | "adcreatives" | "ads",
+    expectedName: string,
+    fields: string,
+    accessToken: string,
+    appSecretProof: string,
+  ): Promise<Record<string, unknown>[]> {
+    const matches: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    let after: string | undefined;
+    for (let page = 0; page < 100; page += 1) {
+      const payload = asRecord(await transport.get({
+        version,
+        path: `${adAccountId}/${edge}`,
+        params: { fields, limit: "100", ...(after ? { after } : {}) },
+        accessToken,
+        appSecretProof,
+      }));
+      if (!Array.isArray(payload.data)) throw new Error(`Meta ${edge} 对账响应结构无效。`);
+      for (const item of payload.data) {
+        if (
+          isRecord(item)
+          && createdObjectNameMatches(item.name, expectedName, edge === "adcreatives")
+        ) matches.push(item);
+      }
+      const paging = isRecord(payload.paging) ? payload.paging : null;
+      const cursors = paging && isRecord(paging.cursors) ? paging.cursors : null;
+      const next = typeof cursors?.after === "string" ? cursors.after : null;
+      if (!next || seen.has(next) || typeof paging?.next !== "string") return matches;
+      seen.add(next);
+      after = next;
+    }
+    throw new Error(`Meta ${edge} 对账分页超过上限。`);
+  }
+
+  private async readPageAccessToken(
+    transport: MetaMarketingApiTransport,
+    version: string,
+    pageId: string,
+    userAccessToken: string,
+    userAppSecretProof: string,
+  ): Promise<string> {
+    let after: string | undefined;
+    const seen = new Set<string>();
+    for (let page = 0; page < 100; page += 1) {
+      const payload = asRecord(await transport.get({
+        version,
+        path: "me/accounts",
+        params: {
+          fields: "id,access_token,tasks",
+          limit: "100",
+          ...(after ? { after } : {}),
+        },
+        accessToken: userAccessToken,
+        appSecretProof: userAppSecretProof,
+      }));
+      if (!Array.isArray(payload.data)) {
+        throw new Error("Meta Page 授权响应结构无效。");
+      }
+      for (const raw of payload.data) {
+        if (!isRecord(raw) || raw.id !== pageId) continue;
+        const tasks = Array.isArray(raw.tasks)
+          ? raw.tasks.filter((item): item is string => typeof item === "string")
+          : [];
+        if (!tasks.includes("ADVERTISE")) {
+          throw new Error("Meta Page 未向当前用户授予 ADVERTISE 任务。");
+        }
+        if (typeof raw.access_token !== "string" || raw.access_token.length < 20) {
+          throw new Error("Meta Page Access Token 不可用。");
+        }
+        return raw.access_token;
+      }
+      const paging = isRecord(payload.paging) ? payload.paging : null;
+      const cursors = paging && isRecord(paging.cursors) ? paging.cursors : null;
+      const next = typeof cursors?.after === "string" ? cursors.after : null;
+      if (!next || seen.has(next) || typeof paging?.next !== "string") break;
+      seen.add(next);
+      after = next;
+    }
+    throw new Error("绑定的 Meta Page 不在当前 Token 可广告投放的 Page 列表中。");
+  }
+
   private async readEdge(
     transport: MetaMarketingApiTransport,
     version: string,
@@ -751,6 +1295,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
     context: ProviderContext,
     settings: ReturnType<typeof MetaMarketingApiConnectionSettingsSchema.parse>,
     allowedMutationExternalIds: readonly string[],
+    allowedCreationPaths: readonly string[] = [],
   ): MetaMarketingApiTransport {
     if (this.transport) return this.transport;
     const liveMode = settings.liveMode ?? "disabled";
@@ -762,6 +1307,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
         profileId: settings.profileId ?? "",
         liveMode,
         allowedMutationExternalIds,
+        allowedCreationPaths,
       });
     }
     return new DisabledMetaMarketingApiTransport();
@@ -779,6 +1325,7 @@ export class MetaMarketingApiAdsProvider implements AdsProvider {
         profileId: profile.profileId,
         liveMode: "read-only",
         allowedMutationExternalIds: [],
+        allowedCreationPaths: [],
       });
     }
     return new DisabledMetaMarketingApiTransport();
@@ -803,6 +1350,32 @@ function readEntityId(value: Record<string, unknown>): string {
     );
   }
   return value.id;
+}
+
+function readCreatedId(
+  value: Record<string, unknown>,
+  phase: MetaCreationProgress["phase"],
+): string {
+  if (typeof value.id !== "string" || !/^\d+$/.test(value.id)) {
+    throw new MetaMarketingApiMutationUnknownError(
+      `Meta ${phase} 创建响应缺少数字 ID，远端结果待确认。`,
+    );
+  }
+  return value.id;
+}
+
+function createdObjectNameMatches(
+  actual: unknown,
+  expected: string,
+  allowMetaCreativeSuffix: boolean,
+): boolean {
+  if (actual === expected) return true;
+  if (
+    !allowMetaCreativeSuffix
+    || typeof actual !== "string"
+    || !actual.startsWith(expected)
+  ) return false;
+  return /^ \d{4}-\d{2}-\d{2}-[a-f0-9]{32}$/.test(actual.slice(expected.length));
 }
 
 function readGrantedPermissions(payload: Record<string, unknown>): Set<string> {

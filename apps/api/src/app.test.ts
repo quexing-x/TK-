@@ -8,6 +8,7 @@ import {
   LaunchService,
   stripGeneratedAdGroupNameSuffixes,
 } from "./launch-service.js";
+import { LaunchWorker } from "./launch-worker.js";
 import type { FastifyInstance } from "fastify";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
@@ -96,12 +97,125 @@ describe("local API", () => {
       kind: "meta-marketing-api",
       platform: "meta",
       implementationStatus: "available",
-      capabilities: ["read-campaigns", "read-ad-groups", "read-ads", "change-status"],
+      capabilities: [
+        "read-campaigns",
+        "read-ad-groups",
+        "read-ads",
+        "change-status",
+        "create-campaigns",
+      ],
     }));
     expect(response.json()).not.toHaveProperty("switchDefinitions");
     expect(response.json().globalAutomationSettings).toMatchObject({
       pollingIntervalMinutes: 5,
       maxActionsPerRun: 15,
+    });
+  });
+
+  it("keeps the existing session cookie name by default", async () => {
+    await app.close();
+    app = await createApp({ store, vault });
+
+    const setup = await app.inject({
+      method: "POST",
+      url: "/api/auth/setup",
+      payload: {
+        username: "default-cookie-developer",
+        displayName: "默认 Cookie 开发者",
+        password: "Default-Cookie-Developer-2026!",
+      },
+    });
+
+    expect(setup.statusCode).toBe(201);
+    expect(setup.headers["set-cookie"]).toMatch(/^tk_auto_session=/);
+  });
+
+  it("reads and clears an isolated custom session cookie", async () => {
+    await app.close();
+    const authCookieName = "tk_auto_meta_live_test_session";
+    app = await createApp({ store, vault, authCookieName });
+
+    const setup = await app.inject({
+      method: "POST",
+      url: "/api/auth/setup",
+      payload: {
+        username: "custom-cookie-developer",
+        displayName: "隔离 Cookie 开发者",
+        password: "Custom-Cookie-Developer-2026!",
+      },
+    });
+    const setCookie = String(setup.headers["set-cookie"]);
+    const cookie = setCookie.split(";", 1)[0] as string;
+    const token = cookie.slice(cookie.indexOf("=") + 1);
+    const csrfToken = setup.json().csrfToken as string;
+
+    expect(setCookie).toMatch(new RegExp(`^${authCookieName}=`));
+    expect(setCookie).not.toContain("tk_auto_session=");
+    const wrongNamespace = await app.inject({
+      method: "GET",
+      url: "/api/bootstrap",
+      headers: { cookie: `tk_auto_session=${token}` },
+    });
+    expect(wrongNamespace.statusCode).toBe(401);
+    const authenticated = await app.inject({
+      method: "GET",
+      url: "/api/bootstrap",
+      headers: { cookie },
+    });
+    expect(authenticated.statusCode).toBe(200);
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/auth/logout",
+      headers: { cookie, "x-csrf-token": csrfToken },
+    });
+    expect(logout.statusCode).toBe(200);
+    expect(logout.headers["set-cookie"]).toMatch(
+      new RegExp(`^${authCookieName}=;.*Max-Age=0`),
+    );
+    expect(logout.headers["set-cookie"]).not.toContain("tk_auto_session=");
+  });
+
+  it("rejects unsafe custom session cookie names before starting the app", async () => {
+    await expect(createApp({
+      store,
+      vault,
+      authCookieName: "unsafe; Path=/\r\nSet-Cookie: injected=1",
+    })).rejects.toThrow("鉴权 Cookie 名称包含不安全字符");
+  });
+
+  it("fails closed without resetting users when local access recovery is disabled", async () => {
+    await app.close();
+    app = await createApp({ store, vault, allowAuthRecovery: false });
+
+    const setup = await app.inject({
+      method: "POST",
+      url: "/api/auth/setup",
+      payload: {
+        username: "recovery-disabled-developer",
+        displayName: "禁用恢复开发者",
+        password: "Recovery-Disabled-Developer-2026!",
+      },
+    });
+    const cookie = String(setup.headers["set-cookie"]).split(";", 1)[0] as string;
+
+    const recovery = await app.inject({
+      method: "POST",
+      url: "/api/auth/recover",
+      payload: { confirmation: "RESET" },
+    });
+    expect(recovery.statusCode).toBe(404);
+    expect(store.countLocalUsers()).toBe(1);
+
+    const status = await app.inject({
+      method: "GET",
+      url: "/api/auth/status",
+      headers: { cookie },
+    });
+    expect(status.json()).toMatchObject({
+      setupRequired: false,
+      authenticated: true,
+      user: { username: "recovery-disabled-developer" },
     });
   });
 
@@ -1063,7 +1177,66 @@ describe("local API", () => {
     expect(listed.body).not.toContain("fixture-access-token");
   });
 
-  it("invalidates the old Meta secret bundle when the App ID changes", async () => {
+  it("returns field-level Meta profile and secret validation without echoing credentials", async () => {
+    const invalidProfile = await app.inject({
+      method: "POST",
+      url: "/api/platforms/meta/access-profiles",
+      payload: {
+        name: "Meta validation fixture",
+        appId: "not-a-number",
+        businessId: "bm-not-a-number",
+        graphApiVersion: "26",
+      },
+    });
+
+    expect(invalidProfile.statusCode).toBe(400);
+    expect(invalidProfile.json()).toMatchObject({
+      error: "VALIDATION_ERROR",
+      details: {
+        fieldErrors: {
+          appId: ["App ID 必须是数字"],
+          businessId: ["Business Portfolio ID 必须是数字"],
+          graphApiVersion: ["Graph API 版本格式应为 vXX.X"],
+        },
+      },
+    });
+
+    const profile = store.createMetaAccessProfile({
+      name: "Meta secret validation fixture",
+      appId: "100000000000090",
+      businessId: null,
+      graphApiVersion: "v26.0",
+    });
+    const invalidAppSecret = "tiny";
+    const invalidAccessToken = "short-token";
+    const invalidSecret = await app.inject({
+      method: "PUT",
+      url: `/api/platforms/meta/access-profiles/${profile.id}/secret`,
+      payload: {
+        appSecret: invalidAppSecret,
+        accessToken: invalidAccessToken,
+      },
+    });
+
+    expect(invalidSecret.statusCode).toBe(400);
+    expect(invalidSecret.json()).toMatchObject({
+      error: "VALIDATION_ERROR",
+      details: {
+        fieldErrors: {
+          appSecret: expect.any(Array),
+          accessToken: expect.any(Array),
+        },
+      },
+    });
+    expect(invalidSecret.body).not.toContain(invalidAppSecret);
+    expect(invalidSecret.body).not.toContain(invalidAccessToken);
+    expect(store.getMetaAccessProfile(profile.id)).toMatchObject({
+      hasAppSecret: false,
+      hasAccessToken: false,
+    });
+  });
+
+  it("rejects ordinary App ID replacement without deleting the saved secret bundle", async () => {
     const profile = store.createMetaAccessProfile({
       name: "App ID 变更测试",
       appId: "100000000000071",
@@ -1087,15 +1260,16 @@ describe("local API", () => {
       },
     });
 
-    expect(updated.statusCode).toBe(200);
+    expect(updated.statusCode).toBe(409);
     expect(updated.json()).toMatchObject({
-      appId: "100000000000072",
-      hasAppSecret: false,
-      hasAccessToken: false,
+      message: expect.stringContaining("不会因普通档案保存而自动清除"),
     });
     expect(updated.body).not.toContain("secretRef");
-    expect(store.getStoredMetaAccessProfile(profile.id)?.secretRef).toBeNull();
-    expect(await vault.read(previousReference)).toBeNull();
+    expect(store.getStoredMetaAccessProfile(profile.id)).toMatchObject({
+      appId: "100000000000071",
+      secretRef: previousReference,
+    });
+    expect(await vault.read(previousReference)).not.toBeNull();
   });
 
   it("rejects deleting a referenced Meta access profile before touching its secret bundle", async () => {
@@ -1629,6 +1803,275 @@ describe("local API", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.listProviderConnections(account.id)).toHaveLength(1);
     expect(store.listAdOperations(account.id)).toEqual([]);
+  });
+
+  it("creates and lists an idempotent Meta PAUSED ad task through the API", async () => {
+    const account = store.createAccount({
+      displayName: "Meta creation fixture",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    const profile = store.createMetaAccessProfile({
+      name: "Meta creation profile",
+      appId: "100000000000001",
+      businessId: null,
+      graphApiVersion: "v99.0",
+    });
+    store.setMetaAccessProfileSecretReference(profile.id, await vault.create(JSON.stringify({
+      appSecret: "fixture-meta-app-secret",
+      accessToken: "fixture-meta-token-with-enough-length",
+    })));
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "meta-marketing-api",
+      profileId: profile.id,
+      adAccountId: "act_300000000000003",
+      pageId: "400000000000004",
+      liveMode: "automation-status",
+      creationMode: "paused-only",
+      allowedStatusEntityTypes: ["campaign", "ad-group", "ad"],
+    });
+    store.updateProviderStatus(account.id, "meta-marketing-api", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "meta-marketing-api", {
+      status: "active",
+      capabilityVersion: "meta-create-test-v1",
+      capabilities: [
+        "read-campaigns",
+        "read-ad-groups",
+        "read-ads",
+        "change-status",
+        "create-campaigns",
+      ],
+    });
+    store.updateSystemRuntimeState({ enabled: true });
+    store.updateMetaAutomationRuntime({
+      enabled: true,
+      pollingIntervalMinutes: 5,
+      maxActionsPerRun: 15,
+    });
+    store.updateAccountSettings(account.id, {
+      displayName: account.displayName,
+      accountType: account.accountType,
+      enabled: true,
+      providerKind: "meta-marketing-api",
+    });
+    const createMetaAd = vi.fn(async (_context, mutation) => {
+      mutation.onProgress?.({
+        phase: "campaign",
+        campaignId: "120000000000101",
+        message: "campaign confirmed",
+      });
+      mutation.onProgress?.({
+        phase: "ad-set",
+        campaignId: "120000000000101",
+        adSetId: "120000000000102",
+        message: "ad set confirmed",
+      });
+      if (mutation.input.targetLevel === "ad-set") {
+        return {
+          ok: true,
+          campaignId: "120000000000101",
+          adSetId: "120000000000102",
+          message: "two layers confirmed",
+        };
+      }
+      mutation.onProgress?.({
+        phase: "creative",
+        campaignId: "120000000000101",
+        adSetId: "120000000000102",
+        creativeId: "120000000000103",
+        message: "creative confirmed",
+      });
+      mutation.onProgress?.({
+        phase: "ad",
+        campaignId: "120000000000101",
+        adSetId: "120000000000102",
+        creativeId: "120000000000103",
+        adId: "120000000000104",
+        message: "ad confirmed",
+      });
+      return {
+        ok: true,
+        campaignId: "120000000000101",
+        adSetId: "120000000000102",
+        creativeId: "120000000000103",
+        adId: "120000000000104",
+        message: "all confirmed",
+      };
+    });
+    const reconcileMetaAd = vi.fn(async (_context, mutation) => ({
+      ok: false,
+      ...mutation.existing,
+      failureKind: "retryable" as const,
+      message: "next layer confirmed absent",
+    }));
+    const provider: AdsProvider = {
+      kind: "meta-marketing-api",
+      platform: "meta",
+      implementationStatus: "available",
+      displayName: "Meta creation test provider",
+      capabilityVersion: "meta-create-test-v1",
+      capabilities: new Set([
+        "read-campaigns",
+        "read-ad-groups",
+        "read-ads",
+        "change-status",
+        "create-campaigns",
+      ]),
+      checkHealth: async () => ({ ok: true, status: "ready", message: "ready" }),
+      syncReadOnly: async () => {
+        const now = new Date().toISOString();
+        return {
+          entities: [],
+          result: {
+            startedAt: now,
+            finishedAt: now,
+            counts: { campaign: 0, "ad-group": 0, ad: 0, material: 0 },
+            warnings: [],
+            quality: testSyncQuality(now),
+          },
+        };
+      },
+      changeStatus: async (_context, mutations) => mutations.map((mutation) => ({
+        ...mutation,
+        ok: true,
+        message: "status confirmed",
+      })),
+      createMetaAd,
+      reconcileMetaAd,
+    };
+    await app.close();
+    app = await createApp({
+      store,
+      vault,
+      providers: new ProviderRegistry([provider]),
+      disableAuth: true,
+    });
+    const payload = {
+      idempotencyKey: "api-meta-create-0001",
+      campaignName: "Sandbox Campaign",
+      adSetName: "Sandbox Ad Set",
+      creativeName: "Sandbox Creative",
+      adName: "Sandbox Ad",
+      objective: "OUTCOME_TRAFFIC",
+      optimizationGoal: "LINK_CLICKS",
+      billingEvent: "IMPRESSIONS",
+      destinationType: "WEBSITE",
+      dailyBudgetMinorUnits: 500,
+      countries: ["US"],
+      destinationUrl: "https://example.com/product",
+      primaryText: "Primary text",
+      headline: "Headline",
+      description: "",
+      callToAction: "LEARN_MORE",
+      imageHash: null,
+    } as const;
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta-creations`,
+      payload,
+    });
+    const replay = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta-creations`,
+      payload,
+    });
+    const conflictingReplay = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta-creations`,
+      payload: { ...payload, headline: "Different request under the same key" },
+    });
+    const twoLevel = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta-creations`,
+      payload: {
+        targetLevel: "ad-set",
+        idempotencyKey: "api-meta-create-two-level-0002",
+        campaignName: payload.campaignName,
+        adSetName: payload.adSetName,
+        objective: payload.objective,
+        optimizationGoal: payload.optimizationGoal,
+        billingEvent: payload.billingEvent,
+        destinationType: payload.destinationType,
+        dailyBudgetMinorUnits: payload.dailyBudgetMinorUnits,
+        countries: payload.countries,
+      },
+    });
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/accounts/${account.id}/meta-creations`,
+    });
+    const missingRetry = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta-creations/00000000-0000-4000-8000-000000000000/retry`,
+    });
+    const automationRun = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/automation/run`,
+    });
+    const unknown = store.createMetaCreationTask(account.id, {
+      ...payload,
+      idempotencyKey: "api-meta-create-unknown-0002",
+    });
+    store.claimMetaCreationTask(unknown.id);
+    store.updateMetaCreationProgress(unknown.id, {
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+      message: "ad set confirmed",
+    });
+    store.completeMetaCreationTask(unknown.id, "unknown", "creative readback unknown");
+    const reconciled = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${account.id}/meta-creations/${unknown.id}/reconcile`,
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(first.json()).toMatchObject({
+      status: "succeeded",
+      phase: "completed",
+      input: { targetLevel: "ad" },
+      campaignId: "120000000000101",
+      adSetId: "120000000000102",
+      creativeId: "120000000000103",
+      adId: "120000000000104",
+    });
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json().id).toBe(first.json().id);
+    expect(conflictingReplay.statusCode).toBe(409);
+    expect(conflictingReplay.json()).toMatchObject({
+      error: "META_CREATION_IDEMPOTENCY_CONFLICT",
+    });
+    expect(twoLevel.statusCode).toBe(201);
+    expect(twoLevel.json()).toMatchObject({
+      status: "succeeded",
+      phase: "completed",
+      input: { targetLevel: "ad-set" },
+      campaignId: "120000000000101",
+      adSetId: "120000000000102",
+      creativeId: null,
+      adId: null,
+    });
+    expect(createMetaAd).toHaveBeenCalledTimes(2);
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toHaveLength(2);
+    expect(missingRetry.statusCode).toBe(404);
+    expect(automationRun.statusCode).toBe(200);
+    expect(automationRun.json()).toMatchObject({
+      accountId: account.id,
+      automatic: true,
+      candidateCount: 0,
+      actionCount: 0,
+    });
+    expect(reconciled.statusCode).toBe(200);
+    expect(reconciled.json()).toMatchObject({
+      status: "failed",
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+    });
+    expect(reconcileMetaAd).toHaveBeenCalledTimes(1);
   });
 
   it("keeps every launch and copy entry point fail-closed for Meta accounts", async () => {
@@ -2374,6 +2817,32 @@ describe("local API", () => {
 
     releaseProvider();
     await vi.waitFor(() => expect(store.listLaunchPlanItems(planId)[0]).toMatchObject({ status: "succeeded" }));
+  });
+
+  it("keeps the launch worker fully disabled in an isolated test app", async () => {
+    await app.close();
+    const start = vi.spyOn(LaunchWorker.prototype, "start");
+    const stop = vi.spyOn(LaunchWorker.prototype, "stop");
+    app = await createApp({
+      store,
+      vault,
+      disableAuth: true,
+      startLaunchWorker: false,
+    });
+
+    expect(start).not.toHaveBeenCalled();
+    const queued = await app.inject({
+      method: "POST",
+      url: "/api/launch-plans/not-present/queue",
+    });
+    expect(queued.statusCode).toBe(503);
+    expect(queued.json()).toEqual({
+      message: "当前隔离测试环境已关闭后台创建队列。",
+    });
+    expect(store.listQueuedLaunchPlans()).toEqual([]);
+
+    await app.close();
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("queues creation while the automation master switch is off", async () => {

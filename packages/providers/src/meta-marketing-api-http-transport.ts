@@ -13,15 +13,32 @@ const META_USAGE_STOP_THRESHOLD = 95;
 export class MetaMarketingApiHttpTransport implements MetaMarketingApiTransport {
   private usageStopReason: string | null = null;
   private readonly allowedMutationExternalIds: ReadonlySet<string>;
+  private readonly allowedCreationPaths: ReadonlySet<string>;
 
-  constructor(allowedMutationExternalIds: string | readonly string[] = []) {
-    const ids = typeof allowedMutationExternalIds === "string"
-      ? [allowedMutationExternalIds]
-      : [...allowedMutationExternalIds];
+  constructor(input: string | readonly string[] | {
+    allowedMutationExternalIds?: readonly string[];
+    allowedCreationPaths?: readonly string[];
+  } = []) {
+    const options = typeof input === "object" && !Array.isArray(input)
+      ? input as {
+          allowedMutationExternalIds?: readonly string[];
+          allowedCreationPaths?: readonly string[];
+        }
+      : null;
+    const ids = typeof input === "string"
+      ? [input]
+      : Array.isArray(input)
+        ? [...input]
+        : [...(options?.allowedMutationExternalIds ?? [])];
+    const creationPaths = [...(options?.allowedCreationPaths ?? [])];
     if (ids.some((externalId) => !/^\d+$/.test(externalId))) {
       throw new Error("Meta 状态写入对象 allowlist 包含无效 ID。");
     }
+    if (creationPaths.some((path) => !/^act_\d+\/(?:campaigns|adsets|adcreatives|ads)$/.test(path))) {
+      throw new Error("Meta 创建路径 allowlist 包含无效路径。");
+    }
     this.allowedMutationExternalIds = new Set(ids);
+    this.allowedCreationPaths = new Set(creationPaths);
   }
 
   async get(input: MetaMarketingApiTransportRequest): Promise<unknown> {
@@ -57,12 +74,21 @@ export class MetaMarketingApiHttpTransport implements MetaMarketingApiTransport 
   async post(input: MetaMarketingApiTransportMutationRequest): Promise<unknown> {
     assertVersion(input.version);
     assertMutationPath(input.path);
-    assertMutationBody(input.body);
     assertAppSecretProof(input.appSecretProof);
-    if (!this.allowedMutationExternalIds.has(input.path)) {
-      throw new MetaMarketingApiMutationRejectedError(
-        "Meta 状态写入对象不在本次对象级 allowlist，未发送请求。",
-      );
+    if (/^\d+$/.test(input.path)) {
+      assertStatusMutationBody(input.body);
+      if (!this.allowedMutationExternalIds.has(input.path)) {
+        throw new MetaMarketingApiMutationRejectedError(
+          "Meta 状态写入对象不在本次对象级 allowlist，未发送请求。",
+        );
+      }
+    } else {
+      assertCreationBody(input.path, input.body);
+      if (!this.allowedCreationPaths.has(input.path)) {
+        throw new MetaMarketingApiMutationRejectedError(
+          "Meta 创建路径不在本次任务级 allowlist，未发送请求。",
+        );
+      }
     }
     if (this.usageStopReason) {
       throw new MetaMarketingApiMutationRejectedError(this.usageStopReason);
@@ -145,24 +171,26 @@ function assertVersion(version: string): void {
 function assertGetPath(path: string): void {
   if (
     path === "me/permissions"
+    || path === "me/accounts"
     || path === "me/adaccounts"
     || /^(?:act_)?\d+$/.test(path)
     || /^\d+\/owned_ad_accounts$/.test(path)
     || /^act_\d+\/(?:campaigns|adsets|ads)$/.test(path)
+    || /^act_\d+\/(?:adimages|advideos|adcreatives)$/.test(path)
     || /^act_\d+\/insights$/.test(path)
   ) return;
   throw new Error("Meta Graph GET 路径不在允许范围内。");
 }
 
 function assertMutationPath(path: string): void {
-  if (!/^\d+$/.test(path)) {
+  if (!/^\d+$/.test(path) && !/^act_\d+\/(?:campaigns|adsets|adcreatives|ads)$/.test(path)) {
     throw new MetaMarketingApiMutationRejectedError(
-      "Meta 状态写入对象 ID 无效，未发送请求。",
+      "Meta 写入路径无效，未发送请求。",
     );
   }
 }
 
-function assertMutationBody(body: Readonly<Record<string, string>>): void {
+function assertStatusMutationBody(body: Readonly<Record<string, string>>): void {
   const entries = Object.entries(body);
   if (
     entries.length !== 1
@@ -172,6 +200,76 @@ function assertMutationBody(body: Readonly<Record<string, string>>): void {
     throw new MetaMarketingApiMutationRejectedError(
       "Meta 状态写入正文不在允许范围内，未发送请求。",
     );
+  }
+}
+
+const creationBodyKeys: Record<string, ReadonlySet<string>> = {
+  campaigns: new Set([
+    "name", "objective", "status", "buying_type", "special_ad_categories",
+    "is_adset_budget_sharing_enabled", "execution_options",
+  ]),
+  adsets: new Set([
+    "name", "campaign_id", "daily_budget", "billing_event", "optimization_goal",
+    "destination_type", "targeting", "bid_strategy", "status",
+  ]),
+  adcreatives: new Set(["name", "object_story_spec", "execution_options"]),
+  ads: new Set(["name", "adset_id", "creative", "status", "execution_options"]),
+};
+
+function assertCreationBody(
+  path: string,
+  body: Readonly<Record<string, string>>,
+): void {
+  const edge = path.split("/").at(-1) ?? "";
+  const allowed = creationBodyKeys[edge];
+  const keys = Object.keys(body);
+  if (!allowed || keys.length === 0 || keys.some((key) => !allowed.has(key))) {
+    throw new MetaMarketingApiMutationRejectedError(
+      "Meta 创建正文包含未授权字段，未发送请求。",
+    );
+  }
+  if (
+    body.execution_options !== undefined
+    && body.execution_options !== '["validate_only"]'
+  ) {
+    throw new MetaMarketingApiMutationRejectedError(
+      "Meta 创建校验选项无效，未发送请求。",
+    );
+  }
+  if ((edge === "campaigns" || edge === "adsets" || edge === "ads") && body.status !== "PAUSED") {
+    throw new MetaMarketingApiMutationRejectedError(
+      "Meta 创建只允许 PAUSED 初始状态，未发送请求。",
+    );
+  }
+  if (edge === "campaigns" && body.objective !== "OUTCOME_TRAFFIC") {
+    throw new MetaMarketingApiMutationRejectedError(
+      "Meta 创建当前只支持 OUTCOME_TRAFFIC，未发送请求。",
+    );
+  }
+  if (edge === "adsets") {
+    if (!/^\d+$/.test(body.campaign_id ?? "") || !/^\d+$/.test(body.daily_budget ?? "")) {
+      throw new MetaMarketingApiMutationRejectedError("Meta Ad Set 创建 ID 或预算无效，未发送请求。");
+    }
+    parseJsonObject(body.targeting, "Meta Ad Set targeting 无效，未发送请求。");
+  }
+  if (edge === "adcreatives") {
+    parseJsonObject(body.object_story_spec, "Meta Creative object_story_spec 无效，未发送请求。");
+  }
+  if (edge === "ads") {
+    if (!/^\d+$/.test(body.adset_id ?? "")) {
+      throw new MetaMarketingApiMutationRejectedError("Meta Ad Set ID 无效，未发送请求。");
+    }
+    parseJsonObject(body.creative, "Meta Ad creative 无效，未发送请求。");
+  }
+}
+
+function parseJsonObject(value: string | undefined, message: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value ?? "");
+    if (!isRecord(parsed)) throw new Error(message);
+    return parsed;
+  } catch {
+    throw new MetaMarketingApiMutationRejectedError(message);
   }
 }
 
@@ -195,7 +293,15 @@ function graphFailureMessage(method: "GET" | "POST", status: number, payload: un
   const subcode = typeof error?.error_subcode === "number"
     ? `，subcode ${error.error_subcode}`
     : "";
-  return `Meta Graph ${method} 明确失败（HTTP ${status}${code}${subcode}）。`;
+  const detail = typeof error?.error_user_msg === "string"
+    ? error.error_user_msg
+    : typeof error?.message === "string"
+      ? error.message
+      : "";
+  const safeDetail = detail
+    .replace(/[A-Za-z0-9_\-]{40,}/g, "[REDACTED]")
+    .slice(0, 400);
+  return `Meta Graph ${method} 明确失败（HTTP ${status}${code}${subcode}）${safeDetail ? `：${safeDetail}` : "。"}`;
 }
 
 function isGraphError(value: unknown): boolean {

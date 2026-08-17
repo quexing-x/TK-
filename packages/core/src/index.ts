@@ -9,6 +9,7 @@ export * from "./rule-evaluator.js";
 export * from "./meta-rules.js";
 export * from "./meta-rule-evaluator.js";
 export * from "./meta-access-profile.js";
+export * from "./meta-creation.js";
 export * from "./notification.js";
 export * from "./runtime.js";
 export * from "./scheduling.js";

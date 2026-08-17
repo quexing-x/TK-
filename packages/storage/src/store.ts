@@ -83,6 +83,12 @@ import {
   MetaAccessProfileSchema,
   type MetaAccessProfile,
   type MetaAccessProfileInput,
+  MetaAdCreationInputSchema,
+  MetaCreationProgressSchema,
+  MetaCreationTaskRecordSchema,
+  type MetaCreationProgress,
+  type MetaCreationTaskRecord,
+  type MetaCreationTaskStatus,
   METRIC_RETENTION_DAYS,
   SystemRuntimeStateSchema,
   type SystemRuntimeState,
@@ -209,6 +215,15 @@ export class MetaAccessProfileAppIdConflictError extends Error {
   }
 }
 
+export class MetaAccessProfileAppIdLockedError extends Error {
+  readonly code = "META_ACCESS_PROFILE_APP_ID_LOCKED";
+
+  constructor(readonly profileId: string) {
+    super("当前 App ID 已绑定加密密钥，不会因普通档案保存而自动清除。请先明确执行密钥轮换后再更换 App 身份。");
+    this.name = "MetaAccessProfileAppIdLockedError";
+  }
+}
+
 export class MetaAccessProfileVersionConflictError extends Error {
   readonly code = "META_ACCESS_PROFILE_VERSION_CONFLICT";
 
@@ -224,6 +239,15 @@ export class PlatformConfigurationConflictError extends Error {
   constructor(readonly platform: "meta", readonly resource: "rules" | "runtime") {
     super(`${platform} ${resource} configuration was updated by another request.`);
     this.name = "PlatformConfigurationConflictError";
+  }
+}
+
+export class MetaCreationIdempotencyConflictError extends Error {
+  readonly code = "META_CREATION_IDEMPOTENCY_CONFLICT";
+
+  constructor(readonly accountId: string, readonly idempotencyKey: string) {
+    super("相同幂等键已用于不同的 Meta 创建请求，请更换幂等键后重试。");
+    this.name = "MetaCreationIdempotencyConflictError";
   }
 }
 
@@ -1221,6 +1245,261 @@ export class AutomationStore {
     return this.getMetaAutomationRuntime();
   }
 
+  createMetaCreationTask(
+    accountId: string,
+    rawInput: unknown,
+  ): MetaCreationTaskRecord {
+    const account = this.getAccount(accountId);
+    if (!account || account.platform !== "meta" || account.providerKind !== "meta-marketing-api") {
+      throw new Error("只有 Meta Marketing API 账户可以创建 Meta 广告任务。");
+    }
+    const input = MetaAdCreationInputSchema.parse(rawInput);
+    const existing = this.db.prepare(
+      "SELECT * FROM meta_creation_tasks WHERE account_id = ? AND idempotency_key = ?",
+    ).get(accountId, input.idempotencyKey) as SqlRow | undefined;
+    if (existing) {
+      const task = mapMetaCreationTask(existing);
+      if (JSON.stringify(task.input) !== JSON.stringify(input)) {
+        throw new MetaCreationIdempotencyConflictError(accountId, input.idempotencyKey);
+      }
+      return task;
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const inserted = this.db.prepare(
+      `INSERT OR IGNORE INTO meta_creation_tasks (
+        id, account_id, idempotency_key, input_json, status, phase,
+        campaign_id, ad_set_id, creative_id, ad_id, message,
+        attempt_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', 'pending', NULL, NULL, NULL, NULL, NULL, 0, ?, ?)`,
+    ).run(id, accountId, input.idempotencyKey, JSON.stringify(input), now, now);
+    if (inserted.changes === 0) {
+      const concurrent = this.db.prepare(
+        "SELECT * FROM meta_creation_tasks WHERE account_id = ? AND idempotency_key = ?",
+      ).get(accountId, input.idempotencyKey) as SqlRow | undefined;
+      if (!concurrent) throw new Error("Meta 创建任务保存失败。");
+      const task = mapMetaCreationTask(concurrent);
+      if (JSON.stringify(task.input) !== JSON.stringify(input)) {
+        throw new MetaCreationIdempotencyConflictError(accountId, input.idempotencyKey);
+      }
+      return task;
+    }
+    this.writeAudit("local-user", accountId, "meta.creation.created", {
+      taskId: id,
+      idempotencyKey: input.idempotencyKey,
+    });
+    return this.getMetaCreationTask(id);
+  }
+
+  getMetaCreationTask(taskId: string): MetaCreationTaskRecord {
+    const row = this.db.prepare(
+      "SELECT * FROM meta_creation_tasks WHERE id = ?",
+    ).get(taskId) as SqlRow | undefined;
+    if (!row) throw new Error("Meta 创建任务不存在。");
+    return mapMetaCreationTask(row);
+  }
+
+  listMetaCreationTasks(accountId: string, limit = 50): MetaCreationTaskRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM meta_creation_tasks
+       WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+    ).all(accountId, Math.max(1, Math.min(200, Math.floor(limit)))) as SqlRow[];
+    return rows.map(mapMetaCreationTask);
+  }
+
+  claimMetaCreationTask(taskId: string): MetaCreationTaskRecord | null {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks
+       SET status = 'running', attempt_count = attempt_count + 1, message = NULL, updated_at = ?
+       WHERE id = ? AND status IN ('pending', 'failed')`,
+    ).run(now, taskId);
+    return result.changes > 0 ? this.getMetaCreationTask(taskId) : null;
+  }
+
+  markMetaCreationTaskDispatching(taskId: string): void {
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks
+       SET message = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(
+      "Meta 远端写入请求即将发送；若执行中断，任务将先转为 unknown 并要求只读对账。",
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
+  }
+
+  recoverInterruptedMetaCreationTasks(staleBefore: string): number {
+    const staleAt = new Date(staleBefore);
+    if (Number.isNaN(staleAt.getTime())) {
+      throw new Error("Meta 创建任务恢复时间无效。");
+    }
+    const cutoff = staleAt.toISOString();
+    const now = new Date().toISOString();
+    const message = "执行进程中断，无法确认 Meta 是否已完成远端创建；任务已转为 unknown，请先执行只读对账。";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db.prepare(
+        `SELECT id, account_id, phase FROM meta_creation_tasks
+         WHERE status = 'running' AND updated_at <= ?`,
+      ).all(cutoff) as SqlRow[];
+      let recovered = 0;
+      for (const row of rows) {
+        const result = this.db.prepare(
+          `UPDATE meta_creation_tasks
+           SET status = 'unknown', message = ?, updated_at = ?
+           WHERE id = ? AND status = 'running' AND updated_at <= ?`,
+        ).run(message, now, String(row.id), cutoff);
+        if (result.changes === 0) continue;
+        recovered += 1;
+        this.writeAudit("system", String(row.account_id), "meta.creation.interrupted", {
+          taskId: String(row.id),
+          phase: String(row.phase),
+        });
+      }
+      this.db.exec("COMMIT");
+      return recovered;
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  updateMetaCreationProgress(
+    taskId: string,
+    rawProgress: MetaCreationProgress,
+  ): MetaCreationTaskRecord {
+    const progress = MetaCreationProgressSchema.parse(rawProgress);
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks SET
+        phase = ?,
+        campaign_id = COALESCE(?, campaign_id),
+        ad_set_id = COALESCE(?, ad_set_id),
+        creative_id = COALESCE(?, creative_id),
+        ad_id = COALESCE(?, ad_id),
+        message = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(
+      progress.phase,
+      progress.campaignId ?? null,
+      progress.adSetId ?? null,
+      progress.creativeId ?? null,
+      progress.adId ?? null,
+      progress.message,
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
+    return this.getMetaCreationTask(taskId);
+  }
+
+  completeMetaCreationTask(
+    taskId: string,
+    status: Extract<MetaCreationTaskStatus, "succeeded" | "failed" | "unknown">,
+    message: string,
+    ids: {
+      campaignId?: string;
+      adSetId?: string;
+      creativeId?: string;
+      adId?: string;
+    } = {},
+  ): MetaCreationTaskRecord {
+    const phase = status === "succeeded" ? "completed" : undefined;
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks SET
+        status = ?, phase = COALESCE(?, phase),
+        campaign_id = COALESCE(?, campaign_id),
+        ad_set_id = COALESCE(?, ad_set_id),
+        creative_id = COALESCE(?, creative_id),
+        ad_id = COALESCE(?, ad_id),
+        message = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(
+      status,
+      phase ?? null,
+      ids.campaignId ?? null,
+      ids.adSetId ?? null,
+      ids.creativeId ?? null,
+      ids.adId ?? null,
+      message,
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
+    const task = this.getMetaCreationTask(taskId);
+    this.writeAudit("local-user", task.accountId, `meta.creation.${status}`, {
+      taskId,
+      phase: task.phase,
+      campaignId: task.campaignId,
+      adSetId: task.adSetId,
+      creativeId: task.creativeId,
+      adId: task.adId,
+    });
+    return task;
+  }
+
+  resolveUnknownMetaCreationTask(
+    taskId: string,
+    resolution: "succeeded" | "failed" | "unknown",
+    message: string,
+    ids: {
+      campaignId?: string;
+      adSetId?: string;
+      creativeId?: string;
+      adId?: string;
+    } = {},
+  ): MetaCreationTaskRecord {
+    const current = this.getMetaCreationTask(taskId);
+    if (current.status !== "unknown") {
+      throw new Error("只有 unknown 的 Meta 创建任务可以执行只读对账。");
+    }
+    const merged = {
+      campaignId: ids.campaignId ?? current.campaignId,
+      adSetId: ids.adSetId ?? current.adSetId,
+      creativeId: ids.creativeId ?? current.creativeId,
+      adId: ids.adId ?? current.adId,
+    };
+    const phase = resolution === "succeeded"
+      ? "completed"
+      : merged.adId
+        ? "ad"
+        : merged.creativeId
+          ? "creative"
+          : merged.adSetId
+            ? "ad-set"
+            : merged.campaignId
+              ? "campaign"
+              : "pending";
+    const result = this.db.prepare(
+      `UPDATE meta_creation_tasks SET
+        status = ?, phase = ?, campaign_id = ?, ad_set_id = ?,
+        creative_id = ?, ad_id = ?, message = ?, updated_at = ?
+       WHERE id = ? AND status = 'unknown'`,
+    ).run(
+      resolution,
+      phase,
+      merged.campaignId,
+      merged.adSetId,
+      merged.creativeId,
+      merged.adId,
+      message,
+      new Date().toISOString(),
+      taskId,
+    );
+    if (result.changes === 0) throw new Error("Meta 创建任务状态已变化。");
+    const task = this.getMetaCreationTask(taskId);
+    this.writeAudit("local-user", task.accountId, `meta.creation.reconciled.${resolution}`, {
+      taskId,
+      phase: task.phase,
+      campaignId: task.campaignId,
+      adSetId: task.adSetId,
+      creativeId: task.creativeId,
+      adId: task.adId,
+    });
+    return task;
+  }
+
   getSystemRuntimeState(): SystemRuntimeState {
     this.ensureGlobalDefaults();
     const row = this.db
@@ -1571,6 +1850,9 @@ export class AutomationStore {
     const current = this.getStoredMetaAccessProfile(profileId);
     if (!current) return null;
     const appIdChanged = current.appId !== profile.appId;
+    if (appIdChanged && current.secretRef !== null) {
+      throw new MetaAccessProfileAppIdLockedError(profileId);
+    }
     const connectionConfigurationChanged = appIdChanged
       || current.businessId !== profile.businessId
       || current.graphApiVersion !== profile.graphApiVersion;
@@ -1589,21 +1871,21 @@ export class AutomationStore {
           profile.appId,
           profile.businessId,
           profile.graphApiVersion,
-          appIdChanged ? null : current.secretRef,
+          current.secretRef,
           now,
           profileId,
         );
       if (connectionConfigurationChanged) {
         this.markMetaAccessProfileConnectionsUntested(
           profileId,
-          appIdChanged ? "not-configured" : "untested",
+          current.secretRef === null ? "not-configured" : "untested",
         );
       }
       this.writeSystemAudit("platform.meta.access-profile.updated", {
         profileId,
         appId: profile.appId,
         hasBusinessId: profile.businessId !== null,
-        secretBundleInvalidated: appIdChanged && current.secretRef !== null,
+        secretBundleInvalidated: false,
       });
       this.db.exec("COMMIT");
     } catch (cause) {
@@ -1615,7 +1897,7 @@ export class AutomationStore {
     }
     return {
       profile: this.getMetaAccessProfile(profileId) as MetaAccessProfile,
-      invalidatedSecretRef: appIdChanged ? current.secretRef : null,
+      invalidatedSecretRef: null,
     };
   }
 
@@ -6081,6 +6363,27 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS meta_creation_tasks (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'unknown')),
+        phase TEXT NOT NULL CHECK (phase IN ('pending', 'campaign', 'ad-set', 'creative', 'ad', 'completed')),
+        campaign_id TEXT,
+        ad_set_id TEXT,
+        creative_id TEXT,
+        ad_id TEXT,
+        message TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (account_id, idempotency_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS meta_creation_tasks_account_created
+      ON meta_creation_tasks (account_id, created_at DESC);
+
       CREATE TABLE IF NOT EXISTS global_runtime_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
@@ -7855,6 +8158,24 @@ function mapLaunchPreset(row: SqlRow): LaunchPresetRecord {
     creationConfig: row.creation_config_json
       ? JSON.parse(String(row.creation_config_json))
       : {},
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function mapMetaCreationTask(row: SqlRow): MetaCreationTaskRecord {
+  return MetaCreationTaskRecordSchema.parse({
+    id: row.id,
+    accountId: row.account_id,
+    input: JSON.parse(String(row.input_json)),
+    status: row.status,
+    phase: row.phase,
+    campaignId: row.campaign_id ?? null,
+    adSetId: row.ad_set_id ?? null,
+    creativeId: row.creative_id ?? null,
+    adId: row.ad_id ?? null,
+    message: row.message ?? null,
+    attemptCount: Number(row.attempt_count),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

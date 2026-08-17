@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, onUnauthorized, setAuthSession } from "./api";
+import { api, ApiRequestError, onUnauthorized, setAuthSession } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -169,6 +169,46 @@ describe("web API client", () => {
     );
 
     await expect(api.bootstrap()).rejects.toThrow("配置保存失败。");
+  });
+
+  it("turns Zod field details into an actionable Meta validation error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({
+          error: "VALIDATION_ERROR",
+          message: "请求数据不符合配置规则。",
+          details: {
+            formErrors: [],
+            fieldErrors: {
+              appSecret: ["String must contain at least 8 character(s)"],
+              accessToken: ["String must contain at least 20 character(s)"],
+            },
+          },
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    const error = await api.saveMetaAccessProfileSecret("profile-1", {
+      appSecret: "short-secret",
+      accessToken: "short-token-value-that-is-not-sent-back",
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error).toMatchObject({
+      status: 400,
+      code: "VALIDATION_ERROR",
+      message: "App Secret 至少需要 8 个字符",
+      fieldErrors: {
+        appSecret: ["String must contain at least 8 character(s)"],
+        accessToken: ["String must contain at least 20 character(s)"],
+      },
+    });
+    expect((error as ApiRequestError).getFieldMessage("accessToken"))
+      .toBe("Access Token 至少需要 20 个字符");
   });
 
   it("clears local authentication and notifies the app when logout finds an expired session", async () => {

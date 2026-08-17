@@ -28,6 +28,7 @@ import {
   LoginInputSchema,
   MetaAccessProfileInputSchema,
   MetaAccessSecretBundleInputSchema,
+  MetaAdCreationInputSchema,
   PasswordChangeInputSchema,
   SystemRuntimeUpdateSchema,
   OneTimeScheduleInputSchema,
@@ -58,6 +59,7 @@ import {
 } from "@tk-auto/providers";
 import {
   AutomationStore,
+  MetaCreationIdempotencyConflictError,
   PlatformConfigurationConflictError,
 } from "@tk-auto/storage";
 import {
@@ -68,6 +70,7 @@ import {
 import { NotificationService } from "./notification-service.js";
 import { LaunchService } from "./launch-service.js";
 import { LaunchWorker } from "./launch-worker.js";
+import { MetaCreationService } from "./meta-creation-service.js";
 import {
   AuthenticationError,
   AuthorizationError,
@@ -95,6 +98,9 @@ const ProviderParamsSchema = AccountParamsSchema.extend({
   providerKind: ProviderKindSchema,
 });
 const MetaAccessProfileParamsSchema = z.object({ profileId: z.string().uuid() });
+const MetaCreationTaskParamsSchema = AccountParamsSchema.extend({
+  taskId: z.string().uuid(),
+});
 const MetaRuleConfigurationUpdateRequestSchema = MetaRuleConfigurationInputSchema.and(
   z.object({ expectedUpdatedAt: z.string().datetime() }),
 );
@@ -132,6 +138,13 @@ const NotificationParamsSchema = z.object({
 const LocalAccessResetSchema = z.object({
   confirmation: z.literal("RESET"),
 });
+const AuthCookieNameSchema = z.string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/,
+    "鉴权 Cookie 名称包含不安全字符。",
+  );
 
 export interface AppDependencies {
   store: AutomationStore;
@@ -140,6 +153,8 @@ export interface AppDependencies {
   automation?: AutomationService;
   notifications?: NotificationService;
   startScheduler?: boolean;
+  /** Disable the durable launch worker only for isolated test environments. */
+  startLaunchWorker?: boolean;
   /** Only for isolated unit tests. Production authentication is always enabled. */
   disableAuth?: boolean;
   /** Enable only when the application is reached through HTTPS. */
@@ -153,23 +168,35 @@ export interface AppDependencies {
   authSessionLifetimeMs?: number;
   /** Desktop client cookie override paired with authSessionLifetimeMs. */
   authCookieMaxAgeSeconds?: number;
+  /** Isolated deployments may use a distinct cookie namespace. */
+  authCookieName?: string;
+  /** Disable the destructive local-access recovery endpoint in isolated deployments. */
+  allowAuthRecovery?: boolean;
 }
 
 export async function createApp(
   dependencies: AppDependencies,
 ): Promise<FastifyInstance> {
+  const sessionCookieName = AuthCookieNameSchema.parse(
+    dependencies.authCookieName ?? authCookie.name,
+  );
   const app = Fastify({ logger: true });
   const providers = dependencies.providers ?? new ProviderRegistry(undefined, {
-    metaMarketingApiTransportFactory: ({ allowedMutationExternalIds }) =>
-      new MetaMarketingApiHttpTransport(allowedMutationExternalIds),
+    metaMarketingApiTransportFactory: ({ allowedMutationExternalIds, allowedCreationPaths }) =>
+      new MetaMarketingApiHttpTransport({
+        allowedMutationExternalIds,
+        allowedCreationPaths: allowedCreationPaths ?? [],
+      }),
   });
   const launchService = new LaunchService(
     dependencies.store,
     dependencies.vault,
     providers,
   );
-  const launchWorker = new LaunchWorker(dependencies.store, launchService);
-  launchWorker.start();
+  const launchWorker = dependencies.startLaunchWorker === false
+    ? null
+    : new LaunchWorker(dependencies.store, launchService);
+  launchWorker?.start();
   const automation =
     dependencies.automation ??
     new AutomationService(
@@ -196,7 +223,7 @@ export async function createApp(
   );
   if (dependencies.startScheduler) scheduler.start();
   app.addHook("onClose", async () => {
-    await launchWorker.stop();
+    await launchWorker?.stop();
     scheduler.stop();
   });
   app.decorateRequest("authSession", null);
@@ -219,7 +246,7 @@ export async function createApp(
 
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/api/")) return;
-    const token = readCookie(request.headers.cookie, authCookie.name);
+    const token = readCookie(request.headers.cookie, sessionCookieName);
     request.authSession = auth.authenticate(token);
     const requestedCorrelationId = request.headers["x-correlation-id"];
     const correlationId = typeof requestedCorrelationId === "string"
@@ -352,26 +379,32 @@ export async function createApp(
     const session = await auth.setupInitialDeveloper(
       InitialDeveloperInputSchema.parse(request.body),
     );
-    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false, sessionCookieMaxAgeSeconds);
+    setSessionCookie(reply, sessionCookieName, session.token, dependencies.secureCookies ?? false, sessionCookieMaxAgeSeconds);
     return reply.status(201).send(auth.status(session));
   });
 
   app.post("/api/auth/login", async (request, reply) => {
     const session = await auth.login(LoginInputSchema.parse(request.body), request.ip);
-    setSessionCookie(reply, session.token, dependencies.secureCookies ?? false, sessionCookieMaxAgeSeconds);
+    setSessionCookie(reply, sessionCookieName, session.token, dependencies.secureCookies ?? false, sessionCookieMaxAgeSeconds);
     return auth.status(session);
   });
 
   app.post("/api/auth/recover", async (request, reply) => {
+    if (dependencies.allowAuthRecovery === false) {
+      return reply.status(404).send({
+        error: "NOT_FOUND",
+        message: "资源不存在。",
+      });
+    }
     LocalAccessResetSchema.parse(request.body);
     auth.resetLocalAccess();
-    clearSessionCookie(reply, dependencies.secureCookies ?? false);
+    clearSessionCookie(reply, sessionCookieName, dependencies.secureCookies ?? false);
     return auth.status(null);
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
     auth.logout(request.authSession);
-    clearSessionCookie(reply, dependencies.secureCookies ?? false);
+    clearSessionCookie(reply, sessionCookieName, dependencies.secureCookies ?? false);
     return { ok: true };
   });
 
@@ -381,7 +414,7 @@ export async function createApp(
       request.authSession.user,
       PasswordChangeInputSchema.parse(request.body),
     );
-    clearSessionCookie(reply, dependencies.secureCookies ?? false);
+    clearSessionCookie(reply, sessionCookieName, dependencies.secureCookies ?? false);
     return { ok: true, reauthenticationRequired: true };
   });
 
@@ -775,6 +808,11 @@ export async function createApp(
   });
 
   app.post("/api/launch-plans/:planId/queue", async (request, reply) => {
+    if (!launchWorker) {
+      return reply.status(503).send({
+        message: "当前隔离测试环境已关闭后台创建队列。",
+      });
+    }
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);
     if (!plan) {
@@ -957,6 +995,11 @@ export async function createApp(
   app.get("/api/platforms/meta/rules", async () =>
     dependencies.store.getMetaRuleConfiguration(),
   );
+  const metaCreationService = new MetaCreationService(
+    dependencies.store,
+    dependencies.vault,
+    providers,
+  );
 
   app.put("/api/platforms/meta/rules", async (request, reply) => {
     const { expectedUpdatedAt, ...body } =
@@ -994,14 +1037,68 @@ export async function createApp(
     }
   });
 
+  app.get("/api/accounts/:accountId/meta-creations", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    return dependencies.store.listMetaCreationTasks(accountId);
+  });
+
+  app.post("/api/accounts/:accountId/meta-creations", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const input = MetaAdCreationInputSchema.parse(request.body);
+    try {
+      const task = await metaCreationService.execute(accountId, input);
+      return reply.status(task.status === "succeeded" ? 201 : 200).send(task);
+    } catch (cause) {
+      if (cause instanceof MetaCreationIdempotencyConflictError) {
+        return reply.status(409).send({
+          error: cause.code,
+          message: cause.message,
+        });
+      }
+      throw cause;
+    }
+  });
+
+  app.post(
+    "/api/accounts/:accountId/meta-creations/:taskId/reconcile",
+    async (request, reply) => {
+      const { accountId, taskId } = MetaCreationTaskParamsSchema.parse(request.params);
+      try {
+        return await metaCreationService.reconcile(accountId, taskId);
+      } catch (cause) {
+        return reply.status(409).send({ message: getSafeProviderError(cause) });
+      }
+    },
+  );
+
+  app.post(
+    "/api/accounts/:accountId/meta-creations/:taskId/retry",
+    async (request, reply) => {
+      const { accountId, taskId } = MetaCreationTaskParamsSchema.parse(request.params);
+      let task;
+      try {
+        task = dependencies.store.getMetaCreationTask(taskId);
+      } catch {
+        return reply.status(404).send({ message: "Meta 创建任务不存在。" });
+      }
+      if (task.accountId !== accountId) {
+        return reply.status(404).send({ message: "Meta 创建任务不存在。" });
+      }
+      return metaCreationService.execute(accountId, task.input);
+    },
+  );
+
   app.get("/api/platforms/meta/access-profiles", async () =>
     dependencies.store.listMetaAccessProfiles(),
   );
 
   app.post("/api/platforms/meta/access-profiles", async (request, reply) => {
+    const input = MetaAccessProfileInputSchema.parse(request.body);
     try {
       return reply.status(201).send(dependencies.store.createMetaAccessProfile(
-        MetaAccessProfileInputSchema.parse(request.body),
+        input,
       ));
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
@@ -1010,25 +1107,13 @@ export async function createApp(
 
   app.put("/api/platforms/meta/access-profiles/:profileId", async (request, reply) => {
     const { profileId } = MetaAccessProfileParamsSchema.parse(request.params);
+    const input = MetaAccessProfileInputSchema.parse(request.body);
     try {
       const result = dependencies.store.updateMetaAccessProfile(
         profileId,
-        MetaAccessProfileInputSchema.parse(request.body),
+        input,
       );
       if (!result) return reply.status(404).send({ message: "Meta 共享凭据不存在。" });
-      if (result.invalidatedSecretRef) {
-        try {
-          await dependencies.vault.delete(result.invalidatedSecretRef);
-        } catch (cleanupCause) {
-          request.log.error(
-            {
-              profileId,
-              error: getSafeProviderError(cleanupCause),
-            },
-            "Meta App ID 已更新并解除旧共享凭据引用，但旧密文文件清理失败。",
-          );
-        }
-      }
       return result.profile;
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
@@ -1574,10 +1659,8 @@ export async function createApp(
       if (!account) {
         return reply.status(404).send({ message: "账号不存在。" });
       }
-      if (account.platform === "meta") {
-        return reply.status(409).send({
-          message: "Meta 启停的失败或 unknown 操作禁止自动重放，请先只读对账。",
-        });
+      if (account.providerKind === "meta-offline") {
+        return reply.status(409).send(metaOfflineMessage());
       }
       if (!account.enabled) {
         return reply.status(409).send({ message: "账户自动化已关闭，请先在用户管理中开启。" });
@@ -2121,6 +2204,7 @@ export function requiredPermission(
   }
   if (path.startsWith("/api/local-users")) return "users:manage";
   if (path.startsWith("/api/platforms/meta/access-profiles")) return "accounts:manage";
+  if (path.includes("/meta-creations")) return "ads:operate";
   if (path.startsWith("/api/system/")) return "system:control";
   if (path === "/api/platforms/meta/runtime") return "system:control";
   if (
@@ -2178,19 +2262,24 @@ function readCookie(
 
 function setSessionCookie(
   reply: FastifyReply,
+  name: string,
   token: string,
   secure: boolean,
   maxAgeSeconds: number,
 ): void {
   reply.header(
     "set-cookie",
-    `${authCookie.name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=${maxAgeSeconds}`,
+    `${name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=${maxAgeSeconds}`,
   );
 }
 
-function clearSessionCookie(reply: FastifyReply, secure: boolean): void {
+function clearSessionCookie(
+  reply: FastifyReply,
+  name: string,
+  secure: boolean,
+): void {
   reply.header(
     "set-cookie",
-    `${authCookie.name}=; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=0`,
+    `${name}=; Path=/; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}; Max-Age=0`,
   );
 }

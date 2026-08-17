@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ProviderKindSchema } from "./account.js";
+import { MetaCreationModeSchema } from "./meta-creation.js";
 
 export const ProviderCapabilitySchema = z.enum([
   "read-campaigns",
@@ -134,6 +135,8 @@ const MetaMarketingApiLivePolicyFields = {
     .max(3)
     .refine((items) => new Set(items).size === items.length, "启停对象层级不能重复")
     .optional(),
+  /** Missing on legacy records remains fail-closed for creation. */
+  creationMode: MetaCreationModeSchema.optional(),
 } as const;
 
 const MetaMarketingApiCurrentConnectionSettingsSchema = z.object({
@@ -170,6 +173,7 @@ export const MetaMarketingApiConnectionSettingsSchema = z.union([
   ...(settings.allowedStatusEntityTypes
     ? { allowedStatusEntityTypes: settings.allowedStatusEntityTypes }
     : {}),
+  ...(settings.creationMode ? { creationMode: settings.creationMode } : {}),
 }));
 export type MetaMarketingApiConnectionSettings = z.infer<
   typeof MetaMarketingApiConnectionSettingsSchema

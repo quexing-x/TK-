@@ -90,6 +90,76 @@ describe("MetaMarketingApiHttpTransport", () => {
     );
   });
 
+  it("allows only task-scoped paused creation edges and bodies", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: "120000000000099" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const path = "act_123/campaigns";
+    const transport = new MetaMarketingApiHttpTransport({
+      allowedCreationPaths: [path],
+    });
+
+    await expect(transport.post({
+      version: "v26.0",
+      path,
+      body: {
+        name: "paused campaign",
+        objective: "OUTCOME_TRAFFIC",
+        status: "PAUSED",
+        buying_type: "AUCTION",
+        special_ad_categories: "[]",
+        is_adset_budget_sharing_enabled: "false",
+      },
+      accessToken: "fixture-sensitive-token",
+      appSecretProof: APP_SECRET_PROOF,
+    })).resolves.toEqual({ id: "120000000000099" });
+
+    const adsPath = "act_123/ads";
+    const adsTransport = new MetaMarketingApiHttpTransport({
+      allowedCreationPaths: [adsPath],
+    });
+    await expect(adsTransport.post({
+      version: "v26.0",
+      path: adsPath,
+      body: {
+        name: "paused ad validation",
+        adset_id: "1",
+        creative: '{"creative_id":"2"}',
+        status: "PAUSED",
+        execution_options: '["validate_only"]',
+      },
+      accessToken: "fixture-sensitive-token",
+      appSecretProof: APP_SECRET_PROOF,
+    })).resolves.toEqual({ id: "120000000000099" });
+
+    await expect(transport.post({
+      version: "v26.0",
+      path,
+      body: {
+        name: "active campaign",
+        objective: "OUTCOME_TRAFFIC",
+        status: "ACTIVE",
+      },
+      accessToken: "fixture-sensitive-token",
+      appSecretProof: APP_SECRET_PROOF,
+    })).rejects.toThrow("PAUSED");
+    await expect(transport.post({
+      version: "v26.0",
+      path: "act_123/ads",
+      body: {
+        name: "ad",
+        adset_id: "1",
+        creative: '{"creative_id":"2"}',
+        status: "PAUSED",
+      },
+      accessToken: "fixture-sensitive-token",
+      appSecretProof: APP_SECRET_PROOF,
+    })).rejects.toThrow("allowlist");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects paths and mutation bodies outside the fixed scope before fetch", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

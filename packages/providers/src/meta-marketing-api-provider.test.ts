@@ -124,6 +124,66 @@ describe("MetaMarketingApiAdsProvider", () => {
     }));
   });
 
+  it("accepts ads_management as sufficient read access for a read-only account", async () => {
+    const provider = new MetaMarketingApiAdsProvider({
+      async get(input) {
+        return input.path === "me/permissions"
+          ? { data: [{ permission: "ads_management", status: "granted" }] }
+          : activeAccountDiscoveryPayload;
+      },
+      async post() {
+        throw new Error("unexpected write");
+      },
+    });
+    const readOnlyContext = {
+      ...context,
+      settings: {
+        ...context.settings,
+        liveMode: "read-only" as const,
+        allowedStatusEntityTypes: [],
+      },
+    } satisfies ProviderContext;
+
+    await expect(provider.checkHealth(readOnlyContext)).resolves.toMatchObject({
+      ok: true,
+      status: "ready",
+      message: expect.stringContaining("ads_management（含读取）"),
+    });
+    expect(provider.resolveCapabilities(readOnlyContext)).not.toContain("change-status");
+  });
+
+  it("exposes two-level creation readiness without requiring a Page binding or Page Token", async () => {
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => input.path === "me/permissions"
+      ? { data: [{ permission: "ads_management", status: "granted" }] }
+      : activeAccountDiscoveryPayload);
+    const provider = new MetaMarketingApiAdsProvider({
+      get,
+      async post() { throw new Error("unexpected write"); },
+    });
+    const creationContext = {
+      ...context,
+      settings: {
+        kind: "meta-marketing-api" as const,
+        profileId: context.settings.profileId,
+        adAccountId: context.settings.adAccountId,
+        pageId: null,
+        liveMode: "read-only" as const,
+        creationMode: "paused-only" as const,
+      },
+    } satisfies ProviderContext;
+
+    await expect(provider.checkHealth(creationContext)).resolves.toMatchObject({
+      ok: true,
+      status: "ready",
+      message: expect.stringContaining("ads_management"),
+    });
+    expect(provider.resolveCapabilities(creationContext)).toContain("create-campaigns");
+    expect(get.mock.calls.map(([request]) => request.path)).toEqual([
+      "me/permissions",
+      "200000000000002/owned_ad_accounts",
+    ]);
+  });
+
   it.each(["manual-status", "automation-status"] as const)(
     "gates %s with ads_management and a single-object transport allowlist",
     async (liveMode) => {
@@ -244,6 +304,7 @@ describe("MetaMarketingApiAdsProvider", () => {
       "read-ad-groups",
       "read-ads",
       "change-status",
+      "create-campaigns",
     ]));
     expect(provider.resolveCapabilities(context)).not.toContain("change-status");
     const statusTestProvider = new MetaMarketingApiAdsProvider(
@@ -911,5 +972,527 @@ describe("MetaMarketingApiAdsProvider", () => {
         message: expect.stringContaining("effective_status=CAMPAIGN_PAUSED"),
       }),
     ]);
+  });
+
+  it("creates and reads back only Campaign and Ad Set without Page access", async () => {
+    const remoteIds = {
+      campaigns: "120000000000091",
+      adsets: "120000000000092",
+    } as const;
+    const post = vi.fn(async (input: MetaMarketingApiTransportMutationRequest) => {
+      if (input.body.execution_options) return { success: true };
+      const edge = input.path.split("/").at(-1) as keyof typeof remoteIds;
+      return { id: remoteIds[edge] };
+    });
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => ({
+      id: input.path,
+      name: input.path === remoteIds.campaigns ? "two-level campaign" : "two-level ad set",
+      status: "PAUSED",
+      effective_status: "PAUSED",
+    }));
+    const factory = vi.fn((): MetaMarketingApiTransport => ({ get, post }));
+    const provider = new MetaMarketingApiAdsProvider(factory);
+    const onBeforeDispatch = vi.fn();
+    const progress: string[] = [];
+
+    const result = await provider.createMetaAd({
+      ...context,
+      settings: {
+        kind: "meta-marketing-api",
+        profileId: context.settings.profileId,
+        adAccountId: context.settings.adAccountId,
+        pageId: null,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-two-level-create-0001",
+        targetLevel: "ad-set",
+        campaignName: "two-level campaign",
+        adSetName: "two-level ad set",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+      },
+      existing: {},
+      onBeforeDispatch,
+      onProgress: (item) => progress.push(item.phase),
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      campaignId: remoteIds.campaigns,
+      adSetId: remoteIds.adsets,
+      message: "Meta Campaign 与 Ad Set 已按 PAUSED 状态创建并回读确认。",
+    });
+    expect(result).not.toHaveProperty("creativeId");
+    expect(result).not.toHaveProperty("adId");
+    expect(progress).toEqual(["campaign", "campaign", "ad-set", "ad-set"]);
+    expect(onBeforeDispatch).toHaveBeenCalledTimes(2);
+    expect(post).toHaveBeenCalledTimes(3);
+    expect(post.mock.calls.map(([request]) => request.path)).toEqual([
+      "act_300000000000003/campaigns",
+      "act_300000000000003/campaigns",
+      "act_300000000000003/adsets",
+    ]);
+    expect(get.mock.calls.map(([request]) => request.path)).toEqual([
+      remoteIds.campaigns,
+      remoteIds.adsets,
+    ]);
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({
+      allowedCreationPaths: [
+        "act_300000000000003/campaigns",
+        "act_300000000000003/adsets",
+      ],
+    }));
+  });
+
+  it("reconciles a two-level task as complete at a PAUSED Ad Set", async () => {
+    const post = vi.fn();
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => {
+      if (input.path === "120000000000091") {
+        return {
+          id: input.path,
+          name: "two-level campaign",
+          status: "PAUSED",
+          effective_status: "PAUSED",
+        };
+      }
+      if (input.path === "120000000000092") {
+        return {
+          id: input.path,
+          name: "two-level ad set",
+          campaign_id: "120000000000091",
+          status: "PAUSED",
+          effective_status: "CAMPAIGN_PAUSED",
+        };
+      }
+      throw new Error(`unexpected path ${input.path}`);
+    });
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+
+    const result = await provider.reconcileMetaAd({
+      ...context,
+      settings: {
+        kind: "meta-marketing-api",
+        profileId: context.settings.profileId,
+        adAccountId: context.settings.adAccountId,
+        pageId: null,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-two-level-reconcile-0001",
+        targetLevel: "ad-set",
+        campaignName: "two-level campaign",
+        adSetName: "two-level ad set",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+      },
+      existing: {
+        campaignId: "120000000000091",
+        adSetId: "120000000000092",
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      campaignId: "120000000000091",
+      adSetId: "120000000000092",
+      message: "Meta Campaign 与 Ad Set 已通过只读对账确认，且均保持 PAUSED。",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(get.mock.calls.map(([request]) => request.path)).toEqual([
+      "120000000000091",
+      "120000000000092",
+    ]);
+  });
+
+  it("rejects an Ad-level task without a Page before any transport request", async () => {
+    const get = vi.fn();
+    const post = vi.fn();
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+
+    const result = await provider.createMetaAd({
+      ...context,
+      settings: {
+        kind: "meta-marketing-api",
+        profileId: context.settings.profileId,
+        adAccountId: context.settings.adAccountId,
+        pageId: null,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-ad-without-page-0001",
+        targetLevel: "ad",
+        campaignName: "fixture campaign",
+        adSetName: "fixture ad set",
+        creativeName: "fixture creative",
+        adName: "fixture ad",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+        destinationUrl: "https://example.com/product",
+        primaryText: "fixture primary text",
+        headline: "fixture headline",
+        description: "",
+        callToAction: "LEARN_MORE",
+        imageHash: null,
+      },
+      existing: {},
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "retryable",
+      message: expect.stringContaining("Page ID"),
+    });
+    expect(get).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("creates the full Meta website-ad chain as PAUSED and reports durable progress", async () => {
+    const remoteIds = {
+      campaigns: "120000000000101",
+      adsets: "120000000000102",
+      adcreatives: "120000000000103",
+      ads: "120000000000104",
+    } as const;
+    const post = vi.fn(async (input: MetaMarketingApiTransportMutationRequest) => {
+      if (input.body.execution_options) return { success: true };
+      const edge = input.path.split("/").at(-1) as keyof typeof remoteIds;
+      return { id: remoteIds[edge] };
+    });
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => {
+      if (input.path === "me/accounts") {
+        return {
+          data: [{
+            id: context.settings.pageId,
+            access_token: "fixture-page-access-token-with-enough-length",
+            tasks: ["ADVERTISE"],
+          }],
+        };
+      }
+      const names: Record<string, string> = {
+        [remoteIds.campaigns]: "fixture campaign",
+        [remoteIds.adsets]: "fixture ad set",
+        [remoteIds.adcreatives]: "fixture creative 2026-08-17-c406ec5f16cc67b1851914b55cd55adf",
+        [remoteIds.ads]: "fixture ad",
+      };
+      return {
+        id: input.path,
+        name: names[input.path],
+        status: "PAUSED",
+        effective_status: "PAUSED",
+      };
+    });
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+    const progress: string[] = [];
+    const result = await provider.createMetaAd({
+      ...context,
+      settings: {
+        ...context.settings,
+        liveMode: "read-only",
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-create-0001",
+        targetLevel: "ad",
+        campaignName: "fixture campaign",
+        adSetName: "fixture ad set",
+        creativeName: "fixture creative",
+        adName: "fixture ad",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+        destinationUrl: "https://example.com/product",
+        primaryText: "fixture primary text",
+        headline: "fixture headline",
+        description: "fixture description",
+        callToAction: "LEARN_MORE",
+        imageHash: null,
+      },
+      existing: {},
+      onProgress: (item) => progress.push(item.phase),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      campaignId: remoteIds.campaigns,
+      adSetId: remoteIds.adsets,
+      creativeId: remoteIds.adcreatives,
+      adId: remoteIds.ads,
+    });
+    expect(progress).toEqual([
+      "campaign", "campaign",
+      "ad-set", "ad-set",
+      "creative", "creative",
+      "ad", "ad",
+    ]);
+    expect(post).toHaveBeenCalledTimes(7);
+    expect(get).toHaveBeenCalledTimes(5);
+    expect(post.mock.calls[2]?.[0]).toMatchObject({
+      path: "act_300000000000003/campaigns",
+      body: expect.objectContaining({ status: "PAUSED", objective: "OUTCOME_TRAFFIC" }),
+    });
+    expect(post.mock.calls[3]?.[0]).toMatchObject({
+      path: "act_300000000000003/adsets",
+      body: expect.objectContaining({
+        campaign_id: remoteIds.campaigns,
+        status: "PAUSED",
+      }),
+    });
+    expect(post.mock.calls[5]?.[0]).toMatchObject({
+      path: "act_300000000000003/ads",
+      accessToken: "fixture-page-access-token-with-enough-length",
+      body: expect.objectContaining({
+        adset_id: remoteIds.adsets,
+        status: "PAUSED",
+        execution_options: '["validate_only"]',
+      }),
+    });
+    expect(post.mock.calls[6]?.[0]).toMatchObject({
+      path: "act_300000000000003/ads",
+      accessToken: "fixture-page-access-token-with-enough-length",
+      body: expect.objectContaining({
+        adset_id: remoteIds.adsets,
+        status: "PAUSED",
+      }),
+    });
+  });
+
+  it("reuses confirmed Campaign, Ad Set, and Creative IDs and dispatches only the final Ad write", async () => {
+    const existing = {
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+      creativeId: "120000000000203",
+    };
+    const adId = "120000000000204";
+    const onBeforeDispatch = vi.fn();
+    const post = vi.fn(async (input: MetaMarketingApiTransportMutationRequest) => {
+      if (input.body.execution_options) return { success: true };
+      if (!input.path.endsWith("/ads")) {
+        throw new Error(`unexpected resumed write: ${input.path}`);
+      }
+      return { id: adId };
+    });
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => {
+      if (input.path === "me/accounts") {
+        return {
+          data: [{
+            id: context.settings.pageId,
+            access_token: "fixture-page-access-token-with-enough-length",
+            tasks: ["ADVERTISE"],
+          }],
+        };
+      }
+      return {
+        id: adId,
+        name: "fixture resumed ad",
+        status: "PAUSED",
+        effective_status: "PAUSED",
+      };
+    });
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+
+    const result = await provider.createMetaAd({
+      ...context,
+      settings: {
+        ...context.settings,
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-resume-ad-0001",
+        targetLevel: "ad",
+        campaignName: "fixture resumed campaign",
+        adSetName: "fixture resumed ad set",
+        creativeName: "fixture resumed creative",
+        adName: "fixture resumed ad",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+        destinationUrl: "https://example.com/product",
+        primaryText: "fixture primary text",
+        headline: "fixture headline",
+        description: "",
+        callToAction: "LEARN_MORE",
+        imageHash: null,
+      },
+      existing,
+      onBeforeDispatch,
+    });
+
+    expect(result).toMatchObject({ ok: true, ...existing, adId });
+    expect(onBeforeDispatch).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledTimes(4);
+    expect(post.mock.calls.filter(([request]) => !request.body.execution_options))
+      .toEqual([[expect.objectContaining({
+        path: "act_300000000000003/ads",
+        body: expect.objectContaining({
+          adset_id: existing.adSetId,
+          status: "PAUSED",
+        }),
+      })]]);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops before every real creation write when the creative preflight is rejected", async () => {
+    const post = vi.fn(async (input: MetaMarketingApiTransportMutationRequest) => {
+      if (input.body.execution_options && input.path.endsWith("/campaigns")) {
+        return { success: true };
+      }
+      if (input.body.execution_options && input.path.endsWith("/adcreatives")) {
+        throw new MetaMarketingApiMutationRejectedError(
+          "Meta App 仍处于开发模式，Creative validate_only 被拒绝。",
+        );
+      }
+      return { id: "120000000000999" };
+    });
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => input.path === "me/accounts"
+      ? {
+          data: [{
+            id: context.settings.pageId,
+            access_token: "fixture-page-access-token-with-enough-length",
+            tasks: ["ADVERTISE"],
+          }],
+        }
+      : { id: input.path, status: "PAUSED", effective_status: "PAUSED" });
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+
+    const result = await provider.createMetaAd({
+      ...context,
+      settings: {
+        ...context.settings,
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-preflight-0001",
+        targetLevel: "ad",
+        campaignName: "fixture campaign",
+        adSetName: "fixture ad set",
+        creativeName: "fixture creative",
+        adName: "fixture ad",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+        destinationUrl: "https://example.com/product",
+        primaryText: "fixture primary text",
+        headline: "fixture headline",
+        description: "",
+        callToAction: "LEARN_MORE",
+        imageHash: null,
+      },
+      existing: {},
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "retryable",
+      message: expect.stringContaining("开发模式"),
+    });
+    expect(result).not.toHaveProperty("campaignId");
+    expect(result).not.toHaveProperty("adSetId");
+    expect(result).not.toHaveProperty("creativeId");
+    expect(result).not.toHaveProperty("adId");
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls.every(([request]) => request.body.execution_options === '["validate_only"]'))
+      .toBe(true);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles an unknown creation read-only and proves the missing next layer", async () => {
+    const post = vi.fn();
+    const get = vi.fn(async (input: MetaMarketingApiTransportRequest) => {
+      if (input.path === "120000000000101") {
+        return {
+          id: input.path,
+          name: "fixture campaign",
+          status: "PAUSED",
+          effective_status: "PAUSED",
+        };
+      }
+      if (input.path === "120000000000102") {
+        return {
+          id: input.path,
+          name: "fixture ad set",
+          campaign_id: "120000000000101",
+          status: "PAUSED",
+          effective_status: "CAMPAIGN_PAUSED",
+        };
+      }
+      if (input.path === "act_300000000000003/adcreatives") {
+        return { data: [] };
+      }
+      throw new Error(`unexpected path ${input.path}`);
+    });
+    const provider = new MetaMarketingApiAdsProvider({ get, post });
+    const result = await provider.reconcileMetaAd({
+      ...context,
+      settings: {
+        ...context.settings,
+        creationMode: "paused-only",
+      },
+    }, {
+      input: {
+        idempotencyKey: "fixture-reconcile-0001",
+        targetLevel: "ad",
+        campaignName: "fixture campaign",
+        adSetName: "fixture ad set",
+        creativeName: "fixture creative",
+        adName: "fixture ad",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        destinationType: "WEBSITE",
+        dailyBudgetMinorUnits: 500,
+        countries: ["US"],
+        destinationUrl: "https://example.com/product",
+        primaryText: "fixture primary text",
+        headline: "fixture headline",
+        description: "",
+        callToAction: "LEARN_MORE",
+        imageHash: null,
+      },
+      existing: {
+        campaignId: "120000000000101",
+        adSetId: "120000000000102",
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "retryable",
+      campaignId: "120000000000101",
+      adSetId: "120000000000102",
+      message: expect.stringContaining("Creative 不存在"),
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(3);
   });
 });

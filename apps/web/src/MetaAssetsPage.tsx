@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   CircleAlert,
   Layers3,
+  Megaphone,
   Pause,
   Play,
   RefreshCcw,
@@ -10,7 +11,13 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { AccountConfig, AdOperationRecord } from "@tk-auto/core";
+import type {
+  AccountConfig,
+  AdOperationRecord,
+  MetaAdCreationInput,
+  MetaCallToAction,
+  MetaCreationTaskRecord,
+} from "@tk-auto/core";
 import {
   api,
   type BootstrapPayload,
@@ -27,11 +34,52 @@ import {
   type MetaAssetStatusFilter,
 } from "./meta-assets-view";
 import { hasProviderCapability } from "./provider-capability-view";
+import {
+  buildMetaCreationInput,
+  defaultMetaCreationTargetLevel,
+  metaCreationTargetCopy,
+  metaCreationTaskTargetLevel,
+} from "./meta-creation-view";
 import { useOverlays } from "./ui/overlays";
 import "./ui/pages/meta-assets.css";
 
 const selectedMetaAccountStorageKey = "tk-auto:selected-meta-account-id";
 const terminalOperationStatuses = new Set(["succeeded", "failed", "unknown", "cancelled"]);
+
+interface MetaCreationDraft {
+  targetLevel: MetaAdCreationInput["targetLevel"];
+  campaignName: string;
+  adSetName: string;
+  creativeName: string;
+  adName: string;
+  dailyBudgetUsd: string;
+  countries: string;
+  destinationUrl: string;
+  primaryText: string;
+  headline: string;
+  description: string;
+  callToAction: MetaCallToAction;
+  imageHash: string;
+}
+
+function newMetaCreationDraft(): MetaCreationDraft {
+  const suffix = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15);
+  return {
+    targetLevel: defaultMetaCreationTargetLevel,
+    campaignName: `TK AUTO Meta Traffic ${suffix}`,
+    adSetName: `TK AUTO Meta Ad Set ${suffix}`,
+    creativeName: `TK AUTO Meta Creative ${suffix}`,
+    adName: `TK AUTO Meta Ad ${suffix}`,
+    dailyBudgetUsd: "5",
+    countries: "US",
+    destinationUrl: "",
+    primaryText: "Meta sandbox automation test",
+    headline: "Meta sandbox test",
+    description: "Created by TK Ads automation",
+    callToAction: "LEARN_MORE",
+    imageHash: "",
+  };
+}
 
 export function MetaAssetsPage({
   accounts,
@@ -54,6 +102,10 @@ export function MetaAssetsPage({
   );
   const [assets, setAssets] = useState<MetaAssetRecord[] | null>(null);
   const [operations, setOperations] = useState<AdOperationRecord[]>([]);
+  const [creationTasks, setCreationTasks] = useState<MetaCreationTaskRecord[]>([]);
+  const [creationDraft, setCreationDraft] = useState<MetaCreationDraft>(newMetaCreationDraft);
+  const [creationKey, setCreationKey] = useState(() => crypto.randomUUID());
+  const creationTargetCopy = metaCreationTargetCopy(creationDraft.targetLevel);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<MetaAssetLevelFilter>("all");
@@ -81,6 +133,10 @@ export function MetaAssetsPage({
     && hasProviderCapability(capabilities, "read-ads");
   const statusReady = connection?.status === "ready"
     && hasProviderCapability(capabilities, "change-status");
+  const creationReady = connection?.status === "ready"
+    && connection.settings.kind === "meta-marketing-api"
+    && connection.settings.creationMode === "paused-only"
+    && hasProviderCapability(capabilities, "create-campaigns");
   const allowedStatusEntityTypes = connection?.settings.kind === "meta-marketing-api"
     ? connection.settings.allowedStatusEntityTypes ?? []
     : [];
@@ -91,16 +147,19 @@ export function MetaAssetsPage({
     if (!selectedAccountId) {
       setAssets([]);
       setOperations([]);
+      setCreationTasks([]);
       setLoadError(null);
       return;
     }
     try {
-      const [nextAssets, nextOperations] = await Promise.all([
+      const [nextAssets, nextOperations, nextCreationTasks] = await Promise.all([
         api.getMetaAssets(selectedAccountId),
         api.getAdOperations(selectedAccountId),
+        api.getMetaCreationTasks(selectedAccountId),
       ]);
       setAssets(nextAssets.filter((item) => item.entityType !== ("material" as typeof item.entityType)));
       setOperations(nextOperations.filter((item) => item.providerKind === "meta-marketing-api"));
+      setCreationTasks(nextCreationTasks);
       setLoadError(null);
       onError(null);
     } catch (cause) {
@@ -203,6 +262,117 @@ export function MetaAssetsPage({
     }
   };
 
+  const createMetaAd = async () => {
+    if (!account || !creationReady || !canOperateAds) return;
+    const budget = Number(creationDraft.dailyBudgetUsd);
+    const countries = creationDraft.countries
+      .split(/[,;\s]+/)
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean);
+    if (!Number.isFinite(budget) || budget < 1) {
+      onError("Meta 日预算至少为 1 USD。");
+      return;
+    }
+    if (countries.length === 0 || countries.some((item) => !/^[A-Z]{2}$/.test(item))) {
+      onError("国家使用两位代码，例如 US；多个国家用逗号分隔。");
+      return;
+    }
+    let destinationUrl = "";
+    if (creationDraft.targetLevel === "ad") {
+      let parsedDestinationUrl: URL;
+      try {
+        parsedDestinationUrl = new URL(creationDraft.destinationUrl.trim());
+      } catch {
+        onError("请输入有效的 HTTPS 落地页 URL。");
+        return;
+      }
+      if (parsedDestinationUrl.protocol !== "https:") {
+        onError("落地页必须使用 HTTPS。");
+        return;
+      }
+      destinationUrl = parsedDestinationUrl.toString();
+    }
+    const input = buildMetaCreationInput(creationDraft.targetLevel, {
+      idempotencyKey: creationKey,
+      campaignName: creationDraft.campaignName.trim(),
+      adSetName: creationDraft.adSetName.trim(),
+      objective: "OUTCOME_TRAFFIC",
+      optimizationGoal: "LINK_CLICKS",
+      billingEvent: "IMPRESSIONS",
+      destinationType: "WEBSITE",
+      dailyBudgetMinorUnits: Math.round(budget * 100),
+      countries,
+    }, {
+      creativeName: creationDraft.creativeName.trim(),
+      adName: creationDraft.adName.trim(),
+      destinationUrl,
+      primaryText: creationDraft.primaryText.trim(),
+      headline: creationDraft.headline.trim(),
+      description: creationDraft.description.trim(),
+      callToAction: creationDraft.callToAction,
+      imageHash: creationDraft.imageHash.trim() || null,
+    });
+    try {
+      setBusy("meta-create");
+      const task = await api.createMetaAd(account.id, input);
+      setCreationTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+      if (task.status === "succeeded") {
+        setCreationKey(crypto.randomUUID());
+        setCreationDraft(newMetaCreationDraft());
+        await loadLocal();
+        toast(creationTargetCopy.success);
+      } else if (task.status === "unknown") {
+        toast("创建结果存在待确认阶段；系统不会自动重放");
+      } else {
+        onError(task.message ?? "Meta 创建失败。");
+      }
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const retryMetaCreation = async (task: MetaCreationTaskRecord) => {
+    if (!account || task.status !== "failed" || !creationReady) return;
+    try {
+      setBusy(`meta-create:${task.id}`);
+      const updated = await api.retryMetaAdCreation(account.id, task.id);
+      setCreationTasks((current) => [updated, ...current.filter((item) => item.id !== updated.id)]);
+      if (updated.status === "succeeded") {
+        await loadLocal();
+        toast(`Meta ${metaCreationTargetCopy(metaCreationTaskTargetLevel(updated)).label}创建任务已从上次确认层级继续并完成`);
+      } else if (updated.status === "unknown") {
+        toast("重试阶段结果待确认，系统不会再次自动重放");
+      }
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reconcileMetaCreation = async (task: MetaCreationTaskRecord) => {
+    if (!account || task.status !== "unknown" || !creationReady) return;
+    try {
+      setBusy(`meta-create:${task.id}`);
+      const updated = await api.reconcileMetaAdCreation(account.id, task.id);
+      setCreationTasks((current) => [updated, ...current.filter((item) => item.id !== updated.id)]);
+      if (updated.status === "succeeded") {
+        await loadLocal();
+        toast(`Meta ${metaCreationTargetCopy(metaCreationTaskTargetLevel(updated)).label}创建结果已通过只读对账确认`);
+      } else if (updated.status === "failed") {
+        toast("只读对账已确认可从现有层级安全继续");
+      } else {
+        toast("只读对账仍无法唯一确认；任务保持 unknown");
+      }
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const filteredAssets = useMemo(
     () => filterMetaAssets(assets ?? [], { level, status, query }),
     [assets, level, query, status],
@@ -260,6 +430,51 @@ export function MetaAssetsPage({
         <article><small>ACTIVE</small><strong>{activeCount}</strong><span>配置状态</span></article>
         <article><small>PAUSED</small><strong>{pausedCount}</strong><span>配置状态</span></article>
         <article><small>待核验</small><strong>{unknownCount}</strong><span>禁止自动重试</span></article>
+      </div>
+
+      <div className="panel meta-create-panel">
+        <div className="panel-heading">
+          <div><span className="panel-icon"><Megaphone size={18} /></span><div><h2>创建 Meta 广告对象</h2><p>{creationTargetCopy.description}</p></div></div>
+          <span className={creationReady ? "status active" : "status warning"}>{creationReady ? "创建已就绪 · USD" : "需在接入页开启 PAUSED only 并重新检测"}</span>
+        </div>
+        <div className="form-grid meta-create-form">
+          <fieldset className="meta-create-target meta-create-wide">
+            <legend>创建层级</legend>
+            <div className="meta-create-target-options">
+              <label className={creationDraft.targetLevel === "ad-set" ? "selected" : undefined}>
+                <input checked={creationDraft.targetLevel === "ad-set"} name="meta-creation-target" onChange={() => setCreationDraft({ ...creationDraft, targetLevel: "ad-set" })} type="radio" value="ad-set" />
+                <span><strong>Campaign + Ad Set</strong><small>默认 · 只创建两层</small></span>
+              </label>
+              <label className={creationDraft.targetLevel === "ad" ? "selected" : undefined}>
+                <input checked={creationDraft.targetLevel === "ad"} name="meta-creation-target" onChange={() => setCreationDraft({ ...creationDraft, targetLevel: "ad" })} type="radio" value="ad" />
+                <span><strong>完整四层</strong><small>包含 Creative 与 Ad</small></span>
+              </label>
+            </div>
+            <p>{creationTargetCopy.description}</p>
+          </fieldset>
+          <label className="field"><span>Campaign 名称</span><input maxLength={400} value={creationDraft.campaignName} onChange={(event) => setCreationDraft({ ...creationDraft, campaignName: event.target.value })} /></label>
+          <label className="field"><span>Ad Set 名称</span><input maxLength={400} value={creationDraft.adSetName} onChange={(event) => setCreationDraft({ ...creationDraft, adSetName: event.target.value })} /></label>
+          <label className="field"><span>日预算（USD）</span><input min="1" step="0.01" type="number" value={creationDraft.dailyBudgetUsd} onChange={(event) => setCreationDraft({ ...creationDraft, dailyBudgetUsd: event.target.value })} /></label>
+          <label className="field"><span>投放国家</span><input placeholder="US" value={creationDraft.countries} onChange={(event) => setCreationDraft({ ...creationDraft, countries: event.target.value })} /></label>
+          {creationDraft.targetLevel === "ad" && <>
+            <label className="field"><span>Creative 名称</span><input maxLength={400} value={creationDraft.creativeName} onChange={(event) => setCreationDraft({ ...creationDraft, creativeName: event.target.value })} /></label>
+            <label className="field"><span>Ad 名称</span><input maxLength={400} value={creationDraft.adName} onChange={(event) => setCreationDraft({ ...creationDraft, adName: event.target.value })} /></label>
+            <label className="field meta-create-wide"><span>HTTPS 落地页</span><input placeholder="https://example.com/product" type="url" value={creationDraft.destinationUrl} onChange={(event) => setCreationDraft({ ...creationDraft, destinationUrl: event.target.value })} /></label>
+            <label className="field meta-create-wide"><span>主要文本</span><textarea maxLength={500} rows={3} value={creationDraft.primaryText} onChange={(event) => setCreationDraft({ ...creationDraft, primaryText: event.target.value })} /></label>
+            <label className="field"><span>标题</span><input maxLength={255} value={creationDraft.headline} onChange={(event) => setCreationDraft({ ...creationDraft, headline: event.target.value })} /></label>
+            <label className="field"><span>描述</span><input maxLength={255} value={creationDraft.description} onChange={(event) => setCreationDraft({ ...creationDraft, description: event.target.value })} /></label>
+            <label className="field"><span>行动按钮</span><select value={creationDraft.callToAction} onChange={(event) => setCreationDraft({ ...creationDraft, callToAction: event.target.value as MetaCallToAction })}><option value="LEARN_MORE">LEARN_MORE</option><option value="SHOP_NOW">SHOP_NOW</option><option value="SIGN_UP">SIGN_UP</option><option value="CONTACT_US">CONTACT_US</option><option value="NO_BUTTON">NO_BUTTON</option></select></label>
+            <label className="field"><span>图片 Hash（可选）</span><input placeholder="留空时由 Meta 读取落地页预览" value={creationDraft.imageHash} onChange={(event) => setCreationDraft({ ...creationDraft, imageHash: event.target.value })} /></label>
+          </>}
+        </div>
+        <div className="connection-inline-actions">
+          <button className="primary-button" disabled={!creationReady || !canOperateAds || busy !== null} onClick={() => void createMetaAd()} type="button"><Megaphone size={16} />{busy === "meta-create" ? "逐层创建中…" : creationTargetCopy.button}</button>
+          <small>请求键：{creationKey.slice(0, 8)} · 失败重试会从已确认 ID 继续</small>
+        </div>
+        {creationTasks.length > 0 && <div className="table-wrap meta-create-history"><table><thead><tr><th>时间 / 任务</th><th>目标 / 阶段</th><th>状态</th><th>远端 ID</th><th>结果</th><th>操作</th></tr></thead><tbody>{creationTasks.slice(0, 10).map((task) => {
+          const taskTargetLevel = metaCreationTaskTargetLevel(task);
+          return <tr key={task.id}><td>{new Date(task.createdAt).toLocaleString()}<br /><small>{task.id.slice(0, 8)}</small></td><td><strong>{metaCreationTargetCopy(taskTargetLevel).label}</strong><br /><small>{task.phase}</small></td><td><span className={creationTaskStatusClass(task.status)}>{task.status}</span></td><td><small>C {task.campaignId ?? "—"}<br />S {task.adSetId ?? "—"}{taskTargetLevel === "ad" && <><br />Cr {task.creativeId ?? "—"}<br />A {task.adId ?? "—"}</>}</small></td><td><small>{task.message ?? "—"}</small></td><td>{task.status === "failed" ? <button disabled={!creationReady || busy !== null} onClick={() => void retryMetaCreation(task)} type="button"><RefreshCcw size={14} />{busy === `meta-create:${task.id}` ? "重试中…" : "继续"}</button> : task.status === "unknown" ? <button disabled={!creationReady || busy !== null} onClick={() => void reconcileMetaCreation(task)} type="button"><RefreshCcw size={14} />{busy === `meta-create:${task.id}` ? "对账中…" : "只读对账"}</button> : "—"}</td></tr>;
+        })}</tbody></table></div>}
       </div>
 
       <div className="panel meta-filter-panel">
@@ -329,6 +544,12 @@ function operationStatusLabel(status: AdOperationRecord["status"]): string {
 function operationStatusClass(status: AdOperationRecord["status"]): string {
   if (status === "succeeded") return "status active";
   if (status === "failed" || status === "cancelled") return "status danger";
+  return "status warning";
+}
+
+function creationTaskStatusClass(status: MetaCreationTaskRecord["status"]): string {
+  if (status === "succeeded") return "status active";
+  if (status === "failed") return "status danger";
   return "status warning";
 }
 

@@ -199,7 +199,7 @@ describe("AutomationStore", () => {
     expect(store.deleteMetaAccessProfile(first.id)).toBeNull();
   });
 
-  it("invalidates the shared secret bundle only when a Meta profile App ID changes", () => {
+  it("preserves the shared secret bundle and blocks ordinary App ID replacement", () => {
     const profile = store.createMetaAccessProfile({
       name: "App A",
       appId: "100000000000010",
@@ -219,16 +219,16 @@ describe("AutomationStore", () => {
     });
     expect(store.getStoredMetaAccessProfile(profile.id)?.secretRef).toBe("vault-secret-bundle");
 
-    expect(store.updateMetaAccessProfile(profile.id, {
+    expect(() => store.updateMetaAccessProfile(profile.id, {
       name: "App B",
       appId: "100000000000011",
       businessId: "200000000000010",
       graphApiVersion: "v26.0",
-    })).toMatchObject({
-      profile: { hasAppSecret: false, hasAccessToken: false },
-      invalidatedSecretRef: "vault-secret-bundle",
+    })).toThrow("不会因普通档案保存而自动清除");
+    expect(store.getStoredMetaAccessProfile(profile.id)).toMatchObject({
+      appId: "100000000000010",
+      secretRef: "vault-secret-bundle",
     });
-    expect(store.getStoredMetaAccessProfile(profile.id)?.secretRef).toBeNull();
   });
 
   it("keeps Meta connections ready for a profile rename but retests discovery changes", () => {
@@ -724,6 +724,170 @@ describe("AutomationStore", () => {
     expect(() => store.updateMetaAutomationRuntime(runtime, runtime.updatedAt)).toThrow(
       "configuration was updated by another request",
     );
+  });
+
+  it("persists idempotent Meta creation progress and resumes only explicit failures", () => {
+    const account = store.createAccount({
+      displayName: "Meta creation fixture",
+      platform: "meta",
+      accountType: "standard",
+      enabled: false,
+      providerKind: "meta-marketing-api",
+    });
+    const input = {
+      idempotencyKey: "meta-create-fixture-0001",
+      campaignName: "campaign",
+      adSetName: "ad set",
+      creativeName: "creative",
+      adName: "ad",
+      objective: "OUTCOME_TRAFFIC" as const,
+      optimizationGoal: "LINK_CLICKS" as const,
+      billingEvent: "IMPRESSIONS" as const,
+      destinationType: "WEBSITE" as const,
+      dailyBudgetMinorUnits: 500,
+      countries: ["US"],
+      destinationUrl: "https://example.com/product",
+      primaryText: "primary text",
+      headline: "headline",
+      description: "description",
+      callToAction: "LEARN_MORE" as const,
+      imageHash: null,
+    };
+
+    const created = store.createMetaCreationTask(account.id, input);
+    expect(created.input.targetLevel).toBe("ad");
+    const database = (store as unknown as { db: DatabaseSync }).db;
+    database.prepare(
+      "UPDATE meta_creation_tasks SET input_json = ? WHERE id = ?",
+    ).run(JSON.stringify(input), created.id);
+    expect(store.getMetaCreationTask(created.id).input.targetLevel).toBe("ad");
+    expect(store.createMetaCreationTask(account.id, input).id).toBe(created.id);
+    expect(() => store.createMetaCreationTask(account.id, {
+      targetLevel: "ad-set",
+      idempotencyKey: input.idempotencyKey,
+      campaignName: input.campaignName,
+      adSetName: input.adSetName,
+      objective: input.objective,
+      optimizationGoal: input.optimizationGoal,
+      billingEvent: input.billingEvent,
+      destinationType: input.destinationType,
+      dailyBudgetMinorUnits: input.dailyBudgetMinorUnits,
+      countries: input.countries,
+    })).toThrow("相同幂等键已用于不同的 Meta 创建请求");
+    expect(() => store.createMetaCreationTask(account.id, {
+      ...input,
+      headline: "different headline",
+    })).toThrow("相同幂等键已用于不同的 Meta 创建请求");
+    expect(store.claimMetaCreationTask(created.id)).toMatchObject({
+      status: "running",
+      attemptCount: 1,
+    });
+    store.updateMetaCreationProgress(created.id, {
+      phase: "campaign",
+      campaignId: "120000000000101",
+      message: "campaign confirmed",
+    });
+    expect(store.completeMetaCreationTask(created.id, "failed", "ad set rejected"))
+      .toMatchObject({
+        status: "failed",
+        phase: "campaign",
+        campaignId: "120000000000101",
+      });
+    expect(store.claimMetaCreationTask(created.id)).toMatchObject({
+      status: "running",
+      attemptCount: 2,
+      campaignId: "120000000000101",
+    });
+    store.updateMetaCreationProgress(created.id, {
+      phase: "ad",
+      adSetId: "120000000000102",
+      creativeId: "120000000000103",
+      adId: "120000000000104",
+      message: "ad confirmed",
+    });
+    expect(store.completeMetaCreationTask(created.id, "succeeded", "done"))
+      .toMatchObject({
+        status: "succeeded",
+        phase: "completed",
+        campaignId: "120000000000101",
+        adId: "120000000000104",
+      });
+    expect(store.claimMetaCreationTask(created.id)).toBeNull();
+    expect(store.listMetaCreationTasks(account.id)).toHaveLength(1);
+
+    const twoLevel = store.createMetaCreationTask(account.id, {
+      targetLevel: "ad-set",
+      idempotencyKey: "meta-create-fixture-two-level-0002",
+      campaignName: input.campaignName,
+      adSetName: input.adSetName,
+      objective: input.objective,
+      optimizationGoal: input.optimizationGoal,
+      billingEvent: input.billingEvent,
+      destinationType: input.destinationType,
+      dailyBudgetMinorUnits: input.dailyBudgetMinorUnits,
+      countries: input.countries,
+    });
+    expect(store.claimMetaCreationTask(twoLevel.id)).toMatchObject({
+      status: "running",
+      input: { targetLevel: "ad-set" },
+    });
+    store.updateMetaCreationProgress(twoLevel.id, {
+      phase: "ad-set",
+      campaignId: "120000000000151",
+      adSetId: "120000000000152",
+      message: "two layers confirmed",
+    });
+    expect(store.completeMetaCreationTask(twoLevel.id, "succeeded", "done"))
+      .toMatchObject({
+        status: "succeeded",
+        phase: "completed",
+        campaignId: "120000000000151",
+        adSetId: "120000000000152",
+        creativeId: null,
+        adId: null,
+      });
+
+    const unknown = store.createMetaCreationTask(account.id, {
+      ...input,
+      idempotencyKey: "meta-create-fixture-unknown-0002",
+    });
+    store.claimMetaCreationTask(unknown.id);
+    store.updateMetaCreationProgress(unknown.id, {
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+      message: "ad set confirmed",
+    });
+    store.completeMetaCreationTask(unknown.id, "unknown", "creative readback unknown");
+    expect(store.resolveUnknownMetaCreationTask(
+      unknown.id,
+      "failed",
+      "creative confirmed absent",
+    )).toMatchObject({
+      status: "failed",
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+    });
+    expect(store.claimMetaCreationTask(unknown.id)).toMatchObject({
+      status: "running",
+      attemptCount: 2,
+    });
+
+    const notStaleBefore = new Date(Date.now() - 1_000).toISOString();
+    expect(store.recoverInterruptedMetaCreationTasks(notStaleBefore)).toBe(0);
+    expect(store.getMetaCreationTask(unknown.id).status).toBe("running");
+    const staleBefore = new Date(Date.now() + 1_000).toISOString();
+    expect(store.recoverInterruptedMetaCreationTasks(staleBefore)).toBe(1);
+    expect(store.getMetaCreationTask(unknown.id)).toMatchObject({
+      status: "unknown",
+      phase: "ad-set",
+      campaignId: "120000000000201",
+      adSetId: "120000000000202",
+      attemptCount: 2,
+    });
+    expect(store.getMetaCreationTask(unknown.id).message).toContain("只读对账");
+    expect(store.recoverInterruptedMetaCreationTasks(staleBefore)).toBe(0);
   });
 
   it("stores notification settings without exposing credential references", () => {
