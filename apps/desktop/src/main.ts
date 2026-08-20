@@ -19,7 +19,7 @@ import {
   Notification,
   Tray,
 } from "electron";
-import { installOutboundProxy, resolveOutboundProxy } from "../../api/src/proxy.ts";
+import { installOutboundProxy, resolveOutboundProxy, startOutboundProxyWatcher } from "../../api/src/proxy.ts";
 import {
   BACKGROUND_PROGRAM_NAME,
   isAddressInUseError,
@@ -183,9 +183,22 @@ async function startRuntime(origin: string) {
   const webRoot = app.isPackaged ? join(process.resourcesPath, "web") : resolve(__dirname, "../../web/dist");
   await server.register(fastifyStatic, { root: webRoot, index: ["index.html"] });
   if (proxyConfig) server.log.info({ source: proxyConfig.source }, "Outbound HTTPS proxy enabled");
+  // 后台程序是开机自启的，常比 VPN / 代理客户端先起来。只在启动瞬间解析一次会把
+  // 「直连」冻结整个进程生命周期，表现为所有账户批量 fetch failed 直到人工重启。
+  const proxyWatcher = startOutboundProxyWatcher({
+    initial: proxyConfig,
+    onChange: (next, previous) => {
+      server.log.warn(
+        { from: previous?.source ?? "direct", to: next?.source ?? "direct" },
+        next
+          ? "Outbound proxy changed; switched global dispatcher"
+          : "Outbound proxy removed; switched back to direct connections",
+      );
+    },
+  });
   await server.listen({ host: HOST, port: Number(new URL(origin).port) });
   if (updateRuntime.isConfigured()) void updateRuntime.checkForUpdates().catch((cause) => server.log.warn({ cause }, "Signed update check failed"));
-  return { server, store, proxyAgent, origin };
+  return { server, store, proxyAgent, proxyWatcher, origin };
 }
 
 function createWindow(origin: string): BrowserWindow {
@@ -312,6 +325,7 @@ function clearClientSessionWatch(): void {
 }
 
 async function stopRuntime(activeRuntime: NonNullable<typeof runtime>) {
+  activeRuntime.proxyWatcher.stop();
   await activeRuntime.server.close();
   await activeRuntime.proxyAgent?.close();
   activeRuntime.store.close();
