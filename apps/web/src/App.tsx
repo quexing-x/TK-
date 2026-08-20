@@ -59,6 +59,7 @@ import type {
   AccountProviderCapabilities,
   SyncEntityType,
 } from "@tk-auto/core";
+import { isNetworkUnreachableMessage } from "@tk-auto/core";
 import {
   api,
   type BootstrapPayload,
@@ -2322,6 +2323,9 @@ function connectionStateLabel(
       <span className={statusClass(access.createReady)}>创建：{access.createReady ? "可用" : "未就绪"}</span>
       <span className={statusClass(access.copyReady)}>复制：{access.copyReady ? "可用" : "未就绪"}</span>
     </div>;
+  }
+  if (connection.status === "failed" && isNetworkUnreachableMessage(connection.lastMessage)) {
+    return <span className="status danger" title={connection.lastMessage ?? undefined}>网络不可达</span>;
   }
   if (connection.status === "failed" && kind === "cookie") {
     return <span className="status danger">Cookie 已失效</span>;

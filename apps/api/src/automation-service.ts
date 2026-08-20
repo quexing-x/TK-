@@ -8,6 +8,7 @@ import {
   evaluateMetaRuleConfiguration,
   evaluateRuleConfiguration,
   filterEntitiesToRecentWindow,
+  networkUnreachableMessagePrefix,
   MetaAccessSecretBundleInputSchema,
   stripAutomaticAdGroupNameSuffixes,
   type AutomationCandidate,
@@ -30,6 +31,7 @@ import {
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
+  withCauseDetail,
   type ProviderContext,
   type StatusMutation,
   type StatusMutationResult,
@@ -906,11 +908,13 @@ export class AutomationService {
         },
       );
     } catch (cause) {
-      const message = safeMessage(cause);
+      // undici 的网络失败一律只留一句 `fetch failed`，真正的错误码藏在 cause 链上。
+      const message = withCauseDetail(safeMessage(cause), cause);
+      const networkUnreachable = isTransientHealthCheckFailure(cause);
       if (
         connection.status === "ready"
         && connection.authorizationStatus === "active"
-        && isTransientHealthCheckFailure(cause)
+        && networkUnreachable
       ) {
         this.store.completeProviderHealthCheckIfCurrent(
           accountId,
@@ -933,9 +937,11 @@ export class AutomationService {
         connection,
         {
           connectionStatus: "failed",
-          message: account.providerKind === "cookie"
-            ? `Cookie 已失效或连接异常：${message}`
-            : `API 连接异常：${message}`,
+          message: networkUnreachable
+            ? `${networkUnreachableMessagePrefix}：${message}`
+            : account.providerKind === "cookie"
+              ? `Cookie 已失效或连接异常：${message}`
+              : `API 连接异常：${message}`,
           authorizationStatus: "failed",
           capabilityVersion: this.providers.capabilityVersion(account.providerKind),
           capabilities: [],

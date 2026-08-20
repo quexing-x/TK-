@@ -1076,6 +1076,30 @@ describe("AutomationService", () => {
     });
   });
 
+  it("reports an unreachable network as a network failure, not an expired credential", async () => {
+    // 代理没生效时 undici 只抛一句 `fetch failed`，错误码在 cause 上。之前这里
+    // 一律写成「Cookie 已失效」，用户照着提示反复重导 Cookie 也修不好。
+    const failure = new Error("TikTok explicitly rejected the credential");
+    vi.spyOn(provider, "checkHealth").mockRejectedValueOnce(failure);
+    await service.checkAccountConnection("demo-account");
+    expect(store.getProviderConnection("demo-account", "cookie")?.status).toBe("failed");
+
+    const unreachable = new TypeError("fetch failed");
+    (unreachable as { cause?: unknown }).cause = Object.assign(
+      new Error("Connect Timeout Error"),
+      { code: "UND_ERR_CONNECT_TIMEOUT" },
+    );
+    vi.spyOn(provider, "checkHealth").mockRejectedValueOnce(unreachable);
+
+    await service.checkAccountConnection("demo-account");
+
+    const connection = store.getProviderConnection("demo-account", "cookie");
+    expect(connection?.status).toBe("failed");
+    expect(connection?.lastMessage).toContain("网络不可达或代理未生效");
+    expect(connection?.lastMessage).toContain("UND_ERR_CONNECT_TIMEOUT");
+    expect(connection?.lastMessage).not.toContain("Cookie 已失效");
+  });
+
   it("refreshes a stale provider capability contract after a successful background health check", async () => {
     const authorizationExpiresAt = new Date(Date.now() + 60_000).toISOString();
     store.updateProviderAuthorization("demo-account", "cookie", {

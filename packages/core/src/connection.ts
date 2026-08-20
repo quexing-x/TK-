@@ -288,6 +288,22 @@ export const ProviderConnectionSchema = z.object({
 
 export type ProviderConnection = z.infer<typeof ProviderConnectionSchema>;
 
+/**
+ * 连接检测失败在网络层（DNS / 连接超时 / 代理未生效）时使用的消息前缀。
+ *
+ * 网络不通和凭据失效是两回事：前者重新导入 Cookie 完全无济于事。检测结果只有
+ * status="failed" 一个维度，界面据此一律显示「Cookie 已失效」，把网络故障误报成
+ * 凭据问题。用前缀把两者分开，API 写入、界面读取共用这一份判据。
+ */
+export const networkUnreachableMessagePrefix = "网络不可达或代理未生效";
+
+export function isNetworkUnreachableMessage(
+  message: string | null | undefined,
+): boolean {
+  return typeof message === "string"
+    && message.startsWith(networkUnreachableMessagePrefix);
+}
+
 export const SyncEntityTypeSchema = z.enum([
   "campaign",
   "ad-group",
