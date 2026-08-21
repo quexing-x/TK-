@@ -154,3 +154,22 @@ export interface DailyMetricRecord {
   /** 该自然日就是账户当地的今天，数据仍在累积中。 */
   isCurrentDay: boolean;
 }
+
+/**
+ * 单个对象在一段自然日区间内的指标合计。
+ *
+ * 与 DailyMetricRecord 同一套口径（每个实体每天取当天最后一个健康快照），只是不再跨实体
+ * 合并，而是按实体累计——广告管理页据此把「消耗」列从"今天"切到任意区间。
+ *
+ * 只带可加的计数量。CPA / CPC 这类比率必须由区间合计现算，把各日比率相加或平均都是错的。
+ */
+export interface EntityRangeMetricRecord {
+  entityType: SyncEntityType;
+  externalId: string;
+  spend: number;
+  clicks: number;
+  conversions: number;
+  carts: number;
+  /** 该对象在区间内有数据的自然日天数。 */
+  days: number;
+}
