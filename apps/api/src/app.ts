@@ -1964,6 +1964,29 @@ export async function createApp(
     );
   });
 
+  // 按自然日汇总。/analytics 返回的是同步批次（当日累计的中间态），只适合排查同步本身；
+  // 业务指标一律走这里，否则同一天的累计值会被重复计入区间合计。
+  app.get("/api/accounts/:accountId/metric-days", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    const query = AnalyticsQuerySchema.parse(request.query);
+    const until = query.to ?? new Date().toISOString();
+    const since = query.from ?? new Date(
+      new Date(until).getTime() - query.days * 24 * 60 * 60_000,
+    ).toISOString();
+    if (new Date(until).getTime() - new Date(since).getTime() > 90 * 24 * 60 * 60_000) {
+      return reply.status(400).send({ message: "自定义分析范围最多为 90 天。" });
+    }
+    return dependencies.store.listDailyMetricTotals(
+      accountId,
+      account.providerKind,
+      since,
+      query.entityType,
+      until,
+    );
+  });
+
   app.post(
     "/api/accounts/:accountId/connections/:providerKind/test",
     async (request, reply) => {

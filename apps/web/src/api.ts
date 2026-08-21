@@ -17,6 +17,7 @@ import type {
   RuleConfigurationInput,
   AdOperationRecord,
   MetricBatchRecord,
+  DailyMetricRecord,
   ManagedEntityRecord,
   IgnoredEntityRecord,
   ManualStatusInput,
@@ -794,6 +795,18 @@ export const api = {
     if (entityType) query.set("entityType", entityType);
     return request<MetricBatchRecord[]>(
       `/api/accounts/${accountId}/analytics?${query.toString()}`,
+    );
+  },
+  /** 按自然日汇总的业务指标；批次接口只用于排查同步。 */
+  getMetricDays: (
+    accountId: string,
+    range: { from: string; to: string },
+    entityType?: ManualStatusInput["entityType"],
+  ) => {
+    const query = new URLSearchParams({ from: range.from, to: range.to });
+    if (entityType) query.set("entityType", entityType);
+    return request<DailyMetricRecord[]>(
+      `/api/accounts/${accountId}/metric-days?${query.toString()}`,
     );
   },
   getMaintenanceStatus: () =>
