@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, CircleCheck, CircleX, Download, FileSpreadsheet, Pencil, RefreshCcw, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
-import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
+import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchAgeRange, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
 import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
@@ -109,7 +109,7 @@ function launchAccountReadiness(
 
 const freshPreset = (): LaunchPresetInput => ({
   name: "基础预设",
-  region: "未设置",
+  region: "台湾",
   dailyBudget: 100,
   bid: null,
   startAt: null,
@@ -118,6 +118,44 @@ const freshPreset = (): LaunchPresetInput => ({
   initialStatus: "enabled",
   creationConfig: defaultCreationPresetConfig,
 });
+
+export function regionLabelForCountryCodes(countryCodes: number[]): string {
+  if (countryCodes.length === 1 && countryCodes[0] === 1668284) return "台湾";
+  return countryCodes.length > 0 ? countryCodes.join(",") : "未设置";
+}
+
+export function nextPresetCopyName(
+  sourceName: string,
+  existingNames: string[],
+): string {
+  const base = `${sourceName} · 自定义`;
+  if (!existingNames.includes(base)) return base;
+  let index = 2;
+  while (existingNames.includes(`${base} (${index})`)) index += 1;
+  return `${base} (${index})`;
+}
+
+export function copyPresetForCustomization(
+  preset: LaunchPresetRecord,
+  existingNames: string[],
+): LaunchPresetInput {
+  const creationConfig = CreationPresetConfigSchema.parse(preset.creationConfig ?? {});
+  return {
+    name: nextPresetCopyName(preset.name, existingNames),
+    region: regionLabelForCountryCodes(creationConfig.countryCodes),
+    dailyBudget: preset.dailyBudget,
+    campaignBudget: preset.campaignBudget ?? null,
+    bid: preset.bid,
+    startAt: preset.startAt,
+    endAt: preset.endAt,
+    startAtRule: preset.startAtRule ?? "absolute",
+    initialStatus: preset.initialStatus,
+    creationConfig: {
+      ...creationConfig,
+      videoPostMappings: creationConfig.videoPostMappings?.map((mapping) => ({ ...mapping })),
+    },
+  };
+}
 
 export function LaunchPage({ accounts, accountCapabilities, connectionStates, preferredAccountId, onConnectionStatesChanged, onManageConnection, onError }: { accounts: AccountConfig[]; accountCapabilities: Record<string, AccountProviderCapabilities>; connectionStates: ConnectionState[]; preferredAccountId: string; onConnectionStatesChanged?: () => Promise<void>; onManageConnection?: (accountId: string) => void; onError: (message: string | null) => void }) {
   const auth = useAuth();
@@ -362,6 +400,11 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   loadRef.current = refreshProgress;
   useEffect(() => { void load().catch((cause) => onError(messageOf(cause))); }, [onError]);
   useEffect(() => {
+    if (editingPresetId || !selectedPreset) return;
+    setPresetForm(copyPresetForCustomization(selectedPreset, presets.map((preset) => preset.name)));
+    setPresetFeedback(null);
+  }, [presetId]);
+  useEffect(() => {
     const poller = createLaunchProgressPoller(() => {
       void loadRef.current().catch((cause) => onError(messageOf(cause)));
     });
@@ -455,6 +498,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
         name: saved.name,
         region: saved.region,
         dailyBudget: saved.dailyBudget,
+        campaignBudget: saved.campaignBudget ?? null,
         bid: saved.bid,
         startAt: saved.startAt,
         startAtRule: saved.startAtRule,
@@ -478,11 +522,32 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     finally { setBusy(false); }
   };
   const editPreset = (preset: LaunchPresetRecord) => {
+    const creationConfig = CreationPresetConfigSchema.parse(preset.creationConfig ?? {});
     setEditingPresetId(preset.id);
-    setPresetForm({ name: preset.name, region: preset.region, dailyBudget: preset.dailyBudget, campaignBudget: preset.campaignBudget ?? null, bid: preset.bid, startAt: preset.startAt, endAt: preset.endAt, startAtRule: preset.startAtRule ?? "absolute", initialStatus: preset.initialStatus, creationConfig: preset.creationConfig });
+    setPresetForm({ name: preset.name, region: regionLabelForCountryCodes(creationConfig.countryCodes), dailyBudget: preset.dailyBudget, campaignBudget: preset.campaignBudget ?? null, bid: preset.bid, startAt: preset.startAt, endAt: preset.endAt, startAtRule: preset.startAtRule ?? "absolute", initialStatus: preset.initialStatus, creationConfig });
   };
   const updateCreationConfig = (patch: Partial<LaunchPresetInput["creationConfig"]>) => {
     setPresetForm((value) => ({ ...value, creationConfig: { ...(value.creationConfig ?? defaultCreationPresetConfig), ...patch } }));
+  };
+  const updateRegionCodes = (value: string) => {
+    const countryCodes = parseIntegerList(value);
+    setPresetForm((current) => ({
+      ...current,
+      region: regionLabelForCountryCodes(countryCodes),
+      creationConfig: {
+        ...(current.creationConfig ?? defaultCreationPresetConfig),
+        countryCodes,
+      },
+    }));
+  };
+  const updateAgeRange = (ageRange: LaunchAgeRange, checked: boolean) => {
+    const selected = presetCreationConfig.ageRanges?.length
+      ? presetCreationConfig.ageRanges
+      : [...LaunchAgeRangeValues];
+    const next = checked
+      ? [...new Set([...selected, ageRange])]
+      : selected.filter((value) => value !== ageRange);
+    if (next.length > 0) updateCreationConfig({ ageRanges: next });
   };
   const presetCreationConfig = CreationPresetConfigSchema.parse(presetForm.creationConfig ?? {});
   const presetBudgetMode = resolveConfiguredBudgetMode(presetCreationConfig);
@@ -670,7 +735,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
 
     {launchMode !== "copy" && <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
       <label className="field"><span>预设名称</span><input value={presetForm.name} onChange={(event) => setPresetForm((value) => ({ ...value, name: event.target.value }))} /></label>
-      <label className="field"><span>投放地区</span><input placeholder="例如：US、美国、US/CA" value={presetForm.region} onChange={(event) => setPresetForm((value) => ({ ...value, region: event.target.value }))} /></label>
+      <label className="field"><span>投放地区（实际生效）</span><input inputMode="numeric" placeholder="例如：1668284" value={(presetCreationConfig.countryCodes ?? []).join(",")} onChange={(event) => updateRegionCodes(event.target.value)} /><small>台湾为 1668284；此处直接生成创建请求的地区代码。</small></label>
       <div className="field budget-mode-field"><span>预算模式</span><div className="budget-mode-switch" role="group" aria-label="预算模式">
         <button aria-pressed={presetBudgetMode === "ad-group"} className={presetBudgetMode === "ad-group" ? "active" : ""} onClick={() => updateCreationConfig({ budgetMode: "ad-group" })} type="button">广告组预算</button>
         <button aria-pressed={presetBudgetMode === "campaign"} className={presetBudgetMode === "campaign" ? "active" : ""} onClick={() => updateCreationConfig({ budgetMode: "campaign" })} type="button">系列预算</button>
@@ -681,7 +746,9 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <label className="field"><span>出价（留空为自动）</span><input min="0" step="0.01" type="number" value={presetForm.bid ?? ""} onChange={(event) => setPresetForm((value) => ({ ...value, bid: event.target.value === "" ? null : Number(event.target.value) }))} /></label>
       <label className="field"><span>创建时间（留空为立即）</span><input type="datetime-local" value={presetForm.startAtRule === "absolute" ? toLocalInput(presetForm.startAt) : ""} onChange={(event) => setPresetForm((value) => ({ ...value, startAtRule: "absolute", startAt: toIso(event.target.value) }))} /><span className="quick-time-actions"><button className={presetForm.startAtRule === "tonight" ? "active" : ""} onClick={() => setPresetForm((value) => ({ ...value, startAtRule: "tonight", startAt: null }))} type="button">当天 24:00</button><button className={presetForm.startAtRule === "tomorrow-morning" ? "active" : ""} onClick={() => setPresetForm((value) => ({ ...value, startAtRule: "tomorrow-morning", startAt: null }))} type="button">次日 06:00</button></span>{presetForm.startAtRule !== "absolute" && <small className="preset-rule-hint">已设为{presetForm.startAtRule === "tonight" ? "当天 24:00" : "次日 06:00"}，随日期自动变动，无需每天修改。</small>}</label>
       <label className="field"><span>初始状态</span><select value={presetForm.initialStatus} onChange={(event) => setPresetForm((value) => ({ ...value, initialStatus: event.target.value as LaunchPresetInput["initialStatus"] }))}><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
-    </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、出价和时间等业务参数。</span></div>{!canManageLaunchPresets && <div className="preset-save-feedback warning"><strong>当前账号无预设管理权限</strong><span>登录角色为“{auth.status.user?.role ?? "未知"}”，无法保存广告预设；请切换至开发者、管理员或操作员账号。</span></div>}{presetFeedback && <div className={`preset-save-feedback ${presetFeedback.tone}`}><strong>{presetFeedback.title}</strong><span>{presetFeedback.lines[0]}</span></div>}<div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets} onClick={() => void savePreset()} title={canManageLaunchPresets ? undefined : "需要 launch:manage 权限"} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(freshPreset()); setPresetFeedback(null); }} type="button">取消编辑</button>}</div>
+      <label className="field"><span>性别</span><select value={presetCreationConfig.gender ?? "all"} onChange={(event) => updateCreationConfig({ gender: event.target.value as "all" | "male" | "female" })}><option value="all">不限</option><option value="male">男</option><option value="female">女</option></select></label>
+      <div className="field wide"><span>年龄</span><div className="launch-age-options">{LaunchAgeRangeValues.map((ageRange) => { const selected = presetCreationConfig.ageRanges?.length ? presetCreationConfig.ageRanges : LaunchAgeRangeValues; return <label key={ageRange}><input checked={selected.includes(ageRange)} onChange={(event) => updateAgeRange(ageRange, event.target.checked)} type="checkbox" /><span>{ageRange === "55-100" ? "55+" : ageRange}</span></label>; })}</div><small>至少保留一个年龄段；旧预设默认不限。</small></div>
+    </div><div className="creation-template-note"><strong>内置创建协议</strong><span>用户无需再抓取创建接口；两条 cURL 提供当前账户会话，广告预设负责预算、地区、年龄、性别、出价和时间等业务参数。</span></div>{!canManageLaunchPresets && <div className="preset-save-feedback warning"><strong>当前账号无预设管理权限</strong><span>登录角色为“{auth.status.user?.role ?? "未知"}”，无法保存广告预设；请切换至开发者、管理员或操作员账号。</span></div>}{presetFeedback && <div className={`preset-save-feedback ${presetFeedback.tone}`}><strong>{presetFeedback.title}</strong><span>{presetFeedback.lines[0]}</span></div>}<div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets} onClick={() => void savePreset()} title={canManageLaunchPresets ? undefined : "需要 launch:manage 权限"} type="button">{editingPresetId ? "更新预设" : "新建预设"}</button>{editingPresetId && <button className="secondary-button" onClick={() => { setEditingPresetId(null); setPresetForm(selectedPreset ? copyPresetForCustomization(selectedPreset, presets.map((preset) => preset.name)) : freshPreset()); setPresetFeedback(null); }} type="button">取消编辑</button>}</div>
       <div className="table-wrap"><table><thead><tr><th>预设</th><th>地区</th><th>预算模式</th><th>预算</th><th>出价</th><th>创建时间</th><th>初始状态</th><th>操作</th></tr></thead><tbody>{presets.map((preset) => { const mode = resolveConfiguredBudgetMode(preset.creationConfig); return <tr key={preset.id}><td>{preset.name}</td><td>{preset.region}</td><td>{mode === "campaign" ? "系列预算" : "广告组预算"}</td><td>{mode === "campaign" ? preset.campaignBudget ?? "未设置" : preset.dailyBudget}</td><td>{preset.bid ?? "自动"}</td><td>{preset.startAtRule === "tonight" ? "当天 24:00（每日自动）" : preset.startAtRule === "tomorrow-morning" ? "次日 06:00（每日自动）" : preset.startAt ? new Date(preset.startAt).toLocaleString() : "立即"}</td><td>{preset.initialStatus === "enabled" ? "开启" : "关闭"}</td><td><button disabled={busy} onClick={() => editPreset(preset)} type="button">编辑</button> <button disabled={busy} onClick={() => void removePreset(preset.id)} type="button">删除</button></td></tr>; })}</tbody></table></div>
     </div>}
 
@@ -696,8 +763,8 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <label className="field"><span>广告身份类型</span><input inputMode="numeric" placeholder="例如 1" value={presetCreationConfig.identityType ?? ""} onChange={(event) => updateCreationConfig({ identityType: nullableInteger(event.target.value) })} /></label>
       {presetCreationConfig.identityType !== 0 && <label className="field"><span>广告身份 ID</span><input placeholder="从账户后台复制" value={presetCreationConfig.identityId ?? ""} onChange={(event) => updateCreationConfig({ identityId: event.target.value || null })} /></label>}
       <label className="field"><span>行动号召 ID</span><input placeholder="从账户后台复制" value={presetCreationConfig.callToActionId ?? ""} onChange={(event) => updateCreationConfig({ callToActionId: event.target.value || null })} /></label>
-      <label className="field"><span>像素 ID</span><input placeholder="从账户后台复制" value={presetCreationConfig.pixelId ?? ""} onChange={(event) => updateCreationConfig({ pixelId: event.target.value || null })} /></label>
-      <label className="field"><span>地区代码（逗号分隔）</span><input inputMode="numeric" placeholder="例如 840,124" value={(presetCreationConfig.countryCodes ?? []).join(",")} onChange={(event) => updateCreationConfig({ countryCodes: parseIntegerList(event.target.value) })} /></label>
+      <label className="field"><span>Pixel ID / Code（或像素名称）</span><input placeholder="例如 D2LU… 或准确像素名称" value={presetCreationConfig.pixelKey ?? presetCreationConfig.pixelId ?? ""} onChange={(event) => updateCreationConfig({ pixelKey: event.target.value || null, pixelId: null })} /><small>{presetCreationConfig.pixelKey == null && presetCreationConfig.pixelId ? "当前为旧版数字接口 ID；修改时请改填 Pixel ID / Code 或名称。" : "不作为创建按钮的前置锁；点击创建后按账户 Cookie 实时查询并匹配，失败仅停止该账户本次执行。"}</small></label>
+      <label className="field"><span>地区代码（基础预设生成）</span><input readOnly value={(presetCreationConfig.countryCodes ?? []).join(",")} /><small>只读；请在上方“投放地区”修改。</small></label>
       <label className="field"><span>版位代码（逗号分隔）</span><input inputMode="numeric" placeholder="例如 3000" value={(presetCreationConfig.placementIds ?? []).join(",")} onChange={(event) => updateCreationConfig({ placementIds: parseIntegerList(event.target.value) })} /></label>
       <label className="field wide"><span>普通创建 TikTok Post 映射（视频代码 | Post ID）</span><textarea placeholder="仅普通上传/新建流程使用" value={formatVideoPostMappings(presetCreationConfig.videoPostMappings)} onChange={(event) => updateCreationConfig({ videoPostMappings: parseVideoPostMappings(event.target.value) })} /><small>原帖迁移不会读取此映射，也不会回退到视频代码或上传流程。</small></label>
     </div><div className="form-actions"><button className="primary-button" disabled={busy || !canManageLaunchPresets || !advancedExecutionReady} onClick={() => void savePreset()} title={advancedExecutionReady ? undefined : "必须完成真实创建参数映射后才能保存"} type="button">保存高级自定义</button></div></div></details>
