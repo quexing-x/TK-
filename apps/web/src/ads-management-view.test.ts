@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ManagedEntityRecord } from "@tk-auto/core";
 import {
+  ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW,
   ADS_MANAGEMENT_DEFAULT_LEVEL,
   ADS_MANAGEMENT_DEFAULT_STATUS,
   ADS_MANAGEMENT_PAGE_SIZE,
+  ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
   sumAdsManagementConversions,
@@ -67,9 +69,64 @@ describe("ads management view", () => {
       entity("enabled", "enabled", "2026-07-21T11:00:00.000Z"),
       entity("disabled", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-20T11:00:00.000Z"),
       entity("expired", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-19T11:59:59.000Z"),
-    ], { level: "ad-group", status: "all", query: "", now });
+    ], { level: "ad-group", status: "all", query: "", now, createdWindow: "all" });
 
     expect(result.map((item) => item.externalId)).toEqual(["enabled", "disabled", "expired"]);
+  });
+
+  it("defaults to the rule window and drops ad groups created outside it", () => {
+    expect(ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW).toBe("recent");
+    expect(ADS_MANAGEMENT_RECENT_WINDOW_HOURS).toBe(48);
+
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const result = filterAdsManagementEntities([
+      entity("fresh", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-20T11:00:00.000Z"),
+      entity("expired", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-19T11:59:59.000Z"),
+    ], { level: "ad-group", status: "all", query: "", now, createdWindow: "recent" });
+
+    expect(result.map((item) => item.externalId)).toEqual(["fresh"]);
+  });
+
+  it("keeps an out-of-window ad group that still spent today, matching the rule engine", () => {
+    // 引擎的存活判据之一：当天有消耗的老组不能掉出评估集，否则关停后再也开不回来。
+    // 列表必须跟着留，不然界面上看不到自动化正在管的对象。
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const result = filterAdsManagementEntities([
+      entity("old-but-spending", "disabled", "2026-07-21T11:00:00.000Z", 12.5, "2026-07-01T00:00:00.000Z"),
+      entity("old-and-idle", "disabled", "2026-07-21T11:00:00.000Z", 0, "2026-07-01T00:00:00.000Z"),
+    ], { level: "ad-group", status: "all", query: "", now, createdWindow: "recent" });
+
+    expect(result.map((item) => item.externalId)).toEqual(["old-but-spending"]);
+  });
+
+  it("ignores syncedAt when applying the created window", () => {
+    // 回归：原实现按 syncedAt 卡 48 小时，而 syncedAt 每轮轮询都会刷新成当前时间，
+    // 条件恒为真，等于没过滤。创建时间早于窗口的对象必须被滤掉，哪怕刚同步过。
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const result = filterAdsManagementEntities([
+      entity("just-synced-old-group", "enabled", now.toISOString(), null, "2026-06-01T00:00:00.000Z"),
+    ], { level: "ad-group", status: "all", query: "", now, createdWindow: "recent" });
+
+    expect(result).toEqual([]);
+  });
+
+  it("lets ads follow their parent ad group through the window", () => {
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const adGroup = entity("group", "enabled", "2026-07-21T11:00:00.000Z", null, "2026-07-20T11:00:00.000Z");
+    // 广告自身没有创建时间时跟随所属广告组；素材层同理。
+    const ad: ManagedEntityRecord = {
+      ...entity("ad", "enabled", "2026-07-21T11:00:00.000Z", null, "2026-07-20T11:00:00.000Z"),
+      entityType: "ad",
+      createdAt: null,
+      parentAdGroupId: "group",
+    };
+    const orphanAd: ManagedEntityRecord = { ...ad, externalId: "orphan", parentAdGroupId: "missing" };
+
+    const result = filterAdsManagementEntities([adGroup, ad, orphanAd], {
+      level: "all", status: "all", query: "", now, createdWindow: "recent",
+    });
+
+    expect(result.map((item) => item.externalId)).toEqual(["group", "ad"]);
   });
 
   it("orders matching entities by spend from highest to lowest", () => {
