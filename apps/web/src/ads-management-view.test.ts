@@ -6,6 +6,8 @@ import {
   ADS_MANAGEMENT_DEFAULT_STATUS,
   ADS_MANAGEMENT_PAGE_SIZE,
   ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
+  adsManagementParticipation,
+  adsManagementParticipationLabel,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
   sumAdsManagementConversions,
@@ -39,6 +41,7 @@ const entity = (
     impressions: null,
   },
   ignored: false,
+  automationManaged: false,
   syncedAt,
 });
 
@@ -127,6 +130,35 @@ describe("ads management view", () => {
     });
 
     expect(result.map((item) => item.externalId)).toEqual(["group", "ad"]);
+  });
+
+  it("reports participation from the same judgement the rule engine uses", () => {
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const fresh = entity("fresh", "enabled", "2026-07-21T11:00:00.000Z", null, "2026-07-20T11:00:00.000Z");
+    const old = entity("old", "disabled", "2026-07-21T11:00:00.000Z", null, "2026-07-01T00:00:00.000Z");
+
+    expect(adsManagementParticipation(fresh, { now })).toBe("participating");
+    // 硬编码成 ignored ? 人工接管 : 参与 的年代，这一行也显示「参与」，但引擎够不着它。
+    expect(adsManagementParticipation(old, { now })).toBe("outside-window");
+    expect(adsManagementParticipation({ ...old, ignored: true }, { now })).toBe("manual-takeover");
+    // 超窗但当天有消耗：引擎仍会评估，界面不能说它不参与。
+    expect(adsManagementParticipation(
+      { ...old, metrics: { ...old.metrics, spend: 3 } },
+      { now },
+    )).toBe("participating");
+  });
+
+  it("treats an automation-paused ad group as participating even outside the window", () => {
+    // 持久管辖集：自动化自己关停、尚未开回的组。当天零消耗、建得早，但引擎靠更长的
+    // 归因窗口仍在评估它——只按创建窗口判断会把它错标成「窗口外」。
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const managed = {
+      ...entity("auto-paused", "disabled", "2026-07-21T11:00:00.000Z", 0, "2026-07-01T00:00:00.000Z"),
+      automationManaged: true,
+    };
+
+    expect(adsManagementParticipation(managed, { now })).toBe("participating");
+    expect(adsManagementParticipationLabel(adsManagementParticipation(managed, { now }))).toBe("参与");
   });
 
   it("orders matching entities by spend from highest to lowest", () => {

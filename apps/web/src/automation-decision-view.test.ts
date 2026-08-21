@@ -70,6 +70,7 @@ describe("selectPendingAutomationDecisions", () => {
       campaignBudgetOptimized: false,
       metrics: decision().metricSnapshot,
       ignored: false,
+      automationManaged: false,
       syncedAt: "2026-07-21T10:01:00.000Z",
     } satisfies ManagedEntityRecord & { accountId: string };
     expect(selectPendingAutomationDecisions({ decisions: [decision()], entities: [entity] })).toEqual([]);
