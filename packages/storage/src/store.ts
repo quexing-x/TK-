@@ -47,6 +47,7 @@ import {
   type EntityMetricSnapshotRecord,
   type MetricBatchRecord,
   type DailyMetricRecord,
+  type EntityRangeMetricRecord,
   type IgnoredEntityRecord,
   type ManagedEntityRecord,
   normalizeProviderEntity,
@@ -5399,6 +5400,66 @@ export class AutomationStore {
       lastCapturedAt: String(row.last_captured),
       lastLocalTime: String(row.last_local_time ?? "").slice(0, 5),
       isCurrentDay: String(row.local_day) === today,
+    }));
+  }
+
+  /**
+   * 每个对象在区间内的指标合计，口径与 listDailyMetricTotals 一致：
+   * 先按 (实体, 自然日) 取当天最后一个健康快照，再按实体跨天累加。
+   *
+   * 只返回可加的计数量；CPA / CPC 由调用方用合计现算，不能把各日比率相加。
+   */
+  listEntityRangeMetrics(
+    accountId: string,
+    kind: ProviderKind,
+    since: string,
+    entityType?: ProviderEntity["entityType"],
+    until = new Date().toISOString(),
+  ): EntityRangeMetricRecord[] {
+    const account = this.getAccount(accountId);
+    const offsetMinutes = utcOffsetMinutes(account?.timezone ?? "UTC");
+    const dayShift = `${offsetMinutes >= 0 ? "+" : "-"}${Math.abs(offsetMinutes)} minutes`;
+    const typeFilter = entityType ? "AND entity_type = ?" : "";
+    const parameters: (string | number)[] = [accountId, kind];
+    if (entityType) parameters.push(entityType);
+    parameters.push(since, until);
+
+    const rows = this.db
+      .prepare(
+        `WITH scoped AS (
+           SELECT entity_type, external_id, captured_at, metrics_json,
+                  date(captured_at, ?) AS local_day
+           FROM entity_metric_snapshots
+           WHERE account_id = ? AND provider_kind = ? ${typeFilter}
+             AND sync_quality_status = 'healthy'
+             AND captured_at >= ? AND captured_at <= ?
+         ),
+         day_last AS (
+           SELECT entity_type, external_id, local_day, MAX(captured_at) AS last_captured
+           FROM scoped GROUP BY entity_type, external_id, local_day
+         )
+         SELECT d.entity_type AS entity_type, d.external_id AS external_id,
+                COUNT(*) AS days,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.spend') AS REAL), 0)) AS spend,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.conversions') AS REAL), 0)) AS conversions,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.carts') AS REAL), 0)) AS carts
+         FROM day_last d
+         JOIN scoped s
+           ON s.entity_type = d.entity_type AND s.external_id = d.external_id
+          AND s.captured_at = d.last_captured
+         GROUP BY d.entity_type, d.external_id`,
+      )
+      .all(dayShift, ...parameters) as SqlRow[];
+
+    return rows.map((row) => ({
+      entityType: row.entity_type as EntityRangeMetricRecord["entityType"],
+      externalId: String(row.external_id),
+      spend: Number(row.spend),
+      clicks: Number(row.clicks),
+      conversions: Number(row.conversions),
+      carts: Number(row.carts),
+      days: Number(row.days),
     }));
   }
 

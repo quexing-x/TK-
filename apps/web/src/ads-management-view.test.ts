@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { ManagedEntityRecord } from "@tk-auto/core";
+import type { EntityRangeMetricRecord, ManagedEntityRecord } from "@tk-auto/core";
 import {
   ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW,
   ADS_MANAGEMENT_DEFAULT_LEVEL,
   ADS_MANAGEMENT_DEFAULT_STATUS,
   ADS_MANAGEMENT_PAGE_SIZE,
+  ADS_MANAGEMENT_DEFAULT_SPEND_RANGE,
   ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
   adsManagementParticipation,
+  adsManagementSpendRangeDays,
+  adsManagementSpendRangeLabel,
+  applyEntityRangeMetrics,
   adsManagementParticipationLabel,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
@@ -234,5 +238,65 @@ describe("ads management view", () => {
       pageCount: 1,
       items: sorted.slice(0, 15),
     });
+  });
+});
+
+describe("消耗区间", () => {
+  const range = (
+    externalId: string,
+    spend: number,
+    extra: Partial<EntityRangeMetricRecord> = {},
+  ): EntityRangeMetricRecord => ({
+    entityType: "ad-group",
+    externalId,
+    spend,
+    clicks: 0,
+    conversions: 0,
+    carts: 0,
+    days: 1,
+    ...extra,
+  });
+
+  it("用区间合计覆盖展示指标，并由合计现算 CPC/CPA", () => {
+    const [applied] = applyEntityRangeMetrics(
+      [entity("g1", "enabled", "2026-07-21T11:00:00.000Z", 5)],
+      [range("g1", 120, { clicks: 400, conversions: 8, carts: 30 })],
+    );
+
+    expect(applied?.metrics.spend).toBe(120);
+    // 比率必须由区间合计现算，不能沿用快照里的当日值或把各日比率相加。
+    expect(applied?.metrics.cost_per_click).toBeCloseTo(0.3);
+    expect(applied?.metrics.cost_per_conversion).toBe(15);
+    expect(applied?.metrics.cost_per_cart).toBe(4);
+  });
+
+  it("区间内没有健康快照的对象计为 0，而不是留着当天的数", () => {
+    const [applied] = applyEntityRangeMetrics(
+      [entity("missing", "enabled", "2026-07-21T11:00:00.000Z", 9)],
+      [],
+    );
+
+    expect(applied?.metrics.spend).toBe(0);
+    expect(applied?.metrics.cost_per_click).toBeNull();
+  });
+
+  it("区间口径不参与可见性判定：规则引擎判的是当天数据", () => {
+    // 一个今天零消耗的超窗老组，七天里花过钱。如果拿区间指标去过窗口，它会假装「参与」。
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const old = entity("old", "disabled", "2026-07-21T11:00:00.000Z", 0, "2026-07-01T00:00:00.000Z");
+    const withRange = applyEntityRangeMetrics([old], [range("old", 88)])[0]!;
+
+    expect(adsManagementParticipation(old, { now })).toBe("outside-window");
+    // 展示指标变了，但判定必须仍按原始（当天）对象来做——调用方负责传原始对象。
+    expect(withRange.metrics.spend).toBe(88);
+    expect(adsManagementParticipation(old, { now })).toBe("outside-window");
+  });
+
+  it("区间天数换算与文案", () => {
+    expect(ADS_MANAGEMENT_DEFAULT_SPEND_RANGE).toBe("today");
+    expect(adsManagementSpendRangeDays("today")).toBe(1);
+    expect(adsManagementSpendRangeDays("7d")).toBe(7);
+    expect(adsManagementSpendRangeLabel("today")).toContain("今天");
+    expect(adsManagementSpendRangeLabel("30d")).toBe("最近 30 天");
   });
 });

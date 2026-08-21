@@ -1987,6 +1987,28 @@ export async function createApp(
     );
   });
 
+  // 广告管理页的「消耗日期」区间：按对象返回区间合计，口径与 metric-days 相同。
+  app.get("/api/accounts/:accountId/entity-metrics", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    const query = AnalyticsQuerySchema.parse(request.query);
+    const until = query.to ?? new Date().toISOString();
+    const since = query.from ?? new Date(
+      new Date(until).getTime() - query.days * 24 * 60 * 60_000,
+    ).toISOString();
+    if (new Date(until).getTime() - new Date(since).getTime() > 90 * 24 * 60 * 60_000) {
+      return reply.status(400).send({ message: "自定义分析范围最多为 90 天。" });
+    }
+    return dependencies.store.listEntityRangeMetrics(
+      accountId,
+      account.providerKind,
+      since,
+      query.entityType,
+      until,
+    );
+  });
+
   app.post(
     "/api/accounts/:accountId/connections/:providerKind/test",
     async (request, reply) => {

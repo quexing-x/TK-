@@ -50,6 +50,7 @@ import type {
   AdOperationRecord,
   MetricBatchRecord,
   DailyMetricRecord,
+  EntityRangeMetricRecord,
   ManagedEntityRecord,
   IgnoredEntityRecord,
   ProviderConnection,
@@ -108,17 +109,23 @@ import {
 } from "./metric-days";
 import {
   ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW,
+  ADS_MANAGEMENT_DEFAULT_SPEND_RANGE,
   ADS_MANAGEMENT_DEFAULT_LEVEL,
   ADS_MANAGEMENT_DEFAULT_STATUS,
   ADS_MANAGEMENT_PAGE_SIZE,
   ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
   adsManagementParticipation,
   adsManagementParticipationLabel,
+  adsManagementSpendRangeDays,
+  adsManagementSpendRangeLabel,
+  applyEntityRangeMetrics,
   compareAdsManagementSpend,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
   sumAdsManagementConversions,
   type AdsManagementCreatedWindow,
+  type AdsManagementParticipation,
+  type AdsManagementSpendRange,
 } from "./ads-management-view";
 import { CommandPalette, OverlayProvider, useOverlays } from "./ui/overlays";
 
@@ -796,8 +803,18 @@ function automationConnectionMessage(
   return `当前账户「${account.displayName}」的${providerLabel}状态：${stateLabel}。请前往“用户管理”完成或检查接入。`;
 }
 
-function renderAdsManagementParticipation(entity: ManagedEntityRecord): ReactNode {
-  const participation = adsManagementParticipation(entity);
+// 传入判定结果而不是对象：切到多日区间后行上的指标是区间合计，
+// 而参与与否必须继续按当天数据判定，不能让展示口径倒灌进判据。
+/** 「消耗日期」区间换算成接口需要的起止时间；与广告分析共用 resolveAnalysisRange 的语义。 */
+function spendRangeToRange(range: AdsManagementSpendRange): { from: string; to: string } {
+  const days = adsManagementSpendRangeDays(range);
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  from.setDate(from.getDate() - (days - 1));
+  return { from: from.toISOString(), to: new Date().toISOString() };
+}
+
+function renderAdsManagementParticipation(participation: AdsManagementParticipation): ReactNode {
   if (participation === "manual-takeover") {
     return <span className="risk-badge destructive">{adsManagementParticipationLabel(participation)}</span>;
   }
@@ -1217,6 +1234,8 @@ function AdsManagementPage({
   const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>(ADS_MANAGEMENT_DEFAULT_LEVEL);
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
   const [createdWindow, setCreatedWindow] = useState<AdsManagementCreatedWindow>(ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW);
+  const [spendRange, setSpendRange] = useState<AdsManagementSpendRange>(ADS_MANAGEMENT_DEFAULT_SPEND_RANGE);
+  const [rangeMetrics, setRangeMetrics] = useState<EntityRangeMetricRecord[] | null>(null);
   const [page, setPage] = useState(0);
   const [manualTakeovers, setManualTakeovers] = useState<IgnoredEntityRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -1239,6 +1258,20 @@ function AdsManagementPage({
       .catch(() => undefined);
   }, []);
   const canRefreshRemote = hasProviderCapability(capabilities, "read-campaigns");
+
+  // 「今天」沿用同步快照里的当日累计，不额外请求；多日区间才走日聚合接口。
+  useEffect(() => {
+    if (spendRange === "today") {
+      setRangeMetrics(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .getEntityRangeMetrics(account.id, spendRangeToRange(spendRange))
+      .then((result) => { if (!cancelled) setRangeMetrics(result); })
+      .catch((cause) => { if (!cancelled) onError(getErrorMessage(cause)); });
+    return () => { cancelled = true; };
+  }, [account.id, onError, spendRange]);
 
   const load = useCallback(async () => {
     try {
@@ -1312,7 +1345,8 @@ function AdsManagementPage({
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const filtered = useMemo(() => {
+  // 可见性与参与判定一律基于当天指标（规则引擎判的就是当天），区间指标只用于展示。
+  const scoped = useMemo(() => {
     const list = filterAdsManagementEntities(entities ?? [], {
       level,
       status: statusFilter,
@@ -1322,13 +1356,27 @@ function AdsManagementPage({
     // 人工接管的广告组始终置顶；其余保持既有排序（如消耗降序）。sort 稳定，不打乱同类相对顺序。
     return [...list].sort((left, right) => Number(Boolean(right.ignored)) - Number(Boolean(left.ignored)));
   }, [entities, createdWindow, level, query, statusFilter]);
+  const participationByKey = useMemo(() => new Map(
+    scoped.map((entity) => [
+      `${entity.entityType}:${entity.externalId}`,
+      adsManagementParticipation(entity),
+    ]),
+  ), [scoped]);
+  const filtered = useMemo(() => {
+    if (spendRange === "today" || !rangeMetrics) return scoped;
+    const applied = applyEntityRangeMetrics(scoped, rangeMetrics);
+    // 换成区间口径后按区间消耗重排，人工接管仍置顶。
+    return [...applied]
+      .sort(compareAdsManagementSpend)
+      .sort((left, right) => Number(Boolean(right.ignored)) - Number(Boolean(left.ignored)));
+  }, [rangeMetrics, scoped, spendRange]);
   const {
     items: pagedEntities,
     pageCount,
     currentPage,
   } = paginateAdsManagementItems(filtered, page);
 
-  useEffect(() => setPage(0), [level, query, statusFilter]);
+  useEffect(() => setPage(0), [level, query, spendRange, statusFilter]);
   useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
   const pendingStatusKeys = useMemo(() => new Set(
     operations
@@ -1463,7 +1511,7 @@ function AdsManagementPage({
       <div className="ads-metric-rail" aria-label="广告管理摘要">
         <article><small>当前对象</small><strong>{filtered.length}</strong><span>{createdWindow === "recent" ? `创建于最近 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时` : "当前筛选对象"}</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>账户时区当天汇总</span></article>
+        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong><span>{adsManagementSpendRangeLabel(spendRange)}</span></article>
         <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
         <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
       </div>
@@ -1486,8 +1534,11 @@ function AdsManagementPage({
             </select>
           </Field>
           <Field label="消耗日期">
-            <select value="today" disabled aria-label="消耗日期">
+            <select value={spendRange} onChange={(event) => setSpendRange(event.target.value as AdsManagementSpendRange)} aria-label="消耗日期">
               <option value="today">今天（账户时区）</option>
+              <option value="3d">最近 3 天</option>
+              <option value="7d">最近 7 天</option>
+              <option value="30d">最近 30 天</option>
             </select>
           </Field>
           <Field label="层级">
@@ -1529,7 +1580,7 @@ function AdsManagementPage({
                     <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
                     <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
-                    <td>{renderAdsManagementParticipation(entity)}</td>
+                    <td>{renderAdsManagementParticipation(participationByKey.get(`${entity.entityType}:${entity.externalId}`) ?? "participating")}</td>
                     <td><div className="row-actions">
                       {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}
                       {entity.status === "unknown" && <small className="inline-protection-note">状态待确认</small>}
@@ -1618,6 +1669,8 @@ function AllAccountsAdsView({
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
   const [createdWindow, setCreatedWindow] = useState<AdsManagementCreatedWindow>(ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW);
+  const [spendRange, setSpendRange] = useState<AdsManagementSpendRange>(ADS_MANAGEMENT_DEFAULT_SPEND_RANGE);
+  const [rangeMetricsByAccount, setRangeMetricsByAccount] = useState<Record<string, EntityRangeMetricRecord[]> | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [statusConfirming, setStatusConfirming] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
   const [scheduling, setScheduling] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
@@ -1639,6 +1692,24 @@ function AllAccountsAdsView({
       onError(getErrorMessage(cause));
     }
   }, [accounts, onError]);
+
+  // 区间指标按账户分别取，再各自套回该账户的对象上——不同账户的时区可能不同，
+  // 自然日必须由各自的服务端换算，不能在前端统一切。
+  useEffect(() => {
+    if (spendRange === "today") {
+      setRangeMetricsByAccount(null);
+      return;
+    }
+    let cancelled = false;
+    const range = spendRangeToRange(spendRange);
+    void Promise.all(accounts.map(async (account) => [
+      account.id,
+      await api.getEntityRangeMetrics(account.id, range).catch(() => [] as EntityRangeMetricRecord[]),
+    ] as const))
+      .then((pairs) => { if (!cancelled) setRangeMetricsByAccount(Object.fromEntries(pairs)); })
+      .catch((cause) => { if (!cancelled) onError(getErrorMessage(cause)); });
+    return () => { cancelled = true; };
+  }, [accounts, onError, spendRange]);
 
   const saveSchedule = async (event: FormEvent) => {
     event.preventDefault();
@@ -1684,19 +1755,35 @@ function AllAccountsAdsView({
       ))
       .map(({ item }) => item);
   }, [createdWindow, entitiesByAccount, statusFilter]);
+  // 参与判定固定按当天指标，与下方展示用的区间口径分开。
+  const participationByKey = useMemo(() => new Map(
+    visible.map(({ entity }) => [
+      `${entity.entityType}:${entity.externalId}`,
+      adsManagementParticipation(entity),
+    ]),
+  ), [visible]);
+  const rows = useMemo(() => {
+    if (spendRange === "today" || !rangeMetricsByAccount) return visible;
+    return visible
+      .map(({ account, entity }) => ({
+        account,
+        entity: applyEntityRangeMetrics([entity], rangeMetricsByAccount[account.id] ?? [])[0] ?? entity,
+      }))
+      .sort((left, right) => compareAdsManagementSpend(left.entity, right.entity));
+  }, [rangeMetricsByAccount, spendRange, visible]);
   const {
     items: paged,
     pageCount,
     currentPage,
-  } = paginateAdsManagementItems(visible, page);
+  } = paginateAdsManagementItems(rows, page);
 
-  useEffect(() => setPage(0), [createdWindow, statusFilter]);
+  useEffect(() => setPage(0), [createdWindow, spendRange, statusFilter]);
   useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
 
   const enabledCount = visible.filter(({ entity }) => entity.status === "enabled").length;
-  const currentSpend = visible.reduce((total, { entity }) => total + (entity.metrics.spend ?? 0), 0);
+  const currentSpend = rows.reduce((total, { entity }) => total + (entity.metrics.spend ?? 0), 0);
   const ignoredCount = visible.filter(({ entity }) => entity.ignored).length;
-  const currentConversions = sumAdsManagementConversions(visible.map(({ entity }) => entity));
+  const currentConversions = sumAdsManagementConversions(rows.map(({ entity }) => entity));
 
   const changeStatus = async (account: AccountConfig, entity: ManagedEntityRecord) => {
     if (!hasProviderCapability(accountCapabilities[account.id], "change-status")) return;
@@ -1735,9 +1822,9 @@ function AllAccountsAdsView({
   return (
     <section className="page-stack all-accounts-ads-page">
       <div className="ads-metric-rail" aria-label="全部账户广告组摘要">
-        <article><small>当前对象</small><strong>{visible.length}</strong><span>当前筛选对象</span></article>
+        <article><small>当前对象</small><strong>{rows.length}</strong><span>当前筛选对象</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>所有账户合计</span></article>
+        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong><span>所有账户 · {adsManagementSpendRangeLabel(spendRange)}</span></article>
         <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
         <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
       </div>
@@ -1751,23 +1838,29 @@ function AllAccountsAdsView({
               <option value="all">全部当前状态</option>
             </select>
             <select aria-label="广告组创建时间" value={createdWindow} onChange={(event) => setCreatedWindow(event.target.value as AdsManagementCreatedWindow)}>
-              <option value="recent">最近 {ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时</option>
-              <option value="all">全部（含历史对象）</option>
+              <option value="recent">创建：最近 {ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时</option>
+              <option value="all">创建：全部（含历史对象）</option>
+            </select>
+            <select aria-label="消耗日期" value={spendRange} onChange={(event) => setSpendRange(event.target.value as AdsManagementSpendRange)}>
+              <option value="today">消耗：今天</option>
+              <option value="3d">消耗：最近 3 天</option>
+              <option value="7d">消耗：最近 7 天</option>
+              <option value="30d">消耗：最近 30 天</option>
             </select>
             <small className="inline-protection-note">每 30 秒更新展示</small>
           </div>
         </div>
         <div className="table-wrap"><table>
           <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
-          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>最新健康同步中暂无符合当前筛选的广告组；若在找历史对象，把「创建时间」切到「全部」。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
+          <tbody>{rows.length === 0 ? <tr><td colSpan={10}>最新健康同步中暂无符合当前筛选的广告组；若在找历史对象，把「创建时间」切到「全部」。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
             <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
-            <td>{renderAdsManagementParticipation(entity)}</td>
+            <td>{renderAdsManagementParticipation(participationByKey.get(`${entity.entityType}:${entity.externalId}`) ?? "participating")}</td>
             <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button>{hasProviderCapability(accountCapabilities[account.id], "change-status") && <button disabled={busy !== null || !canOperateAds} onClick={() => { const overnight = nextOvernightScheduleTimes(); setScheduling({ account, entity }); setScheduleKind("once"); setScheduledAction("disable"); setRunAt(nextLocalMidnightInputValue()); setDisableAt(localDateTimeInputValue(overnight.disableAt)); setEnableAt(localDateTimeInputValue(overnight.enableAt)); }} type="button">定时 / 过夜</button>}</div></td>
           </tr>)}</tbody>
         </table></div>
-        {visible.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {visible.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
+        {rows.length > ADS_MANAGEMENT_PAGE_SIZE && <div className="table-pagination"><span>第 {currentPage + 1} / {pageCount} 页，共 {rows.length} 条</span><div><button className="secondary-button compact-button" disabled={currentPage === 0} onClick={() => setPage((value) => value - 1)} type="button">上一页</button><button className="secondary-button compact-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => value + 1)} type="button">下一页</button></div></div>}
       </div>
       {statusConfirming && <div className="modal-backdrop" onMouseDown={() => setStatusConfirming(null)}><div className="modal confirmation-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="eyebrow">确认状态变更</span><h2>{statusConfirming.entity.status === "disabled" ? "开启" : "关闭"}广告组</h2></div><button type="button" onClick={() => setStatusConfirming(null)}><X size={20} /></button></div><p>将对“{statusConfirming.account.displayName} / {statusConfirming.entity.name}”发送启停请求。</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setStatusConfirming(null)}>取消</button><button className="primary-button" disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[statusConfirming.account.id], "change-status")} type="button" onClick={() => { const target = statusConfirming; setStatusConfirming(null); void changeStatus(target.account, target.entity); }}>确认</button></div></div></div>}
       {scheduling && (

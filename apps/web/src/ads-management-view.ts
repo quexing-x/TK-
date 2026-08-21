@@ -1,4 +1,8 @@
-import { RULE_LOOKBACK_HOURS, type ManagedEntityRecord } from "@tk-auto/core";
+import {
+  RULE_LOOKBACK_HOURS,
+  type EntityRangeMetricRecord,
+  type ManagedEntityRecord,
+} from "@tk-auto/core";
 
 export const ADS_MANAGEMENT_DEFAULT_LEVEL = "ad-group" as const;
 export const ADS_MANAGEMENT_DEFAULT_STATUS = "enabled" as const;
@@ -47,6 +51,56 @@ export function isWithinAdsManagementCreatedWindow(
     return true;
   }
   return entity.entityType === "ad-group" && (entity.metrics.spend ?? 0) > 0;
+}
+
+/** 「消耗日期」可选区间。默认今天——自动化规则判的就是当天数据。 */
+export type AdsManagementSpendRange = "today" | "3d" | "7d" | "30d";
+export const ADS_MANAGEMENT_DEFAULT_SPEND_RANGE: AdsManagementSpendRange = "today";
+
+export function adsManagementSpendRangeDays(range: AdsManagementSpendRange): number {
+  return range === "today" ? 1 : Number.parseInt(range, 10);
+}
+
+export function adsManagementSpendRangeLabel(range: AdsManagementSpendRange): string {
+  return range === "today" ? "今天（账户时区）" : `最近 ${adsManagementSpendRangeDays(range)} 天`;
+}
+
+/**
+ * 把区间合计覆盖到对象的展示指标上。
+ *
+ * 只换展示用的数值：**可见性和「自动化」列必须继续用当天指标判定**，因为规则引擎判的就是
+ * 当天数据。拿七天合计去过窗口会让一个今天零消耗的老广告组因为上周花过钱而显示「参与」。
+ *
+ * CPA / CPC 由区间合计现算，不能沿用快照里的当日比率。区间内没有健康快照的对象计为 0：
+ * 那段时间它确实没有被采集到数据。
+ */
+export function applyEntityRangeMetrics(
+  entities: readonly ManagedEntityRecord[],
+  records: readonly EntityRangeMetricRecord[],
+): ManagedEntityRecord[] {
+  const byKey = new Map(
+    records.map((record) => [`${record.entityType}:${record.externalId}`, record]),
+  );
+  return entities.map((entity) => {
+    const record = byKey.get(`${entity.entityType}:${entity.externalId}`);
+    const spend = record?.spend ?? 0;
+    const clicks = record?.clicks ?? 0;
+    const conversions = record?.conversions ?? 0;
+    const carts = record?.carts ?? 0;
+    return {
+      ...entity,
+      metrics: {
+        ...entity.metrics,
+        spend,
+        clicks,
+        conversions,
+        carts,
+        cost_per_click: clicks > 0 ? spend / clicks : null,
+        cost_per_conversion: conversions > 0 ? spend / conversions : null,
+        cost_per_cart: carts > 0 ? spend / carts : null,
+      },
+    };
+  });
 }
 
 export type AdsManagementParticipation =

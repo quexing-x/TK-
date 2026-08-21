@@ -18,6 +18,7 @@ import type {
   AdOperationRecord,
   MetricBatchRecord,
   DailyMetricRecord,
+  EntityRangeMetricRecord,
   ManagedEntityRecord,
   IgnoredEntityRecord,
   ManualStatusInput,
@@ -795,6 +796,18 @@ export const api = {
     if (entityType) query.set("entityType", entityType);
     return request<MetricBatchRecord[]>(
       `/api/accounts/${accountId}/analytics?${query.toString()}`,
+    );
+  },
+  /** 按对象返回区间指标合计，供广告管理页的「消耗日期」切换。 */
+  getEntityRangeMetrics: (
+    accountId: string,
+    range: { from: string; to: string },
+    entityType?: ManualStatusInput["entityType"],
+  ) => {
+    const query = new URLSearchParams({ from: range.from, to: range.to });
+    if (entityType) query.set("entityType", entityType);
+    return request<EntityRangeMetricRecord[]>(
+      `/api/accounts/${accountId}/entity-metrics?${query.toString()}`,
     );
   },
   /** 按自然日汇总的业务指标；批次接口只用于排查同步。 */
