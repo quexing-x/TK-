@@ -14,7 +14,6 @@ import {
   type SyncEntityType,
   type LaunchOriginalPost,
   type LaunchProductInfo,
-  type CreationPresetConfig,
 } from "@tk-auto/core";
 import type {
   AdsProvider,
@@ -31,6 +30,10 @@ import type {
   DeleteAdGroupMutation,
   DeleteAdGroupMutationResult,
 } from "./types.js";
+import {
+  resolveLegacyTargetAccountPixelId,
+  resolveLivePixelDirectoryId,
+} from "./pixel-resolver.js";
 import {
   ConfirmedCreationFailureError,
   RetryableCreationError,
@@ -824,6 +827,41 @@ export class CookieAdsProvider implements AdsProvider {
     const reservationKey = `${context.accountId}:${seriesKey}`;
     const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
     try {
+      // Pixel is an execution-time account check, not a preset/UI readiness
+      // check. Read the account's live directory exactly once for this call and
+      // resolve every user-entered ID/Code before any TikTok draft can be saved.
+      const resolvedLivePixelIds = new Map<string, string>();
+      const pixelSelectors = new Map<string, string>();
+      for (const mutation of mutations) {
+        if (mutation.reconcileOnly === true) continue;
+        const selector = mutation.preset.pixelKey?.trim();
+        if (selector) pixelSelectors.set(normalizeLivePixelSelector(selector), selector);
+      }
+      if (pixelSelectors.size > 0) {
+        const pixelDispatchState: CreationDispatchState = {
+          mutationDispatched: false,
+          acceptedMutationCount: 0,
+        };
+        try {
+          const pixelDirectory = await requestLivePixelDirectoryPages(
+            sessionRequest,
+            credential,
+            pixelDispatchState,
+          );
+          for (const [key, selector] of pixelSelectors) {
+            resolvedLivePixelIds.set(
+              key,
+              resolveLivePixelDirectoryId(pixelDirectory, selector),
+            );
+          }
+        } catch (cause) {
+          return mutations.map((mutation) => creationFailureResult(
+            mutation,
+            cause,
+            pixelDispatchState,
+          ));
+        }
+      }
       // Reservations are scoped to this invocation only. Persisting failed names
       // across retries was the source of unrequested `-001` ad groups.
       const reservations = {
@@ -850,6 +888,7 @@ export class CookieAdsProvider implements AdsProvider {
               ? { campaignId: reservations.campaignIds.get(campaignKey)! }
               : {}),
             adGroupNames: names,
+            resolvedLivePixelIds,
           },
         );
         const successful = batchResults.find((result) => result.ok && result.campaignId);
@@ -878,6 +917,7 @@ export class CookieAdsProvider implements AdsProvider {
                 ? { campaignId: reservations.campaignIds.get(campaignKey)! }
                 : {}),
               adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
+              resolvedLivePixelIds,
             },
           );
           results.push(result);
@@ -2331,6 +2371,13 @@ interface CookieDraftBatchState {
   campaignResponse?: Record<string, unknown>;
 }
 
+interface CookieDraftReservation {
+  campaignId?: string;
+  adGroupNames: Set<string>;
+  /** One account-scoped live-directory result, resolved before any draft write. */
+  resolvedLivePixelIds?: ReadonlyMap<string, string>;
+}
+
 interface PreparedCookieDraft {
   kind: "prepared";
   mutation: CreationMutation;
@@ -2368,7 +2415,7 @@ async function createCookieDraftBatch(
   credential: ParsedCookieCredential,
   mutations: CreationMutation[],
   timezone: string,
-  batchReservation: { campaignId?: string; adGroupNames: Set<string> },
+  batchReservation: CookieDraftReservation,
 ): Promise<CreationMutationResult[]> {
   const batchState: CookieDraftBatchState = {
     ...(batchReservation.campaignId ? { campaignId: batchReservation.campaignId } : {}),
@@ -3226,7 +3273,7 @@ async function createCookieDraftChain(
   credential: ParsedCookieCredential,
   mutation: CreationMutation,
   timezone: string,
-  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
+  batchReservation?: CookieDraftReservation,
 ): Promise<CreationMutationResult> {
   const dispatchState: CreationDispatchState = {
     mutationDispatched: false,
@@ -3298,7 +3345,7 @@ async function runCookieDraftChain(
   mutation: CreationMutation,
   timezone: string,
   dispatchState: CreationDispatchState,
-  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
+  batchReservation?: CookieDraftReservation,
 ): Promise<CreationMutationResult>;
 async function runCookieDraftChain(
   sessionRequest: CapturedCookieRequest,
@@ -3307,7 +3354,7 @@ async function runCookieDraftChain(
   mutation: CreationMutation,
   timezone: string,
   dispatchState: CreationDispatchState,
-  batchReservation: { campaignId?: string; adGroupNames: Set<string> } | undefined,
+  batchReservation: CookieDraftReservation | undefined,
   batchState: CookieDraftBatchState,
   preflight: CookieDraftPreflight,
 ): Promise<PreparedCookieDraft>;
@@ -3318,7 +3365,7 @@ async function runCookieDraftChain(
   mutation: CreationMutation,
   timezone: string,
   dispatchState: CreationDispatchState,
-  batchReservation?: { campaignId?: string; adGroupNames: Set<string> },
+  batchReservation?: CookieDraftReservation,
   batchState?: CookieDraftBatchState,
   preflight?: CookieDraftPreflight,
 ): Promise<CreationMutationResult | PreparedCookieDraft> {
@@ -3370,15 +3417,26 @@ async function runCookieDraftChain(
     phase: "validation",
     evidence: { resolvedAdGroupName: creationRow.adGroupName },
   });
-  const drafts = credential.creationProfile
-    ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), mutation.preset)
-    : buildDraftPayloads(creationRow, mutation.preset, timezone);
-  if (!credential.creationProfile) {
-    const targetPixelId = resolveTargetAccountPixelId(preflightEntities, mutation.preset);
-    if (targetPixelId) {
-      requireObjectField(drafts.adGroup, "ad_sketch_form_data").ad_ref_pixel_id = targetPixelId;
+  const pixelSelector = mutation.preset.pixelKey?.trim();
+  let targetPixelId: string | undefined;
+  if (pixelSelector) {
+    targetPixelId = batchReservation?.resolvedLivePixelIds?.get(
+      normalizeLivePixelSelector(pixelSelector),
+    );
+    if (!targetPixelId) {
+      throw new RetryableCreationError(
+        `当前账户尚未完成 Pixel ID / Code“${pixelSelector}”的实时匹配，已在发送创建请求前停止。`,
+      );
     }
+  } else {
+    targetPixelId = resolveLegacyTargetAccountPixelId(preflightEntities, mutation.preset);
   }
+  const resolvedPreset = targetPixelId
+    ? { ...mutation.preset, pixelId: targetPixelId }
+    : mutation.preset;
+  const drafts = credential.creationProfile
+    ? buildProfileDraftPayloads(credential.creationProfile, creationRow, timezone, new Date(), resolvedPreset)
+    : buildDraftPayloads(creationRow, resolvedPreset, timezone);
   // A new launch never copies a campaign. New campaign names save a fresh
   // campaign draft; exact-name matches skip that save and attach a fresh
   // ad-group to the existing campaign. Campaign copy is reserved for the
@@ -5208,29 +5266,6 @@ async function readPublishedAssetGroupCreativeId(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-function resolveTargetAccountPixelId(
-  entities: ProviderEntity[],
-  preset: CreationPresetConfig,
-): string | undefined {
-  const counts = new Map<string, number>();
-  for (const entity of entities) {
-    const payload = entity.payload;
-    if (Number(payload.objective_type) !== preset.objectiveType
-      || Number(payload.optimize_goal) !== preset.optimizeGoal
-      || Number(payload.external_action) !== preset.externalAction) {
-      continue;
-    }
-    const pixelId = nonEmptyId(payload.ad_ref_pixel_id);
-    if (pixelId) counts.set(pixelId, (counts.get(pixelId) ?? 0) + 1);
-  }
-  const ranked = [...counts].sort((left, right) => right[1] - left[1]);
-  if (ranked.length === 0) return undefined;
-  if (ranked.length > 1 && ranked[0]![1] === ranked[1]![1]) {
-    throw new RetryableCreationError("目标账户存在多个同等匹配的 Pixel，无法安全确定迁移应使用哪一个。");
-  }
-  return ranked[0]![0];
-}
-
 function migrationProductInfo(value: unknown): LaunchProductInfo | null {
   if (!isRecord(value)) return null;
   const promoCodeInfos = Array.isArray(value.promo_code_infos)
@@ -6353,6 +6388,61 @@ async function requestCompleteListPages(
   }
   throw new RetryableCreationError(
     `${step} 超过 100 页，无法${semantics === "result-query" ? "确认创建结果" : "在创建前完成安全查重"}。`,
+  );
+}
+
+function normalizeLivePixelSelector(selector: string): string {
+  return selector.trim().toLocaleLowerCase();
+}
+
+/**
+ * Reads the target account's current Pixel directory through the same Cookie
+ * session used by Ads Manager. This is deliberately execution-time and does
+ * not depend on whether a Pixel has appeared in any previously synced ad.
+ */
+async function requestLivePixelDirectoryPages(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  dispatchState: CreationDispatchState,
+): Promise<Record<string, unknown>[]> {
+  const pages: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const payload = await requestCreationStep(
+      `pixel/list 第 ${page} 页`,
+      () => creationPathGetRequest(
+        sessionRequest,
+        "/mi/api/v2/i18n/pixel/list/",
+        {
+          page: String(page),
+          limit: "100",
+        },
+      ),
+      credential,
+      { semantics: "preflight-read", dispatchState },
+    );
+    const data = isRecord(payload.data) ? payload.data : undefined;
+    if (!data || !Array.isArray(data.pixel_list)) {
+      throw new RetryableCreationError(
+        "pixel/list 实时响应缺少 pixel_list，已在发送创建请求前停止。",
+      );
+    }
+    const responsePage = responsePageNumber(payload);
+    if (responsePage !== null && responsePage !== page) {
+      throw new RetryableCreationError(
+        `pixel/list 未返回请求的第 ${page} 页，已在发送创建请求前停止。`,
+      );
+    }
+    pages.push(payload);
+    if (hasExplicitAdditionalPages(payload)) continue;
+    if (!hasExplicitPaginationEnd(payload)) {
+      throw new RetryableCreationError(
+        "pixel/list 缺少可验证的分页结束信息，已在发送创建请求前停止。",
+      );
+    }
+    return pages;
+  }
+  throw new RetryableCreationError(
+    "pixel/list 超过 100 页，已在发送创建请求前停止。",
   );
 }
 

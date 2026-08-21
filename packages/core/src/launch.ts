@@ -11,6 +11,20 @@ export type LaunchMode = z.infer<typeof LaunchModeSchema>;
 export const LaunchTemplateModeSchema = z.enum(["none", "copy"]);
 export type LaunchTemplateMode = z.infer<typeof LaunchTemplateModeSchema>;
 
+export const LaunchGenderSchema = z.enum(["all", "male", "female"]);
+export type LaunchGender = z.infer<typeof LaunchGenderSchema>;
+
+export const LaunchAgeRangeValues = [
+  "13-17",
+  "18-24",
+  "25-34",
+  "35-44",
+  "45-54",
+  "55-100",
+] as const;
+export const LaunchAgeRangeSchema = z.enum(LaunchAgeRangeValues);
+export type LaunchAgeRange = z.infer<typeof LaunchAgeRangeSchema>;
+
 export const LaunchPlanItemStatusSchema = z.enum([
   "pending",
   "running",
@@ -157,12 +171,21 @@ export const CreationPresetConfigSchema = z.object({
   pricing: z.number().int().nullable().default(null),
   optimizeGoal: z.number().int().nullable().default(null),
   externalAction: z.number().int().nullable().default(null),
+  /**
+   * User-facing Pixel Code or exact pixel name. The provider resolves this to
+   * the target account's numeric ad_ref_pixel_id only after execution starts.
+   */
+  pixelKey: z.string().trim().max(256).nullable().optional(),
+  /** @deprecated Numeric account-internal ID retained for old saved presets. */
   pixelId: z.string().trim().max(256).nullable().default(null),
   identityType: z.number().int().nullable().default(null),
   identityId: z.string().trim().max(256).nullable().default(null),
   callToActionId: z.string().trim().max(256).nullable().default(null),
   countryCodes: z.array(z.number().int()).max(100).default([]),
   placementIds: z.array(z.number().int()).max(100).default([]),
+  gender: LaunchGenderSchema.optional(),
+  ageRanges: z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length)
+    .optional(),
   smartTargeting: z.boolean().default(true),
   commentDisabled: z.boolean().default(false),
   shareDisabled: z.boolean().default(false),
@@ -183,11 +206,15 @@ export const defaultCreationPresetConfig: CreationPresetConfig =
     pricing: 1,
     optimizeGoal: 100,
     externalAction: 96,
+    pixelKey: null,
+    pixelId: null,
     identityType: 0,
     identityId: null,
     callToActionId: "0",
     countryCodes: [1668284],
     placementIds: [3000],
+    gender: "all",
+    ageRanges: [...LaunchAgeRangeValues],
   });
 
 /**

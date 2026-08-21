@@ -83,6 +83,17 @@ describe("creation protocol", () => {
     });
   });
 
+  it("defers pixel resolution until account execution instead of blocking create", () => {
+    expect(getCreationTemplateReadiness({
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 9, optimizeGoal: 100, externalAction: 96,
+      pixelKey: "D2LUO4BC77U67ECJGK00", pixelId: null,
+      identityType: 0, identityId: null, callToActionId: "0",
+      countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
+      commentDisabled: false, shareDisabled: false,
+    })).toEqual({ ready: true, missingFieldCount: 0 });
+  });
+
   it("builds a current Smart+ oCPM form without under-18, dynamic-budget, or first-phase conflicts", () => {
     const payloads = buildDraftPayloads({
       rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
@@ -162,6 +173,76 @@ describe("creation protocol", () => {
       call_to_action_id: "",
       call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
     });
+  });
+
+  it("maps preset gender and age ranges into the Smart+ audience form", () => {
+    const payloads = buildDraftPayloads({
+      rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
+      videoCode: "video", productUrl: "https://example.com", region: "TW",
+      dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+    }, {
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
+      identityType: 0, identityId: null, callToActionId: "0",
+      countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
+      commentDisabled: false, shareDisabled: false,
+      gender: "female", ageRanges: ["25-34", "35-44", "45-54", "55-100"],
+    });
+
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
+      gender: 2,
+      age: [],
+      exclude_age_under_eighteen: 1,
+      limited_audience: { age: [[25, 34], [35, 44], [45, 54], [55, 100]] },
+    });
+  });
+
+  it("applies preset gender and age ranges to an account snapshot", () => {
+    const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: {} },
+      adGroupPayload: { ad_sketch_form_data: { gender: 0, age: [], limited_audience: { age: [] } } },
+      creativePayload: { asset_group_sketch_form_data_list: [{ image_list: [{}] }] },
+      publishPayload: {},
+    }, {
+      rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
+      videoCode: "video", productUrl: "https://example.com", region: "TW",
+      dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+    }, "UTC", new Date("2026-08-21T00:00:00.000Z"), {
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
+      identityType: 0, identityId: null, callToActionId: "0",
+      countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
+      commentDisabled: false, shareDisabled: false,
+      gender: "female", ageRanges: ["25-34", "35-44", "45-54", "55-100"],
+    });
+
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
+      gender: 2,
+      age: [],
+      exclude_age_under_eighteen: 1,
+      limited_audience: { age: [[25, 34], [35, 44], [45, 54], [55, 100]] },
+    });
+  });
+
+  it("preserves snapshot gender for a legacy preset without a gender field", () => {
+    const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
+      campaignPayload: { campaign_sketch_form_data: {} },
+      adGroupPayload: { ad_sketch_form_data: { gender: 2 } },
+      creativePayload: { asset_group_sketch_form_data_list: [{ image_list: [{}] }] },
+      publishPayload: {},
+    }, {
+      rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
+      videoCode: "video", productUrl: "https://example.com", region: "TW",
+      dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+    }, "UTC", new Date("2026-08-21T00:00:00.000Z"), {
+      objectiveType: 1, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
+      identityType: 0, identityId: null, callToActionId: "0",
+      countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
+      commentDisabled: false, shareDisabled: false,
+    });
+
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ gender: 2 });
   });
 
   it("uses an encrypted account snapshot while replacing only creation inputs", () => {

@@ -1757,6 +1757,7 @@ describe("CookieAdsProvider", () => {
 
   it("builds every same-campaign draft before one synchronized publish", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let pixelDirectoryReads = 0;
     let campaignSaves = 0;
     let adGroupSaves = 0;
     let creativeSaves = 0;
@@ -1766,7 +1767,14 @@ describe("CookieAdsProvider", () => {
       const requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       requested.push({ url, body: requestBody });
       let body: Record<string, unknown>;
-      if (url.includes("statistics/sketch/")) {
+      if (url.includes("/mi/api/v2/i18n/pixel/list/")) {
+        pixelDirectoryReads += 1;
+        body = { code: 0, data: { pixel_list: [{
+          pixel_id: "7542379322273447954",
+          pixel_name: "纵恣-lsh",
+          pixel_code: "D2LUO4BC77U67ECJGK00",
+        }], pagination: { page: 1, page_count: 1 } } };
+      } else if (url.includes("statistics/sketch/")) {
         body = emptySketchListPayload();
       } else if (url.includes("/statistics/op/campaign/list")) {
         body = completeListPayload(completed ? [{ campaign_id: "campaign", campaign_name: "campaign" }] : []);
@@ -1815,6 +1823,8 @@ describe("CookieAdsProvider", () => {
     first.attemptId = "attempt-1";
     second.operationId = "operation-2";
     second.attemptId = "attempt-2";
+    first.preset = { ...first.preset, pixelKey: "D2LUO4BC77U67ECJGK00", pixelId: null };
+    second.preset = { ...second.preset, pixelKey: "d2luo4bc77u67ecjgk00", pixelId: null };
     second.row = { ...second.row, rowNumber: 3, adGroupName: "group-2", adName: "260717:002" };
 
     const result = await new CookieAdsProvider().createFromPreset!(
@@ -1823,15 +1833,54 @@ describe("CookieAdsProvider", () => {
     );
 
     const publishes = requested.filter((item) => item.url.includes("async_creation/create_by_snap"));
+    expect(pixelDirectoryReads).toBe(1);
     expect(campaignSaves).toBe(1);
     expect(adGroupSaves).toBe(2);
     expect(creativeSaves).toBe(2);
     expect(publishes).toHaveLength(1);
     expect(publishes[0]?.body.ad_and_creative_snap_info_list).toHaveLength(2);
+    for (const request of requested.filter((item) => item.url.includes("/ad_snap/save/"))) {
+      expect(request.body).toMatchObject({
+        ad_sketch_form_data: { ad_ref_pixel_id: "7542379322273447954" },
+      });
+    }
     expect(result).toEqual(expect.arrayContaining([
       expect.objectContaining({ operationId: "operation-1", ok: true, campaignId: "campaign", adGroupId: "adgroup-1", adId: "creative-1" }),
       expect.objectContaining({ operationId: "operation-2", ok: true, campaignId: "campaign", adGroupId: "adgroup-2", adId: "creative-2" }),
     ]));
+  });
+
+  it("returns an account execution error before any draft when the live Pixel ID is unavailable", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, method: init?.method ?? "GET" });
+      if (url.includes("/mi/api/v2/i18n/pixel/list/")) {
+        return jsonResponse({
+          code: 0,
+          data: { pixel_list: [], pagination: { page: 1, page_count: 1 } },
+        });
+      }
+      throw new Error(`Pixel 预检失败后不应继续请求：${new URL(url).pathname}`);
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.preset = {
+      ...mutation.preset,
+      pixelKey: "D2LUO4BC77U67ECJGK00",
+      pixelId: null,
+    };
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result).toMatchObject({ ok: false, failureKind: "retryable", retrySafe: true });
+    expect(result?.message).toContain("实时像素目录未找到");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("GET");
+    expect(new URL(requests[0]!.url).searchParams.get("aadvid")).toBe("123456");
+    expect(requests.some((request) => request.url.includes("/creation/"))).toBe(false);
   });
 
   it("keeps the requested formal ad-group successful when TikTok omits its ad material", async () => {

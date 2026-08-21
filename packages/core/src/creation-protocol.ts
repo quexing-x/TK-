@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { CapturedCookieRequest, CookieCreationProfile } from "./connection.js";
-import { resolveConfiguredBudgetMode, type CreationPresetConfig, type LaunchConfigurationRow } from "./launch.js";
+import {
+  LaunchAgeRangeValues,
+  resolveConfiguredBudgetMode,
+  type CreationPresetConfig,
+  type LaunchAgeRange,
+  type LaunchConfigurationRow,
+} from "./launch.js";
 import { resolveBudgetFields, type ResolvedBudgetFields } from "./budget-mode.js";
 
 /** Confirmed TikTok draft-to-publish sequence.  Values are deliberately
@@ -84,6 +90,24 @@ export interface CreationTemplateReadiness {
   missingFieldCount: number;
 }
 
+const TikTokAgeRanges: Record<LaunchAgeRange, [number, number]> = {
+  "13-17": [13, 17],
+  "18-24": [18, 24],
+  "25-34": [25, 34],
+  "35-44": [35, 44],
+  "45-54": [45, 54],
+  "55-100": [55, 100],
+};
+
+function resolvedAgeRanges(config: Pick<CreationPresetConfig, "ageRanges">): number[][] {
+  const values = config.ageRanges?.length ? config.ageRanges : LaunchAgeRangeValues;
+  return values.map((value) => [...TikTokAgeRanges[value]]);
+}
+
+function resolvedGender(config: Pick<CreationPresetConfig, "gender">): number {
+  return config.gender === "male" ? 1 : config.gender === "female" ? 2 : 0;
+}
+
 /**
  * Keeps the UI independent from TikTok's unstable internal field names.  The
  * UI only needs to know whether a verified account template exists; exact
@@ -117,7 +141,10 @@ export function buildDraftPayloads(
     adGroupBudget: row.dailyBudget,
     smartPlus,
   });
-  const allAgeRanges = [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]];
+  const ageRanges = resolvedAgeRanges(config);
+  const gender = resolvedGender(config);
+  const hasExplicitAgeRanges = Boolean(config.ageRanges?.length);
+  const includesUnder18 = config.ageRanges?.includes("13-17") ?? true;
   return {
     campaign: {
       campaign_sketch_form_data: {
@@ -232,8 +259,8 @@ export function buildDraftPayloads(
         app_type: 0,
         flow_control_mode: 1,
         language_list: [],
-        gender: 0,
-        age: [],
+        gender,
+        age: !smartPlus && hasExplicitAgeRanges ? ageRanges : [],
         ac: [],
         ad_tag_v2: [],
         android_osv: "",
@@ -268,7 +295,7 @@ export function buildDraftPayloads(
         ios14_quota_type: 1,
         suitability_non_garm_category: [],
         anti_discrimination: 0,
-        exclude_age_under_eighteen: 0,
+        exclude_age_under_eighteen: hasExplicitAgeRanges && !includesUnder18 ? 1 : 0,
         duration_time_range: 0,
         attribution_window_click: 7,
         attribution_window_view: 1,
@@ -282,7 +309,7 @@ export function buildDraftPayloads(
         smart_gender: smartPlus ? 3 : 0,
         custom_audience_tag_relation: 0,
         suggestion_audience_toggle: smartPlus ? 3 : 0,
-        limited_audience: { age: smartPlus ? allAgeRanges : [] },
+        limited_audience: { age: smartPlus ? ageRanges : [] },
         ad_ref_onsite_event_source_type: 0,
         auto_pull_toggle: 0,
         ttms_account_id: "",
@@ -440,7 +467,11 @@ function applyCreationConfigOverrides(
   config: CreationPresetConfig,
 ) {
   const smartPlus = config.objectiveType === 3;
-  const allAgeRanges = [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]];
+  const ageRanges = resolvedAgeRanges(config);
+  const gender = resolvedGender(config);
+  const hasExplicitGender = config.gender !== undefined;
+  const hasExplicitAgeRanges = Boolean(config.ageRanges?.length);
+  const includesUnder18 = config.ageRanges?.includes("13-17") ?? true;
   campaignForm.objective_type = config.objectiveType;
   campaignForm.buying_type = config.buyingType;
   // 预算字段由 applyResolvedBudgetFields 在本函数之后统一写入。
@@ -500,8 +531,9 @@ function applyCreationConfigOverrides(
   if (smartPlus) {
     Object.assign(adForm, {
       age: [],
-      exclude_age_under_eighteen: 0,
-      limited_audience: { age: allAgeRanges },
+      ...(hasExplicitGender ? { gender } : {}),
+      exclude_age_under_eighteen: includesUnder18 ? 0 : 1,
+      limited_audience: { age: ageRanges },
       smart_interest_behavior: 3,
       smart_audience: 3,
       smart_age: 3,
@@ -511,6 +543,13 @@ function applyCreationConfigOverrides(
       spc_upgrade_mode: 1,
       spc_multi_ad_mode: 1,
     });
+  }
+  if (!smartPlus) {
+    if (hasExplicitAgeRanges) adForm.age = ageRanges;
+    if (hasExplicitGender) adForm.gender = gender;
+    if (hasExplicitAgeRanges) {
+      adForm.exclude_age_under_eighteen = includesUnder18 ? 0 : 1;
+    }
   }
   if (config.countryCodes.length > 0) adForm.country = [...config.countryCodes];
   if (config.placementIds.length > 0) {
@@ -524,8 +563,8 @@ function applyCreationConfigOverrides(
     adForm.language_list = [];
   }
   const neutralAdDefaults: Record<string, unknown> = {
-    gender: 0,
-    age: [],
+    gender,
+    age: !smartPlus && hasExplicitAgeRanges ? ageRanges : [],
     ac: [],
     ad_tag_v2: [],
     android_osv: "",
@@ -560,7 +599,9 @@ function applyCreationConfigOverrides(
     ios14_quota_type: 1,
     suitability_non_garm_category: [],
     anti_discrimination: 0,
-    exclude_age_under_eighteen: 1,
+    exclude_age_under_eighteen: hasExplicitAgeRanges
+      ? includesUnder18 ? 0 : 1
+      : smartPlus ? 0 : 1,
     duration_time_range: 0,
     attribution_window_click: 7,
     attribution_window_view: 1,
@@ -574,7 +615,13 @@ function applyCreationConfigOverrides(
     smart_gender: 0,
     custom_audience_tag_relation: 0,
     suggestion_audience_toggle: 0,
-    limited_audience: { age: [[18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
+    limited_audience: {
+      age: smartPlus
+        ? ageRanges
+        : hasExplicitAgeRanges
+          ? []
+          : [[18, 24], [25, 34], [35, 44], [45, 54], [55, 100]],
+    },
     ad_ref_onsite_event_source_type: 0,
     auto_pull_toggle: 0,
     ttms_account_id: "",
