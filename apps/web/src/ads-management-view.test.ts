@@ -161,6 +161,38 @@ describe("ads management view", () => {
     expect(adsManagementParticipationLabel(adsManagementParticipation(managed, { now }))).toBe("参与");
   });
 
+  it("keeps automation-managed ad groups in the default view, matching the 自动化 column", () => {
+    // 过滤一度只看创建窗口、标签却认管辖集：自动化关停等着开回来的老组被标成「参与」，
+    // 却在默认视图里看不见（实测 75 个）。两边必须用同一个判据。
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const managed = {
+      ...entity("auto-paused", "disabled", "2026-07-21T11:00:00.000Z", 0, "2026-07-01T00:00:00.000Z"),
+      automationManaged: true,
+    };
+    const idle = entity("old-and-idle", "disabled", "2026-07-21T11:00:00.000Z", 0, "2026-07-01T00:00:00.000Z");
+
+    const result = filterAdsManagementEntities([managed, idle], {
+      level: "ad-group", status: "all", query: "", now, createdWindow: "recent",
+    });
+
+    expect(result.map((item) => item.externalId)).toEqual(["auto-paused"]);
+    expect(adsManagementParticipation(managed, { now })).toBe("participating");
+  });
+
+  it("keeps manual-takeover entities visible even when they fall outside the window", () => {
+    const now = new Date("2026-07-21T12:00:00.000Z");
+    const takenOver = {
+      ...entity("taken-over", "disabled", "2026-07-21T11:00:00.000Z", 0, "2026-07-01T00:00:00.000Z"),
+      ignored: true,
+    };
+
+    const result = filterAdsManagementEntities([takenOver], {
+      level: "ad-group", status: "all", query: "", now, createdWindow: "recent",
+    });
+
+    expect(result.map((item) => item.externalId)).toEqual(["taken-over"]);
+  });
+
   it("orders matching entities by spend from highest to lowest", () => {
     const now = new Date("2026-07-21T12:00:00.000Z");
     const result = filterAdsManagementEntities([

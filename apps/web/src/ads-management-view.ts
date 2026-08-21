@@ -90,7 +90,13 @@ export function adsManagementParticipationLabel(
 }
 
 /**
- * 按创建窗口筛出可见对象。先定广告组，再让广告/素材跟随其所属广告组。
+ * 筛出"还在局中"的对象：与「自动化」列同一个判据，只把 outside-window 挡在外面。
+ *
+ * 过滤一度只看创建窗口，而标签额外认持久管辖集——于是自动化关停、正等着归因回传把它
+ * 开回来的老广告组被判成「参与」，却在默认视图里看不见（实测 75 个）。默认视图声称展示
+ * 规则窗口内的对象，漏掉自动化正在盯的对象说不过去，两边因此统一到这一个判据。
+ *
+ * 人工接管的对象同样保留：它们是使用者显式管起来的，不该因为建得早就从列表上消失。
  */
 export function filterAdsManagementEntitiesByCreatedWindow(
   entities: ManagedEntityRecord[],
@@ -101,11 +107,11 @@ export function filterAdsManagementEntitiesByCreatedWindow(
   const visibleAdGroupIds = new Set(
     entities
       .filter((entity) => entity.entityType === "ad-group")
-      .filter((entity) => isWithinAdsManagementCreatedWindow(entity, { now }))
+      .filter((entity) => adsManagementParticipation(entity, { now }) !== "outside-window")
       .map((entity) => entity.externalId),
   );
   return entities.filter((entity) => (
-    isWithinAdsManagementCreatedWindow(entity, { now, visibleAdGroupIds })
+    adsManagementParticipation(entity, { now, visibleAdGroupIds }) !== "outside-window"
   ));
 }
 

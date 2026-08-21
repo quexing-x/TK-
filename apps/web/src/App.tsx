@@ -109,7 +109,6 @@ import {
   adsManagementParticipationLabel,
   compareAdsManagementSpend,
   filterAdsManagementEntities,
-  isWithinAdsManagementCreatedWindow,
   paginateAdsManagementItems,
   sumAdsManagementConversions,
   type AdsManagementCreatedWindow,
@@ -1670,7 +1669,7 @@ function AllAccountsAdsView({
       .filter(({ item: { entity } }) => (
         entity.entityType === "ad-group"
         && (statusFilter === "all" || entity.status === statusFilter)
-        && (createdWindow === "all" || isWithinAdsManagementCreatedWindow(entity, { now }))
+        && (createdWindow === "all" || adsManagementParticipation(entity, { now }) !== "outside-window")
       ))
       .sort((left, right) => (
         compareAdsManagementSpend(left.item.entity, right.item.entity)
