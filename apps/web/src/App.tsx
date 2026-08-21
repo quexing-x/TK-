@@ -100,13 +100,17 @@ import {
   filterTikTokOperationalAccounts,
 } from "./platform-account-view";
 import {
+  ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW,
   ADS_MANAGEMENT_DEFAULT_LEVEL,
   ADS_MANAGEMENT_DEFAULT_STATUS,
   ADS_MANAGEMENT_PAGE_SIZE,
+  ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
   compareAdsManagementSpend,
   filterAdsManagementEntities,
+  isWithinAdsManagementCreatedWindow,
   paginateAdsManagementItems,
   sumAdsManagementConversions,
+  type AdsManagementCreatedWindow,
 } from "./ads-management-view";
 import { CommandPalette, OverlayProvider, useOverlays } from "./ui/overlays";
 
@@ -1186,6 +1190,7 @@ function AdsManagementPage({
   const [query, setQuery] = useState("");
   const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>(ADS_MANAGEMENT_DEFAULT_LEVEL);
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
+  const [createdWindow, setCreatedWindow] = useState<AdsManagementCreatedWindow>(ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW);
   const [page, setPage] = useState(0);
   const [manualTakeovers, setManualTakeovers] = useState<IgnoredEntityRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -1286,10 +1291,11 @@ function AdsManagementPage({
       level,
       status: statusFilter,
       query,
+      createdWindow,
     });
     // 人工接管的广告组始终置顶；其余保持既有排序（如消耗降序）。sort 稳定，不打乱同类相对顺序。
     return [...list].sort((left, right) => Number(Boolean(right.ignored)) - Number(Boolean(left.ignored)));
-  }, [entities, level, query, statusFilter]);
+  }, [entities, createdWindow, level, query, statusFilter]);
   const {
     items: pagedEntities,
     pageCount,
@@ -1429,7 +1435,7 @@ function AdsManagementPage({
   return (
     <section className="page-stack ads-page">
       <div className="ads-metric-rail" aria-label="广告管理摘要">
-        <article><small>当前对象</small><strong>{filtered.length}</strong><span>创建于最近 48 小时</span></article>
+        <article><small>当前对象</small><strong>{filtered.length}</strong><span>{createdWindow === "recent" ? `创建于最近 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时` : "当前筛选对象"}</span></article>
         <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
         <article><small>今日消耗</small><strong>{formatMetric(currentSpend)}</strong><span>账户时区当天汇总</span></article>
         <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
@@ -1442,9 +1448,15 @@ function AdsManagementPage({
           </Field>
           <Field label="状态">
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
-              <option value="all">全部状态（48 小时）</option>
+              <option value="all">全部当前状态</option>
               <option value="enabled">已开启</option>
               <option value="disabled">已关闭</option>
+            </select>
+          </Field>
+          <Field label="创建时间">
+            <select value={createdWindow} onChange={(event) => setCreatedWindow(event.target.value as AdsManagementCreatedWindow)}>
+              <option value="recent">最近 {ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时</option>
+              <option value="all">全部（含历史对象）</option>
             </select>
           </Field>
           <Field label="消耗日期">
@@ -1579,6 +1591,7 @@ function AllAccountsAdsView({
   }>>([]);
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<"all" | ManagedEntityRecord["status"]>(ADS_MANAGEMENT_DEFAULT_STATUS);
+  const [createdWindow, setCreatedWindow] = useState<AdsManagementCreatedWindow>(ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW);
   const [busy, setBusy] = useState<string | null>(null);
   const [statusConfirming, setStatusConfirming] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
   const [scheduling, setScheduling] = useState<{ account: AccountConfig; entity: ManagedEntityRecord } | null>(null);
@@ -1628,27 +1641,30 @@ function AllAccountsAdsView({
   }, [load]);
 
   const visible = useMemo(() => {
-    const cutoff = Date.now() - 48 * 60 * 60_000;
+    // 原本这里按 syncedAt 卡 48 小时，但 syncedAt 是"最近一次同步时间"，每轮轮询都会
+    // 刷成当前时间，条件恒为真——等于没过滤，三周前的老广告组照样铺满列表。真正该看的
+    // 是创建时间，且判据要和规则引擎同一套，所以改走 ads-management-view 的共用实现。
+    const now = new Date();
     return entitiesByAccount
       .map((item, index) => ({ item, index }))
       .filter(({ item: { entity } }) => (
         entity.entityType === "ad-group"
-        && new Date(entity.syncedAt).getTime() >= cutoff
         && (statusFilter === "all" || entity.status === statusFilter)
+        && (createdWindow === "all" || isWithinAdsManagementCreatedWindow(entity, { now }))
       ))
       .sort((left, right) => (
         compareAdsManagementSpend(left.item.entity, right.item.entity)
         || left.index - right.index
       ))
       .map(({ item }) => item);
-  }, [entitiesByAccount, statusFilter]);
+  }, [createdWindow, entitiesByAccount, statusFilter]);
   const {
     items: paged,
     pageCount,
     currentPage,
   } = paginateAdsManagementItems(visible, page);
 
-  useEffect(() => setPage(0), [statusFilter]);
+  useEffect(() => setPage(0), [createdWindow, statusFilter]);
   useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
 
   const enabledCount = visible.filter(({ entity }) => entity.status === "enabled").length;
@@ -1701,19 +1717,23 @@ function AllAccountsAdsView({
       </div>
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最新健康同步中仍存在的广告组；可直接执行启停和人工接管。</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最新健康同步中仍存在的广告组；默认只看规则窗口内的对象，可直接执行启停和人工接管。</p></div></div>
           <div className="row-actions">
             <select aria-label="广告组状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
               <option value="enabled">已开启</option>
               <option value="disabled">已关闭</option>
               <option value="all">全部当前状态</option>
             </select>
+            <select aria-label="广告组创建时间" value={createdWindow} onChange={(event) => setCreatedWindow(event.target.value as AdsManagementCreatedWindow)}>
+              <option value="recent">最近 {ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时</option>
+              <option value="all">全部（含历史对象）</option>
+            </select>
             <small className="inline-protection-note">每 30 秒更新展示</small>
           </div>
         </div>
         <div className="table-wrap"><table>
           <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
-          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>最新健康同步中暂无符合当前状态的广告组。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
+          <tbody>{visible.length === 0 ? <tr><td colSpan={10}>最新健康同步中暂无符合当前筛选的广告组；若在找历史对象，把「创建时间」切到「全部」。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
             <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
