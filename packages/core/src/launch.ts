@@ -301,6 +301,10 @@ export const LaunchConfigurationRowSchema = z.object({
   // Older locally saved plans did not contain a region.  Preserve their
   // readability while every newly saved plan receives it from its preset.
   region: z.string().trim().min(1).max(120).default("未设置"),
+  // 新导入的表格会逐行保存定向；optional 保持旧计划和非表格复制流程可读，
+  // 创建协议会在缺失时兼容回退到旧预设或不限定向。
+  gender: LaunchGenderSchema.optional(),
+  ageRanges: z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length).optional(),
   dailyBudget: z.number().positive().max(100_000_000),
   // 系列日预算。系列预算(CBO)模式下由本字段下发到系列层，广告组层不再发预算。
   // 旧计划没有这个字段，缺省即按组预算处理。同一个系列下的多行必须携带相同的
@@ -425,17 +429,16 @@ export const LaunchSheetImportResultSchema = z.object({
 export type LaunchSheetImportResult = z.infer<typeof LaunchSheetImportResultSchema>;
 
 export const launchSheetColumns = [
-  { key: "campaignName", label: "推广系列名称", aliases: ["系列名称", "广告系列名称", "campaign", "campaign name"] },
-  { key: "adGroupName", label: "广告组名称", aliases: ["组名称", "adgroup", "ad group name"] },
-  { key: "videoCode", label: "视频代码", aliases: ["视频ID", "视频id", "video", "video code", "video id"] },
-  { key: "productUrl", label: "产品 URL", aliases: ["产品链接", "落地页", "product url", "url", "landing page"] },
+  { key: "campaignName", label: "推广系列名称", aliases: ["系列名称", "广告系列名称", "campaign", "campaign name"], required: true },
+  { key: "adGroupName", label: "广告组名称", aliases: ["组名称", "adgroup", "ad group name"], required: true },
+  { key: "videoCode", label: "视频代码", aliases: ["视频ID", "视频id", "video", "video code", "video id"], required: true },
+  { key: "productUrl", label: "产品 URL", aliases: ["产品链接", "落地页", "product url", "url", "landing page"], required: true },
+  { key: "ageRanges", label: "年龄", aliases: ["年龄段", "age", "age range", "age ranges"], required: false },
+  { key: "gender", label: "性别", aliases: ["gender", "sex"], required: false },
 ] as const;
 type LaunchSheetColumnKey = (typeof launchSheetColumns)[number]["key"];
 
-/**
- * Parses the two fields that need manual spreadsheet input. Budget, bid and
- * timing are deliberately applied afterwards from the selected preset.
- */
+/** 表格逐行读取广告组字段；预算、地区、出价和时间仍由所选预设统一提供。 */
 /**
  * 把预设的创建时间规则解析成具体时间。相对规则（当天24:00 / 次日06:00）按传入
  * 的 now 重算，因此保存的预设不会冻结日期，每次使用都随当前时间变动。
@@ -570,12 +573,18 @@ export function parseLaunchSheetTable(
   let block: { campaignName: string; videoCode: string; productUrl: string } | null = null;
   for (let index = 1; index < table.length; index += 1) {
     const source = table[index] ?? [];
-    if (source.every(isBlank)) continue;
+    // 下载模板会预填 500 行“年龄全选 / 性别不限”。只要四个业务字段都为空，
+    // 该行仍然是空白占位行，不能产生 500 条必填错误。
+    const hasLaunchData = (["campaignName", "adGroupName", "videoCode", "productUrl"] as const)
+      .some((key) => !isBlank(source[headerMap.get(key) ?? -1]));
+    if (!hasLaunchData) continue;
     const rowNumber = index + 1;
     let campaignName = asText(source[headerMap.get("campaignName") ?? -1]);
     const adGroupName = asText(source[headerMap.get("adGroupName") ?? -1]);
     let videoCode = asText(source[headerMap.get("videoCode") ?? -1]);
     let productUrl = asText(source[headerMap.get("productUrl") ?? -1]);
+    const ageRanges = parseLaunchAgeRanges(source[headerMap.get("ageRanges") ?? -1]);
+    const gender = parseLaunchGender(source[headerMap.get("gender") ?? -1]);
     if (campaignName) {
       // New block head: its own 系列/代码/URL become the defaults inherited by
       // the continuation rows below until the next filled 系列名称.
@@ -593,6 +602,10 @@ export function parseLaunchSheetTable(
       addError(errors, rowNumber, "视频代码", "请填写视频代码。");
     }
     if (!isUrl(productUrl)) addError(errors, rowNumber, "产品 URL", "请填写有效的 http 或 https 产品 URL。");
+    if (!ageRanges) {
+      addError(errors, rowNumber, "年龄", `年龄只能填写 ${LaunchAgeRangeValues.join(";")} 中的值，并用分号分隔。`);
+    }
+    if (!gender) addError(errors, rowNumber, "性别", "性别只能填写“不限”“男”或“女”。");
     if (errors.some((issue) => issue.rowNumber === rowNumber)) continue;
     // One sheet row = one ad-group. Several video codes in the cell become
     // several ads *inside* that one ad-group; the codes stay joined here and
@@ -610,6 +623,8 @@ export function parseLaunchSheetTable(
       adGroupName,
       adName: name,
       region: preset.region,
+      ageRanges,
+      gender,
       dailyBudget: preset.dailyBudget,
       bid: preset.bid,
       startAt: resolveLaunchStartAt(preset.startAtRule, preset.startAt ?? null, now, timeZone),
@@ -767,9 +782,35 @@ function mapHeaders(headers: unknown[], errors: LaunchSheetIssue[]): Map<LaunchS
     if (definition && !map.has(definition.key)) map.set(definition.key, index);
   });
   for (const column of launchSheetColumns) {
-    if (!map.has(column.key)) errors.push({ rowNumber: 1, field: column.label, message: `缺少必需表头“${column.label}”。` });
+    if (column.required && !map.has(column.key)) {
+      errors.push({ rowNumber: 1, field: column.label, message: `缺少必需表头“${column.label}”。` });
+    }
   }
   return map;
+}
+
+function parseLaunchGender(value: unknown): LaunchGender | null {
+  const normalized = asText(value).toLowerCase();
+  if (!normalized || ["不限", "全部", "全选", "all", "0"].includes(normalized)) return "all";
+  if (["男", "男性", "male", "m", "1"].includes(normalized)) return "male";
+  if (["女", "女性", "female", "f", "2"].includes(normalized)) return "female";
+  return null;
+}
+
+function parseLaunchAgeRanges(value: unknown): LaunchAgeRange[] | null {
+  const text = asText(value);
+  if (!text || ["不限", "全部", "全选", "all"].includes(text.toLowerCase())) {
+    return [...LaunchAgeRangeValues];
+  }
+  const values = text
+    .replace(/[－—–~～]/g, "-")
+    .split(/[;；,，、\r\n]+/)
+    .map((item) => item.trim().replace(/\s+/g, ""))
+    .filter(Boolean)
+    .map((item) => item === "55+" ? "55-100" : item);
+  if (values.length === 0 || values.some((item) => !LaunchAgeRangeSchema.safeParse(item).success)) return null;
+  const selected = new Set(values as LaunchAgeRange[]);
+  return LaunchAgeRangeValues.filter((item) => selected.has(item));
 }
 
 function asText(value: unknown): string {

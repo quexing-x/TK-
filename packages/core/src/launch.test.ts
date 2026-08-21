@@ -55,7 +55,7 @@ const preset = {
 };
 
 describe("parseLaunchSheetTable", () => {
-  it("only accepts campaign and video-code columns, then applies the preset", () => {
+  it("keeps old four-column sheets compatible and defaults targeting to unrestricted", () => {
     const result = parseLaunchSheetTable(
       [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["夏季系列", "夏季广告组", "video-001", "https://example.com/product"]],
       preset,
@@ -70,10 +70,52 @@ describe("parseLaunchSheetTable", () => {
       adGroupName: "夏季广告组",
       adName: "260716:001",
       region: "US",
+      ageRanges: ["13-17", "18-24", "25-34", "35-44", "45-54", "55-100"],
+      gender: "all",
       dailyBudget: 100,
       bid: 1.25,
       initialStatus: "disabled",
     })]);
+  });
+
+  it("imports age and gender independently for each ad-group row", () => {
+    const result = parseLaunchSheetTable([
+      ["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"],
+      ["系列", "女性组", "video-1", "https://example.com/1", "25-34；35-44；55+", "女"],
+      ["", "男性组", "video-2", "", "18-24;25-34", "男"],
+    ], preset, new Date("2026-07-16T09:00:00.000Z"));
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows.map((row) => ({
+      name: row.adGroupName,
+      ageRanges: row.ageRanges,
+      gender: row.gender,
+    }))).toEqual([
+      { name: "女性组", ageRanges: ["25-34", "35-44", "55-100"], gender: "female" },
+      { name: "男性组", ageRanges: ["18-24", "25-34"], gender: "male" },
+    ]);
+  });
+
+  it("ignores template placeholder rows that only contain targeting defaults", () => {
+    const result = parseLaunchSheetTable([
+      ["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"],
+      ["", "", "", "", "13-17;18-24;25-34;35-44;45-54;55-100", "不限"],
+    ], preset);
+
+    expect(result.rows).toEqual([]);
+    expect(result.errors).toEqual([
+      { rowNumber: 2, field: "数据", message: "没有可导入的任务行。" },
+    ]);
+  });
+
+  it("rejects unsupported per-row targeting values", () => {
+    const result = parseLaunchSheetTable([
+      ["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"],
+      ["系列", "广告组", "video", "https://example.com", "20-30", "其他"],
+    ], preset);
+
+    expect(result.rows).toEqual([]);
+    expect(result.errors.map((issue) => issue.field)).toEqual(["年龄", "性别"]);
   });
 
   it("reports missing required columns and values", () => {

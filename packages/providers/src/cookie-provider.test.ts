@@ -2419,7 +2419,17 @@ describe("CookieAdsProvider", () => {
           : url.includes("spark/validate_promote_music")
             ? { data: { music_info_map: { "9998887776665": { status: 0 } } }, code: 0 }
             : url.includes("creative/creative_automation_option")
-              ? { data: { strategy_ids: [], group_strategies: [] }, code: 0 }
+              ? { data: {
+                  strategy_ids: [
+                    "100001",
+                    "100002",
+                    "200001",
+                    "7419232909960003601",
+                    "7455417586723028993",
+                    "7478954523433500688",
+                  ],
+                  group_strategies: [],
+                }, code: 0 }
               : url.includes("spark/creative_fix_task/save")
                 ? { data: { task_map: { "spark-video": "spark-task" } }, code: 0 }
                 : url.includes("spark/creative_fix_task/info")
@@ -2491,6 +2501,12 @@ describe("CookieAdsProvider", () => {
       identity_id: "spark-identity",
       identity_type: 2,
       item_source: 2,
+    });
+    expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<Record<string, unknown>>)[0]).toMatchObject({
+      creative_automation_type: 1,
+      creative_automation_list: ["100001", "100002", "7455417586723028993"],
+      catalog_setup: 0,
+      need_create_cta_id: true,
     });
     expect(requested.some((item) =>
       new URL(item.url).pathname === "/api/v4/i18n/creation/creative_snap/check/"

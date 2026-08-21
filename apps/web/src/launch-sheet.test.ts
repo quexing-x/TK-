@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { downloadLaunchTemplate, parseCsvTable, readLaunchSpreadsheet } from "./launch-sheet.js";
+import { createLaunchTemplateBuffer, downloadLaunchTemplate, parseCsvTable, readLaunchSpreadsheet } from "./launch-sheet.js";
 
 const preset = { name: "测试预设", region: "US", dailyBudget: 120, bid: null, startAt: null, endAt: null, initialStatus: "disabled" as const };
 
@@ -27,7 +27,48 @@ describe("launch spreadsheet", () => {
     const result = await readLaunchSpreadsheet(file, preset);
 
     expect(result.errors).toEqual([]);
-    expect(result.rows[0]).toMatchObject({ campaignName: "测试系列", adGroupName: "测试广告组", videoCode: "video-001", productUrl: "https://example.com/product", region: "US", dailyBudget: 120, bid: null });
+    expect(result.rows[0]).toMatchObject({
+      campaignName: "测试系列",
+      adGroupName: "测试广告组",
+      videoCode: "video-001",
+      productUrl: "https://example.com/product",
+      region: "US",
+      dailyBudget: 120,
+      bid: null,
+      ageRanges: ["13-17", "18-24", "25-34", "35-44", "45-54", "55-100"],
+      gender: "all",
+    });
+  });
+  it("builds 500 editable rows with all ages and unrestricted gender prefilled", async () => {
+    const { Workbook } = await import("exceljs");
+    const workbook = new Workbook();
+    await workbook.xlsx.load(await createLaunchTemplateBuffer());
+    const worksheet = workbook.getWorksheet("批量创建")!;
+
+    expect(worksheet.getRow(1).values).toEqual([
+      undefined,
+      "推广系列名称",
+      "广告组名称",
+      "视频代码",
+      "产品 URL",
+      "年龄",
+      "性别",
+    ]);
+    expect(worksheet.rowCount).toBe(501);
+    expect(worksheet.getCell("E2").value).toBe("13-17;18-24;25-34;35-44;45-54;55-100");
+    expect(worksheet.getCell("F2").value).toBe("不限");
+    expect(worksheet.getCell("E501").value).toBe("13-17;18-24;25-34;35-44;45-54;55-100");
+    expect(worksheet.getCell("F501").value).toBe("不限");
+    expect(worksheet.getCell("F2").dataValidation.formulae).toEqual(['"不限,男,女"']);
+    expect(workbook.getWorksheet("填写示例")?.getRow(2).values).toEqual([
+      undefined,
+      "夏季促销系列",
+      "夏季广告组",
+      "视频代码_001；视频代码_002",
+      "https://example.com/product",
+      "13-17;18-24;25-34;35-44;45-54;55-100",
+      "不限",
+    ]);
   });
   it("downloads a populated workbook template", async () => {
     const anchor = { href: "", download: "", click: vi.fn(), remove: vi.fn() };
