@@ -524,6 +524,10 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
 .chart-axis-label, .chart-x-label { fill: #8a969f; font-size: 9px; }
 .chart-bar { fill: #20c8c2; opacity: .72; }
 .chart-bar:hover { opacity: 1; }
+/* 同步中断的日子：当日快照停在中途，数值偏低，用条纹区别于完整日。 */
+.chart-bar-partial { opacity: .38; }
+.chart-bar-partial:hover { opacity: .62; }
+
 .chart-line { stroke: #fe2c55; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
 .chart-line-dot { fill: #fff; stroke: #fe2c55; stroke-width: 2; }
 .chart-empty { margin: 0 18px 18px; min-height: 150px; display: grid; place-items: center; color: #87939d; border: 1px dashed #dce4e8; border-radius: 11px; }

@@ -46,6 +46,7 @@ import {
   type StatusManualVerificationRecord,
   type EntityMetricSnapshotRecord,
   type MetricBatchRecord,
+  type DailyMetricRecord,
   type IgnoredEntityRecord,
   type ManagedEntityRecord,
   normalizeProviderEntity,
@@ -5332,6 +5333,75 @@ export class AutomationStore {
     }));
   }
 
+  /**
+   * 按账户时区的自然日汇总指标。
+   *
+   * 快照里的 spend/clicks/conversions 是当日累计值，一天里写几十条。按 (实体, 自然日)
+   * 取当天最后一个健康快照——即该实体那天的终值——再跨实体求和，才是那天的真实消耗。
+   * 直接把批次相加会把同一天重复计上几十遍。
+   *
+   * 时区偏移按"当前"解析一次后套用于整个区间：投放账户用的都是固定偏移时区，
+   * 跨 DST 边界的历史日期可能偏移一小时，够不上重写成逐日解析的复杂度。
+   */
+  listDailyMetricTotals(
+    accountId: string,
+    kind: ProviderKind,
+    since: string,
+    entityType?: ProviderEntity["entityType"],
+    until = new Date().toISOString(),
+  ): DailyMetricRecord[] {
+    const account = this.getAccount(accountId);
+    const offsetMinutes = utcOffsetMinutes(account?.timezone ?? "UTC");
+    const dayShift = `${offsetMinutes >= 0 ? "+" : "-"}${Math.abs(offsetMinutes)} minutes`;
+    const typeFilter = entityType ? "AND entity_type = ?" : "";
+    const parameters: (string | number)[] = [accountId, kind];
+    if (entityType) parameters.push(entityType);
+    parameters.push(since, until);
+
+    const rows = this.db
+      .prepare(
+        `WITH scoped AS (
+           SELECT external_id, captured_at, metrics_json,
+                  date(captured_at, ?) AS local_day
+           FROM entity_metric_snapshots
+           WHERE account_id = ? AND provider_kind = ? ${typeFilter}
+             AND sync_quality_status = 'healthy'
+             AND captured_at >= ? AND captured_at <= ?
+         ),
+         day_last AS (
+           SELECT external_id, local_day, MAX(captured_at) AS last_captured
+           FROM scoped GROUP BY external_id, local_day
+         )
+         SELECT d.local_day AS local_day,
+                COUNT(*) AS entity_count,
+                MAX(d.last_captured) AS last_captured,
+                time(MAX(d.last_captured), ?) AS last_local_time,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.spend') AS REAL), 0)) AS spend,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.conversions') AS REAL), 0)) AS conversions
+         FROM day_last d
+         JOIN scoped s
+           ON s.external_id = d.external_id AND s.captured_at = d.last_captured
+         GROUP BY d.local_day
+         ORDER BY d.local_day DESC`,
+      )
+      .all(dayShift, ...parameters, dayShift) as SqlRow[];
+
+    const today = new Date(Date.now() + offsetMinutes * 60_000)
+      .toISOString()
+      .slice(0, 10);
+    return rows.map((row) => ({
+      date: String(row.local_day),
+      count: Number(row.entity_count),
+      spend: Number(row.spend),
+      clicks: Number(row.clicks),
+      conversions: Number(row.conversions),
+      lastCapturedAt: String(row.last_captured),
+      lastLocalTime: String(row.last_local_time ?? "").slice(0, 5),
+      isCurrentDay: String(row.local_day) === today,
+    }));
+  }
+
   listMetricBatches(
     accountId: string,
     kind: ProviderKind,
@@ -8297,4 +8367,30 @@ function advanceDailyRun(current: string, completedAt: string): string {
     next += 24 * 60 * 60_000;
   } while (next <= completed);
   return new Date(next).toISOString();
+}
+
+/**
+ * 某个 IANA 时区相对 UTC 的偏移分钟数，用于把 UTC 时间戳换算成账户当地的自然日。
+ * SQLite 不认识时区名，只能接受 '+480 minutes' 这样的位移量。
+ */
+function utcOffsetMinutes(timeZone: string, at = new Date()): number {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).formatToParts(at);
+  } catch {
+    // 时区名无效（脏数据/手填）时退回 UTC，宁可按 UTC 分日也不要整条查询失败。
+    return 0;
+  }
+  const value = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((part) => part.type === type)?.value ?? "0");
+  const asUtc = Date.UTC(
+    value("year"), value("month") - 1, value("day"),
+    value("hour"), value("minute"), value("second"),
+  );
+  return Math.round((asUtc - Math.floor(at.getTime() / 1000) * 1000) / 60_000);
 }

@@ -49,6 +49,7 @@ import type {
   AutomationRunRecord,
   AdOperationRecord,
   MetricBatchRecord,
+  DailyMetricRecord,
   ManagedEntityRecord,
   IgnoredEntityRecord,
   ProviderConnection,
@@ -99,6 +100,12 @@ import {
   filterMetaAccounts,
   filterTikTokOperationalAccounts,
 } from "./platform-account-view";
+import {
+  describeDailyCoverage,
+  isDailyMetricIncomplete,
+  mergeDailyMetricsAcrossAccounts,
+  summarizeDailyMetrics,
+} from "./metric-days";
 import {
   ADS_MANAGEMENT_DEFAULT_CREATED_WINDOW,
   ADS_MANAGEMENT_DEFAULT_LEVEL,
@@ -1799,6 +1806,7 @@ function AnalyticsPage({
   const [barMetric, setBarMetric] = useState<BatchBarMetric>("spend");
   const [lineMetric, setLineMetric] = useState<BatchLineMetric>("cpc");
   const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
+  const [days, setDays] = useState<DailyMetricRecord[] | null>(null);
   const range = useMemo(
     () => {
       try {
@@ -1817,17 +1825,22 @@ function AnalyticsPage({
   useEffect(() => {
     if (!range) return;
     setBatches(null);
-    void api
-      .getAnalytics(account.id, range, level === "all" ? undefined : level)
-      .then((result) => {
-        setBatches(result);
+    setDays(null);
+    const entityType = level === "all" ? undefined : level;
+    void Promise.all([
+      api.getMetricDays(account.id, range, entityType),
+      api.getAnalytics(account.id, range, entityType),
+    ])
+      .then(([dailyResult, batchResult]) => {
+        setDays(dailyResult);
+        setBatches(batchResult);
         onError(null);
       })
       .catch((cause) => onError(getErrorMessage(cause)));
   }, [account.id, level, onError, range?.from, range?.to]);
 
-  const analysis = useMemo(() => analyzeMetricBatches(batches ?? []), [batches]);
-  if (!batches) return <EmptyState text="正在分析指标快照…" loading />;
+  const summary = useMemo(() => summarizeDailyMetrics(days ?? []), [days]);
+  if (!days || !batches) return <EmptyState text="正在分析指标快照…" loading />;
 
   return (
     <section className="page-stack analytics-page">
@@ -1847,21 +1860,21 @@ function AnalyticsPage({
         <p className="retention-note">本地快照保留 90 天；Cookie 接入不含广告层级分析。</p>
       </div>
       <div className="summary-grid">
-        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
-        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
-        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(analysis.latestConversions)} tone="green" />
-        <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
-        <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
+        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(summary.spend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(summary.clicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(summary.conversions)} tone="green" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(summary.cpc)} tone="blue" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(summary.cpa)} tone="violet" />
       </div>
       <div className="panel batch-chart-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>批次数据透视</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
-        <BatchTrendChart batches={analysis.batches} barMetric={barMetric} lineMetric={lineMetric} />
+        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>按日趋势</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
+        <DailyTrendChart days={days} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
       <details className="panel table-panel collapsible-panel">
-        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次明细 <em className="heading-count">{analysis.batches.length}</em></h2></div></div></summary>
+        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2><p>每条是一次同步写下的当日累计中间态，仅用于排查同步；业务指标以上方按日口径为准。</p></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
-          <tbody>{analysis.batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : analysis.batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
+          <tbody>{batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
         </table></div>
       </details>
     </section>
@@ -1872,15 +1885,18 @@ type BatchBarMetric = "spend" | "clicks" | "conversions";
 type BatchLineMetric = "cpc" | "cpa";
 type AnalyticsBatch = MetricBatchRecord;
 
-function BatchTrendChart({ batches, barMetric, lineMetric }: { batches: AnalyticsBatch[]; barMetric: BatchBarMetric; lineMetric: BatchLineMetric }) {
-  const points = batches.slice(0, 24).reverse().map((batch) => ({
-    ...batch,
-    barValue: batch[barMetric],
+function DailyTrendChart({ days, barMetric, lineMetric }: { days: DailyMetricRecord[]; barMetric: BatchBarMetric; lineMetric: BatchLineMetric }) {
+  // 横轴是自然日。旧实现画的是同步批次，而每个批次只属于一个账户、装的又是当日累计，
+  // 于是大账户的累计值和小账户的累计值交替成柱——看着像消耗剧烈波动，其实是账户体量差异。
+  const points = days.slice(0, 30).reverse().map((day) => ({
+    ...day,
+    barValue: day[barMetric],
     lineValue: lineMetric === "cpc"
-      ? (batch.clicks > 0 ? batch.spend / batch.clicks : null)
-      : (batch.conversions > 0 ? batch.spend / batch.conversions : null),
+      ? (day.clicks > 0 ? day.spend / day.clicks : null)
+      : (day.conversions > 0 ? day.spend / day.conversions : null),
+    incomplete: isDailyMetricIncomplete(day),
   }));
-  if (points.length === 0) return <div className="chart-empty">暂无批次数据，请先执行检测。</div>;
+  if (points.length === 0) return <div className="chart-empty">该区间内没有健康同步的快照。</div>;
   const width = 920;
   const height = 286;
   const left = 54;
@@ -1908,9 +1924,11 @@ function BatchTrendChart({ batches, barMetric, lineMetric }: { batches: Analytic
   if (currentSegment.length > 1) lineSegments.push(currentSegment.join(" "));
   const barLabel = { spend: "消耗", clicks: "点击", conversions: "转化" }[barMetric];
   const lineLabel = lineMetric === "cpc" ? "平均 CPC" : "平均转化成本";
+  const describe = (point: (typeof points)[number]) =>
+    `${point.date}${describeDailyCoverage(point) ? `（${describeDailyCoverage(point)}）` : ""}`;
 
   return <div className="batch-chart-wrap">
-    <div className="chart-legend"><span className="bar-key">{barLabel}（柱）</span><span className="line-key">{lineLabel}（线）</span><small>最多显示最近 24 个检测批次</small></div>
+    <div className="chart-legend"><span className="bar-key">{barLabel}（柱）</span><span className="line-key">{lineLabel}（线）</span><small>按账户时区的自然日，最多显示最近 30 天</small></div>
     <svg aria-label={`${barLabel}柱状图与${lineLabel}折线图`} className="batch-combo-chart" role="img" viewBox={`0 0 ${width} ${height}`}>
       {[0, .25, .5, .75, 1].map((ratio) => {
         const y = top + plotHeight * (1 - ratio);
@@ -1920,17 +1938,22 @@ function BatchTrendChart({ batches, barMetric, lineMetric }: { batches: Analytic
         const x = left + step * index + step / 2;
         const barHeight = (point.barValue / barMaximum) * plotHeight;
         const labelEvery = Math.max(1, Math.ceil(points.length / 8));
-        return <g key={point.capturedAt}><rect className="chart-bar" height={barHeight} rx="3" width={barWidth} x={x - barWidth / 2} y={top + plotHeight - barHeight}><title>{new Date(point.capturedAt).toLocaleString()} · {barLabel} {formatMetric(point.barValue)} · {lineLabel} {formatMetric(point.lineValue)}</title></rect>{index % labelEvery === 0 && <text className="chart-x-label" textAnchor="middle" x={x} y={height - 24}>{formatChartTime(point.capturedAt)}</text>}</g>;
+        return <g key={point.date}><rect className={point.incomplete ? "chart-bar chart-bar-partial" : "chart-bar"} height={barHeight} rx="3" width={barWidth} x={x - barWidth / 2} y={top + plotHeight - barHeight}><title>{describe(point)} · {barLabel} {formatMetric(point.barValue)} · {lineLabel} {formatMetric(point.lineValue)}</title></rect>{index % labelEvery === 0 && <text className="chart-x-label" textAnchor="middle" x={x} y={height - 24}>{formatChartDay(point.date)}</text>}</g>;
       })}
       {lineSegments.map((segment, index) => <polyline className="chart-line" fill="none" key={index} points={segment} />)}
       {points.map((point, index) => {
         if (point.lineValue === null) return null;
         const x = left + step * index + step / 2;
         const y = top + plotHeight - (point.lineValue / lineMaximum) * plotHeight;
-        return <circle className="chart-line-dot" cx={x} cy={y} key={point.capturedAt} r="3.5"><title>{new Date(point.capturedAt).toLocaleString()} · {lineLabel} {formatMetric(point.lineValue)}</title></circle>;
+        return <circle className="chart-line-dot" cx={x} cy={y} key={point.date} r="3.5"><title>{describe(point)} · {lineLabel} {formatMetric(point.lineValue)}</title></circle>;
       })}
     </svg>
   </div>;
+}
+
+function formatChartDay(date: string): string {
+  const [, month, day] = date.split("-");
+  return `${Number(month)}/${Number(day)}`;
 }
 
 function formatChartTime(value: string): string {
@@ -2510,23 +2533,6 @@ function formatDateInput(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function analyzeMetricBatches(batches: MetricBatchRecord[]) {
-  const sorted = [...batches].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
-  const latest = sorted[0];
-  const earliest = sorted[sorted.length - 1];
-  // 平台上报的 spend/clicks/conversions 为累计快照，直接取最新批次会导致
-  // "今天/七天"都显示同一累计值、时间窗口形同虚设。改为区间净增量：
-  // 窗口内最新累计 − 最早累计（高频同步下即为该区间的真实消耗/点击/转化）。
-  const windowValue = (field: "spend" | "clicks" | "conversions") =>
-    Math.max(0, (latest?.[field] ?? 0) - (earliest?.[field] ?? 0));
-  return {
-    latestSpend: windowValue("spend"),
-    latestClicks: windowValue("clicks"),
-    latestConversions: windowValue("conversions"),
-    batches: sorted,
-  };
-}
-
 function aggregateAccountBatches(lists: MetricBatchRecord[][]): MetricBatchRecord[] {
   const byTime = new Map<string, MetricBatchRecord>();
   for (const list of lists) {
@@ -2556,6 +2562,7 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
   const [barMetric, setBarMetric] = useState<BatchBarMetric>("spend");
   const [lineMetric, setLineMetric] = useState<BatchLineMetric>("cpc");
   const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
+  const [days, setDays] = useState<DailyMetricRecord[] | null>(null);
   const range = useMemo(() => {
     try { return resolveAnalysisRange(preset, customFrom, customTo); } catch { return null; }
   }, [customFrom, customTo, preset]);
@@ -2563,15 +2570,23 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
   useEffect(() => {
     if (!range) return;
     setBatches(null);
-    void Promise.all(
-      accounts.map((account) => api.getAnalytics(account.id, range, level === "all" ? undefined : level).catch(() => [] as MetricBatchRecord[])),
-    )
-      .then((lists) => { setBatches(aggregateAccountBatches(lists)); onError(null); })
+    setDays(null);
+    const entityType = level === "all" ? undefined : level;
+    void Promise.all([
+      Promise.all(accounts.map((account) => api.getMetricDays(account.id, range, entityType).catch(() => [] as DailyMetricRecord[]))),
+      Promise.all(accounts.map((account) => api.getAnalytics(account.id, range, entityType).catch(() => [] as MetricBatchRecord[]))),
+    ])
+      .then(([dailyLists, batchLists]) => {
+        // 跨账户按自然日相加；批次只是同步日志，仍按时间戳并列。
+        setDays(mergeDailyMetricsAcrossAccounts(dailyLists));
+        setBatches(aggregateAccountBatches(batchLists));
+        onError(null);
+      })
       .catch((cause) => onError(getErrorMessage(cause)));
   }, [accounts, level, onError, range?.from, range?.to]);
 
-  const analysis = useMemo(() => analyzeMetricBatches(batches ?? []), [batches]);
-  if (!batches) return <EmptyState text="正在汇总全部账户指标…" loading />;
+  const summary = useMemo(() => summarizeDailyMetrics(days ?? []), [days]);
+  if (!days || !batches) return <EmptyState text="正在汇总全部账户指标…" loading />;
 
   return (
     <section className="page-stack analytics-page">
@@ -2591,21 +2606,21 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
         <p className="retention-note">本地快照保留 90 天；已按检测时间聚合全部账户。</p>
       </div>
       <div className="summary-grid">
-        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(analysis.latestSpend)} tone="blue" />
-        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(analysis.latestClicks)} tone="violet" />
-        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(analysis.latestConversions)} tone="green" />
-        <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(analysis.latestClicks > 0 ? analysis.latestSpend / analysis.latestClicks : null)} tone="blue" />
-        <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(analysis.latestConversions > 0 ? analysis.latestSpend / analysis.latestConversions : null)} tone="violet" />
+        <SummaryCard icon={<Gauge size={20} />} label="区间消耗" value={formatMetric(summary.spend)} tone="blue" />
+        <SummaryCard icon={<Activity size={20} />} label="区间点击" value={formatMetric(summary.clicks)} tone="violet" />
+        <SummaryCard icon={<Check size={20} />} label="区间转化" value={formatMetric(summary.conversions)} tone="green" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均 CPC" value={formatMetric(summary.cpc)} tone="blue" />
+        <SummaryCard icon={<CircleGauge size={20} />} label="平均转化成本" value={formatMetric(summary.cpa)} tone="violet" />
       </div>
       <div className="panel batch-chart-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>批次数据透视</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
-        <BatchTrendChart batches={analysis.batches} barMetric={barMetric} lineMetric={lineMetric} />
+        <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>按日趋势</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
+        <DailyTrendChart days={days} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
       <details className="panel table-panel collapsible-panel">
-        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>检测批次明细 <em className="heading-count">{analysis.batches.length}</em></h2></div></div></summary>
+        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2><p>每条是一次同步写下的当日累计中间态，仅用于排查同步；业务指标以上方按日口径为准。</p></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
-          <tbody>{analysis.batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : analysis.batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
+          <tbody>{batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
         </table></div>
       </details>
     </section>

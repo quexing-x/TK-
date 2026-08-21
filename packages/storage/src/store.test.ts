@@ -1035,6 +1035,56 @@ describe("AutomationStore", () => {
     });
   });
 
+  describe("按自然日汇总指标", () => {
+    // 平台回传的是当日累计值，一天里写几十条快照。按批次相加会把一天重复计几十遍，
+    // 正确口径是每个实体取当天最后一条。demo-account 是 Asia/Shanghai(+8)，因此
+    // UTC 16:00 之后已经属于第二个自然日——这条边界是整段逻辑最容易错的地方。
+    const capture = (finishedAt: string, spends: Record<string, number>) => {
+      store.saveReadOnlySync("demo-account", "cookie",
+        Object.entries(spends).map(([externalId, stat_cost]) => ({
+          entityType: "ad-group" as const,
+          externalId,
+          payload: { ad_name: externalId, stat_cost },
+        })),
+        {
+          startedAt: finishedAt,
+          finishedAt,
+          counts: { campaign: 0, "ad-group": Object.keys(spends).length, ad: 0, material: 0 },
+          warnings: [],
+          quality: healthySyncQuality(finishedAt),
+        },
+      );
+    };
+
+    it("每个实体取当天最后一条累计值，跨自然日按账户时区切分", () => {
+      capture("2026-08-19T01:00:00.000Z", { g1: 1, g2: 0.5 });   // 当地 08-19 09:00
+      capture("2026-08-19T10:00:00.000Z", { g1: 6, g2: 2 });     // 当地 08-19 18:00
+      capture("2026-08-19T15:30:00.000Z", { g1: 9, g2: 3 });     // 当地 08-19 23:30
+      capture("2026-08-19T16:30:00.000Z", { g1: 0.4, g2: 0.1 }); // 当地 08-20 00:30，累计已归零
+
+      const days = store.listDailyMetricTotals(
+        "demo-account", "cookie", "2026-08-18T00:00:00.000Z", "ad-group", "2026-08-21T00:00:00.000Z",
+      );
+
+      expect(days.map((day) => [day.date, Number(day.spend.toFixed(2))])).toEqual([
+        ["2026-08-20", 0.5],  // 归零后的新一天，不是 12 + 0.5
+        ["2026-08-19", 12],   // 9 + 3，取当天最后一条，而不是四个批次相加
+      ]);
+      expect(days.find((day) => day.date === "2026-08-19")?.lastLocalTime).toBe("23:30");
+    });
+
+    it("同步中断的日子把截止时刻如实带出来，供界面标注偏低", () => {
+      capture("2026-08-19T00:06:00.000Z", { g1: 4.6 }); // 当地 08-19 08:06 之后再无快照
+
+      const day = store.listDailyMetricTotals(
+        "demo-account", "cookie", "2026-08-18T00:00:00.000Z", "ad-group", "2026-08-21T00:00:00.000Z",
+      ).find((item) => item.date === "2026-08-19");
+
+      expect(day?.lastLocalTime).toBe("08:06");
+      expect(day?.isCurrentDay).toBe(false);
+    });
+  });
+
   // 2026-08-06：三条自动申诉因 TikTok 后端解包失败被判 unknown，而 blocked 把
   // unknown 也当成永久占坑，于是这三条广告被永久踢出候选池。申诉是可安全重复提交
   // 的操作，代价远低于"永远不再申诉"，改为与明确失败一样受 retryLimit 约束。

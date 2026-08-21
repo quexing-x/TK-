@@ -127,3 +127,30 @@ export interface MetricBatchRecord {
   clicks: number;
   conversions: number;
 }
+
+/**
+ * 一个自然日（账户时区）的指标真值。
+ *
+ * 平台回传的 spend/clicks/conversions 是**当日累计**：同一天里每轮同步都会写一条快照，
+ * 值从零点起单调递增，过零点归零。把这些快照当成增量点相加会把一天的消耗重复计上几十遍
+ * ——旧的「批次」口径正是这么错的。这里改为按 (实体, 自然日) 取当天最后一个健康快照，
+ * 也就是该实体那天的累计终值，再跨实体求和。
+ */
+export interface DailyMetricRecord {
+  /** 账户时区下的自然日，YYYY-MM-DD。 */
+  date: string;
+  /** 当天有数据的实体数。 */
+  count: number;
+  spend: number;
+  clicks: number;
+  conversions: number;
+  /**
+   * 当天最后一个被采纳的快照时间（UTC ISO）。同步中断的日子会停在中途，
+   * 该日数值因此偏低——界面据此标注「截止至 HH:MM」，不静默当成真值。
+   */
+  lastCapturedAt: string;
+  /** lastCapturedAt 在账户时区下的时刻，HH:MM。时区换算在服务端做，界面不必再猜。 */
+  lastLocalTime: string;
+  /** 该自然日就是账户当地的今天，数据仍在累积中。 */
+  isCurrentDay: boolean;
+}
