@@ -60,6 +60,12 @@ function withinWindow(createdAt: string | null | undefined, filter: TimeFilter, 
   return created >= now - hours * 60 * 60_000;
 }
 
+/** 扩组预设的初始值，按当前投放习惯定；面板里仍可逐次改。 */
+const DEFAULT_COPY_COUNT = 1;
+const DEFAULT_DAILY_BUDGET = 50;
+/** 空串表示继承源组出价；给了默认值就等于默认覆盖，需要继承时手动清空。 */
+const DEFAULT_BID_TEXT = "7";
+
 export function ExpandGroupsPanel({
   accounts,
   connectionStates,
@@ -83,9 +89,9 @@ export function ExpandGroupsPanel({
   const [conversionFilter, setConversionFilter] = useState<ConversionFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
-  const [count, setCount] = useState(1);
-  const [dailyBudget, setDailyBudget] = useState(100);
-  const [bidText, setBidText] = useState("");
+  const [count, setCount] = useState(DEFAULT_COPY_COUNT);
+  const [dailyBudget, setDailyBudget] = useState(DEFAULT_DAILY_BUDGET);
+  const [bidText, setBidText] = useState(DEFAULT_BID_TEXT);
   const [timingMode, setTimingMode] = useState<"immediate" | "scheduled">("scheduled");
   const [scheduledAt, setScheduledAt] = useState<string>(defaultNextDaySix);
   const [visibleAccountIds, setVisibleAccountIds] = useState<string[]>([]);
