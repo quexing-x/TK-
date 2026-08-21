@@ -25,6 +25,54 @@ export const TikTokCreationPublishSource = {
   sketch_publish_source: 1,
 } as const;
 
+/** TikTok 当前创建前端使用的自动优化策略 ID（2026-08-21 官方前端）。 */
+export const TikTokCreativeAutomationStrategies = {
+  ctaEnhancement: "100001",
+  generatedAdCard: "100002",
+  catalogProducts: "200001",
+  translateAndDub: "7419232909960003601",
+  videoQuality: "7455417586723028993",
+  musicRefresh: "7478954523433500688",
+} as const;
+
+/** 用户确认的默认组合：CTA、生成广告卡片、视频质量开启；其余策略关闭。 */
+export const DefaultTikTokCreativeAutomationStrategyIds = [
+  TikTokCreativeAutomationStrategies.ctaEnhancement,
+  TikTokCreativeAutomationStrategies.generatedAdCard,
+  TikTokCreativeAutomationStrategies.videoQuality,
+] as const;
+
+const DefaultProgrammaticCtaAssets = [{
+  asset_ids: [202046, 201641],
+  asset_content: "立即下单",
+  asset_content_key: "order_now",
+  asset_source: 0,
+  cta_content: "立即下单",
+  material_id: "202046_201641",
+}] as const;
+
+function defaultCreativeAutomationFields(): Record<string, unknown> {
+  return {
+    creative_automation_type: 1,
+    creative_automation_list: [...DefaultTikTokCreativeAutomationStrategyIds],
+    need_create_cta_id: true,
+    call_to_action_id: "",
+    call_to_action_asset_list: clone(DefaultProgrammaticCtaAssets),
+    // “商品库显示设置”关闭；生成广告卡片由 100002 独立控制。
+    catalog_setup: 0,
+    catalog_authorized_bc: "0",
+    spp_rebrand_catalog_switch: 0,
+    product_info_type: 1,
+    product_info: {
+      promo_code_infos: [],
+      is_auto_use: 2,
+      auto_select_toggle: 0,
+      image_infos: [],
+      selling_points_by_types: [],
+    },
+  };
+}
+
 /**
  * A creation request has a different path from the two onboarding requests,
  * but belongs to the same authenticated advertiser session.  This deliberately
@@ -99,13 +147,33 @@ const TikTokAgeRanges: Record<LaunchAgeRange, [number, number]> = {
   "55-100": [55, 100],
 };
 
-function resolvedAgeRanges(config: Pick<CreationPresetConfig, "ageRanges">): number[][] {
-  const values = config.ageRanges?.length ? config.ageRanges : LaunchAgeRangeValues;
+function materializeAgeRanges(values: readonly LaunchAgeRange[]): number[][] {
   return values.map((value) => [...TikTokAgeRanges[value]]);
 }
 
-function resolvedGender(config: Pick<CreationPresetConfig, "gender">): number {
-  return config.gender === "male" ? 1 : config.gender === "female" ? 2 : 0;
+function materializeGender(gender: CreationPresetConfig["gender"]): number {
+  return gender === "male" ? 1 : gender === "female" ? 2 : 0;
+}
+
+/**
+ * 新表格逐行定向优先；旧计划或非表格复制流程缺少行字段时，继续兼容旧预设。
+ * 两处都没有值时只为载荷准备“不限”的数值，但不宣称显式覆盖已验证快照。
+ */
+function resolvedRowTargeting(
+  row: Pick<LaunchConfigurationRow, "ageRanges" | "gender">,
+  config: Pick<CreationPresetConfig, "ageRanges" | "gender">,
+) {
+  const selectedAgeRanges = row.ageRanges?.length
+    ? row.ageRanges
+    : config.ageRanges?.length ? config.ageRanges : undefined;
+  const selectedGender = row.gender ?? config.gender;
+  return {
+    ageRanges: materializeAgeRanges(selectedAgeRanges ?? LaunchAgeRangeValues),
+    gender: materializeGender(selectedGender),
+    hasExplicitAgeRanges: Boolean(selectedAgeRanges?.length),
+    hasExplicitGender: selectedGender !== undefined,
+    includesUnder18: selectedAgeRanges?.includes("13-17") ?? true,
+  };
 }
 
 /**
@@ -141,10 +209,7 @@ export function buildDraftPayloads(
     adGroupBudget: row.dailyBudget,
     smartPlus,
   });
-  const ageRanges = resolvedAgeRanges(config);
-  const gender = resolvedGender(config);
-  const hasExplicitAgeRanges = Boolean(config.ageRanges?.length);
-  const includesUnder18 = config.ageRanges?.includes("13-17") ?? true;
+  const { ageRanges, gender, hasExplicitAgeRanges, includesUnder18 } = resolvedRowTargeting(row, config);
   return {
     campaign: {
       campaign_sketch_form_data: {
@@ -338,9 +403,9 @@ export function buildDraftPayloads(
         call_to_action_id: config.callToActionId,
         is_comment_disable: config.commentDisabled ? 1 : 0,
         is_share_disable: config.shareDisabled ? 1 : 0,
+        ...defaultCreativeAutomationFields(),
         ...(smartPlus ? {
           creative_material_mode: 6,
-          creative_automation_type: 1,
           is_smart_creative: false,
           // Campaign/ad-group SPC is mode 1, while a finalized manual Spark
           // creative is mode 0. Propagating the campaign mode into the creative
@@ -356,30 +421,9 @@ export function buildDraftPayloads(
           // No catalog/product metadata is migrated with an account post.
           // Advertising `catalog_setup=1` with an empty product_info makes the
           // creative automation tuple internally inconsistent at publish time.
-          catalog_setup: 0,
-          catalog_authorized_bc: "0",
-          spp_rebrand_catalog_switch: 0,
-          product_info_type: 1,
-          product_info: {
-            promo_code_infos: [],
-            is_auto_use: 2,
-            auto_select_toggle: 0,
-            image_infos: [],
-            selling_points_by_types: [],
-          },
           auto_follow_up_list: [],
           auto_selected_vids: [],
           struct_version: 1,
-          need_create_cta_id: true,
-          call_to_action_id: "",
-          call_to_action_asset_list: [{
-            asset_ids: [202046, 201641],
-            asset_content: "立即下单",
-            asset_content_key: "order_now",
-            asset_source: 0,
-            cta_content: "立即下单",
-            material_id: "202046_201641",
-          }],
           featured_with_three_auto_enabled_in_copy: false,
         } : {}),
       }],
@@ -426,7 +470,7 @@ export function buildProfileDraftPayloads(
   if (!Array.isArray(asset.image_list) || !isRecord(asset.image_list[0])) throw new Error("本地创建模板缺少视频素材结构，请重新验证该账户的创建模板。");
   asset.image_list[0].aweme_item_id = row.videoCode;
   if (customConfig && requiredCreationFields(customConfig).length === 0) {
-    applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig);
+    applyCreationConfigOverrides(campaignForm, adForm, asset, customConfig, row);
   }
   // 预算字段最后写，压过抓包模板和 config 覆盖里的旧值。它不依赖 config 是否完整：
   // 模板不完整时也必须保证「持有预算的那一层」正确，否则会发出一个声明了系列预算
@@ -465,13 +509,16 @@ function applyCreationConfigOverrides(
   adForm: Record<string, unknown>,
   asset: Record<string, unknown>,
   config: CreationPresetConfig,
+  row: LaunchConfigurationRow,
 ) {
   const smartPlus = config.objectiveType === 3;
-  const ageRanges = resolvedAgeRanges(config);
-  const gender = resolvedGender(config);
-  const hasExplicitGender = config.gender !== undefined;
-  const hasExplicitAgeRanges = Boolean(config.ageRanges?.length);
-  const includesUnder18 = config.ageRanges?.includes("13-17") ?? true;
+  const {
+    ageRanges,
+    gender,
+    hasExplicitGender,
+    hasExplicitAgeRanges,
+    includesUnder18,
+  } = resolvedRowTargeting(row, config);
   campaignForm.objective_type = config.objectiveType;
   campaignForm.buying_type = config.buyingType;
   // 预算字段由 applyResolvedBudgetFields 在本函数之后统一写入。
@@ -641,10 +688,14 @@ function applyCreationConfigOverrides(
   if (adForm.objective_type === undefined) adForm.objective_type = config.objectiveType;
   asset.identity_type = config.identityType;
   asset.identity_id = config.identityId;
+  const existingCtaAssets = asset.call_to_action_asset_list;
+  Object.assign(asset, defaultCreativeAutomationFields());
+  if (Array.isArray(existingCtaAssets) && existingCtaAssets.length >= 1 && existingCtaAssets.length <= 3) {
+    asset.call_to_action_asset_list = existingCtaAssets;
+  }
   if (smartPlus) {
     Object.assign(asset, {
       creative_material_mode: 6,
-      creative_automation_type: 1,
       is_smart_creative: false,
       spc_upgrade_mode: config.identityType === 5 ? 1 : 0,
       ...(config.identityType === 5 ? {} : { spc_multi_ad_mode: 0 }),
@@ -654,30 +705,9 @@ function applyCreationConfigOverrides(
       auto_pull_toggle: 0,
       auto_open: 0,
       utm_auto_switch: 1,
-      catalog_setup: 0,
-      catalog_authorized_bc: "0",
-      spp_rebrand_catalog_switch: 0,
-      product_info_type: 1,
-      product_info: {
-        promo_code_infos: [],
-        is_auto_use: 2,
-        auto_select_toggle: 0,
-        image_infos: [],
-        selling_points_by_types: [],
-      },
       auto_follow_up_list: [],
       auto_selected_vids: [],
       struct_version: 1,
-      need_create_cta_id: true,
-      call_to_action_id: "",
-      call_to_action_asset_list: [{
-        asset_ids: [202046, 201641],
-        asset_content: "立即下单",
-        asset_content_key: "order_now",
-        asset_source: 0,
-        cta_content: "立即下单",
-        material_id: "202046_201641",
-      }],
       featured_with_three_auto_enabled_in_copy: false,
     });
   }
@@ -695,7 +725,7 @@ function applyCreationConfigOverrides(
   asset.is_comment_disable = config.commentDisabled ? 1 : 0;
   asset.is_share_disable = config.shareDisabled ? 1 : 0;
 }
-function clone(value: Record<string, unknown>): Record<string, unknown> { return JSON.parse(JSON.stringify(value)) as Record<string, unknown>; }
+function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> { if (!isRecord(value[key])) throw new Error(`本地创建模板缺少 ${key}，请重新验证该账户的创建模板。`); return value[key]; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 

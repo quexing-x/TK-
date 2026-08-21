@@ -4,6 +4,7 @@ import {
   buildDraftPayloads,
   buildProfileDraftPayloads,
   buildPublishInput,
+  DefaultTikTokCreativeAutomationStrategyIds,
   TikTokCreationPublishSource,
   splitVideoCodes,
   deriveTikTokCreationRequest,
@@ -3706,6 +3707,9 @@ async function runCookieDraftChain(
         delete singleAsset.identity_type;
         delete singleAsset.identity_id;
         delete singleAsset.item_source;
+        // 账户原帖迁移沿用经过验证的 identity_type=5 结构；不要把普通
+        // Spark 创意的自动优化列表塞进该结构。
+        delete singleAsset.creative_automation_list;
         singleAsset.spc_upgrade_mode = 1;
         delete singleAsset.spc_multi_ad_mode;
       } else {
@@ -4227,7 +4231,7 @@ async function prepareSparkPosts(
     credential,
   );
 
-  await requestAdvisoryCreationStep(
+  const automationOptions = await requestAdvisoryCreationStep(
     "creative/creative_automation_option",
     () => creationPathRequest(
       sessionRequest,
@@ -4236,6 +4240,7 @@ async function prepareSparkPosts(
     ),
     credential,
   );
+  applySupportedCreativeAutomationStrategies(context.creativeInfo, automationOptions);
 
   const uniqueVids = [...new Set(sparkVideos.map((video) => video.vid))];
   const countryList = [...new Set(
@@ -4298,6 +4303,24 @@ async function prepareSparkPosts(
     });
     if (statuses.every((status) => status === 2)) return;
   }
+}
+
+/**
+ * 自动优化是执行期、账户级能力：仅发送当前账户接口明确支持的默认策略。
+ * 接口不可用时保留已验证默认值，让后续 creative save 返回权威错误；不会把它
+ * 升格成用户点击创建前的阻塞项。
+ */
+function applySupportedCreativeAutomationStrategies(
+  creativeInfo: Record<string, unknown>,
+  response: Record<string, unknown> | undefined,
+): void {
+  if (!Array.isArray(creativeInfo.creative_automation_list)) return;
+  const data = response && isRecord(response.data) ? response.data : response;
+  if (!data || !Array.isArray(data.strategy_ids)) return;
+  const supported = new Set(data.strategy_ids.map((value) => String(value)));
+  const selected = DefaultTikTokCreativeAutomationStrategyIds.filter((strategyId) => supported.has(strategyId));
+  creativeInfo.creative_automation_list = [...selected];
+  creativeInfo.creative_automation_type = selected.length > 0 ? 1 : 0;
 }
 
 /** Maps TikTok location ids used by the ad targeting to the ISO country codes

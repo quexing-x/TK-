@@ -1265,28 +1265,6 @@ td strong { color: var(--ink); }
 .launch-preset-panel > .form-grid > .field {
   align-self: start;
 }
-.launch-age-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.launch-age-options label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-raised);
-  color: var(--ink);
-  font-size: 12px;
-}
-.launch-age-options input {
-  width: auto;
-  height: auto;
-  margin: 0;
-}
 .selected-preset-summary {
   margin: 0 18px 16px;
   padding: 14px 16px;

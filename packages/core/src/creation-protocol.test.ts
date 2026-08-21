@@ -53,6 +53,10 @@ describe("creation protocol", () => {
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       creative_name: "260716:001", external_url: "https://example.com/product",
       image_list: [{ aweme_item_id: "video-001" }],
+      creative_automation_type: 1,
+      creative_automation_list: ["100001", "100002", "7455417586723028993"],
+      need_create_cta_id: true,
+      catalog_setup: 0,
     });
   });
 
@@ -153,6 +157,7 @@ describe("creation protocol", () => {
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       creative_material_mode: 6,
       creative_automation_type: 1,
+      creative_automation_list: ["100001", "100002", "7455417586723028993"],
       is_smart_creative: false,
       spc_upgrade_mode: 0,
       spc_multi_ad_mode: 0,
@@ -173,20 +178,24 @@ describe("creation protocol", () => {
       call_to_action_id: "",
       call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
     });
+    const smartAsset = payloads.creative.asset_group_sketch_form_data_list[0] as Record<string, unknown>;
+    expect(smartAsset.creative_automation_list)
+      .not.toEqual(expect.arrayContaining(["200001", "7419232909960003601", "7478954523433500688"]));
   });
 
-  it("maps preset gender and age ranges into the Smart+ audience form", () => {
+  it("maps spreadsheet-row gender and age ranges into the Smart+ audience form", () => {
     const payloads = buildDraftPayloads({
       rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
       videoCode: "video", productUrl: "https://example.com", region: "TW",
       dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+      gender: "female", ageRanges: ["25-34", "35-44", "45-54", "55-100"],
     }, {
       objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
       pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
       identityType: 0, identityId: null, callToActionId: "0",
       countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
       commentDisabled: false, shareDisabled: false,
-      gender: "female", ageRanges: ["25-34", "35-44", "45-54", "55-100"],
+      gender: "male", ageRanges: ["13-17", "18-24"],
     });
 
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
@@ -197,7 +206,7 @@ describe("creation protocol", () => {
     });
   });
 
-  it("applies preset gender and age ranges to an account snapshot", () => {
+  it("applies spreadsheet-row gender and age ranges to an account snapshot", () => {
     const payloads = buildProfileDraftPayloads({ version: 1, verifiedAt: null,
       campaignPayload: { campaign_sketch_form_data: {} },
       adGroupPayload: { ad_sketch_form_data: { gender: 0, age: [], limited_audience: { age: [] } } },
@@ -207,13 +216,14 @@ describe("creation protocol", () => {
       rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
       videoCode: "video", productUrl: "https://example.com", region: "TW",
       dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+      gender: "female", ageRanges: ["25-34", "35-44", "45-54", "55-100"],
     }, "UTC", new Date("2026-08-21T00:00:00.000Z"), {
       objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
       pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
       identityType: 0, identityId: null, callToActionId: "0",
       countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
       commentDisabled: false, shareDisabled: false,
-      gender: "female", ageRanges: ["25-34", "35-44", "45-54", "55-100"],
+      gender: "male", ageRanges: ["13-17", "18-24"],
     });
 
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
@@ -273,7 +283,15 @@ describe("creation protocol", () => {
     // 不再把预设里的原始 budget_mode 数字透传给 TikTok。
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ objective_type: 1, buying_type: 2, budget_mode: -1, budget: "" });
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ budget_mode: 3, budget: "10", pricing: 5, optimize_goal: 6, external_action: 7, ad_ref_pixel_id: "pixel", country: [840], platform: [0], inventory_flow: [11] });
-    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ identity_type: 8, identity_id: "identity", call_to_action_id: "SHOP_NOW", is_comment_disable: 1, is_share_disable: 1 });
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({
+      identity_type: 8,
+      identity_id: "identity",
+      call_to_action_id: "",
+      need_create_cta_id: true,
+      creative_automation_list: ["100001", "100002", "7455417586723028993"],
+      is_comment_disable: 1,
+      is_share_disable: 1,
+    });
   });
 
   it("preserves the verified programmatic CTA assets instead of replacing them with preset id zero", () => {
@@ -298,7 +316,9 @@ describe("creation protocol", () => {
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({
       call_to_action_id: "",
       need_create_cta_id: true,
-      creative_automation_type: 2,
+      creative_automation_type: 1,
+      creative_automation_list: ["100001", "100002", "7455417586723028993"],
+      catalog_setup: 0,
       call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],
     });
   });
