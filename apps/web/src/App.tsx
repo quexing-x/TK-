@@ -105,6 +105,8 @@ import {
   ADS_MANAGEMENT_DEFAULT_STATUS,
   ADS_MANAGEMENT_PAGE_SIZE,
   ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
+  adsManagementParticipation,
+  adsManagementParticipationLabel,
   compareAdsManagementSpend,
   filterAdsManagementEntities,
   isWithinAdsManagementCreatedWindow,
@@ -786,6 +788,24 @@ function automationConnectionMessage(
             : "API 连接异常"
           : "尚未通过连接检测";
   return `当前账户「${account.displayName}」的${providerLabel}状态：${stateLabel}。请前往“用户管理”完成或检查接入。`;
+}
+
+function renderAdsManagementParticipation(entity: ManagedEntityRecord): ReactNode {
+  const participation = adsManagementParticipation(entity);
+  if (participation === "manual-takeover") {
+    return <span className="risk-badge destructive">{adsManagementParticipationLabel(participation)}</span>;
+  }
+  if (participation === "outside-window") {
+    return (
+      <span
+        className="status"
+        title={`创建时间已超出 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时规则窗口，且当天无消耗、不在自动化管辖中；规则引擎不会评估它。`}
+      >
+        {adsManagementParticipationLabel(participation)}
+      </span>
+    );
+  }
+  return adsManagementParticipationLabel(participation);
 }
 
 function connectionStatusSummary(
@@ -1503,7 +1523,7 @@ function AdsManagementPage({
                     <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
                     <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
-                    <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
+                    <td>{renderAdsManagementParticipation(entity)}</td>
                     <td><div className="row-actions">
                       {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}
                       {entity.status === "unknown" && <small className="inline-protection-note">状态待确认</small>}
@@ -1737,7 +1757,7 @@ function AllAccountsAdsView({
             <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
             <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
-            <td>{entity.ignored ? <span className="risk-badge destructive">人工接管</span> : "参与"}</td>
+            <td>{renderAdsManagementParticipation(entity)}</td>
             <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button>{hasProviderCapability(accountCapabilities[account.id], "change-status") && <button disabled={busy !== null || !canOperateAds} onClick={() => { const overnight = nextOvernightScheduleTimes(); setScheduling({ account, entity }); setScheduleKind("once"); setScheduledAction("disable"); setRunAt(nextLocalMidnightInputValue()); setDisableAt(localDateTimeInputValue(overnight.disableAt)); setEnableAt(localDateTimeInputValue(overnight.enableAt)); }} type="button">定时 / 过夜</button>}</div></td>
           </tr>)}</tbody>
         </table></div>

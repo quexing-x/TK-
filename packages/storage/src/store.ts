@@ -154,6 +154,7 @@ import {
   DatabaseBackupRecordSchema,
   type DatabaseBackupKind,
   type DatabaseBackupRecord,
+  AUTOMATION_MANAGED_LOOKBACK_HOURS,
 } from "@tk-auto/core";
 
 const SYNC_STALE_AFTER_MS = 15 * 60_000;
@@ -2510,6 +2511,16 @@ export class AutomationStore {
         (item) => `${item.entityType}:${item.externalId}`,
       ),
     );
+    // 与规则引擎同一个持久管辖集：自动化关停、尚未自动开回的广告组。界面据此判断
+    // 「参与自动化」，否则超出创建窗口的这类组会被错标成不参与。
+    const automationManaged = new Set(
+      this.listAutomationDisabledAdGroupIds(
+        accountId,
+        new Date(
+          Date.now() - AUTOMATION_MANAGED_LOOKBACK_HOURS * 60 * 60_000,
+        ).toISOString(),
+      ),
+    );
     const rows = this.db
       .prepare(
         `SELECT entity_type, external_id, payload_json, synced_at
@@ -2528,6 +2539,8 @@ export class AutomationStore {
       return {
         ...snapshot,
         ignored: ignored.has(`${snapshot.entityType}:${snapshot.externalId}`),
+        automationManaged: snapshot.entityType === "ad-group"
+          && automationManaged.has(snapshot.externalId),
         syncedAt: String(row.synced_at),
         ...(kind === "meta-marketing-api"
           ? {

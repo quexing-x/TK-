@@ -49,6 +49,46 @@ export function isWithinAdsManagementCreatedWindow(
   return entity.entityType === "ad-group" && (entity.metrics.spend ?? 0) > 0;
 }
 
+export type AdsManagementParticipation =
+  | "manual-takeover"
+  | "participating"
+  | "outside-window";
+
+/**
+ * 该对象当前是否真的会被规则引擎评估。
+ *
+ * 原先这一列硬编码成 `ignored ? "人工接管" : "参与"`，从不看窗口——账户里三周前建的
+ * 广告组照样显示「参与」，而引擎根本够不着它。三条判据与 filterEntitiesToRecentWindow
+ * 一一对应：人工接管出局；窗口内、当天有消耗、或在持久管辖集内都算参与；其余是窗口外。
+ */
+export function adsManagementParticipation(
+  entity: ManagedEntityRecord,
+  input: { now?: Date; visibleAdGroupIds?: ReadonlySet<string> } = {},
+): AdsManagementParticipation {
+  if (entity.ignored) return "manual-takeover";
+  if (entity.automationManaged) return "participating";
+  const now = input.now ?? new Date();
+  return isWithinAdsManagementCreatedWindow(entity, {
+    now,
+    ...(input.visibleAdGroupIds ? { visibleAdGroupIds: input.visibleAdGroupIds } : {}),
+  })
+    ? "participating"
+    : "outside-window";
+}
+
+export function adsManagementParticipationLabel(
+  participation: AdsManagementParticipation,
+): string {
+  switch (participation) {
+    case "manual-takeover":
+      return "人工接管";
+    case "participating":
+      return "参与";
+    case "outside-window":
+      return "窗口外";
+  }
+}
+
 /**
  * 按创建窗口筛出可见对象。先定广告组，再让广告/素材跟随其所属广告组。
  */

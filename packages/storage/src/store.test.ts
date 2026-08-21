@@ -1012,6 +1012,27 @@ describe("AutomationStore", () => {
       expect(store.listAutomationDisabledAdGroupIds("demo-account", futureSince))
         .not.toContain("ag-old");
     });
+
+    it("在管关停的广告组在实体快照上标出 automationManaged，供界面判定是否参与自动化", () => {
+      recordDecision("ag-managed", "disable");
+      store.saveReadOnlySync("demo-account", "cookie", [
+        { entityType: "ad-group", externalId: "ag-managed", payload: { ad_name: "在管关停" } },
+        { entityType: "ad-group", externalId: "ag-untouched", payload: { ad_name: "自动化没碰过" } },
+      ], {
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        counts: { campaign: 0, "ad-group": 2, ad: 0, material: 0 },
+        warnings: [],
+        quality: healthySyncQuality(new Date().toISOString()),
+      });
+
+      const byId = new Map(
+        store.listCurrentManagedEntities("demo-account", "cookie")
+          .map((entity) => [entity.externalId, entity]),
+      );
+      expect(byId.get("ag-managed")?.automationManaged).toBe(true);
+      expect(byId.get("ag-untouched")?.automationManaged).toBe(false);
+    });
   });
 
   // 2026-08-06：三条自动申诉因 TikTok 后端解包失败被判 unknown，而 blocked 把

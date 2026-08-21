@@ -32,6 +32,14 @@ export type AppealQueueInput = z.infer<typeof AppealQueueInputSchema>;
 export interface ManagedEntityRecord extends ManagedEntitySnapshot {
   ignored: boolean;
   syncedAt: string;
+  /**
+   * 该广告组当前在持久管辖集里：自动化自己关停、且尚未被自动开回。
+   *
+   * 界面判断"是否参与自动化"绕不开这一条：这类组即便建得早、当天零消耗，规则引擎
+   * 仍会评估它（好让归因延迟回传的转化把它开回来）。只按创建窗口判定会把它错标成
+   * 不参与。人工暂停的组不在此集内。非广告组层恒为 false。
+   */
+  automationManaged: boolean;
   /** Meta configured status returned by the object endpoint (for example ACTIVE/PAUSED). */
   configuredStatus?: string | null;
   /** Meta effective delivery status after parent-level effects are applied. */
