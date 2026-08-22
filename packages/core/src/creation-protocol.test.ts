@@ -197,7 +197,7 @@ describe("creation protocol", () => {
       identityType: 0, identityId: null, callToActionId: "0",
       countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
       commentDisabled: false, shareDisabled: false,
-      gender: "male", ageRanges: ["13-17", "18-24"],
+      gender: "male", ageRanges: ["18-24"],
     });
 
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
@@ -225,7 +225,7 @@ describe("creation protocol", () => {
       identityType: 0, identityId: null, callToActionId: "0",
       countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
       commentDisabled: false, shareDisabled: false,
-      gender: "male", ageRanges: ["13-17", "18-24"],
+      gender: "male", ageRanges: ["18-24"],
     });
 
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({

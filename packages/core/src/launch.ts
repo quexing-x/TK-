@@ -14,25 +14,14 @@ export type LaunchTemplateMode = z.infer<typeof LaunchTemplateModeSchema>;
 export const LaunchGenderSchema = z.enum(["all", "male", "female"]);
 export type LaunchGender = z.infer<typeof LaunchGenderSchema>;
 
+/** 可选年龄段。TikTok 的 Smart+ 推广系列禁止向 18 岁以下投放，故不提供未成年档。 */
 export const LaunchAgeRangeValues = [
-  "13-17",
   "18-24",
   "25-34",
   "35-44",
   "45-54",
   "55-100",
 ] as const;
-/**
- * 默认年龄段：18 岁以上。
- *
- * 13-17 仍然是合法取值（存量表格与非 Smart+ 场景要能解析），但不再进入任何默认值：
- * Smart+ 推广系列禁止向 18 岁以下投放，带上它会被 TikTok 以
- * audience_age_smart_age_validate_error 拒绝，而模板从前是全选、等于每次都踩。
- */
-export const LaunchDefaultAgeRangeValues = LaunchAgeRangeValues.filter(
-  (item) => item !== "13-17",
-);
-
 export const LaunchAgeRangeSchema = z.enum(LaunchAgeRangeValues);
 export type LaunchAgeRange = z.infer<typeof LaunchAgeRangeSchema>;
 
@@ -846,8 +835,7 @@ function parseLaunchGender(value: unknown): LaunchGender | null {
 function parseLaunchAgeRanges(value: unknown): LaunchAgeRange[] | null {
   const text = asText(value);
   if (!text || ["不限", "全部", "全选", "all"].includes(text.toLowerCase())) {
-    // 「不限」按 18 岁以上理解：Smart+ 系列不接受 13-17，全选会直接创建失败。
-    return [...LaunchDefaultAgeRangeValues];
+    return [...LaunchAgeRangeValues];
   }
   const values = text
     .replace(/[－—–~～]/g, "-")
@@ -855,8 +843,12 @@ function parseLaunchAgeRanges(value: unknown): LaunchAgeRange[] | null {
     .map((item) => item.trim().replace(/\s+/g, ""))
     .filter(Boolean)
     .map((item) => item === "55+" ? "55-100" : item);
-  if (values.length === 0 || values.some((item) => !LaunchAgeRangeSchema.safeParse(item).success)) return null;
-  const selected = new Set(values as LaunchAgeRange[]);
+  // 已下线的年龄档（历史表格里可能还写着未成年档）直接丢弃，不因此判整行错误；
+  // 真正写错的档位在下面的 supported 判断里仍然会报错。
+  const supported = values.filter((item) => LaunchAgeRangeSchema.safeParse(item).success);
+  const retired = values.filter((item) => /^\d+-\d+$/.test(item) && Number(item.split("-")[0]) < 18);
+  if (supported.length === 0 || supported.length + retired.length !== values.length) return null;
+  const selected = new Set(supported as LaunchAgeRange[]);
   return LaunchAgeRangeValues.filter((item) => selected.has(item));
 }
 
