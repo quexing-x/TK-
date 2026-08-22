@@ -35,6 +35,7 @@ import {
   OvernightScheduleInputSchema,
   AutomationFeatureSettingsInputSchema,
   MultiAccountLaunchPlanInputSchema,
+  stripRetiredAgeRanges,
   LaunchCopyPreviewInputSchema,
   LaunchPresetInputSchema,
   getCreationTemplateReadiness,
@@ -642,7 +643,13 @@ export async function createApp(
 
   app.post("/api/launch-plans", async (request, reply) => {
     try {
-      const input = MultiAccountLaunchPlanInputSchema.parse(request.body);
+      // 存量行可能带已下线的年龄档（页面里更新前导入的表、旧计划）：先剥掉再校验，
+      // 否则整条被拒，且报错挂在 launchRows 顶层键上、指不到年龄字段。
+      const rawBody = request.body as { launchRows?: unknown } | null;
+      const body = rawBody && Array.isArray(rawBody.launchRows)
+        ? { ...rawBody, launchRows: stripRetiredAgeRanges(rawBody.launchRows as Array<{ ageRanges?: unknown }>) }
+        : request.body;
+      const input = MultiAccountLaunchPlanInputSchema.parse(body);
       if (hasMetaOfflineAccount(dependencies.store, [
         input.sourceAccountId,
         ...input.targetAccountIds,
