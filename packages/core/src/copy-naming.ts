@@ -25,6 +25,19 @@ export function monthDaySuffix(at: Date, timeZone?: string): string {
   return `${month}${day}`;
 }
 
+/** 账户本地日历日，格式 `YYYY-MM-DD`。「今天」的判定一律走它，不用 UTC 日期。 */
+export function dateKeyInTimeZone(value: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const part = (type: "year" | "month" | "day") =>
+    parts.find((item) => item.type === type)?.value ?? "00";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 /** 投放日期 + 时间，格式 `MMDD-HHMMSS`，按账户时区取值。 */
 export function dateTimeSuffix(at: Date, timeZone?: string): string {
   if (!timeZone) {

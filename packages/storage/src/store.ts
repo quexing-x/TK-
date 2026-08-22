@@ -3522,6 +3522,15 @@ export class AutomationStore {
     taskKey: string,
     accountId: string,
     sourceAdGroupId: string,
+    // 手动扩组也把来源系列、投放本地日期与计划组名一并落库。重复提交前的预检要靠
+    // 这几列回答「这个源组今天扩过没有、扩出来的是哪几个组」——只有 auto-copy 记
+    // 的话，手动扩组永远查不到自己刚建的东西。
+    details?: {
+      sourceCampaignId?: string | null;
+      localDate?: string | null;
+      requestedCount?: number;
+      generatedNames?: string[];
+    },
   ): "claimed" | "running" | "succeeded" | "unknown" {
     const now = new Date().toISOString();
     const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
@@ -3545,16 +3554,103 @@ export class AutomationStore {
         }
       }
       this.db.prepare(
-        `INSERT INTO ad_group_expand_tasks (task_key, account_id, source_ad_group_id, status, claimed_at, updated_at, uncertain)
-         VALUES (?, ?, ?, 'running', ?, ?, 0)
-         ON CONFLICT(task_key) DO UPDATE SET status = 'running', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at, uncertain = 0`,
-      ).run(taskKey, accountId, sourceAdGroupId, now, now);
+        `INSERT INTO ad_group_expand_tasks (
+           task_key, account_id, source_ad_group_id, status, claimed_at, updated_at, uncertain,
+           source_campaign_id, local_date, requested_count, generated_names_json
+         )
+         VALUES (?, ?, ?, 'running', ?, ?, 0, ?, ?, ?, ?)
+         ON CONFLICT(task_key) DO UPDATE SET
+           status = 'running', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at, uncertain = 0,
+           source_campaign_id = excluded.source_campaign_id, local_date = excluded.local_date,
+           requested_count = excluded.requested_count, generated_names_json = excluded.generated_names_json`,
+      ).run(
+        taskKey,
+        accountId,
+        sourceAdGroupId,
+        now,
+        now,
+        details?.sourceCampaignId ?? null,
+        details?.localDate ?? null,
+        details?.requestedCount ?? 0,
+        JSON.stringify(details?.generatedNames ?? []),
+      );
       this.db.exec("COMMIT");
       return "claimed";
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /**
+   * 重复提交预检用：查这批源组「还没跑完的」与「今天已经扩过的」任务。
+   *
+   * 只回三类，其余历史一律不返回——判定口径就是「进行中 + 今日已扩过」：
+   * - uncertain=1：上次结果待人工确认
+   * - status='running' 且未超过 30 分钟租约：确实还在跑
+   * - status='succeeded' 且 local_date 命中今天：今天已经扩过
+   *
+   * 超过租约的 running 是上次进程被杀留下的残骸，不算「进行中」，否则用户会被一条
+   * 永远消不掉的提示挡住。
+   */
+  listAdGroupExpandActivity(
+    accountId: string,
+    sourceAdGroupIds: string[],
+    localDate: string,
+  ): Array<{
+    sourceAdGroupId: string;
+    sourceCampaignId: string | null;
+    status: "running" | "succeeded";
+    uncertain: boolean;
+    claimedAt: string;
+    updatedAt: string;
+    localDate: string | null;
+    requestedCount: number;
+    generatedNames: string[];
+    executorKind: string;
+  }> {
+    const wanted = [...new Set(sourceAdGroupIds.filter((id) => id.trim() !== ""))];
+    if (wanted.length === 0) return [];
+    const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
+    const placeholders = wanted.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT source_ad_group_id, source_campaign_id, status, uncertain, claimed_at, updated_at,
+              local_date, requested_count, generated_names_json, executor_kind
+         FROM ad_group_expand_tasks
+        WHERE account_id = ?
+          AND source_ad_group_id IN (${placeholders})
+          AND (
+            uncertain = 1
+            OR (status = 'running' AND claimed_at > ?)
+            OR (status = 'succeeded' AND local_date = ?)
+          )
+        ORDER BY updated_at DESC`,
+    ).all(accountId, ...wanted, staleBefore, localDate) as SqlRow[];
+    return rows.map((row) => {
+      let generatedNames: string[] = [];
+      try {
+        const parsed = JSON.parse(String(row.generated_names_json ?? "[]")) as unknown;
+        if (Array.isArray(parsed)) {
+          generatedNames = parsed.map((item) => String(item ?? "").trim()).filter(Boolean);
+        }
+      } catch {
+        // 损坏的历史行不该让预检整体失败：少列出几个组名而已，判定仍然成立。
+      }
+      return {
+        sourceAdGroupId: String(row.source_ad_group_id),
+        sourceCampaignId: row.source_campaign_id === null || row.source_campaign_id === undefined
+          ? null
+          : String(row.source_campaign_id),
+        status: String(row.status) === "succeeded" ? "succeeded" as const : "running" as const,
+        uncertain: Number(row.uncertain ?? 0) === 1,
+        claimedAt: String(row.claimed_at),
+        updatedAt: String(row.updated_at),
+        localDate: row.local_date === null || row.local_date === undefined ? null : String(row.local_date),
+        requestedCount: Number(row.requested_count ?? 0),
+        generatedNames,
+        executorKind: String(row.executor_kind ?? "manual-expand"),
+      };
+    });
   }
 
   // 成功永久跳过；明确失败允许重试；结果未知永久保留且禁止自动重试。

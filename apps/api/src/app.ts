@@ -752,6 +752,22 @@ export async function createApp(
     return reply.send({ ok: true });
   });
 
+  // 只读预检：发请求前告诉用户这批源组「有没有在跑的、今天扩过没有」，由用户决定
+  // 是否继续。不写任何东西，也不拦截提交。
+  app.post("/api/ad-groups/batch-expand/preflight", async (request, reply) => {
+    const input = z.object({
+      sources: z.array(z.object({
+        accountId: z.string().min(1),
+        sourceCampaignId: z.string().min(1),
+        sourceCampaignName: z.string().min(1),
+        sourceAdGroupId: z.string().min(1),
+        sourceAdGroupName: z.string().min(1),
+      })).min(1).max(200),
+      scheduledStartAt: z.string().datetime().nullable().default(null),
+    }).parse(request.body);
+    return reply.send(launchService.previewBatchExpandConflicts(input));
+  });
+
   app.post("/api/ad-groups/batch-expand", async (request, reply) => {
     const input = z.object({
       sources: z.array(z.object({

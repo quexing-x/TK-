@@ -3,7 +3,10 @@ import {
   MetaAccessSecretBundleInputSchema,
   ProviderCredentialInputSchema,
   assertCampaignNameAvailable,
+  dateKeyInTimeZone,
   dateTimeSuffix,
+  monthDaySuffix,
+  stripGeneratedNameSuffixes,
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
   planCampaignCopy,
@@ -1079,6 +1082,129 @@ export class LaunchService {
     return { createdCampaigns, createdGroups, skipped, failed, plan: plannedSources };
   }
 
+  /**
+   * 扩组重复提交预检：只报告，不拦截。
+   *
+   * 扩组的幂等 taskKey 是对「组名」取的哈希，而组名精确到秒，因此跨秒的重复提交在
+   * 引擎看来永远是全新任务——闸门拦不住误重复点。与其把按钮锁死（一批要跑很久，
+   * 锁死等于整个面板停摆），不如在发请求之前把「已经有什么」摆给用户看，让人来判
+   * 断这一次是不是误点。
+   *
+   * 判定口径固定为「进行中 + 今日已扩过」：
+   * - running / 待人工确认：这批还没跑完
+   * - 今日已扩过：同一源组今天已经成功扩过（含扩了几个、组名）
+   * - 目标组重名：计划组名的当日前缀已经出现在任务记录或本地快照里
+   *
+   * 快照可能滞后一轮轮询，所以快照命中只是「提示」的一个来源，不作为拒绝的依据。
+   */
+  previewBatchExpandConflicts(input: {
+    sources: Array<{
+      accountId: string;
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      sourceAdGroupId: string;
+      sourceAdGroupName: string;
+    }>;
+    scheduledStartAt?: string | null;
+  }): {
+    conflicts: Array<{
+      accountId: string;
+      sourceAdGroupId: string;
+      sourceAdGroupName: string;
+      /** 进行中：running 租约未过期，或上次结果待人工确认。 */
+      inProgress: { kind: "running" | "pending-confirmation"; since: string } | null;
+      /** 今天已经成功扩过的次数与组名。 */
+      expandedToday: { batches: number; groups: number; names: string[] } | null;
+      /** 与计划组名当日前缀相同的已有组名（来自任务记录或本地快照）。 */
+      existingNames: string[];
+    }>;
+  } {
+    const deliveryDate = input.scheduledStartAt ? new Date(input.scheduledStartAt) : new Date();
+    const byAccount = new Map<string, typeof input.sources>();
+    for (const source of input.sources) {
+      const list = byAccount.get(source.accountId) ?? [];
+      list.push(source);
+      byAccount.set(source.accountId, list);
+    }
+
+    const conflicts: Array<{
+      accountId: string;
+      sourceAdGroupId: string;
+      sourceAdGroupName: string;
+      inProgress: { kind: "running" | "pending-confirmation"; since: string } | null;
+      expandedToday: { batches: number; groups: number; names: string[] } | null;
+      existingNames: string[];
+    }> = [];
+
+    for (const [accountId, sources] of byAccount) {
+      const account = this.store.getAccount(accountId);
+      // 账号不存在是提交时才该报的错；预检只负责「能查到什么就说什么」。
+      if (!account) continue;
+      const timeZone = account.timezone;
+      const localDate = dateKeyInTimeZone(deliveryDate, timeZone);
+      const activity = this.store.listAdGroupExpandActivity(
+        accountId,
+        sources.map((source) => source.sourceAdGroupId),
+        localDate,
+      );
+      const activityBySource = new Map<string, typeof activity>();
+      for (const row of activity) {
+        const list = activityBySource.get(row.sourceAdGroupId) ?? [];
+        list.push(row);
+        activityBySource.set(row.sourceAdGroupId, list);
+      }
+      const snapshotAdGroupNames = this.store
+        .listCurrentManagedEntities(accountId, account.providerKind)
+        .filter((entity) => entity.entityType === "ad-group")
+        .map((entity) => entity.name);
+
+      for (const source of sources) {
+        const rows = activityBySource.get(source.sourceAdGroupId) ?? [];
+        const pending = rows.find((row) => row.uncertain);
+        const running = rows.find((row) => !row.uncertain && row.status === "running");
+        const succeededToday = rows.filter(
+          (row) => !row.uncertain && row.status === "succeeded" && row.localDate === localDate,
+        );
+
+        // 当日前缀：`清洗后源组名-MMDD`。带秒的完整组名每次都不同，比前缀才看得出
+        // 「今天已经扩过一轮」。
+        const todayPrefix = `${stripGeneratedNameSuffixes(source.sourceAdGroupName)}-${monthDaySuffix(deliveryDate, timeZone)}`;
+        const existingNames = [...new Set([
+          ...succeededToday.flatMap((row) => row.generatedNames),
+          ...snapshotAdGroupNames.filter((name) => name.trim().startsWith(todayPrefix)),
+        ])];
+
+        const inProgress = pending
+          ? { kind: "pending-confirmation" as const, since: pending.updatedAt }
+          : running
+            ? { kind: "running" as const, since: running.claimedAt }
+            : null;
+        const expandedToday = succeededToday.length > 0
+          ? {
+            batches: succeededToday.length,
+            groups: succeededToday.reduce(
+              (total, row) => total + (row.requestedCount > 0 ? row.requestedCount : row.generatedNames.length),
+              0,
+            ),
+            names: succeededToday.flatMap((row) => row.generatedNames),
+          }
+          : null;
+
+        if (!inProgress && !expandedToday && existingNames.length === 0) continue;
+        conflicts.push({
+          accountId,
+          sourceAdGroupId: source.sourceAdGroupId,
+          sourceAdGroupName: source.sourceAdGroupName,
+          inProgress,
+          expandedToday,
+          existingNames,
+        });
+      }
+    }
+
+    return { conflicts };
+  }
+
   // 一键扩组：批量选中的源广告组，每个各扩 count 个新组。
   // 按账户串行、账户内逐源串行执行，复用 copyAdGroupWithinAccount。
   // 幂等：相同 (账户+源组+扩组预设指纹) 已成功则跳过，不重复建组。
@@ -1151,6 +1277,17 @@ export class LaunchService {
           taskKey,
           source.accountId,
           source.sourceAdGroupId,
+          {
+            sourceCampaignId: source.sourceCampaignId,
+            localDate: dateKeyInTimeZone(deliveryDate, expandTimeZone ?? "UTC"),
+            requestedCount: count,
+            // 组名规则与 copyAdGroupWithinAccount 一致（`基名-序号`），落库供重复提交
+            // 预检回答「今天扩出来的是哪几个组」。
+            generatedNames: Array.from(
+              { length: count },
+              (_unused, index) => `${baseAdGroupName}-${index + 1}`,
+            ),
+          },
         );
         if (claim !== "claimed") {
           if (claim === "unknown") {

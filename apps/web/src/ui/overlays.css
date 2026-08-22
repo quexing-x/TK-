@@ -5,7 +5,8 @@
 .unified-modal .modal-heading-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 12px; color: var(--primary); background: color-mix(in srgb, var(--primary) 13%, transparent); }
 .unified-modal.is-danger .modal-heading-icon { color: var(--danger, #c74d57); background: color-mix(in srgb, var(--danger, #c74d57) 13%, transparent); }
 .dialog-body { padding: 22px 24px 6px; display: grid; gap: 15px; }
-.dialog-body p { margin: 0; color: var(--ink-soft); line-height: 1.65; font-size: 13px; }
+/* pre-line：确认文案要能逐条列出冲突项，换行不能被折叠掉。 */
+.dialog-body p { margin: 0; color: var(--ink-soft); line-height: 1.65; font-size: 13px; white-space: pre-line; }
 .dialog-body input { width: 100%; box-sizing: border-box; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-raised); color: var(--ink); font-size: 13px; transition: border-color .15s, box-shadow .15s; }
 .dialog-body input::placeholder { color: var(--ink-faint); }
 .dialog-body input:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent); }
