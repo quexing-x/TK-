@@ -53,7 +53,9 @@ const DefaultProgrammaticCtaAssets = [{
 
 function defaultCreativeAutomationFields(): Record<string, unknown> {
   return {
-    creative_automation_type: 1,
+    // 2 = 自选策略列表。真机成功抓包用的就是 2；写 1 会被 TikTok 以
+    // creative_automation_list_should_be_nil_error 拒绝（type=1 不允许带列表）。
+    creative_automation_type: 2,
     creative_automation_list: [...DefaultTikTokCreativeAutomationStrategyIds],
     need_create_cta_id: true,
     call_to_action_id: "",

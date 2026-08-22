@@ -53,7 +53,7 @@ describe("creation protocol", () => {
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       creative_name: "260716:001", external_url: "https://example.com/product",
       image_list: [{ aweme_item_id: "video-001" }],
-      creative_automation_type: 1,
+      creative_automation_type: 2,
       creative_automation_list: ["100001", "100002", "7455417586723028993"],
       need_create_cta_id: true,
       catalog_setup: 0,
@@ -156,7 +156,7 @@ describe("creation protocol", () => {
     });
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       creative_material_mode: 6,
-      creative_automation_type: 1,
+      creative_automation_type: 2,
       creative_automation_list: ["100001", "100002", "7455417586723028993"],
       is_smart_creative: false,
       spc_upgrade_mode: 0,
@@ -316,7 +316,7 @@ describe("creation protocol", () => {
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({
       call_to_action_id: "",
       need_create_cta_id: true,
-      creative_automation_type: 1,
+      creative_automation_type: 2,
       creative_automation_list: ["100001", "100002", "7455417586723028993"],
       catalog_setup: 0,
       call_to_action_asset_list: [{ asset_ids: [202046, 201641], cta_content: "立即下单" }],

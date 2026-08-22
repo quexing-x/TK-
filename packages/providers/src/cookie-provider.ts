@@ -3686,6 +3686,10 @@ async function runCookieDraftChain(
         // 账户原帖迁移沿用经过验证的 identity_type=5 结构；不要把普通
         // Spark 创意的自动优化列表塞进该结构。
         delete singleAsset.creative_automation_list;
+        // 列表删掉后必须把 type 一并钉回这条路原本验证过的 1：普通 Spark 创意
+        // 改用 2（自选列表）之后，这里如果跟着变成 2 就成了「标称自选却没有
+        // 列表」，属于另一种自相矛盾。这条链路没有新证据，保持原样。
+        singleAsset.creative_automation_type = 1;
         singleAsset.spc_upgrade_mode = 1;
         delete singleAsset.spc_multi_ad_mode;
       } else {
@@ -4349,6 +4353,21 @@ async function prepareSparkPosts(
  * 接口不可用时保留已验证默认值，让后续 creative save 返回权威错误；不会把它
  * 升格成用户点击创建前的阻塞项。
  */
+/**
+ * 只保留当前账户接口明确支持的自动优化策略。
+ *
+ * 两条规则都是从真机成功抓包里读出来的，别凭感觉改：
+ *
+ * 1. **过滤的是创意上已有的那份列表**，不是写死的默认值。创建模板重放的是真机
+ *    验证过的组合（例如 4 项，含翻译配音 7419232909960003601），拿默认值覆盖它
+ *    等于把模板的意义抹掉，也解释了为什么导入模板后仍然发出 3 项。
+ *    只有创意上没有列表时才退回默认值。
+ *
+ * 2. **非空列表必须配 `creative_automation_type = 2`**。真机成功那次就是 2；
+ *    此前这里写死成 1，而 TikTok 对「type=1 且列表非空」直接回
+ *    `creative_automation_list_should_be_nil_error`——自相矛盾的组合。
+ *    列表为空时才是 0。
+ */
 function applySupportedCreativeAutomationStrategies(
   creativeInfo: Record<string, unknown>,
   response: Record<string, unknown> | undefined,
@@ -4357,9 +4376,13 @@ function applySupportedCreativeAutomationStrategies(
   const data = response && isRecord(response.data) ? response.data : response;
   if (!data || !Array.isArray(data.strategy_ids)) return;
   const supported = new Set(data.strategy_ids.map((value) => String(value)));
-  const selected = DefaultTikTokCreativeAutomationStrategyIds.filter((strategyId) => supported.has(strategyId));
-  creativeInfo.creative_automation_list = [...selected];
-  creativeInfo.creative_automation_type = selected.length > 0 ? 1 : 0;
+  const current = creativeInfo.creative_automation_list
+    .map((value) => String(value))
+    .filter((value) => value !== "");
+  const base = current.length > 0 ? current : [...DefaultTikTokCreativeAutomationStrategyIds];
+  const selected = [...new Set(base)].filter((strategyId) => supported.has(strategyId));
+  creativeInfo.creative_automation_list = selected;
+  creativeInfo.creative_automation_type = selected.length > 0 ? 2 : 0;
 }
 
 /** Maps TikTok location ids used by the ad targeting to the ISO country codes
