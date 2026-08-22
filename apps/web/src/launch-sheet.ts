@@ -8,7 +8,8 @@ import {
 } from "@tk-auto/core";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const DEFAULT_AGE_RANGES = "13-17;18-24;25-34;35-44;45-54;55-100";
+// 模板预填 18 岁以上：Smart+ 推广系列禁止向 18 岁以下投放。
+const DEFAULT_AGE_RANGES = "18-24;25-34;35-44;45-54;55-100";
 const TEMPLATE_DATA_ROW_COUNT = 500;
 
 export async function readLaunchSpreadsheet(

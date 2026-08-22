@@ -140,7 +140,8 @@ describe("parseLaunchSheetTable", () => {
       adGroupName: "夏季广告组",
       adName: "260716:001",
       region: "US",
-      ageRanges: ["13-17", "18-24", "25-34", "35-44", "45-54", "55-100"],
+      // 「不限 / 留空」按 18 岁以上兜底，不再全选。
+      ageRanges: ["18-24", "25-34", "35-44", "45-54", "55-100"],
       gender: "all",
       dailyBudget: 100,
       bid: 1.25,

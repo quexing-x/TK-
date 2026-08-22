@@ -22,6 +22,17 @@ export const LaunchAgeRangeValues = [
   "45-54",
   "55-100",
 ] as const;
+/**
+ * 默认年龄段：18 岁以上。
+ *
+ * 13-17 仍然是合法取值（存量表格与非 Smart+ 场景要能解析），但不再进入任何默认值：
+ * Smart+ 推广系列禁止向 18 岁以下投放，带上它会被 TikTok 以
+ * audience_age_smart_age_validate_error 拒绝，而模板从前是全选、等于每次都踩。
+ */
+export const LaunchDefaultAgeRangeValues = LaunchAgeRangeValues.filter(
+  (item) => item !== "13-17",
+);
+
 export const LaunchAgeRangeSchema = z.enum(LaunchAgeRangeValues);
 export type LaunchAgeRange = z.infer<typeof LaunchAgeRangeSchema>;
 
@@ -835,7 +846,8 @@ function parseLaunchGender(value: unknown): LaunchGender | null {
 function parseLaunchAgeRanges(value: unknown): LaunchAgeRange[] | null {
   const text = asText(value);
   if (!text || ["不限", "全部", "全选", "all"].includes(text.toLowerCase())) {
-    return [...LaunchAgeRangeValues];
+    // 「不限」按 18 岁以上理解：Smart+ 系列不接受 13-17，全选会直接创建失败。
+    return [...LaunchDefaultAgeRangeValues];
   }
   const values = text
     .replace(/[－—–~～]/g, "-")

@@ -134,9 +134,11 @@ describe("creation protocol", () => {
         smart_bid_type: 0,
         optimization_source: 0,
         cpa_skip_first_phrase: 1,
-        exclude_age_under_eighteen: 0,
+        // 默认年龄改为 18 岁以上：Smart+ 系列禁止向 18 岁以下投放，
+        // 带 13-17 会被 TikTok 以 audience_age_smart_age_validate_error 拒绝。
+        exclude_age_under_eighteen: 1,
         age: [],
-        limited_audience: { age: [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
+        limited_audience: { age: [[18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
         smart_age: 3,
         smart_audience: 3,
         smart_gender: 3,

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { CapturedCookieRequest, CookieCreationProfile } from "./connection.js";
 import {
-  LaunchAgeRangeValues,
+  LaunchDefaultAgeRangeValues,
   resolveConfiguredBudgetMode,
   type CreationPresetConfig,
   type LaunchAgeRange,
@@ -170,11 +170,14 @@ function resolvedRowTargeting(
     : config.ageRanges?.length ? config.ageRanges : undefined;
   const selectedGender = row.gender ?? config.gender;
   return {
-    ageRanges: materializeAgeRanges(selectedAgeRanges ?? LaunchAgeRangeValues),
+    // 完全没指定年龄时同样按 18 岁以上兜底，理由见 LaunchDefaultAgeRangeValues。
+    ageRanges: materializeAgeRanges(selectedAgeRanges ?? LaunchDefaultAgeRangeValues),
     gender: materializeGender(selectedGender),
     hasExplicitAgeRanges: Boolean(selectedAgeRanges?.length),
     hasExplicitGender: selectedGender !== undefined,
-    includesUnder18: selectedAgeRanges?.includes("13-17") ?? true,
+    // 没有显式选择时按 18 岁以上兜底，与 LaunchDefaultAgeRangeValues 保持一致；
+    // 兜底成 true 会让 exclude_age_under_eighteen 归 0，与 18+ 的年龄列表自相矛盾。
+    includesUnder18: selectedAgeRanges?.includes("13-17") ?? false,
   };
 }
 
@@ -362,7 +365,9 @@ export function buildDraftPayloads(
         ios14_quota_type: 1,
         suitability_non_garm_category: [],
         anti_discrimination: 0,
-        exclude_age_under_eighteen: hasExplicitAgeRanges && !includesUnder18 ? 1 : 0,
+        // 与年龄列表保持一致：默认 18+ 时必须置 1，否则「排除未成年=否」会和
+        // 18+ 的年龄列表自相矛盾。三条路径（合成 / Smart+ / 模板重放）口径统一。
+        exclude_age_under_eighteen: includesUnder18 ? 0 : 1,
         duration_time_range: 0,
         attribution_window_click: 7,
         attribution_window_view: 1,
@@ -648,9 +653,8 @@ function applyCreationConfigOverrides(
     ios14_quota_type: 1,
     suitability_non_garm_category: [],
     anti_discrimination: 0,
-    exclude_age_under_eighteen: hasExplicitAgeRanges
-      ? includesUnder18 ? 0 : 1
-      : smartPlus ? 0 : 1,
+    // 同上统一口径：只看年龄列表里有没有 13-17，不再按「是否显式选择」分叉。
+    exclude_age_under_eighteen: includesUnder18 ? 0 : 1,
     duration_time_range: 0,
     attribution_window_click: 7,
     attribution_window_view: 1,
