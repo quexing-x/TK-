@@ -51,7 +51,24 @@ describe("local API", () => {
     await app.close();
     store.close();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
+
+  /**
+   * 冻结时钟，供所有「同一批操作分成两次请求、断言它们被认成同一天/同一个任务」的
+   * 用例使用。
+   *
+   * 系列复制与扩组的幂等 taskKey 都是对生成的副本名取的哈希，而副本名精确到秒
+   * （`-MMDD-HHMMSS`）：两次请求只要落在不同的整秒里，本来就是两个不同的任务，
+   * 第二次当然不会被跳过。同理，重复提交预检按账户本地日历日判「今天」，跨过午夜
+   * 就不再是同一天。真实时钟下这类断言实际上依赖「两次 inject 恰好落在同一个秒/
+   * 同一天里」——满载跑整个文件时第一次请求足够慢，跨边界就会偶发失败。
+   *
+   * 只冻 Date，定时器保持真实，避免 await 卡死；afterEach 统一恢复真实时钟。
+   */
+  function freezeClock() {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
 
   function createMetaOfflineAccount() {
     return store.createAccount({
@@ -234,6 +251,7 @@ describe("local API", () => {
   });
 
   it("按 M/N 分配把源系列复制成多个新系列，并对相同任务幂等跳过", async () => {
+    freezeClock();
     const copyCampaign = vi.fn(async (
       _context: unknown,
       _input: { campaignName: string; adGroups: Array<{ sourceAdGroupId: string; name: string }> },
@@ -419,6 +437,7 @@ describe("local API", () => {
   }, 20_000);
 
   it("retrySafe=false：立即停止，不做任何自动重试，安全边界不因优化而放松", async () => {
+    freezeClock();
     const copyCampaign = vi.fn<(...args: unknown[]) => Promise<CampaignCopyMockResult>>(async () => ({
       ok: false,
       message: "TikTok 创建终态不完整",
@@ -684,6 +703,7 @@ describe("local API", () => {
   });
 
   it("does not automatically retry an expansion whose provider result is unknown", async () => {
+    freezeClock();
     const copyAdGroupToExistingCampaign = vi.fn(async () => ({
       ok: false,
       message: "create_by_snap：请求已发出，但响应丢失",
@@ -748,6 +768,7 @@ describe("local API", () => {
   });
 
   it("passes the dispatch guard through the non-same-campaign copy path", async () => {
+    freezeClock();
     const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
       mutations[0]?.onBeforeDispatch?.();
       throw new UnknownCreationStateError("response lost after dispatch");
@@ -808,6 +829,7 @@ describe("local API", () => {
   });
 
   it("does not retry a non-same-campaign expansion after a partial success", async () => {
+    freezeClock();
     let copyCall = 0;
     const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
       const mutation = mutations[0]!;
