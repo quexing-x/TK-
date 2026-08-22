@@ -253,8 +253,9 @@ export function onUnauthorized(handler: () => void): () => void {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
+  // 扩组自己弹结果 toast；/preflight 是只读预检，更不该报「操作已完成」。
   const usesDedicatedResultToast = path.startsWith("/api/launch-plans")
-    || path === "/api/ad-groups/batch-expand";
+    || path.startsWith("/api/ad-groups/batch-expand");
   const response = await fetch(path, {
     ...init,
     credentials: "same-origin",
@@ -716,6 +717,27 @@ export const api = {
       "/api/ad-groups/batch-expand",
       { method: "POST", body: JSON.stringify(input) },
     ),
+  /** 扩组重复提交预检：只查不写，返回值仅用于二次确认弹窗。 */
+  preflightBatchExpandAdGroups: (input: {
+    sources: Array<{
+      accountId: string;
+      sourceCampaignId: string;
+      sourceCampaignName: string;
+      sourceAdGroupId: string;
+      sourceAdGroupName: string;
+    }>;
+    scheduledStartAt?: string | null;
+  }) =>
+    request<{
+      conflicts: Array<{
+        accountId: string;
+        sourceAdGroupId: string;
+        sourceAdGroupName: string;
+        inProgress: { kind: "running" | "pending-confirmation"; since: string } | null;
+        expandedToday: { batches: number; groups: number; names: string[] } | null;
+        existingNames: string[];
+      }>;
+    }>("/api/ad-groups/batch-expand/preflight", { method: "POST", body: JSON.stringify(input) }),
   copyCampaign: (input: {
     accountId: string;
     sources: Array<{ sourceCampaignId: string; sourceAdGroupIds: string[] }>;

@@ -519,6 +519,62 @@ describe("AutomationStore", () => {
     expect(store.claimAdGroupExpandTask("crash-task", "demo-account", "adgroup-3")).toBe("unknown");
   });
 
+  it("扩组活动查询只回「进行中 + 今日已扩过」：过期租约、往日记录、别的源组都不算", () => {
+    const today = "2026-08-22";
+    // 今天已扩过：组名与份数都要能回读，预检要靠它们说清楚「扩了哪几个」。
+    store.claimAdGroupExpandTask("today-task", "demo-account", "adgroup-today", {
+      sourceCampaignId: "campaign-1",
+      localDate: today,
+      requestedCount: 2,
+      generatedNames: ["蓝牙音响-0822-101500-1", "蓝牙音响-0822-101500-2"],
+    });
+    store.finishAdGroupExpandTask("today-task", "succeeded");
+
+    // 昨天扩过的不该再提示，否则天天扩组的账户会变成每次都弹窗。
+    store.claimAdGroupExpandTask("yesterday-task", "demo-account", "adgroup-yesterday", {
+      localDate: "2026-08-21",
+      requestedCount: 1,
+      generatedNames: ["旧组-0821-101500-1"],
+    });
+    store.finishAdGroupExpandTask("yesterday-task", "succeeded");
+
+    // 租约过期的 running 是上次进程被杀留下的残骸，不算「进行中」，
+    // 否则用户会被一条永远消不掉的提示挡住。
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(Date.now() - 45 * 60_000));
+      store.claimAdGroupExpandTask("stale-task", "demo-account", "adgroup-stale", { localDate: today });
+    } finally {
+      vi.useRealTimers();
+    }
+    store.claimAdGroupExpandTask("fresh-task", "demo-account", "adgroup-fresh", { localDate: today });
+
+    const activity = store.listAdGroupExpandActivity(
+      "demo-account",
+      ["adgroup-today", "adgroup-yesterday", "adgroup-stale", "adgroup-fresh"],
+      today,
+    );
+    expect(activity.map((row) => row.sourceAdGroupId).sort()).toEqual(["adgroup-fresh", "adgroup-today"]);
+    expect(activity.find((row) => row.sourceAdGroupId === "adgroup-today")).toMatchObject({
+      status: "succeeded",
+      uncertain: false,
+      requestedCount: 2,
+      generatedNames: ["蓝牙音响-0822-101500-1", "蓝牙音响-0822-101500-2"],
+      sourceCampaignId: "campaign-1",
+    });
+    expect(activity.find((row) => row.sourceAdGroupId === "adgroup-fresh")).toMatchObject({
+      status: "running",
+      uncertain: false,
+    });
+
+    // 结果未知的任务无论多久都要报出来：这类必须由人工去后台核实。
+    store.markAdGroupExpandTaskDispatching("fresh-task");
+    expect(store.listAdGroupExpandActivity("demo-account", ["adgroup-fresh"], today)[0])
+      .toMatchObject({ uncertain: true });
+    // 别的账户查不到这些记录。
+    expect(store.listAdGroupExpandActivity("other-account", ["adgroup-today"], today)).toEqual([]);
+  });
+
   it("reserves automatic copies atomically, enforces the daily cap, and remembers generated destinations", () => {
     expect(store.claimAutomaticCopyTask({
       taskKey: "auto-copy-1",

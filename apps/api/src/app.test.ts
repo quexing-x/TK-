@@ -51,7 +51,24 @@ describe("local API", () => {
     await app.close();
     store.close();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
+
+  /**
+   * 冻结时钟，供所有「同一批操作分成两次请求、断言它们被认成同一天/同一个任务」的
+   * 用例使用。
+   *
+   * 系列复制与扩组的幂等 taskKey 都是对生成的副本名取的哈希，而副本名精确到秒
+   * （`-MMDD-HHMMSS`）：两次请求只要落在不同的整秒里，本来就是两个不同的任务，
+   * 第二次当然不会被跳过。同理，重复提交预检按账户本地日历日判「今天」，跨过午夜
+   * 就不再是同一天。真实时钟下这类断言实际上依赖「两次 inject 恰好落在同一个秒/
+   * 同一天里」——满载跑整个文件时第一次请求足够慢，跨边界就会偶发失败。
+   *
+   * 只冻 Date，定时器保持真实，避免 await 卡死；afterEach 统一恢复真实时钟。
+   */
+  function freezeClock() {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
 
   function createMetaOfflineAccount() {
     return store.createAccount({
@@ -234,6 +251,7 @@ describe("local API", () => {
   });
 
   it("按 M/N 分配把源系列复制成多个新系列，并对相同任务幂等跳过", async () => {
+    freezeClock();
     const copyCampaign = vi.fn(async (
       _context: unknown,
       _input: { campaignName: string; adGroups: Array<{ sourceAdGroupId: string; name: string }> },
@@ -419,6 +437,7 @@ describe("local API", () => {
   }, 20_000);
 
   it("retrySafe=false：立即停止，不做任何自动重试，安全边界不因优化而放松", async () => {
+    freezeClock();
     const copyCampaign = vi.fn<(...args: unknown[]) => Promise<CampaignCopyMockResult>>(async () => ({
       ok: false,
       message: "TikTok 创建终态不完整",
@@ -684,6 +703,7 @@ describe("local API", () => {
   });
 
   it("does not automatically retry an expansion whose provider result is unknown", async () => {
+    freezeClock();
     const copyAdGroupToExistingCampaign = vi.fn(async () => ({
       ok: false,
       message: "create_by_snap：请求已发出，但响应丢失",
@@ -748,6 +768,7 @@ describe("local API", () => {
   });
 
   it("passes the dispatch guard through the non-same-campaign copy path", async () => {
+    freezeClock();
     const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
       mutations[0]?.onBeforeDispatch?.();
       throw new UnknownCreationStateError("response lost after dispatch");
@@ -808,6 +829,7 @@ describe("local API", () => {
   });
 
   it("does not retry a non-same-campaign expansion after a partial success", async () => {
+    freezeClock();
     let copyCall = 0;
     const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
       const mutation = mutations[0]!;
@@ -875,6 +897,136 @@ describe("local API", () => {
     expect(first.json().failed[0].message).toContain("禁止自动重试");
     expect(second.json().failed[0].message).toContain("待人工确认");
     expect(copy).toHaveBeenCalledTimes(2);
+  });
+
+  it("扩组重复提交预检：干净的源组不打扰，扩过之后报出今日已扩记录且不写任何东西", async () => {
+    // 「今天」按账户本地日历日判定，冻结时钟避免跨午夜误判。
+    freezeClock();
+    const copyAdGroupToExistingCampaign = vi.fn(async () => ({ ok: true, message: "created" }));
+    const provider = {
+      kind: "cookie",
+      displayName: "preflight expansion provider",
+      capabilityVersion: "preflight-expansion-v1",
+      capabilities: new Set(["copy-ads"]),
+      copyAdGroupToExistingCampaign,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "preflight-expansion-v1", capabilities: ["copy-ads"],
+    });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const source = {
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceCampaignName: "campaign",
+      sourceAdGroupId: "adgroup-1",
+      sourceAdGroupName: "蓝牙音响",
+    };
+    const preflight = () => app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand/preflight",
+      payload: { sources: [source] },
+    });
+
+    // 没有任何记录时保持安静：无谓的弹窗会把真正的重复提示训练成「无脑点确认」。
+    const clean = await preflight();
+    expect(clean.statusCode).toBe(200);
+    expect(clean.json()).toEqual({ conflicts: [] });
+
+    const expanded = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand",
+      payload: {
+        sources: [source],
+        count: 2,
+        dailyBudget: 50,
+        bid: null,
+        launchImmediately: false,
+        sameCampaign: true,
+        scheduledStartAt: null,
+      },
+    });
+    expect(expanded.json()).toMatchObject({ createdGroups: 2, failed: [] });
+
+    const afterExpand = await preflight();
+    const conflicts = afterExpand.json().conflicts as Array<{
+      sourceAdGroupId: string;
+      inProgress: { kind: string } | null;
+      expandedToday: { batches: number; groups: number; names: string[] };
+      existingNames: string[];
+    }>;
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      sourceAdGroupId: "adgroup-1",
+      // 已经跑完了，不该再报「进行中」。
+      inProgress: null,
+      expandedToday: { batches: 1, groups: 2 },
+    });
+    // 手动扩组也要落库真实组名，否则预检永远查不到自己刚建的东西。
+    expect(conflicts[0]?.expandedToday.names).toEqual([
+      expect.stringMatching(/^蓝牙音响-\d{4}-\d{6}-1$/),
+      expect.stringMatching(/^蓝牙音响-\d{4}-\d{6}-2$/),
+    ]);
+    expect(conflicts[0]?.existingNames).toEqual(
+      expect.arrayContaining(conflicts[0]!.expandedToday.names),
+    );
+
+    // 预检是只读的：连着调不产生任何新任务，也不改变已有判定。
+    expect((await preflight()).json()).toEqual(afterExpand.json());
+    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(1);
+  });
+
+  it("扩组重复提交预检：进行中与待人工确认分别标出来", async () => {
+    freezeClock();
+    // 与引擎一致：本地日历日按账户时区取，不用 UTC。
+    const localDate = new Date().toLocaleDateString("en-CA", {
+      timeZone: store.getAccount("demo-account")!.timezone,
+    });
+    const source = {
+      accountId: "demo-account",
+      sourceCampaignId: "campaign-1",
+      sourceCampaignName: "campaign",
+      sourceAdGroupId: "adgroup-running",
+      sourceAdGroupName: "在跑的组",
+    };
+    store.claimAdGroupExpandTask("running-task", "demo-account", "adgroup-running", {
+      sourceCampaignId: "campaign-1",
+      localDate,
+      requestedCount: 1,
+      generatedNames: ["在跑的组-0101-000000-1"],
+    });
+
+    const running = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand/preflight",
+      payload: { sources: [source] },
+    });
+    expect(running.json().conflicts[0]).toMatchObject({
+      sourceAdGroupId: "adgroup-running",
+      inProgress: { kind: "running" },
+      // 还没跑完，不该算进「今天已扩过」。
+      expandedToday: null,
+    });
+
+    // 写请求已发出、结果未知：必须升级成「待人工确认」，这是最需要拦住手的一类。
+    store.markAdGroupExpandTaskDispatching("running-task");
+    const pending = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand/preflight",
+      payload: { sources: [source] },
+    });
+    expect(pending.json().conflicts[0]).toMatchObject({
+      inProgress: { kind: "pending-confirmation" },
+    });
   });
 
   it("creates a launch preset from the default launch-page form payload", async () => {

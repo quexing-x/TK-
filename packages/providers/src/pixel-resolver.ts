@@ -6,10 +6,11 @@ interface PixelCandidate {
   matchingObjectiveCount: number;
 }
 
-interface PixelDirectoryCandidate {
+interface AdGroupPixelCandidate {
   id: string;
   name: string;
-  code: string;
+  /** 引用该数据连接的广告组数量，仅用于报错时按常用度排序。 */
+  usageCount: number;
 }
 
 const pixelIdKeys = new Set(["ad_ref_pixel_id", "pixel_id", "pixelid", "tracking_pixel_id"]);
@@ -65,55 +66,72 @@ function pixelCandidates(
   return [...candidates.values()];
 }
 
-function pixelDirectoryCandidates(
-  payloads: Record<string, unknown>[],
-): PixelDirectoryCandidate[] {
-  const candidates = new Map<string, PixelDirectoryCandidate>();
-  for (const payload of payloads) {
-    const data = payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
-      ? payload.data as Record<string, unknown>
-      : payload;
-    if (!Array.isArray(data.pixel_list)) {
-      throw new RetryableCreationError(
-        "TikTok 实时像素目录响应缺少 pixel_list，已在发送创建请求前停止。",
-      );
-    }
-    for (const item of data.pixel_list) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-      const record = item as Record<string, unknown>;
-      const id = textValue(record.pixel_id);
-      if (!id) continue;
-      const previous = candidates.get(id);
-      candidates.set(id, {
-        id,
-        name: textValue(record.pixel_name) ?? previous?.name ?? "",
-        code: textValue(record.pixel_code) ?? previous?.code ?? "",
-      });
-    }
+/**
+ * 目标账户当前在用的数据连接（旧称 Pixel），从广告组自身的字段里归纳。
+ *
+ * 数据来源刻意选广告组列表：创建广告组时要填的就是这个「数据连接」，账户里在用
+ * 哪些、叫什么名字，广告组自己最清楚。事件管理器那套目录接口
+ * （/mi/api/v2/i18n/pixel/list/）已经对所有账户返回 code 50002，不能再依赖。
+ */
+function adGroupPixelCandidates(entities: ProviderEntity[]): AdGroupPixelCandidate[] {
+  const candidates = new Map<string, AdGroupPixelCandidate>();
+  for (const entity of entities) {
+    if (entity.entityType !== "ad-group") continue;
+    const id = textValue(entity.payload.ad_ref_pixel_id);
+    if (!id || !/^\d+$/.test(id)) continue;
+    const name = textValue(entity.payload.ad_pixel_name) ?? "";
+    const previous = candidates.get(id);
+    candidates.set(id, {
+      id,
+      name: name || previous?.name || "",
+      usageCount: (previous?.usageCount ?? 0) + 1,
+    });
   }
   return [...candidates.values()];
 }
 
-/** Resolves a user-entered Pixel ID/Code/name from the target account's live directory. */
-export function resolveLivePixelDirectoryId(
-  payloads: Record<string, unknown>[],
+/** 20 位大写字母数字混排：TikTok 事件管理器里展示的 Pixel Code。 */
+function looksLikePixelCode(value: string): boolean {
+  return /^[A-Z0-9]{16,32}$/.test(value) && /[A-Z]/.test(value) && !/^\d+$/.test(value);
+}
+
+/**
+ * 把用户填的「数据连接」解析成 TikTok 的数字 ID。
+ *
+ * 只认**名称**与**数字 ID**：广告组字段里只有 ad_ref_pixel_id 和 ad_pixel_name，
+ * 没有 pixel_code，所以 Code 无法在本地比对——与其拿 Code 去查那个已经废掉的目录
+ * 接口（整批创建会在发出任何写请求前全灭），不如直接告诉用户改填名称或 ID。
+ */
+export function resolveAccountPixelIdFromAdGroups(
+  entities: ProviderEntity[],
   selector: string,
 ): string {
   const requested = selector.trim();
   const normalized = requested.toLocaleLowerCase();
-  const matches = pixelDirectoryCandidates(payloads).filter((candidate) =>
-    candidate.id === requested
-    || candidate.code.toLocaleLowerCase() === normalized
-    || candidate.name.toLocaleLowerCase() === normalized,
-  );
-  if (matches.length === 1) return matches[0]!.id;
-  if (matches.length > 1) {
+  const candidates = adGroupPixelCandidates(entities);
+  const matched = candidates.filter((candidate) =>
+    candidate.id === requested || candidate.name.toLocaleLowerCase() === normalized);
+  if (matched.length === 1) return matched[0]!.id;
+  if (matched.length > 1) {
     throw new RetryableCreationError(
-      `当前账户的实时像素目录有多个像素匹配“${requested}”，已在发送创建请求前停止。请填写唯一的 Pixel ID / Code。`,
+      `目标账户有多个数据连接匹配“${requested}”：${matched.map((item) => `${item.name}(${item.id})`).join("、")}。请改填唯一的数字 ID。`,
+    );
+  }
+  // 报错必须带上「这个账户实际有什么」，否则用户只能靠猜。
+  const known = candidates
+    .sort((left, right) => right.usageCount - left.usageCount)
+    .slice(0, 8)
+    .map((item) => `${item.name || "(未命名)"}(${item.id})`)
+    .join("、");
+  if (looksLikePixelCode(requested)) {
+    throw new RetryableCreationError(
+      `“${requested}”看起来是 Pixel Code，创建广告组时无法用 Code 匹配数据连接。`
+      + `请改填数据连接名称或数字 ID。${known ? `该账户在用的有：${known}` : "该账户的广告组里没有任何数据连接可供匹配。"}`,
     );
   }
   throw new RetryableCreationError(
-    `当前账户的实时像素目录未找到“${requested}”，已在发送创建请求前停止。请确认 Pixel ID / Code 属于该广告账户。`,
+    `目标账户的广告组里找不到数据连接“${requested}”，已在发送创建请求前停止。`
+    + `${known ? `该账户在用的有：${known}` : "该账户的广告组里没有任何数据连接可供匹配。"}`,
   );
 }
 

@@ -3,6 +3,7 @@ import {
   AUTOMATION_MANAGED_LOOKBACK_HOURS,
   ProviderCredentialInputSchema,
   automationRuleDefinitions,
+  dateKeyInTimeZone,
   dateTimeSuffix,
   buildMetaRulePredicate,
   evaluateMetaRuleConfiguration,
@@ -2305,18 +2306,6 @@ function renderAppealTemplate(
     .replaceAll("{reject_reason}", values.rejectReason);
 }
 
-
-function dateKeyInTimeZone(value: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(value);
-  const part = (type: "year" | "month" | "day") =>
-    parts.find((item) => item.type === type)?.value ?? "00";
-  return `${part("year")}-${part("month")}-${part("day")}`;
-}
 
 function hasCurrentDayMetricCoverage(
   sync: ReturnType<AutomationStore["getLatestReadOnlySync"]>,

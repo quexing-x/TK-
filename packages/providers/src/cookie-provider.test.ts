@@ -1769,20 +1769,27 @@ describe("CookieAdsProvider", () => {
       let body: Record<string, unknown>;
       if (url.includes("/mi/api/v2/i18n/pixel/list/")) {
         pixelDirectoryReads += 1;
-        body = { code: 0, data: { pixel_list: [{
-          pixel_id: "7542379322273447954",
-          pixel_name: "纵恣-lsh",
-          pixel_code: "D2LUO4BC77U67ECJGK00",
-        }], pagination: { page: 1, page_count: 1 } } };
+        body = { code: 0, data: { pixel_list: [], pagination: { page: 1, page_count: 1 } } };
       } else if (url.includes("statistics/sketch/")) {
         body = emptySketchListPayload();
       } else if (url.includes("/statistics/op/campaign/list")) {
         body = completeListPayload(completed ? [{ campaign_id: "campaign", campaign_name: "campaign" }] : []);
       } else if (url.includes("/statistics/op/adgroup/list")) {
-        body = completeListPayload(completed ? [
-          { campaign_id: "campaign", ad_id: "adgroup-1", ad_name: "group" },
-          { campaign_id: "campaign", ad_id: "adgroup-2", ad_name: "group-2" },
-        ] : []);
+        // 账户里本来就有的广告组，带着它自己的数据连接——这就是「创建广告组的
+        // 地方」能看到的东西，预设填的名称/ID 要从这里解析。
+        body = completeListPayload([
+          {
+            campaign_id: "existing-campaign",
+            ad_id: "existing-adgroup",
+            ad_name: "既有组",
+            ad_ref_pixel_id: "7542379322273447954",
+            ad_pixel_name: "纵恣-lsh",
+          },
+          ...(completed ? [
+            { campaign_id: "campaign", ad_id: "adgroup-1", ad_name: "group" },
+            { campaign_id: "campaign", ad_id: "adgroup-2", ad_name: "group-2" },
+          ] : []),
+        ]);
       } else if (url.includes("/statistics/op/ad/list")) {
         body = completeListPayload(completed ? [
           { campaign_id: "campaign", ad_id: "adgroup-1", creative_id: "creative-1", creative_name: "260717:001" },
@@ -1823,8 +1830,9 @@ describe("CookieAdsProvider", () => {
     first.attemptId = "attempt-1";
     second.operationId = "operation-2";
     second.attemptId = "attempt-2";
-    first.preset = { ...first.preset, pixelKey: "D2LUO4BC77U67ECJGK00", pixelId: null };
-    second.preset = { ...second.preset, pixelKey: "d2luo4bc77u67ecjgk00", pixelId: null };
+    // 一条按名称填、一条按数字 ID 填，两种写法都要解析到同一个数据连接。
+    first.preset = { ...first.preset, pixelKey: "纵恣-lsh", pixelId: null };
+    second.preset = { ...second.preset, pixelKey: "7542379322273447954", pixelId: null };
     second.row = { ...second.row, rowNumber: 3, adGroupName: "group-2", adName: "260717:002" };
 
     const result = await new CookieAdsProvider().createFromPreset!(
@@ -1833,7 +1841,8 @@ describe("CookieAdsProvider", () => {
     );
 
     const publishes = requested.filter((item) => item.url.includes("async_creation/create_by_snap"));
-    expect(pixelDirectoryReads).toBe(1);
+    // 事件管理器目录接口已对所有账户返回 code 50002，创建链路一次都不该再碰它。
+    expect(pixelDirectoryReads).toBe(0);
     expect(campaignSaves).toBe(1);
     expect(adGroupSaves).toBe(2);
     expect(creativeSaves).toBe(2);
@@ -1850,23 +1859,31 @@ describe("CookieAdsProvider", () => {
     ]));
   });
 
-  it("returns an account execution error before any draft when the live Pixel ID is unavailable", async () => {
+  it("数据连接解析不出来时，一个草稿都不建", async () => {
     const requests: Array<{ url: string; method: string }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, method: init?.method ?? "GET" });
-      if (url.includes("/mi/api/v2/i18n/pixel/list/")) {
-        return jsonResponse({
-          code: 0,
-          data: { pixel_list: [], pagination: { page: 1, page_count: 1 } },
-        });
+      if (url.includes("statistics/sketch/")) return jsonResponse(emptySketchListPayload());
+      if (url.includes("adgroup/list")) {
+        return jsonResponse({ data: { table: [{
+          campaign_id: "existing-campaign",
+          ad_id: "existing-adgroup",
+          ad_name: "既有组",
+          ad_ref_pixel_id: "7542379322273447954",
+          ad_pixel_name: "纵恣-lsh",
+        }], pagination: { page: 1, page_count: 1 } }, code: 0 });
       }
-      throw new Error(`Pixel 预检失败后不应继续请求：${new URL(url).pathname}`);
+      if (url.includes("campaign/list")) {
+        return jsonResponse({ data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 });
+      }
+      throw new Error(`数据连接解析失败后不应继续请求：${new URL(url).pathname}`);
     }));
     const mutation = creationTestMutation("none");
     mutation.preset = {
       ...mutation.preset,
-      pixelKey: "D2LUO4BC77U67ECJGK00",
+      // 账户里只有「纵恣-lsh」，预设却指向另一个连接。
+      pixelKey: "纵恣-czx",
       pixelId: null,
     };
 
@@ -1876,11 +1893,45 @@ describe("CookieAdsProvider", () => {
     );
 
     expect(result).toMatchObject({ ok: false, failureKind: "retryable", retrySafe: true });
-    expect(result?.message).toContain("实时像素目录未找到");
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.method).toBe("GET");
-    expect(new URL(requests[0]!.url).searchParams.get("aadvid")).toBe("123456");
+    expect(result?.message).toContain("找不到数据连接");
+    // 报错要带上账户实际在用的连接，否则用户只能靠猜。
+    expect(result?.message).toContain("纵恣-lsh(7542379322273447954)");
+    // 这条是真正的安全边界：解析没通过，就不能有任何草稿/发布请求。
     expect(requests.some((request) => request.url.includes("/creation/"))).toBe(false);
+    expect(requests.some((request) => request.url.includes("_snap/save"))).toBe(false);
+  });
+
+  it("填 Pixel Code 时直接说清楚不支持，而不是拿去查已经废掉的目录接口", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.includes("statistics/sketch/")) return jsonResponse(emptySketchListPayload());
+      if (url.includes("adgroup/list")) {
+        return jsonResponse({ data: { table: [{
+          campaign_id: "existing-campaign",
+          ad_id: "existing-adgroup",
+          ad_name: "既有组",
+          ad_ref_pixel_id: "7542379322273447954",
+          ad_pixel_name: "纵恣-lsh",
+        }], pagination: { page: 1, page_count: 1 } }, code: 0 });
+      }
+      if (url.includes("campaign/list")) {
+        return jsonResponse({ data: { table: [], pagination: { page: 1, page_count: 1 } }, code: 0 });
+      }
+      throw new Error(`不应继续请求：${new URL(url).pathname}`);
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.preset = { ...mutation.preset, pixelKey: "D2LUO4BC77U67ECJGK00", pixelId: null };
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result?.message).toContain("看起来是 Pixel Code");
+    expect(result?.message).toContain("请改填数据连接名称或数字 ID");
+    expect(requests.some((url) => url.includes("/pixel/list/"))).toBe(false);
   });
 
   it("keeps the requested formal ad-group successful when TikTok omits its ad material", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CheckCircle2, CopyPlus, Inbox, Info, RefreshCcw, XCircle } from "lucide-react";
 import type {
@@ -60,6 +60,57 @@ function withinWindow(createdAt: string | null | undefined, filter: TimeFilter, 
   return created >= now - hours * 60 * 60_000;
 }
 
+export type ExpandConflict = {
+  accountId: string;
+  sourceAdGroupId: string;
+  sourceAdGroupName: string;
+  inProgress: { kind: "running" | "pending-confirmation"; since: string } | null;
+  expandedToday: { batches: number; groups: number; names: string[] } | null;
+  existingNames: string[];
+};
+
+/**
+ * 把预检结果写成人能一眼看懂的几行。
+ *
+ * 这段文案是「防重复」唯一的实际防线——按钮不再锁死，引擎那道幂等闸门又只拦得住
+ * 同一秒内的重放，所以用户能不能认出「这是我刚才点过的那一批」，全看这里说得够不
+ * 够具体：谁在跑、今天扩过几次、已经占了哪些组名。
+ */
+export function describeExpandConflicts(conflicts: ExpandConflict[]): string[] {
+  return conflicts.map((conflict) => {
+    const reasons: string[] = [];
+    if (conflict.inProgress) {
+      reasons.push(conflict.inProgress.kind === "running"
+        ? `有一批仍在执行中（${fmtDate(conflict.inProgress.since)} 开始）`
+        : `上次结果待人工确认（${fmtDate(conflict.inProgress.since)}）`);
+    }
+    if (conflict.expandedToday) {
+      reasons.push(`今天已扩过 ${conflict.expandedToday.batches} 次、共 ${conflict.expandedToday.groups} 个组`);
+    }
+    if (conflict.existingNames.length > 0) {
+      const shown = conflict.existingNames.slice(0, 3).join("、");
+      const rest = conflict.existingNames.length > 3 ? ` 等 ${conflict.existingNames.length} 个` : "";
+      reasons.push(`已有同日组名：${shown}${rest}`);
+    }
+    return `· ${conflict.sourceAdGroupName}：${reasons.join("；")}`;
+  });
+}
+
+/** 二次确认的完整文案：先列冲突，再说清这一次还要建多少个。 */
+export function buildExpandConfirmMessage(input: {
+  conflictLines: string[];
+  sourceCount: number;
+  countPerSource: number;
+  immediate: boolean;
+}): string {
+  return [
+    `${input.conflictLines.length} 个源组已经有进行中或今天扩过的记录：`,
+    ...input.conflictLines,
+    "",
+    `继续将为 ${input.sourceCount} 个源组各创建 ${input.countPerSource} 个新组（共 ${input.sourceCount * input.countPerSource} 个）${input.immediate ? "并【立即开始投放】" : ""}。确认继续？`,
+  ].join("\n");
+}
+
 /** 扩组预设的初始值，按当前投放习惯定；面板里仍可逐次改。 */
 const DEFAULT_COPY_COUNT = 1;
 const DEFAULT_DAILY_BUDGET = 50;
@@ -95,7 +146,11 @@ export function ExpandGroupsPanel({
   const [timingMode, setTimingMode] = useState<"immediate" | "scheduled">("scheduled");
   const [scheduledAt, setScheduledAt] = useState<string>(defaultNextDaySix);
   const [visibleAccountIds, setVisibleAccountIds] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  // 正在跑的批次数。只用于显示进度，不再拿它去禁用任何东西——一批扩组可能跑很久，
+  // 锁死按钮等于整个面板停摆。防重复靠提交前的预检二次确认。
+  const [runningBatches, setRunningBatches] = useState(0);
+  // 同账户排队、跨账户并发：每个账户一条 Promise 链，互不阻塞。
+  const accountQueues = useRef(new Map<string, Promise<unknown>>());
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
 
@@ -285,8 +340,33 @@ export function ExpandGroupsPanel({
       }
       scheduledStartAt = when.toISOString();
     }
-    // 立即投放是不可逆的真实写入，二次确认避免误点。
-    if (timingMode === "immediate") {
+    // 重复提交预检：把「有没有在跑的、今天扩过没有、会不会撞上已有组名」摆出来，
+    // 由用户判断这次是不是误点。预检失败不阻断提交——它只是提示，不是闸门。
+    let conflictLines: string[] = [];
+    try {
+      const { conflicts } = await api.preflightBatchExpandAdGroups({ sources, scheduledStartAt });
+      conflictLines = describeExpandConflicts(conflicts);
+    } catch {
+      // 预检本身出错不该挡住正常扩组，只是这次没有提示可给。
+      conflictLines = [];
+    }
+
+    const immediate = timingMode === "immediate";
+    if (conflictLines.length > 0) {
+      const confirmed = await confirm({
+        title: "这些源组可能是重复扩组",
+        message: buildExpandConfirmMessage({
+          conflictLines,
+          sourceCount: selectedValid.length,
+          countPerSource: count,
+          immediate,
+        }),
+        confirmLabel: "确认继续扩组",
+        danger: true,
+      });
+      if (!confirmed) return;
+    } else if (immediate) {
+      // 立即投放是不可逆的真实写入，二次确认避免误点。
       const confirmed = await confirm({
         title: "立即投放确认",
         message: `将为 ${selectedValid.length} 个源组各创建 ${count} 个新组并【立即开始投放】（共 ${selectedValid.length * count} 个）。确认立即投放？`,
@@ -295,48 +375,66 @@ export function ExpandGroupsPanel({
       });
       if (!confirmed) return;
     }
-    setBusy(true);
+
     setFeedback(null);
     onError(null);
-    try {
-      const result = await api.batchExpandAdGroups({
-        sources,
-        count,
-        dailyBudget,
-        bid,
-        launchImmediately: timingMode === "immediate",
-        sameCampaign: true,
-        scheduledStartAt,
+    setSelected([]);
+
+    // 按账户拆分，各自挂到本账户的队列尾部：同账户串行避免叠加频控，不同账户并发。
+    const byAccount = new Map<string, typeof sources>();
+    for (const source of sources) {
+      byAccount.set(source.accountId, [...(byAccount.get(source.accountId) ?? []), source]);
+    }
+    for (const [accountId, accountSources] of byAccount) {
+      const previous = accountQueues.current.get(accountId) ?? Promise.resolve();
+      // 入队即计数：排在同账户队列里还没轮到的批次同样是「待办」，不显示出来的话
+      // 用户会以为自己那次点击丢了。
+      setRunningBatches((current) => current + 1);
+      const runBatch = async () => {
+        try {
+          const result = await api.batchExpandAdGroups({
+            sources: accountSources,
+            count,
+            dailyBudget,
+            bid,
+            launchImmediately: immediate,
+            sameCampaign: true,
+            scheduledStartAt,
+          });
+          const label = accountName.get(accountId) ?? accountId;
+          const lines: string[] = [];
+          for (const failure of result.failed) lines.push(`${failure.name} 失败：${failure.message}`);
+          if (scheduledStartAt && result.scheduled > 0) {
+            lines.push(`${result.scheduled} 个新组已设置 TikTok 原生定时投放：${new Date(scheduledStartAt).toLocaleString()}。`);
+          }
+          if (result.skipped > 0) lines.push(`${result.skipped} 个已扩过或进行中，已跳过。`);
+          const created = result.createdGroups > 0;
+          // 多账户并发时逐批追加，后完成的不覆盖先完成的结果。
+          setFeedback((current) => ({
+            // 只要有一批失败，整体就保持失败态，后续成功的批次不把它洗白。
+            tone: created && current?.tone !== "danger" ? "success" : "danger",
+            title: created ? "创建成功" : "创建失败",
+            lines: [...(current?.lines ?? []), `【${label}】成功 ${result.createdGroups} 个组`, ...lines],
+          }));
+          toast(
+            result.failed.length > 0
+              ? `${label} 扩组完成：成功 ${result.createdGroups} 个，失败 ${result.failed.length} 个`
+              : `${label} 扩组全部成功（${result.createdGroups} 个广告组）`,
+            result.failed.length > 0 ? "error" : "success",
+          );
+          void loadAccount(accountId);
+        } catch (cause) {
+          onError(messageOf(cause));
+        } finally {
+          setRunningBatches((current) => Math.max(0, current - 1));
+        }
+      };
+      // 前一批失败也要继续跑本批：队列只负责排序，不传播错误。
+      const chained = previous.then(runBatch, runBatch);
+      accountQueues.current.set(accountId, chained);
+      void chained.finally(() => {
+        if (accountQueues.current.get(accountId) === chained) accountQueues.current.delete(accountId);
       });
-      const lines: string[] = [];
-      if (result.failed.length > 0) {
-        for (const failure of result.failed) lines.push(`${failure.name} 失败：${failure.message}`);
-      }
-      if (scheduledStartAt && result.scheduled > 0) {
-        lines.push(`${result.scheduled} 个新组已设置 TikTok 原生定时投放：${new Date(scheduledStartAt).toLocaleString()}。`);
-      }
-      if (result.skipped > 0) lines.push(`${result.skipped} 个已扩过或进行中，已跳过。`);
-      const created = result.createdGroups > 0;
-      setFeedback({
-        tone: created ? "success" : "danger",
-        title: created ? "创建成功" : "创建失败",
-        lines,
-      });
-      toast(
-        result.failed.length > 0
-          ? `扩组完成：成功 ${result.createdGroups} 个广告组，失败 ${result.failed.length} 个广告组`
-          : `扩组任务全部成功（${result.createdGroups} 个广告组）`,
-        result.failed.length > 0 ? "error" : "success",
-      );
-      setSelected([]);
-      // 扩组后刷新涉及账户，展示新组。
-      for (const accountId of new Set(sources.map((source) => source.accountId))) {
-        void loadAccount(accountId);
-      }
-    } catch (cause) {
-      onError(messageOf(cause));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -420,17 +518,17 @@ export function ExpandGroupsPanel({
               </div>
             </div>
             <div className="expand-account-actions">
-              <button className="secondary-button compact-button" disabled={busy || groupKeys.length === 0} onClick={() => toggleAccount(group.accountId, groupKeys)} type="button">{allSelected ? "取消本账户" : "全选本账户"}</button>
+              <button className="secondary-button compact-button" disabled={groupKeys.length === 0} onClick={() => toggleAccount(group.accountId, groupKeys)} type="button">{allSelected ? "取消本账户" : "全选本账户"}</button>
               <button className="secondary-button compact-button" disabled={isLoading} onClick={() => void loadAccount(group.accountId)} title="重新读取该账户已同步的广告组" type="button"><RefreshCcw size={14} /> {isLoading ? "刷新中" : "刷新"}</button>
             </div>
           </header>
-          {group.adGroups.length === 0 ? <p className="expand-account-empty">{isLoading ? "读取中…" : "该账户在当前筛选下没有广告组。"}</p> : <div className="table-wrap expand-table"><table><thead><tr><th className="expand-check-col"><input aria-label="全选本账户" checked={allSelected} disabled={busy || groupKeys.length === 0} onChange={() => toggleAccount(group.accountId, groupKeys)} type="checkbox" /></th><th>广告组</th><th>所属系列</th><th>创建时间</th><th className="expand-num">花费</th><th className="expand-num">转化</th><th className="expand-num">CPA</th><th>状态</th></tr></thead><tbody>
+          {group.adGroups.length === 0 ? <p className="expand-account-empty">{isLoading ? "读取中…" : "该账户在当前筛选下没有广告组。"}</p> : <div className="table-wrap expand-table"><table><thead><tr><th className="expand-check-col"><input aria-label="全选本账户" checked={allSelected} disabled={groupKeys.length === 0} onChange={() => toggleAccount(group.accountId, groupKeys)} type="checkbox" /></th><th>广告组</th><th>所属系列</th><th>创建时间</th><th className="expand-num">花费</th><th className="expand-num">转化</th><th className="expand-num">CPA</th><th>状态</th></tr></thead><tbody>
             {group.adGroups.map((entity) => {
               const key = keyOf(group.accountId, entity.externalId);
               const selectable = Boolean(entity.parentCampaignId);
               const checked = selected.includes(key);
-              return <tr key={key} className={checked ? "selected" : ""} onClick={() => selectable && !busy && toggle(key)}>
-                <td className="expand-check-col"><input checked={checked} disabled={!selectable || busy} onChange={() => toggle(key)} onClick={(event) => event.stopPropagation()} title={selectable ? undefined : "缺少所属系列 ID，无法扩组"} type="checkbox" /></td>
+              return <tr key={key} className={checked ? "selected" : ""} onClick={() => selectable && toggle(key)}>
+                <td className="expand-check-col"><input checked={checked} disabled={!selectable} onChange={() => toggle(key)} onClick={(event) => event.stopPropagation()} title={selectable ? undefined : "缺少所属系列 ID，无法扩组"} type="checkbox" /></td>
                 <td className="expand-name">{entity.name}</td>
                 <td className="expand-muted">{entity.parentCampaignId ? group.campaignNames.get(entity.parentCampaignId) ?? entity.parentCampaignId : "—"}</td>
                 <td className="expand-muted">{fmtDate(entity.createdAt)}</td>
@@ -450,8 +548,8 @@ export function ExpandGroupsPanel({
     {feedback && <div className={`expand-feedback ${feedback.tone}`}>{feedback.tone === "success" ? <CheckCircle2 size={16} /> : <XCircle size={16} />}<div><strong>{feedback.title}</strong>{feedback.lines.length > 0 && <ul>{feedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul>}</div></div>}
 
     <div className="expand-actions">
-      <span className="expand-summary">已选 <b>{selectedValid.length}</b>{totalSelectable > 0 ? ` / ${totalSelectable}` : ""} 个源组 · 预计新增 <b>{selectedValid.length * count}</b> 个广告组</span>
-      <button className="expand-submit" disabled={busy || selectedValid.length === 0} onClick={() => void submit()} type="button"><CopyPlus size={16} /> {busy ? "扩组中…" : "一键扩组"}</button>
+      <span className="expand-summary">已选 <b>{selectedValid.length}</b>{totalSelectable > 0 ? ` / ${totalSelectable}` : ""} 个源组 · 预计新增 <b>{selectedValid.length * count}</b> 个广告组{runningBatches > 0 ? ` · ${runningBatches} 批进行中（同账户排队、跨账户并发）` : ""}</span>
+      <button className="expand-submit" disabled={selectedValid.length === 0} onClick={() => void submit()} type="button"><CopyPlus size={16} /> 一键扩组</button>
     </div>
   </div>;
 }

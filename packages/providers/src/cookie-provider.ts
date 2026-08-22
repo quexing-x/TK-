@@ -33,7 +33,7 @@ import type {
 } from "./types.js";
 import {
   resolveLegacyTargetAccountPixelId,
-  resolveLivePixelDirectoryId,
+  resolveAccountPixelIdFromAdGroups,
 } from "./pixel-resolver.js";
 import {
   ConfirmedCreationFailureError,
@@ -828,41 +828,9 @@ export class CookieAdsProvider implements AdsProvider {
     const reservationKey = `${context.accountId}:${seriesKey}`;
     const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
     try {
-      // Pixel is an execution-time account check, not a preset/UI readiness
-      // check. Read the account's live directory exactly once for this call and
-      // resolve every user-entered ID/Code before any TikTok draft can be saved.
-      const resolvedLivePixelIds = new Map<string, string>();
-      const pixelSelectors = new Map<string, string>();
-      for (const mutation of mutations) {
-        if (mutation.reconcileOnly === true) continue;
-        const selector = mutation.preset.pixelKey?.trim();
-        if (selector) pixelSelectors.set(normalizeLivePixelSelector(selector), selector);
-      }
-      if (pixelSelectors.size > 0) {
-        const pixelDispatchState: CreationDispatchState = {
-          mutationDispatched: false,
-          acceptedMutationCount: 0,
-        };
-        try {
-          const pixelDirectory = await requestLivePixelDirectoryPages(
-            sessionRequest,
-            credential,
-            pixelDispatchState,
-          );
-          for (const [key, selector] of pixelSelectors) {
-            resolvedLivePixelIds.set(
-              key,
-              resolveLivePixelDirectoryId(pixelDirectory, selector),
-            );
-          }
-        } catch (cause) {
-          return mutations.map((mutation) => creationFailureResult(
-            mutation,
-            cause,
-            pixelDispatchState,
-          ));
-        }
-      }
+      // 数据连接（旧称 Pixel）在每条 mutation 自己的创建前解析，数据取自那次本来
+      // 就要发的 adgroup/list 实时读取。不再预先拉事件管理器目录：那个接口已对所有
+      // 账户返回 code 50002，而它一挂，整批创建会在发出任何写请求前全部失败。
       // Reservations are scoped to this invocation only. Persisting failed names
       // across retries was the source of unrequested `-001` ad groups.
       const reservations = {
@@ -889,7 +857,6 @@ export class CookieAdsProvider implements AdsProvider {
               ? { campaignId: reservations.campaignIds.get(campaignKey)! }
               : {}),
             adGroupNames: names,
-            resolvedLivePixelIds,
           },
         );
         const successful = batchResults.find((result) => result.ok && result.campaignId);
@@ -918,7 +885,6 @@ export class CookieAdsProvider implements AdsProvider {
                 ? { campaignId: reservations.campaignIds.get(campaignKey)! }
                 : {}),
               adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
-              resolvedLivePixelIds,
             },
           );
           results.push(result);
@@ -2376,7 +2342,6 @@ interface CookieDraftReservation {
   campaignId?: string;
   adGroupNames: Set<string>;
   /** One account-scoped live-directory result, resolved before any draft write. */
-  resolvedLivePixelIds?: ReadonlyMap<string, string>;
 }
 
 interface PreparedCookieDraft {
@@ -3421,14 +3386,9 @@ async function runCookieDraftChain(
   const pixelSelector = mutation.preset.pixelKey?.trim();
   let targetPixelId: string | undefined;
   if (pixelSelector) {
-    targetPixelId = batchReservation?.resolvedLivePixelIds?.get(
-      normalizeLivePixelSelector(pixelSelector),
-    );
-    if (!targetPixelId) {
-      throw new RetryableCreationError(
-        `当前账户尚未完成 Pixel ID / Code“${pixelSelector}”的实时匹配，已在发送创建请求前停止。`,
-      );
-    }
+    // 用这次 adgroup/list 实时读回来的广告组来匹配：账户当前在用哪些数据连接、
+    // 各自叫什么，广告组自己就带着（ad_ref_pixel_id / ad_pixel_name）。
+    targetPixelId = resolveAccountPixelIdFromAdGroups(preflightEntities, pixelSelector);
   } else {
     targetPixelId = resolveLegacyTargetAccountPixelId(preflightEntities, mutation.preset);
   }
@@ -6414,60 +6374,6 @@ async function requestCompleteListPages(
   );
 }
 
-function normalizeLivePixelSelector(selector: string): string {
-  return selector.trim().toLocaleLowerCase();
-}
-
-/**
- * Reads the target account's current Pixel directory through the same Cookie
- * session used by Ads Manager. This is deliberately execution-time and does
- * not depend on whether a Pixel has appeared in any previously synced ad.
- */
-async function requestLivePixelDirectoryPages(
-  sessionRequest: CapturedCookieRequest,
-  credential: ParsedCookieCredential,
-  dispatchState: CreationDispatchState,
-): Promise<Record<string, unknown>[]> {
-  const pages: Record<string, unknown>[] = [];
-  for (let page = 1; page <= 100; page += 1) {
-    const payload = await requestCreationStep(
-      `pixel/list 第 ${page} 页`,
-      () => creationPathGetRequest(
-        sessionRequest,
-        "/mi/api/v2/i18n/pixel/list/",
-        {
-          page: String(page),
-          limit: "100",
-        },
-      ),
-      credential,
-      { semantics: "preflight-read", dispatchState },
-    );
-    const data = isRecord(payload.data) ? payload.data : undefined;
-    if (!data || !Array.isArray(data.pixel_list)) {
-      throw new RetryableCreationError(
-        "pixel/list 实时响应缺少 pixel_list，已在发送创建请求前停止。",
-      );
-    }
-    const responsePage = responsePageNumber(payload);
-    if (responsePage !== null && responsePage !== page) {
-      throw new RetryableCreationError(
-        `pixel/list 未返回请求的第 ${page} 页，已在发送创建请求前停止。`,
-      );
-    }
-    pages.push(payload);
-    if (hasExplicitAdditionalPages(payload)) continue;
-    if (!hasExplicitPaginationEnd(payload)) {
-      throw new RetryableCreationError(
-        "pixel/list 缺少可验证的分页结束信息，已在发送创建请求前停止。",
-      );
-    }
-    return pages;
-  }
-  throw new RetryableCreationError(
-    "pixel/list 超过 100 页，已在发送创建请求前停止。",
-  );
-}
 
 function withRequestedPage(template: CapturedCookieRequest, page: number): CapturedCookieRequest {
   const url = new URL(template.url);
