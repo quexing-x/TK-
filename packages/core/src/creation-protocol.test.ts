@@ -134,11 +134,12 @@ describe("creation protocol", () => {
         smart_bid_type: 0,
         optimization_source: 0,
         cpa_skip_first_phrase: 1,
-        // 默认年龄改为 18 岁以上：Smart+ 系列禁止向 18 岁以下投放，
-        // 带 13-17 会被 TikTok 以 audience_age_smart_age_validate_error 拒绝。
-        exclude_age_under_eighteen: 1,
+        // limited_audience 是「可选范围」，Smart+ 必须原样带全池（含未成年档），
+        // 少一档会被判成自定义年龄而拒绝；实际投放年龄走 age，空数组 = 不限。
+        // 线上实测：age=[[25,34]] 时 TikTok 回读 ad_age="25-34"，age=[] 时为"全部"。
+        exclude_age_under_eighteen: 0,
         age: [],
-        limited_audience: { age: [[18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
+        limited_audience: { age: [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
         smart_age: 3,
         smart_audience: 3,
         smart_gender: 3,
@@ -202,9 +203,33 @@ describe("creation protocol", () => {
 
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
       gender: 2,
+      // 行里选了 4 档（不是全选）-> age 带这 4 档；可选范围恒为全池。
+      age: [[25, 34], [35, 44], [45, 54], [55, 100]],
+      exclude_age_under_eighteen: 0,
+      limited_audience: { age: [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
+    });
+  });
+
+  it("选满全部可选档等同于不限：age 发空数组，而不是把五档逐个列出", () => {
+    // 模板默认就是全选。真机「不限年龄」发的是空 age，TikTok 界面才显示「全部」；
+    // 逐个列出会被显示成自定义档位。
+    const payloads = buildDraftPayloads({
+      rowNumber: 2, campaignName: "campaign", adGroupName: "group", adName: "ad",
+      videoCode: "video", productUrl: "https://example.com", region: "TW",
+      dailyBudget: 50, bid: 7, startAt: null, endAt: null, initialStatus: "disabled",
+      gender: "all", ageRanges: ["18-24", "25-34", "35-44", "45-54", "55-100"],
+    }, {
+      objectiveType: 3, buyingType: 1, campaignBudgetMode: -1, adBudgetMode: 3,
+      pricing: 9, optimizeGoal: 100, externalAction: 96, pixelId: "pixel",
+      identityType: 0, identityId: null, callToActionId: "0",
+      countryCodes: [1668284], placementIds: [3000], smartTargeting: false,
+      commentDisabled: false, shareDisabled: false,
+    });
+
+    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
       age: [],
-      exclude_age_under_eighteen: 1,
-      limited_audience: { age: [[25, 34], [35, 44], [45, 54], [55, 100]] },
+      exclude_age_under_eighteen: 0,
+      limited_audience: { age: [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
     });
   });
 
@@ -230,9 +255,10 @@ describe("creation protocol", () => {
 
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
       gender: 2,
-      age: [],
-      exclude_age_under_eighteen: 1,
-      limited_audience: { age: [[25, 34], [35, 44], [45, 54], [55, 100]] },
+      // 行里选了 4 档（不是全选）-> age 带这 4 档；可选范围恒为全池。
+      age: [[25, 34], [35, 44], [45, 54], [55, 100]],
+      exclude_age_under_eighteen: 0,
+      limited_audience: { age: [[13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100]] },
     });
   });
 
