@@ -42,11 +42,12 @@ function fmtDate(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
 
-// 次日 06:00（本地时区），返回 datetime-local 可用的 "YYYY-MM-DDTHH:mm"。
-function defaultNextDaySix(): string {
+// 未来最近的 06:00（本地时区），返回 datetime-local 可用的 "YYYY-MM-DDTHH:mm"。
+// 现在是 00:10 就给今天早上 06:00；已经过了 06:00 才顺延到次日。
+function defaultNextSixOClock(): string {
   const date = new Date();
-  date.setDate(date.getDate() + 1);
   date.setHours(6, 0, 0, 0);
+  if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
@@ -144,7 +145,7 @@ export function ExpandGroupsPanel({
   const [dailyBudget, setDailyBudget] = useState(DEFAULT_DAILY_BUDGET);
   const [bidText, setBidText] = useState(DEFAULT_BID_TEXT);
   const [timingMode, setTimingMode] = useState<"immediate" | "scheduled">("scheduled");
-  const [scheduledAt, setScheduledAt] = useState<string>(defaultNextDaySix);
+  const [scheduledAt, setScheduledAt] = useState<string>(defaultNextSixOClock);
   const [visibleAccountIds, setVisibleAccountIds] = useState<string[]>([]);
   // 正在跑的批次数。只用于显示进度，不再拿它去禁用任何东西——一批扩组可能跑很久，
   // 锁死按钮等于整个面板停摆。防重复靠提交前的预检二次确认。
@@ -453,7 +454,7 @@ export function ExpandGroupsPanel({
         <button className={timingMode === "scheduled" ? "expand-timing-mode active" : "expand-timing-mode"} onClick={() => setTimingMode("scheduled")} type="button">定时投放</button>
       </div>
       {timingMode === "scheduled"
-        ? <label className="expand-timing-when"><input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新组将以开启状态发布，并由 TikTok 在设定时间开始投放。默认次日 06:00，可改。</small></label>
+        ? <label className="expand-timing-when"><input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新组将以开启状态发布，并由 TikTok 在设定时间开始投放。默认最近的早上 06:00（未到 06:00 就是今天），可改。</small></label>
         : <small className="expand-timing-hint">新组创建后立即开启投放。</small>}
     </div>
   </div>;

@@ -2801,9 +2801,13 @@ describe("AutomationStore", () => {
       const reviewedTimes = Object.fromEntries(
         preview.items.map((item) => [item.accountId, item.launchRow.startAt]),
       );
+      // 06:00 取【未来最近的那个】，因此两个账户会落在不同的日历日：
+      //   台北当地 17:15，已过 06:00 -> 次日早上（UTC 7/23 22:00）
+      //   纽约当地 05:15，还没到     -> 当天早上（UTC 7/23 10:00），只等 45 分钟
+      // 旧逻辑无条件 +1 天，会把纽约排到第二天早上，白等 24 小时。
       expect(reviewedTimes).toEqual({
         [east.id]: "2026-07-23T22:00:00.000Z",
-        [west.id]: "2026-07-24T10:00:00.000Z",
+        [west.id]: "2026-07-23T10:00:00.000Z",
       });
 
       const plan = store.createMultiAccountLaunchPlan({
