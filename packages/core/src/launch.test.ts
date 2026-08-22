@@ -18,6 +18,43 @@ describe("resolveLaunchStartAt", () => {
     expect(tonight).toBe("2026-07-23T16:00:00.000Z");
     expect(morning).toBe("2026-07-23T22:00:00.000Z");
   });
+
+  it("凌晨建广告时 06:00 取当天，不再白等一整天", () => {
+    // 台北 7/24 00:10（= UTC 7/23 16:10）。此前无条件 +1 天会排到 7/25 早上，
+    // 凭空多等 24 小时；现在应当排今天早上 06:00。
+    const beforeDawn = new Date("2026-07-23T16:10:00.000Z");
+    expect(resolveLaunchStartAt("tomorrow-morning", null, beforeDawn, "Asia/Taipei"))
+      .toBe("2026-07-23T22:00:00.000Z");
+  });
+
+  it("刚好 06:00 与已过 06:00 都顺延到次日，不会排到过去", () => {
+    // 台北 7/24 06:00 整：已经到点，排今天等于排在当下，必须顺延。
+    const atSix = new Date("2026-07-23T22:00:00.000Z");
+    expect(resolveLaunchStartAt("tomorrow-morning", null, atSix, "Asia/Taipei"))
+      .toBe("2026-07-24T22:00:00.000Z");
+    // 台北 7/24 05:59：还差一分钟，仍用今天。
+    const justBefore = new Date("2026-07-23T21:59:00.000Z");
+    expect(resolveLaunchStartAt("tomorrow-morning", null, justBefore, "Asia/Taipei"))
+      .toBe("2026-07-23T22:00:00.000Z");
+  });
+
+  it("当天 24:00 不受影响：永远是下一个午夜", () => {
+    const beforeDawn = new Date("2026-07-23T16:10:00.000Z");
+    // 台北 7/24 00:10 的下一个午夜是 7/25 00:00（= UTC 7/24 16:00）。
+    expect(resolveLaunchStartAt("tonight", null, beforeDawn, "Asia/Taipei"))
+      .toBe("2026-07-24T16:00:00.000Z");
+  });
+
+  it("不带时区时同样取未来最近的 06:00", () => {
+    const local = new Date();
+    local.setHours(2, 30, 0, 0);
+    const resolved = resolveLaunchStartAt("tomorrow-morning", null, local);
+    const scheduled = new Date(resolved!);
+    expect(scheduled.getHours()).toBe(6);
+    expect(scheduled.getTime()).toBeGreaterThan(local.getTime());
+    // 凌晨 2:30 排的应当是 3.5 小时后，而不是 27.5 小时后。
+    expect(scheduled.getTime() - local.getTime()).toBeLessThan(12 * 60 * 60 * 1000);
+  });
 });
 
 describe("resolveMigrationStartAt", () => {

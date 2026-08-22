@@ -453,10 +453,14 @@ export function resolveLaunchStartAt(
   if (timeZone) {
     const nowParts = dateTimePartsInZone(now, timeZone);
     const targetHour = startAtRule === "tonight" ? 0 : 6;
+    // 06:00 取【未来最近的那个 06:00】：现在是 00:10 就用今天早上，已经过了 06:00
+    // 才顺延到次日。此前无条件 +1 天，凌晨建的广告要白等一整天。
+    // 24:00 不需要这个判断——次日 00:00 本来就永远是下一个午夜。
+    const dayOffset = targetHour === 6 && nowParts.hour < 6 ? 0 : 1;
     const targetWallClock = Date.UTC(
       nowParts.year,
       nowParts.month - 1,
-      nowParts.day + 1,
+      nowParts.day + dayOffset,
       targetHour,
       0,
       0,
@@ -480,8 +484,14 @@ export function resolveLaunchStartAt(
   }
   const date = new Date(now);
   date.setSeconds(0, 0);
-  date.setDate(date.getDate() + 1);
-  date.setHours(startAtRule === "tonight" ? 0 : 6, 0, 0, 0);
+  if (startAtRule === "tonight") {
+    date.setDate(date.getDate() + 1);
+    date.setHours(0, 0, 0, 0);
+  } else {
+    // 同上：未来最近的 06:00，今天还没到就用今天。
+    date.setHours(6, 0, 0, 0);
+    if (date.getTime() <= now.getTime()) date.setDate(date.getDate() + 1);
+  }
   return date.toISOString();
 }
 

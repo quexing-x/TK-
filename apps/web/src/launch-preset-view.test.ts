@@ -27,7 +27,9 @@ describe("presetStartLabel", () => {
   it("shows immediate and relative preset timing explicitly", () => {
     expect(presetStartLabel(preset())).toBe("立即");
     expect(presetStartLabel(preset({ startAtRule: "tonight" }))).toContain("当天 24:00");
-    expect(presetStartLabel(preset({ startAtRule: "tomorrow-morning" }))).toContain("次日 06:00");
+    // 「次日」是错的口径：未到 06:00 时排的是今天早上。文案不能再写次日。
+    expect(presetStartLabel(preset({ startAtRule: "tomorrow-morning" }))).toContain("早上 06:00");
+    expect(presetStartLabel(preset({ startAtRule: "tomorrow-morning" }))).not.toContain("次日");
   });
 });
 

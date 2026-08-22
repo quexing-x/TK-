@@ -29,10 +29,11 @@ interface StuckCampaignCopyTask {
 
 type LaunchTiming = "disabled" | "immediate" | "scheduled";
 
-function defaultNextDaySix(): string {
+// 未来最近的 06:00（本地时区）：现在是 00:10 就给今天早上，已过 06:00 才顺延到次日。
+function defaultNextSixOClock(): string {
   const date = new Date();
-  date.setDate(date.getDate() + 1);
   date.setHours(6, 0, 0, 0);
+  if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
@@ -88,7 +89,7 @@ export function CopyCampaignPanel(props: {
   const [campaignCopies, setCampaignCopies] = useState(2);
   const [groupsPerCampaign, setGroupsPerCampaign] = useState(1);
   const [launchTiming, setLaunchTiming] = useState<LaunchTiming>("disabled");
-  const [scheduledAt, setScheduledAt] = useState<string>(defaultNextDaySix);
+  const [scheduledAt, setScheduledAt] = useState<string>(defaultNextSixOClock);
   const [campaignBudgetText, setCampaignBudgetText] = useState("");
   const [bidText, setBidText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -400,7 +401,7 @@ export function CopyCampaignPanel(props: {
             <button aria-pressed={launchTiming === "scheduled"} className={launchTiming === "scheduled" ? "active" : ""} disabled={disabled} onClick={() => setLaunchTiming("scheduled")} type="button">定时投放</button>
           </div>
           {launchTiming === "scheduled"
-            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>{isMeta ? "Meta 会先创建两层对象，完成状态写入门禁后按该时间启用；全程不创建新帖子。" : "新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。"} 默认次日 06:00，可改。</small></label>
+            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>{isMeta ? "Meta 会先创建两层对象，完成状态写入门禁后按该时间启用；全程不创建新帖子。" : "新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。"} 默认最近的早上 06:00（未到 06:00 就是今天），可改。</small></label>
             : <small>一次会创建多个系列，默认关闭以避免误花费。</small>}
         </div>
       </div>
