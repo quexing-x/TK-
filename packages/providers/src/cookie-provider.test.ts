@@ -2454,6 +2454,45 @@ describe("CookieAdsProvider", () => {
     expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
   });
 
+  it("自动优化：保留创意上已有的策略列表，且非空列表必须配 type=2", async () => {
+    // 真机成功抓包：creative_automation_type=2 且列表 4 项（含翻译配音）。
+    // 此前这里写死 type=1 并拿默认 3 项覆盖，TikTok 回
+    // creative_automation_list_should_be_nil_error——type=1 不允许带列表。
+    let creativeBody: Record<string, unknown> | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      let payload: Record<string, unknown>;
+      if (url.includes("material/tt_video/bulk/info")) {
+        payload = { code: 0, data: { tt_video_map: { "#lib-code": {
+          item_id: "9998887776665", core_user_id: "spark-identity", video_info: { vid: "spark-video" },
+        } } } };
+      } else if (url.includes("material/tt_video/bulk/authorize")) {
+        payload = { code: 0, data: { identity_id_map: { "#lib-code": "spark-identity" } } };
+      } else if (url.includes("creative/creative_automation_option")) {
+        // 账户支持这 4 项，其中 200001 不在创意列表里，不应被塞进去。
+        payload = { code: 0, data: { strategy_ids: ["100001", "100002", "200001", "7419232909960003601", "7455417586723028993"], group_strategies: [] } };
+      } else {
+        if (url.includes("creative_snap/save")) creativeBody = body;
+        payload = sparkCreationPayload(url, body);
+      }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#lib-code";
+    mutation.preset.videoPostMappings = [];
+
+    await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    const asset = (creativeBody as unknown as {
+      asset_group_sketch_form_data_list?: Array<Record<string, unknown>>;
+    } | null)?.asset_group_sketch_form_data_list?.[0];
+    expect(asset?.creative_automation_type).toBe(2);
+    // 账户支持但创意没选的策略不会被补进来。
+    expect(asset?.creative_automation_list).not.toContain("200001");
+    expect((asset?.creative_automation_list as string[]).length).toBeGreaterThan(0);
+  });
+
   it("发布失败时把 TikTok 的原话带出来，而不是被 id 挤掉", async () => {
     // 线上事故：报错被 JSON.stringify(result).slice(0, 300) 从中间切断，
     // 真正的原因排在一堆 snap/sketch id 后面，每次都正好被切掉。
@@ -2703,7 +2742,7 @@ describe("CookieAdsProvider", () => {
       item_source: 2,
     });
     expect((creativeSave?.body.asset_group_sketch_form_data_list as Array<Record<string, unknown>>)[0]).toMatchObject({
-      creative_automation_type: 1,
+      creative_automation_type: 2,
       creative_automation_list: ["100001", "100002", "7455417586723028993"],
       catalog_setup: 0,
       need_create_cta_id: true,
