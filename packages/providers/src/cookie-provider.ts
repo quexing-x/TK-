@@ -4125,12 +4125,14 @@ function skippedMaterialWarning(skipped: string[]): string {
 /**
  * 素材库批量接口的单次查询码数上限。
  *
- * TikTok 没有公开这个数字，只在超限时回一句
- * 「Authorization codes queried at one time exceeds the upper limit」。生产实测：
- * 单请求 33 个码必被拒，因此真实上限落在 33 以下。这里取保守值——多几次请求的代价
- * 远小于整批创建失败；确认真实上限后可以调大。
+ * TikTok 后台手动导入授权码时一次也是 20 条，接口侧同一个限制；超了只回一句
+ * 「Authorization codes queried at one time exceeds the upper limit」，不说上限是
+ * 多少。生产数据与这个值一致：单请求 33 个码必被拒，16 个码可以过。
+ *
+ * 注意这与「一个广告组最多挂 50 条素材」是两个不同的限制——50 条素材的广告组是
+ * 合法的，只是它的授权码要分 3 次查。
  */
-const VIDEO_CODE_LOOKUP_CHUNK_SIZE = 10;
+const VIDEO_CODE_LOOKUP_CHUNK_SIZE = 20;
 
 function chunkVideoCodes(codes: string[]): string[][] {
   const chunks: string[][] = [];

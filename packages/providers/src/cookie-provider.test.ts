@@ -2488,10 +2488,11 @@ describe("CookieAdsProvider", () => {
 
     await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
 
-    // 25 个码切成 3 批，没有任何一批超过上限。
-    expect(infoBatches).toHaveLength(3);
-    expect(infoBatches.map((batch) => batch.length)).toEqual([10, 10, 5]);
-    expect(authorizeBatches.map((batch) => batch.length)).toEqual([10, 10, 5]);
+    // 25 个码切成 20 + 5，没有任何一批超过 TikTok 的单次 20 条上限。
+    expect(infoBatches).toHaveLength(2);
+    expect(infoBatches.map((batch) => batch.length)).toEqual([20, 5]);
+    expect(authorizeBatches.map((batch) => batch.length)).toEqual([20, 5]);
+    expect(infoBatches.every((batch) => batch.length <= 20)).toBe(true);
     // 切批不能丢码，也不能重复。
     expect(infoBatches.flat()).toEqual(codes);
     expect(authorizeBatches.flat()).toEqual(codes);
