@@ -35,11 +35,12 @@ describe("launch spreadsheet", () => {
       region: "US",
       dailyBudget: 120,
       bid: null,
-      ageRanges: ["13-17", "18-24", "25-34", "35-44", "45-54", "55-100"],
+      // 模板预填 18 岁以上：Smart+ 系列禁止向 18 岁以下投放。
+      ageRanges: ["18-24", "25-34", "35-44", "45-54", "55-100"],
       gender: "all",
     });
   });
-  it("builds 500 editable rows with all ages and unrestricted gender prefilled", async () => {
+  it("builds 500 editable rows with 18+ ages and unrestricted gender prefilled", async () => {
     const { Workbook } = await import("exceljs");
     const workbook = new Workbook();
     await workbook.xlsx.load(await createLaunchTemplateBuffer());
@@ -55,9 +56,9 @@ describe("launch spreadsheet", () => {
       "性别",
     ]);
     expect(worksheet.rowCount).toBe(501);
-    expect(worksheet.getCell("E2").value).toBe("13-17;18-24;25-34;35-44;45-54;55-100");
+    expect(worksheet.getCell("E2").value).toBe("18-24;25-34;35-44;45-54;55-100");
     expect(worksheet.getCell("F2").value).toBe("不限");
-    expect(worksheet.getCell("E501").value).toBe("13-17;18-24;25-34;35-44;45-54;55-100");
+    expect(worksheet.getCell("E501").value).toBe("18-24;25-34;35-44;45-54;55-100");
     expect(worksheet.getCell("F501").value).toBe("不限");
     expect(worksheet.getCell("F2").dataValidation.formulae).toEqual(['"不限,男,女"']);
     expect(workbook.getWorksheet("填写示例")?.getRow(2).values).toEqual([
@@ -66,7 +67,7 @@ describe("launch spreadsheet", () => {
       "夏季广告组",
       "视频代码_001；视频代码_002",
       "https://example.com/product",
-      "13-17;18-24;25-34;35-44;45-54;55-100",
+      "18-24;25-34;35-44;45-54;55-100",
       "不限",
     ]);
   });

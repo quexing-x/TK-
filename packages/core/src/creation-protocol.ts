@@ -141,7 +141,6 @@ export interface CreationTemplateReadiness {
 }
 
 const TikTokAgeRanges: Record<LaunchAgeRange, [number, number]> = {
-  "13-17": [13, 17],
   "18-24": [18, 24],
   "25-34": [25, 34],
   "35-44": [35, 44],
@@ -150,7 +149,12 @@ const TikTokAgeRanges: Record<LaunchAgeRange, [number, number]> = {
 };
 
 function materializeAgeRanges(values: readonly LaunchAgeRange[]): number[][] {
-  return values.map((value) => [...TikTokAgeRanges[value]]);
+  // 历史计划里可能存着已下线的年龄档，映射不到就丢弃——绝不能产出 undefined 元素
+  // 塞进定向载荷。
+  return values.flatMap((value) => {
+    const range = TikTokAgeRanges[value];
+    return range ? [[...range]] : [];
+  });
 }
 
 function materializeGender(gender: CreationPresetConfig["gender"]): number {
@@ -174,7 +178,6 @@ function resolvedRowTargeting(
     gender: materializeGender(selectedGender),
     hasExplicitAgeRanges: Boolean(selectedAgeRanges?.length),
     hasExplicitGender: selectedGender !== undefined,
-    includesUnder18: selectedAgeRanges?.includes("13-17") ?? true,
   };
 }
 
@@ -211,7 +214,7 @@ export function buildDraftPayloads(
     adGroupBudget: row.dailyBudget,
     smartPlus,
   });
-  const { ageRanges, gender, hasExplicitAgeRanges, includesUnder18 } = resolvedRowTargeting(row, config);
+  const { ageRanges, gender, hasExplicitAgeRanges } = resolvedRowTargeting(row, config);
   return {
     campaign: {
       campaign_sketch_form_data: {
@@ -362,7 +365,7 @@ export function buildDraftPayloads(
         ios14_quota_type: 1,
         suitability_non_garm_category: [],
         anti_discrimination: 0,
-        exclude_age_under_eighteen: hasExplicitAgeRanges && !includesUnder18 ? 1 : 0,
+        exclude_age_under_eighteen: 1,
         duration_time_range: 0,
         attribution_window_click: 7,
         attribution_window_view: 1,
@@ -519,7 +522,6 @@ function applyCreationConfigOverrides(
     gender,
     hasExplicitGender,
     hasExplicitAgeRanges,
-    includesUnder18,
   } = resolvedRowTargeting(row, config);
   campaignForm.objective_type = config.objectiveType;
   campaignForm.buying_type = config.buyingType;
@@ -581,7 +583,7 @@ function applyCreationConfigOverrides(
     Object.assign(adForm, {
       age: [],
       ...(hasExplicitGender ? { gender } : {}),
-      exclude_age_under_eighteen: includesUnder18 ? 0 : 1,
+      exclude_age_under_eighteen: 1,
       limited_audience: { age: ageRanges },
       smart_interest_behavior: 3,
       smart_audience: 3,
@@ -597,7 +599,7 @@ function applyCreationConfigOverrides(
     if (hasExplicitAgeRanges) adForm.age = ageRanges;
     if (hasExplicitGender) adForm.gender = gender;
     if (hasExplicitAgeRanges) {
-      adForm.exclude_age_under_eighteen = includesUnder18 ? 0 : 1;
+      adForm.exclude_age_under_eighteen = 1;
     }
   }
   if (config.countryCodes.length > 0) adForm.country = [...config.countryCodes];
@@ -648,9 +650,8 @@ function applyCreationConfigOverrides(
     ios14_quota_type: 1,
     suitability_non_garm_category: [],
     anti_discrimination: 0,
-    exclude_age_under_eighteen: hasExplicitAgeRanges
-      ? includesUnder18 ? 0 : 1
-      : smartPlus ? 0 : 1,
+    // 投放年龄不含未成年档，恒为排除。
+    exclude_age_under_eighteen: 1,
     duration_time_range: 0,
     attribution_window_click: 7,
     attribution_window_view: 1,

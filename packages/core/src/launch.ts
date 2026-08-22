@@ -14,8 +14,8 @@ export type LaunchTemplateMode = z.infer<typeof LaunchTemplateModeSchema>;
 export const LaunchGenderSchema = z.enum(["all", "male", "female"]);
 export type LaunchGender = z.infer<typeof LaunchGenderSchema>;
 
+/** 可选年龄段。TikTok 的 Smart+ 推广系列禁止向 18 岁以下投放，故不提供未成年档。 */
 export const LaunchAgeRangeValues = [
-  "13-17",
   "18-24",
   "25-34",
   "35-44",
@@ -843,8 +843,12 @@ function parseLaunchAgeRanges(value: unknown): LaunchAgeRange[] | null {
     .map((item) => item.trim().replace(/\s+/g, ""))
     .filter(Boolean)
     .map((item) => item === "55+" ? "55-100" : item);
-  if (values.length === 0 || values.some((item) => !LaunchAgeRangeSchema.safeParse(item).success)) return null;
-  const selected = new Set(values as LaunchAgeRange[]);
+  // 已下线的年龄档（历史表格里可能还写着未成年档）直接丢弃，不因此判整行错误；
+  // 真正写错的档位在下面的 supported 判断里仍然会报错。
+  const supported = values.filter((item) => LaunchAgeRangeSchema.safeParse(item).success);
+  const retired = values.filter((item) => /^\d+-\d+$/.test(item) && Number(item.split("-")[0]) < 18);
+  if (supported.length === 0 || supported.length + retired.length !== values.length) return null;
+  const selected = new Set(supported as LaunchAgeRange[]);
   return LaunchAgeRangeValues.filter((item) => selected.has(item));
 }
 

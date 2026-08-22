@@ -140,7 +140,8 @@ describe("parseLaunchSheetTable", () => {
       adGroupName: "夏季广告组",
       adName: "260716:001",
       region: "US",
-      ageRanges: ["13-17", "18-24", "25-34", "35-44", "45-54", "55-100"],
+      // 「不限 / 留空」按 18 岁以上兜底，不再全选。
+      ageRanges: ["18-24", "25-34", "35-44", "45-54", "55-100"],
       gender: "all",
       dailyBudget: 100,
       bid: 1.25,
@@ -169,13 +170,26 @@ describe("parseLaunchSheetTable", () => {
   it("ignores template placeholder rows that only contain targeting defaults", () => {
     const result = parseLaunchSheetTable([
       ["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"],
-      ["", "", "", "", "13-17;18-24;25-34;35-44;45-54;55-100", "不限"],
+      ["", "", "", "", "18-24;25-34;35-44;45-54;55-100", "不限"],
     ], preset);
 
     expect(result.rows).toEqual([]);
     expect(result.errors).toEqual([
       { rowNumber: 2, field: "数据", message: "没有可导入的任务行。" },
     ]);
+  });
+
+  it("历史表格里已下线的未成年档被丢弃，整行仍可导入", () => {
+    // 用户库里有 28 条历史计划项的年龄列还写着这个已下线档位；判整行错会让这些
+    // 表格突然不能重导。真正写错的档位（下一个用例）仍然要报错。
+    const RETIRED_UNDER_18_BAND = "13-17";
+    const result = parseLaunchSheetTable([
+      ["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"],
+      ["系列", "广告组", "video", "https://example.com", `${RETIRED_UNDER_18_BAND};25-34`, "不限"],
+    ], preset);
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[0]?.ageRanges).toEqual(["25-34"]);
   });
 
   it("rejects unsupported per-row targeting values", () => {
