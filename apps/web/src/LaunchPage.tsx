@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, CircleCheck, CircleX, Download, FileSpreadsheet, Pencil, RefreshCcw, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
 import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
@@ -221,36 +221,48 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     : selectedPresetExecutionReady;
   const canManageLaunchPresets = auth.status.permissions.includes("launch:manage");
   const canDispatchLaunch = auth.status.permissions.includes("ads:operate");
+  /**
+   * 账户当前的接入信息。connections 是 load() 里逐账户拉回来的覆盖值，在它到位
+   * 之前（或某个账户拉失败导致整个 Promise.all 抛出时）为空——没有回退的话，
+   * 闸门会认为所有账户都没连接，于是卡片显示「可发布」、下拉却一个都选不到。
+   * 卡片一直有这个回退，这里必须用同一套判据。
+   */
+  const connectionOf = useCallback(
+    (accountId: string) => connections[accountId]
+      ?? connectionStates.find((state) => state.accountId === accountId)?.connection
+      ?? null,
+    [connections, connectionStates],
+  );
   const createTargets = useMemo(
     () => accounts.filter((account) =>
       isLaunchExecutionReady(
         account,
-        connections[account.id],
+        connectionOf(account.id),
         accountCapabilities[account.id],
         "create",
       ),
     ),
-    [accountCapabilities, accounts, connections],
+    [accountCapabilities, accounts, connectionOf],
   );
   const copySources = useMemo(
     () => accounts.filter((account) =>
       account.providerKind === "cookie"
-      && connections[account.id]?.status === "ready"
+      && connectionOf(account.id)?.status === "ready"
       && canUseCopySource(accountCapabilities[account.id]),
     ),
-    [accountCapabilities, accounts, connections],
+    [accountCapabilities, accounts, connectionOf],
   );
   const copyTargets = useMemo(
     () => accounts.filter((account) =>
       account.providerKind === "cookie"
       && isLaunchExecutionReady(
         account,
-        connections[account.id],
+        connectionOf(account.id),
         accountCapabilities[account.id],
         "copy",
       ),
     ),
-    [accountCapabilities, accounts, connections],
+    [accountCapabilities, accounts, connectionOf],
   );
   const accountReadiness = useMemo(
     () => accounts.map((account) => launchAccountReadiness(
@@ -282,7 +294,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const selectedSourceGroups = sourceAdGroups.filter((group) => sourceAdGroupIds.includes(group.adGroupId));
   const selectedAccountIds = launchMode === "single" ? (sourceAccountId ? [sourceAccountId] : []) : targetIds;
   const notReadyAccountIds = selectedAccountIds.filter((accountId) =>
-    connections[accountId]?.status !== "ready"
+    connectionOf(accountId)?.status !== "ready"
     || !canUseLaunchTarget(accountCapabilities[accountId], launchMode === "copy" ? "copy" : "create"),
   );
   const copySourceReady = launchMode !== "copy" || copySources.some((account) => account.id === sourceAccountId);
@@ -330,7 +342,16 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       api.getLaunchPresets(),
       api.getLaunchPlans(),
       api.getQueuedLaunchPlanIds(),
-      Promise.all(accounts.map(async (account) => [account.id, (await api.getConnections(account.id)).find((item) => item.kind === account.providerKind) ?? null] as const)),
+      // 逐账户容错：任何一个账户读接入失败都不该让整批变空——那会让所有账户
+      // 在闸门眼里"没连接"，卡片显示可发布、下拉却一个都选不到。
+      Promise.all(accounts.map(async (account) => {
+        try {
+          const list = await api.getConnections(account.id);
+          return [account.id, list.find((item) => item.kind === account.providerKind) ?? null] as const;
+        } catch {
+          return [account.id, null] as const;
+        }
+      })),
     ]);
     setPresets(nextPresets);
     setPlans(nextPlans);

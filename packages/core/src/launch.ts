@@ -25,6 +25,24 @@ export const LaunchAgeRangeValues = [
 export const LaunchAgeRangeSchema = z.enum(LaunchAgeRangeValues);
 export type LaunchAgeRange = z.infer<typeof LaunchAgeRangeSchema>;
 
+/**
+ * 年龄段字段。存量数据（历史计划行、页面里更新前导入的表格、旧预设）可能还带着
+ * 已下线的未成年档，直接按新枚举校验会整条报错——用户看到的是
+ * 「launchRows: Array must contain at most N element(s)」这种不知所云的提示。
+ *
+ * 这里先剥掉已下线档位并去重，再交给枚举校验：能救的照常放行，真正写错的值仍然
+ * 会被枚举拦下。
+ */
+const LaunchAgeRangesFieldSchema = z.preprocess(
+  (value) => {
+    if (!Array.isArray(value)) return value;
+    const supported = new Set<string>(LaunchAgeRangeValues);
+    return [...new Set(value.map(String).filter((item) => supported.has(item)))];
+  },
+  z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length),
+);
+
+
 export const LaunchPlanItemStatusSchema = z.enum([
   "pending",
   "running",
@@ -184,8 +202,7 @@ export const CreationPresetConfigSchema = z.object({
   countryCodes: z.array(z.number().int()).max(100).default([]),
   placementIds: z.array(z.number().int()).max(100).default([]),
   gender: LaunchGenderSchema.optional(),
-  ageRanges: z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length)
-    .optional(),
+  ageRanges: LaunchAgeRangesFieldSchema.optional(),
   smartTargeting: z.boolean().default(true),
   commentDisabled: z.boolean().default(false),
   shareDisabled: z.boolean().default(false),
@@ -304,7 +321,7 @@ export const LaunchConfigurationRowSchema = z.object({
   // 新导入的表格会逐行保存定向；optional 保持旧计划和非表格复制流程可读，
   // 创建协议会在缺失时兼容回退到旧预设或不限定向。
   gender: LaunchGenderSchema.optional(),
-  ageRanges: z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length).optional(),
+  ageRanges: LaunchAgeRangesFieldSchema.optional(),
   dailyBudget: z.number().positive().max(100_000_000),
   // 系列日预算。系列预算(CBO)模式下由本字段下发到系列层，广告组层不再发预算。
   // 旧计划没有这个字段，缺省即按组预算处理。同一个系列下的多行必须携带相同的
