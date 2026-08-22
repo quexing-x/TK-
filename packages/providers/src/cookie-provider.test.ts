@@ -2454,6 +2454,43 @@ describe("CookieAdsProvider", () => {
     expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
   });
 
+  it("发布失败时把 TikTok 的原话带出来，而不是被 id 挤掉", async () => {
+    // 线上事故：报错被 JSON.stringify(result).slice(0, 300) 从中间切断，
+    // 真正的原因排在一堆 snap/sketch id 后面，每次都正好被切掉。
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const payload = url.includes("async_creation/detail")
+        ? { code: 0, data: { status: 1, result: {
+            campaign_name: "DM001636頸椎保護頸托低价测试",
+            operation: 5,
+            by_campaign_snap_id: "1874228203604017",
+            by_campaign_sketch_id: "1874228215425474",
+            ad_and_creative: { 0: {
+              ad_name: "DM001636頸椎保護頸托低价测试",
+              is_success: false,
+              ad_error_items: [{
+                starling_key: "uaa_campaign_automation_inconsistent_error",
+                message: "自动优化设置与系列不一致，请检查后重试",
+              }],
+            } },
+          } } }
+        : successfulCreationPayload(url);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [creationTestMutation("none")],
+    );
+
+    expect(result?.ok).toBe(false);
+    // starling_key 稳定可检索，message 才有细节，两个都要留下。
+    expect(result?.message).toContain("uaa_campaign_automation_inconsistent_error");
+    expect(result?.message).toContain("自动优化设置与系列不一致，请检查后重试");
+    // 定位用的上下文仍然保留，但不再把原因挤出去。
+    expect(result?.message).toContain("1874228203604017");
+  });
+
   it("授权码分批查询，不再一次性把整批码塞进一个请求", async () => {
     // 生产事故：一行 50 个码、或批量创建把 17 行的码汇总成 289 个，素材库接口回
     // 「Authorization codes queried at one time exceeds the upper limit」，整批全灭。
