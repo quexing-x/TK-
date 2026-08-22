@@ -548,6 +548,14 @@ function dateTimePartsInZone(value: Date, timeZone: string): {
   };
 }
 
+/**
+ * 单次导入允许创建的广告条数上限。
+ *
+ * 这是自定义的防误操作闸门（防止误传一个大表格就铺出去几千条广告），**不是**
+ * TikTok 的接口限制。按广告条数计：一行有几个视频代码就算几条广告。
+ */
+export const MAX_LAUNCH_ADS_PER_IMPORT = 2000;
+
 export function parseLaunchSheetTable(
   table: unknown[][],
   preset: LaunchPresetInput,
@@ -635,12 +643,29 @@ export function parseLaunchSheetTable(
   if (rows.length === 0 && errors.length === 0) {
     errors.push({ rowNumber: 2, field: "数据", message: "没有可导入的任务行。" });
   }
-  // The 500 cap counts ads (a multi-code ad-group counts as several ads), not
-  // ad-group rows, matching the template's stated safety limit.
-  if (adCount > 500) {
-    errors.push({ rowNumber: 1, field: "文件", message: "单次最多创建 500 条广告。" });
+  // 上限按广告条数算，不是按行数：一行多代码 = 组内多条广告，一行 50 个代码就顶
+  // 50 条。这是自定义的防误操作闸门，不是 TikTok 的限制。
+  //
+  // 报错必须把「现在是多少、超了多少、谁占大头」说清楚——一个几十行、每行几十个
+  // 代码的表格，只说「超了」等于让用户自己拿计算器找。
+  if (adCount > MAX_LAUNCH_ADS_PER_IMPORT) {
+    const heaviest = [...rows]
+      .sort((left, right) => splitVideoCodes(right.videoCode).length - splitVideoCodes(left.videoCode).length)
+      .slice(0, 3)
+      .map((row) => `第 ${row.rowNumber} 行 ${Math.max(1, splitVideoCodes(row.videoCode).length)} 条`)
+      .join("、");
+    errors.push({
+      rowNumber: 1,
+      field: "文件",
+      message: `本次共 ${adCount} 条广告，超出单次上限 ${MAX_LAUNCH_ADS_PER_IMPORT} 条 ${adCount - MAX_LAUNCH_ADS_PER_IMPORT} 条。`
+        + `一行有几个视频代码就算几条广告${heaviest ? `，占比最大的是 ${heaviest}` : ""}。请拆成多次导入。`,
+    });
   }
-  return LaunchSheetImportResultSchema.parse({ rows: rows.slice(0, 500), errors, warnings });
+  return LaunchSheetImportResultSchema.parse({
+    rows: rows.slice(0, MAX_LAUNCH_ADS_PER_IMPORT),
+    errors,
+    warnings,
+  });
 }
 
 /** A cell can contain several account-local video codes separated by ;、； or a new line. */

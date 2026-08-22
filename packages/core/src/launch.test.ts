@@ -55,6 +55,39 @@ const preset = {
 };
 
 describe("parseLaunchSheetTable", () => {
+  it("上限按广告条数算：一行多代码顶多条，报错要说清现在多少、超多少、谁占大头", () => {
+    // 每行 50 个代码 = 50 条广告，41 行刚好越过 2000。
+    const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];
+    const codes = Array.from({ length: 50 }, (_unused, index) => `#code-${index + 1}`).join(";");
+    const table: unknown[][] = [header];
+    for (let row = 1; row <= 41; row += 1) {
+      table.push([`系列${row}`, `组${row}`, codes, "https://example.com/product"]);
+    }
+
+    const result = parseLaunchSheetTable(table, preset, new Date("2026-07-16T09:00:00.000Z"));
+
+    const overflow = result.errors.find((error) => error.field === "文件");
+    expect(overflow?.message).toContain("本次共 2050 条广告");
+    expect(overflow?.message).toContain("超出单次上限 2000 条 50 条");
+    // 只说「超了」等于让用户拿计算器自己找，必须点名占比最大的行。
+    expect(overflow?.message).toContain("一行有几个视频代码就算几条广告");
+    expect(overflow?.message).toMatch(/第 \d+ 行 50 条/);
+  });
+
+  it("刚好到上限不拦：2000 条整必须放行", () => {
+    const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];
+    const codes = Array.from({ length: 50 }, (_unused, index) => `#code-${index + 1}`).join(";");
+    const table: unknown[][] = [header];
+    for (let row = 1; row <= 40; row += 1) {
+      table.push([`系列${row}`, `组${row}`, codes, "https://example.com/product"]);
+    }
+
+    const result = parseLaunchSheetTable(table, preset, new Date("2026-07-16T09:00:00.000Z"));
+
+    expect(result.errors.filter((error) => error.field === "文件")).toEqual([]);
+    expect(result.rows).toHaveLength(40);
+  });
+
   it("keeps old four-column sheets compatible and defaults targeting to unrestricted", () => {
     const result = parseLaunchSheetTable(
       [["推广系列名称", "广告组名称", "视频代码", "产品 URL"], ["夏季系列", "夏季广告组", "video-001", "https://example.com/product"]],
