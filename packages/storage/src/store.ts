@@ -115,6 +115,7 @@ import {
   defaultCreationPresetConfig,
   MultiAccountLaunchPlanInputSchema,
   MultiAccountLaunchPlanRecordSchema,
+  stripRetiredAgeRanges,
   type MultiAccountLaunchPlanInput,
   type MultiAccountLaunchPlanRecord,
   LaunchCopyPreviewInputSchema,
@@ -8253,7 +8254,11 @@ function mapMultiAccountLaunchPlan(row: SqlRow): MultiAccountLaunchPlanRecord {
     presetSnapshot: row.preset_snapshot_json
       ? JSON.parse(String(row.preset_snapshot_json))
       : null,
-    launchRows: JSON.parse(String(row.launch_rows_json ?? "[]")),
+    // 历史计划可能带已下线的年龄档；不剥掉的话读取直接抛，任务中心与预设列表
+    // 会一起加载失败（前端是 Promise.all，一处失败全部拿不到）。
+    launchRows: stripRetiredAgeRanges(
+      JSON.parse(String(row.launch_rows_json ?? "[]")) as Array<{ ageRanges?: unknown }>,
+    ),
     executionResults: JSON.parse(String(row.execution_results_json ?? "[]")),
     status: row.status,
     message: row.message ?? null,
@@ -8275,7 +8280,10 @@ function mapLaunchPlanItem(row: SqlRow): LaunchPlanItemRecord {
     planId: row.plan_id,
     accountId: row.account_id,
     itemIndex: Number(row.item_index),
-    launchRow: JSON.parse(String(row.launch_row_json)),
+    // 同上：逐项也可能是历史行。
+    launchRow: stripRetiredAgeRanges(
+      [JSON.parse(String(row.launch_row_json)) as { ageRanges?: unknown }],
+    )[0],
     templateMode: row.template_mode,
     templateCampaignId: row.template_campaign_id ?? null,
     sourceSnapshot: legacyCopyUnsupported ? null : sourceEvidence,
