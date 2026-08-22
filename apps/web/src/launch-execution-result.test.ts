@@ -3,6 +3,8 @@ import type { AccountConfig, ManagedEntityRecord } from "@tk-auto/core";
 import type { LaunchExecutionResult } from "./api";
 import {
   buildSourceAdGroupOptions,
+  describeRepeatSubmission,
+  launchSubmissionFingerprint,
   summarizeExecution,
   summarizeLaunchOutcomeToast,
   summarizePlanAccountResult,
@@ -155,5 +157,35 @@ describe("launch item result presentation", () => {
       tone: "danger",
       text: "失败 1 条：明确失败：预算被拒绝",
     });
+  });
+});
+
+describe("重复提交提醒", () => {
+  const row = (campaignName: string, adGroupName: string, videoCode: string) =>
+    ({ campaignName, adGroupName, videoCode });
+
+  it("同一批内容指纹相同，账户顺序不影响", () => {
+    const a = launchSubmissionFingerprint({ mode: "single", presetId: "p1", accountIds: ["b", "a"], rows: [row("c", "g", "#v")] });
+    const b = launchSubmissionFingerprint({ mode: "single", presetId: "p1", accountIds: ["a", "b"], rows: [row("c", "g", "#v")] });
+    expect(a).toBe(b);
+  });
+
+  it("换预设、换账户、换任意一行内容都算不同批次", () => {
+    const base = { mode: "single", presetId: "p1", accountIds: ["a"], rows: [row("c", "g", "#v")] };
+    const fingerprint = launchSubmissionFingerprint(base);
+    expect(launchSubmissionFingerprint({ ...base, presetId: "p2" })).not.toBe(fingerprint);
+    expect(launchSubmissionFingerprint({ ...base, accountIds: ["a", "b"] })).not.toBe(fingerprint);
+    expect(launchSubmissionFingerprint({ ...base, rows: [row("c", "g", "#other")] })).not.toBe(fingerprint);
+  });
+
+  it("确认文案说清是同一张表、多少条、多久之前", () => {
+    const seconds = describeRepeatSubmission({ rowCount: 17, accountCount: 2, secondsAgo: 40 });
+    expect(seconds).toContain("40 秒前");
+    expect(seconds).toContain("17 条 × 2 个账户");
+    // 必须点明后果，否则用户只会无脑点确认。
+    expect(seconds).toContain("重复创建同名广告组");
+
+    const minutes = describeRepeatSubmission({ rowCount: 1, accountCount: 1, secondsAgo: 185 });
+    expect(minutes).toContain("3 分钟前");
   });
 });

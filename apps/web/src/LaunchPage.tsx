@@ -198,6 +198,8 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [expandPresetHost, setExpandPresetHost] = useState<HTMLDivElement | null>(null);
   const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
+  // 上次提交的内容指纹与时间。提交后不再清空表格，靠它做重复提交提醒。
+  const lastSubmission = useRef<{ fingerprint: string; at: number } | null>(null);
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const terminalPlanNotificationsReady = useRef(false);
   const notifiedTerminalPlanIds = useRef(new Set<string>());
@@ -617,6 +619,26 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   };
   const savePlan = async () => {
     if (!canSave || (launchMode !== "copy" && !sheet)) return;
+    const fingerprint = launchSubmissionFingerprint({
+      mode: launchMode,
+      presetId,
+      accountIds: selectedAccountIds,
+      rows: sheet?.rows ?? [],
+    });
+    const previous = lastSubmission.current;
+    if (previous && previous.fingerprint === fingerprint) {
+      const confirmed = await confirm({
+        title: "这批内容刚提交过",
+        message: describeRepeatSubmission({
+          rowCount: sheet?.rows.length ?? 0,
+          accountCount: selectedAccountIds.length,
+          secondsAgo: (Date.now() - previous.at) / 1000,
+        }),
+        confirmLabel: "确认再发一次",
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
     try {
       setBusy(true);
       setExecutionFeedback(null);
@@ -653,8 +675,13 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
         setActivePlanIds((current) => [...new Set([...current, plan.id])]);
         setExecutionFeedback({ tone: "warning", title: "已加入后台创建队列", lines: ["页面将持续刷新逐项状态；关闭本页不会中断已领取的任务。"] });
       }
-      setSheet(null); setFileName(""); setTargetIds([]); setCopyPreview(null); setPlanRequestId(crypto.randomUUID());
-      if (fileInput.current) fileInput.current.value = "";
+      // 刻意保留 sheet / fileName / 账户选择：清空会让「创建并发布」直接变灰，
+      // 用户看到的是「系统挡住我了」，而真实原因只是表单被重置。防误重复点改由
+      // 上面的指纹二次确认负责。
+      lastSubmission.current = { fingerprint, at: Date.now() };
+      // 复制预览是一次性冻结证据（带过期时间），必须清；幂等键也要换，否则同一个
+      // clientRequestId 会被服务端当成同一次提交去重。
+      setCopyPreview(null); setPlanRequestId(crypto.randomUUID());
       await load(); onError(null);
     } catch (cause) {
       setExecutionFeedback(null);
@@ -896,6 +923,40 @@ function formatInTimeZone(value: string, timeZone: string): string {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value))}（${timeZone}）`;
+}
+
+/**
+ * 同一批创建内容的指纹，用于识别「这张表刚提交过」。
+ *
+ * 提交成功后表格**不再被清空**（清空等于把按钮变灰，用户以为被系统挡住了），
+ * 所以必须有别的东西来防误重复点——就是这个指纹加一次二次确认。口径与扩组那边
+ * 一致：不锁死，只提醒。
+ */
+export function launchSubmissionFingerprint(input: {
+  mode: string;
+  presetId: string;
+  accountIds: string[];
+  rows: Array<{ campaignName: string; adGroupName: string; videoCode: string }>;
+}): string {
+  return JSON.stringify([
+    input.mode,
+    input.presetId,
+    [...input.accountIds].sort(),
+    input.rows.map((row) => `${row.campaignName}|${row.adGroupName}|${row.videoCode}`),
+  ]);
+}
+
+/** 重复提交的确认文案：说清是同一张表、多少条、多久之前发的。 */
+export function describeRepeatSubmission(input: {
+  rowCount: number;
+  accountCount: number;
+  secondsAgo: number;
+}): string {
+  const when = input.secondsAgo < 60
+    ? `${Math.max(1, Math.round(input.secondsAgo))} 秒前`
+    : `${Math.round(input.secondsAgo / 60)} 分钟前`;
+  return `这批内容${when}刚提交过：${input.rowCount} 条 × ${input.accountCount} 个账户。`
+    + `再发一次会重复创建同名广告组（TikTok 侧可能因重名失败，也可能真的建出两批）。确认再发一次？`;
 }
 
 export function summarizeExecution(
