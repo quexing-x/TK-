@@ -37,6 +37,28 @@ if (!isRecord(publishResponse) || publishResponse.code !== 0) {
   throw new Error(`HAR 里的发布请求不是成功的（code=${isRecord(publishResponse) ? String(publishResponse.code) : "?"}），拒绝导入。`);
 }
 
+/**
+ * 抓包来自真机手动创建，里面的定向可能含未成年档（TikTok 后台允许选，Smart+ 系列
+ * 却会以 audience_age_smart_age_validate_error 拒绝）。模板是要被反复重放的，必须
+ * 在存进凭据之前洗掉——代码层的覆盖只在预设完整时才跑，不能把安全性押在那上面。
+ */
+function stripUnderageTargeting(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    // TikTok 的年龄段形如 [13,17]；下界小于 18 的整段丢弃。
+    if (value.length === 2 && typeof value[0] === "number" && typeof value[1] === "number"
+      && value[0] < 18 && value[1] <= 100) return null;
+    return value.map(stripUnderageTargeting).filter((item) => item !== null);
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = key === "exclude_age_under_eighteen" ? 1 : stripUnderageTargeting(nested);
+    }
+    return out;
+  }
+  return value;
+}
+
 const campaign = bodyBefore("campaign_snap/save");
 const adGroup = bodyBefore("ad_snap/save");
 const creative = bodyBefore("creative_snap/save");
@@ -70,10 +92,10 @@ try {
     ...credential,
     creationProfile: {
       version: 1,
-      campaignPayload: campaign,
-      adGroupPayload: adGroup,
-      creativePayload: creative,
-      publishPayload: publish,
+      campaignPayload: stripUnderageTargeting(campaign) as Record<string, unknown>,
+      adGroupPayload: stripUnderageTargeting(adGroup) as Record<string, unknown>,
+      creativePayload: stripUnderageTargeting(creative) as Record<string, unknown>,
+      publishPayload: stripUnderageTargeting(publish) as Record<string, unknown>,
       verifiedAt: null,
     },
   })));
