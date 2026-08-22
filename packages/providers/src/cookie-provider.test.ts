@@ -2454,6 +2454,117 @@ describe("CookieAdsProvider", () => {
     expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
   });
 
+  it("授权码分批查询，不再一次性把整批码塞进一个请求", async () => {
+    // 生产事故：一行 50 个码、或批量创建把 17 行的码汇总成 289 个，素材库接口回
+    // 「Authorization codes queried at one time exceeds the upper limit」，整批全灭。
+    // 广告组本身允许 50 条素材，但查询接口的单次上限小得多，两者不是一回事。
+    const infoBatches: string[][] = [];
+    const authorizeBatches: string[][] = [];
+    const codes = Array.from({ length: 25 }, (_unused, index) => `#code-${index + 1}`);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      let payload: Record<string, unknown>;
+      if (url.includes("material/tt_video/bulk/info")) {
+        const list = body.video_code_list as string[];
+        infoBatches.push(list);
+        payload = { code: 0, data: { tt_video_map: Object.fromEntries(list.map((code) => [code, {
+          item_id: `item-${code}`,
+          core_user_id: "spark-identity",
+          video_info: { vid: `vid-${code}` },
+        }])) } };
+      } else if (url.includes("material/tt_video/bulk/authorize")) {
+        const list = (body.auth_code_info_list as Array<{ auth_code: string }>).map((item) => item.auth_code);
+        authorizeBatches.push(list);
+        payload = { code: 0, data: { identity_id_map: Object.fromEntries(list.map((code) => [code, "spark-identity"])) } };
+      } else {
+        payload = sparkCreationPayload(url, body);
+      }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = codes.join(";");
+    mutation.preset.videoPostMappings = [];
+
+    await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    // 25 个码切成 3 批，没有任何一批超过上限。
+    expect(infoBatches).toHaveLength(3);
+    expect(infoBatches.map((batch) => batch.length)).toEqual([10, 10, 5]);
+    expect(authorizeBatches.map((batch) => batch.length)).toEqual([10, 10, 5]);
+    // 切批不能丢码，也不能重复。
+    expect(infoBatches.flat()).toEqual(codes);
+    expect(authorizeBatches.flat()).toEqual(codes);
+  });
+
+  it("解析不到的授权码自动跳过，用其余素材继续创建并报出跳过的码", async () => {
+    // 一行可以挂 50 个码，人工排查「是哪一个没授权」成本极高；坏码跳过、好码照建。
+    let creativeBody: Record<string, unknown> | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      let payload: Record<string, unknown>;
+      if (url.includes("material/tt_video/bulk/info")) {
+        // #bad-code 在素材库里查不到，其余两个正常。
+        const list = (body.video_code_list as string[]).filter((code) => code !== "#bad-code");
+        payload = { code: 0, data: { tt_video_map: Object.fromEntries(list.map((code) => [code, {
+          item_id: `item-${code}`,
+          core_user_id: "spark-identity",
+          video_info: { vid: `vid-${code}` },
+        }])) } };
+      } else if (url.includes("material/tt_video/bulk/authorize")) {
+        const list = (body.auth_code_info_list as Array<{ auth_code: string }>).map((item) => item.auth_code);
+        payload = { code: 0, data: { identity_id_map: Object.fromEntries(list.map((code) => [code, "spark-identity"])) } };
+      } else {
+        if (url.includes("creative_snap/save")) creativeBody = body;
+        payload = sparkCreationPayload(url, body);
+      }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#good-1;#bad-code;#good-2";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    // 坏码没有毙掉整行。
+    expect(result).toMatchObject({ ok: true });
+    // 跳过必须可见：界面按「素材提示 / 已跳过 N 条素材」匹配汇总。
+    expect(result?.warning).toContain("素材提示");
+    expect(result?.warning).toContain("已跳过 1 条素材");
+    expect(result?.warning).toContain("#bad-code");
+    // 只有两条好素材进入创意，坏码不会以任何形式混进去。
+    const assets = (creativeBody as unknown as { asset_group_sketch_form_data_list?: Array<Record<string, unknown>> } | null)
+      ?.asset_group_sketch_form_data_list?.[0];
+    expect((assets?.image_list as unknown[])?.length).toBe(2);
+    expect(JSON.stringify(assets?.title_list)).not.toContain("bad-code");
+  });
+
+  it("整行授权码全部解析不到时仍然失败，不建空广告组", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const payload = url.includes("material/tt_video/bulk/info")
+        ? { code: 0, data: { tt_video_map: {} } }
+        : sparkCreationPayload(url);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = "#bad-1;#bad-2";
+    mutation.preset.videoPostMappings = [];
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+
+    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
+    expect(result?.message).toContain("全部无法在素材库中解析到帖子");
+    expect(result?.message).toContain("#bad-1");
+  });
+
   it("runs the successful HAR Spark authorization sequence before saving the creative", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -4553,6 +4664,37 @@ function creationTestMutation(mode: "none" | "copy"): CreationMutation {
     templateMode: mode,
     ...(mode === "copy" ? { templateCampaignId: "source-campaign" } : {}),
   };
+}
+
+/**
+ * Spark 从零创建的完整应答夹具：按请求体动态生成，因而与素材条数无关。
+ * 需要断言「多素材 / 分批 / 跳过」这类行为的用例都用它，避免把 vid、task id
+ * 写死成单条。
+ */
+function sparkCreationPayload(url: string, body: Record<string, unknown> = {}): Record<string, unknown> {
+  if (url.includes("spark/validate_promote_music")) {
+    const posts = Array.isArray(body.post_list) ? body.post_list : [];
+    return { code: 0, data: { music_info_map: Object.fromEntries(
+      posts.filter(isPlainRecord).map((post) => [String(post.item_id), { status: 0 }]),
+    ) } };
+  }
+  if (url.includes("creative/creative_automation_option")) {
+    return { code: 0, data: { strategy_ids: ["100001", "100002", "200001"], group_strategies: [] } };
+  }
+  if (url.includes("spark/creative_fix_task/save")) {
+    const vids = Array.isArray(body.creative_fix_vid_list) ? body.creative_fix_vid_list : [];
+    return { code: 0, data: { task_map: Object.fromEntries(vids.map((vid) => [String(vid), `task-${String(vid)}`])) } };
+  }
+  if (url.includes("spark/creative_fix_task/info")) {
+    const taskIds = Array.isArray(body.task_id_list) ? body.task_id_list : [];
+    return { code: 0, data: { task_info_map: Object.fromEntries(taskIds.map((id) => [String(id), { task_status: 2 }])) } };
+  }
+  if (url.includes("/creative_snap/check/")) return { code: 0, data: { success: true } };
+  return successfulCreationPayload(url);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function successfulCreationPayload(url: string): Record<string, unknown> {

@@ -2355,6 +2355,8 @@ interface PreparedCookieDraft {
   publishItem: DraftPublishItem;
   riskInfo: Record<string, unknown>;
   dispatchState: CreationDispatchState;
+  /** 本行被跳过的授权码，随发布结果一起报给用户。 */
+  skippedVideoCodes?: string[];
 }
 
 interface CookieDraftPreflight {
@@ -2533,7 +2535,7 @@ async function createCookieDraftBatch(
     );
   }
 
-  const ready: Array<{ mutation: CreationMutation; resolvedVideos: ResolvedVideo[] }> = [];
+  const ready: Array<{ mutation: CreationMutation; resolvedVideos: ResolvedVideo[]; skippedCodes: string[] }> = [];
   for (const mutation of mutations) {
     const dispatchState: CreationDispatchState = {
       mutationDispatched: false,
@@ -2542,9 +2544,11 @@ async function createCookieDraftBatch(
         ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
         : {}),
     };
+    const skippedCodes: string[] = [];
     try {
       ready.push({
         mutation,
+        skippedCodes,
         resolvedVideos: mutation.originalPosts?.length
           ? mutation.originalPosts.map((post) => ({
               itemId: post.itemId,
@@ -2558,6 +2562,8 @@ async function createCookieDraftBatch(
               sessionRequest,
               credential,
               library,
+              dispatchState,
+              skippedCodes,
             ),
       });
     } catch (cause) {
@@ -2565,7 +2571,7 @@ async function createCookieDraftBatch(
     }
   }
 
-  for (const { mutation, resolvedVideos } of ready) {
+  for (const { mutation, resolvedVideos, skippedCodes } of ready) {
     const dispatchState: CreationDispatchState = {
       mutationDispatched: false,
       acceptedMutationCount: 0,
@@ -2574,7 +2580,7 @@ async function createCookieDraftBatch(
         : {}),
     };
     try {
-      prepared.push(await runCookieDraftChain(
+      const preparedItem = await runCookieDraftChain(
         sessionRequest,
         campaignObjectRequest,
         credential,
@@ -2584,7 +2590,10 @@ async function createCookieDraftBatch(
         batchReservation,
         batchState,
         { adGroupPayloads, campaignPayloads, resolvedVideos, baseline },
-      ));
+      );
+      // 跳过的素材必须跟着这条任务的结果一起报出去。
+      if (skippedCodes.length > 0) preparedItem.skippedVideoCodes = skippedCodes;
+      prepared.push(preparedItem);
     } catch (cause) {
       const failure = creationFailureResult(mutation, cause, dispatchState);
       failures.push(failure);
@@ -2729,7 +2738,11 @@ async function createCookieDraftBatch(
           return creationFailureResult(item.mutation, outcome.error, item.dispatchState);
         }
         const ids = outcome.ids;
-        const warning = [ids.warning, enableWarning].filter(Boolean).join("；");
+        const warning = [
+          ids.warning,
+          enableWarning,
+          item.skippedVideoCodes?.length ? skippedMaterialWarning(item.skippedVideoCodes) : "",
+        ].filter(Boolean).join("；");
         return {
           ...item.mutation,
           row: item.row,
@@ -3628,12 +3641,15 @@ async function runCookieDraftChain(
     ? initializedIds.creativeSketchId
     : responseId(adGroup, "creative_sketch_id");
 
+  // 单条路径：被跳过的授权码在本函数末尾随结果一起报出。
+  const skippedVideoCodes: string[] = [];
   const resolvedVideos = preflight?.resolvedVideos ?? await resolveTikTokVideos(
     { ...mutation, row: creationRow },
     sessionRequest,
     credential,
     undefined,
     dispatchState,
+    skippedVideoCodes,
   );
 
   // One ad-group, several ads = ONE creative whose image_list carries every
@@ -3864,6 +3880,9 @@ async function runCookieDraftChain(
     ...(ids.campaignId ? { campaignId: ids.campaignId } : {}),
     ...(ids.adGroupId ? { adGroupId: ids.adGroupId } : {}),
     ...(ids.adId ? { adId: ids.adId } : {}),
+    ...(skippedVideoCodes.length > 0
+      ? { warning: skippedMaterialWarning(skippedVideoCodes) }
+      : {}),
     message: "TikTok 创建任务已完成，正在回读三层状态。",
   };
 }
@@ -4029,6 +4048,8 @@ async function resolveTikTokVideos(
   credential: ParsedCookieCredential,
   preloadedLibrary?: ReadonlyMap<string, ResolvedVideo>,
   dispatchState?: CreationDispatchState,
+  /** 出参：本行被跳过的授权码。调用方负责把它报给用户，不能默默吞掉。 */
+  skippedCodes?: string[],
 ): Promise<ResolvedVideo[]> {
   const codes = splitVideoCodes(mutation.row.videoCode);
   const list = codes.length > 0 ? codes : [mutation.row.videoCode];
@@ -4053,7 +4074,14 @@ async function resolveTikTokVideos(
         dispatchState ?? { mutationDispatched: false, acceptedMutationCount: 0 },
       )
     : new Map<string, ResolvedVideo>());
-  const videos = list.map((code) => {
+  // 解析不到的授权码逐个跳过，不再让一颗坏码毙掉整行。
+  //
+  // 一行可以挂到 50 个码，人工排查「是哪一个没授权」成本极高，而其余素材本身是好
+  // 的——把能建的建出来，再把跳过的码原样报给用户，比整行失败有用得多。跳过必须
+  // 可见：调用方会把它写进 syncWarning，界面按「已跳过 N 条素材」汇总。
+  const skipped: string[] = [];
+  const videos: ResolvedVideo[] = [];
+  for (const code of list) {
     const fromLibrary = library.get(code);
     if (code.startsWith("#")) {
       if (fromLibrary) {
@@ -4061,17 +4089,55 @@ async function resolveTikTokVideos(
         if (mappedPostId && mappedPostId !== fromLibrary.itemId) {
           throw new RetryableCreationError("授权码解析结果与保存的 Post ID 不一致，请刷新授权关系后重试。");
         }
-        return fromLibrary;
+        videos.push(fromLibrary);
+        continue;
       }
-      throw new RetryableCreationError(
-        "有授权码无法在素材库中解析到帖子；请确认该视频已授权到当前账户。",
-      );
+      skipped.push(code);
+      continue;
     }
     const manualId = manual.get(code);
-    if (manualId) return { itemId: manualId } satisfies ResolvedVideo;
-    return { itemId: code } satisfies ResolvedVideo;
-  });
+    videos.push({ itemId: manualId ?? code } satisfies ResolvedVideo);
+  }
+  if (videos.length === 0) {
+    // 一个都解析不出来时仍然失败：没有素材就没有可创建的广告，
+    // 静默建出一个空广告组比报错更糟。
+    throw new RetryableCreationError(
+      skipped.length > 0
+        ? `本行 ${skipped.length} 个授权码全部无法在素材库中解析到帖子（${formatSkippedCodes(skipped)}）；请确认这些视频已授权到当前账户。`
+        : "有授权码无法在素材库中解析到帖子；请确认该视频已授权到当前账户。",
+    );
+  }
+  if (skippedCodes) skippedCodes.push(...skipped);
   return videos;
+}
+
+/** 报错/警告里列出被跳过的码，超过 10 个折成计数，避免把提示撑爆。 */
+function formatSkippedCodes(codes: string[]): string {
+  const shown = codes.slice(0, 10).join("、");
+  return codes.length > 10 ? `${shown} 等 ${codes.length} 个` : shown;
+}
+
+/** 素材跳过提示。界面按「素材提示 / 已跳过 N 条素材」匹配并汇总，格式不要随意改。 */
+function skippedMaterialWarning(skipped: string[]): string {
+  return `素材提示：已跳过 ${skipped.length} 条素材（授权码无法在素材库中解析到帖子：${formatSkippedCodes(skipped)}），其余素材已正常创建。`;
+}
+
+/**
+ * 素材库批量接口的单次查询码数上限。
+ *
+ * TikTok 没有公开这个数字，只在超限时回一句
+ * 「Authorization codes queried at one time exceeds the upper limit」。生产实测：
+ * 单请求 33 个码必被拒，因此真实上限落在 33 以下。这里取保守值——多几次请求的代价
+ * 远小于整批创建失败；确认真实上限后可以调大。
+ */
+const VIDEO_CODE_LOOKUP_CHUNK_SIZE = 10;
+
+function chunkVideoCodes(codes: string[]): string[][] {
+  const chunks: string[][] = [];
+  for (let index = 0; index < codes.length; index += VIDEO_CODE_LOOKUP_CHUNK_SIZE) {
+    chunks.push(codes.slice(index, index + VIDEO_CODE_LOOKUP_CHUNK_SIZE));
+  }
+  return chunks;
 }
 
 /** Looks up `#…` authorization codes in the account's material library and maps
@@ -4083,62 +4149,71 @@ async function resolveVideoCodesFromLibrary(
   dispatchState: CreationDispatchState,
 ): Promise<Map<string, ResolvedVideo>> {
   const uniqueCodes = [...new Set(codes)];
-  const response = await requestCreationStep(
-    "material/tt_video/bulk/info",
-    () => creationPathRequest(
-      sessionRequest,
-      "/api/v4/i18n/creation/material/tt_video/bulk/info/",
-      { video_code_list: uniqueCodes },
-    ),
-    credential,
-    { semantics: "preflight-read", dispatchState },
-  );
-  const data = isRecord(response.data) ? response.data : {};
-  const videoMap = isRecord(data.tt_video_map) ? data.tt_video_map : {};
   const out = new Map<string, ResolvedVideo>();
-  for (const code of uniqueCodes) {
-    const entry = videoMap[code];
-    if (!isRecord(entry)) continue;
-    const itemId = nonEmptyId(entry.item_id);
-    if (!itemId) continue;
-    const identityId = nonEmptyId(entry.core_user_id);
-    if (!identityId) {
-      throw dispatchState.mutationDispatched
-        ? new UnknownCreationStateError("TikTok 素材信息未返回可用的 Spark 身份；已有草稿请求发出，不能直接重试。")
-        : new RetryableCreationError("TikTok 素材信息未返回可用的 Spark 身份，请更新授权后重试本条。");
+  // 逐批查询。素材库这两个接口有自己的单次查询上限，和「广告组最多 50 条素材」
+  // 完全是两回事：生产实测单请求 33 个码就会被 TikTok 以
+  // 「Authorization codes queried at one time exceeds the upper limit」拒掉，
+  // 而一个 50 条素材的广告组本身是合法的。批量创建还会把整批所有行的码汇总成
+  // 一个请求（曾出现 289 个码），不切分必炸。
+  for (const chunk of chunkVideoCodes(uniqueCodes)) {
+    const response = await requestCreationStep(
+      "material/tt_video/bulk/info",
+      () => creationPathRequest(
+        sessionRequest,
+        "/api/v4/i18n/creation/material/tt_video/bulk/info/",
+        { video_code_list: chunk },
+      ),
+      credential,
+      { semantics: "preflight-read", dispatchState },
+    );
+    const data = isRecord(response.data) ? response.data : {};
+    const videoMap = isRecord(data.tt_video_map) ? data.tt_video_map : {};
+    for (const code of chunk) {
+      const entry = videoMap[code];
+      if (!isRecord(entry)) continue;
+      const itemId = nonEmptyId(entry.item_id);
+      if (!itemId) continue;
+      const identityId = nonEmptyId(entry.core_user_id);
+      if (!identityId) {
+        throw dispatchState.mutationDispatched
+          ? new UnknownCreationStateError("TikTok 素材信息未返回可用的 Spark 身份；已有草稿请求发出，不能直接重试。")
+          : new RetryableCreationError("TikTok 素材信息未返回可用的 Spark 身份，请更新授权后重试本条。");
+      }
+      const videoInfo = isRecord(entry.video_info) ? entry.video_info : {};
+      const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(videoInfo.video_id);
+      out.set(code, {
+        itemId,
+        identityId,
+        ...(vid ? { vid } : {}),
+      });
     }
-    const videoInfo = isRecord(entry.video_info) ? entry.video_info : {};
-    const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(videoInfo.video_id);
-    out.set(code, {
-      itemId,
-      identityId,
-      ...(vid ? { vid } : {}),
-    });
   }
   const resolvedCodes = uniqueCodes.filter((code) => out.has(code));
   if (resolvedCodes.length === 0) return out;
-  const authorized = await requestCreationStep(
-    "material/tt_video/bulk/authorize",
-    () => creationPathRequest(
-      sessionRequest,
-      "/api/v4/i18n/creation/material/tt_video/bulk/authorize/",
-      { auth_code_info_list: resolvedCodes.map((auth_code) => ({ auth_code })), is_check: false },
-    ),
-    credential,
-    { semantics: "preflight-read", dispatchState },
-  );
-  const authorizedData = isRecord(authorized.data) ? authorized.data : {};
-  const identityMap = isRecord(authorizedData.identity_id_map) ? authorizedData.identity_id_map : {};
-  for (const code of resolvedCodes) {
-    const video = out.get(code)!;
-    const authorizedIdentity = nonEmptyId(identityMap[code]);
-    if (!authorizedIdentity) {
-      throw new ConfirmedCreationFailureError("TikTok 未返回授权码对应的 Spark 身份，已停止创建创意。");
+  for (const chunk of chunkVideoCodes(resolvedCodes)) {
+    const authorized = await requestCreationStep(
+      "material/tt_video/bulk/authorize",
+      () => creationPathRequest(
+        sessionRequest,
+        "/api/v4/i18n/creation/material/tt_video/bulk/authorize/",
+        { auth_code_info_list: chunk.map((auth_code) => ({ auth_code })), is_check: false },
+      ),
+      credential,
+      { semantics: "preflight-read", dispatchState },
+    );
+    const authorizedData = isRecord(authorized.data) ? authorized.data : {};
+    const identityMap = isRecord(authorizedData.identity_id_map) ? authorizedData.identity_id_map : {};
+    for (const code of chunk) {
+      const video = out.get(code)!;
+      const authorizedIdentity = nonEmptyId(identityMap[code]);
+      if (!authorizedIdentity) {
+        throw new ConfirmedCreationFailureError("TikTok 未返回授权码对应的 Spark 身份，已停止创建创意。");
+      }
+      if (video.identityId && video.identityId !== authorizedIdentity) {
+        throw new ConfirmedCreationFailureError("TikTok 返回的 Spark 身份前后不一致，已停止创建创意。");
+      }
+      out.set(code, { ...video, identityId: authorizedIdentity });
     }
-    if (video.identityId && video.identityId !== authorizedIdentity) {
-      throw new ConfirmedCreationFailureError("TikTok 返回的 Spark 身份前后不一致，已停止创建创意。");
-    }
-    out.set(code, { ...video, identityId: authorizedIdentity });
   }
   return out;
 }
