@@ -4006,7 +4006,9 @@ async function awaitCreationResult(
             "TikTok 返回部分创建成功、部分失败，转入 Cookie 远端列表核验。",
           );
         }
-        throw new ConfirmedCreationFailureError(`TikTok 已明确报告广告组或创意创建失败，未生成正式广告。detail=${JSON.stringify(data.result).slice(0, 300)}`);
+        throw new ConfirmedCreationFailureError(
+          `TikTok 已明确报告广告组或创意创建失败，未生成正式广告。原因：${describeCreationFailure(data.result)}`,
+        );
       }
       return detail;
     }
@@ -4424,6 +4426,43 @@ function assertStaticCreationMutation(
       "当前创建样本来自 copy 流程，不能用于从零创建。请重新导入一次真正从空白页面创建广告时的创建请求。",
     );
   }
+}
+
+/**
+ * 从创建结果里捞出 TikTok 真正说了什么。
+ *
+ * 之前这里是 `JSON.stringify(result).slice(0, 300)`：报错原因排在一堆 snap/sketch
+ * id 后面，每次都正好被切掉，线上只能看到
+ * 「detail={"campaign_name":…,"ad_error_items":[{"starling_key":"uaa_campaign_automa」
+ * 这种断句，等于把唯一有用的信息扔了。改为先把 error item 抽出来放最前面。
+ */
+function collectCreationErrorItems(value: unknown, out: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const item of value) collectCreationErrorItems(item, out);
+    return out;
+  }
+  if (!isRecord(value)) return out;
+  const key = typeof value.starling_key === "string" ? value.starling_key.trim() : "";
+  const message = typeof value.message === "string" ? value.message.trim() : "";
+  if (key || message) {
+    // key 与 message 常常互为补充：key 稳定可检索，message 才有细节。
+    const line = key && message && !message.startsWith(key) ? `${key}: ${message}` : (message || key);
+    if (line && !out.includes(line)) out.push(line);
+  }
+  for (const nested of Object.values(value)) collectCreationErrorItems(nested, out);
+  return out;
+}
+
+function describeCreationFailure(result: Record<string, unknown>): string {
+  const reasons = collectCreationErrorItems(result);
+  const context = {
+    campaign_name: result.campaign_name,
+    by_campaign_snap_id: result.by_campaign_snap_id,
+    by_campaign_sketch_id: result.by_campaign_sketch_id,
+  };
+  return reasons.length > 0
+    ? `${reasons.join("；")}（${JSON.stringify(context)}）`
+    : JSON.stringify(result).slice(0, 600);
 }
 
 function hasExplicitCreationFailure(value: unknown): boolean {
