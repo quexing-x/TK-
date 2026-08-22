@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
+import { automaticName, stripRetiredAgeRanges, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
 
 describe("resolveLaunchStartAt", () => {
   const now = new Date("2026-07-23T09:15:00.000Z");
@@ -177,6 +177,21 @@ describe("parseLaunchSheetTable", () => {
     expect(result.errors).toEqual([
       { rowNumber: 2, field: "数据", message: "没有可导入的任务行。" },
     ]);
+  });
+
+  it("存量计划行里已下线的年龄档被剥离，不因此整条报错", () => {
+    // 页面里更新前导入的表格、库里的历史计划行都可能带 6 个年龄值（含已下线档）。
+    // 按当前枚举硬校验会报「Array must contain at most 5 element(s)」，而这个错挂在
+    // launchRows 顶层键上，指不到年龄字段。
+    const RETIRED_UNDER_18_BAND = "13-17";
+    const [row] = stripRetiredAgeRanges([{
+      campaignName: "系列",
+      ageRanges: [RETIRED_UNDER_18_BAND, "18-24", "25-34", "35-44", "45-54", "55-100"],
+    }]);
+    expect(row?.ageRanges).toEqual(["18-24", "25-34", "35-44", "45-54", "55-100"]);
+    // 没有已下线档时原样返回，不做多余拷贝。
+    const clean = [{ ageRanges: ["18-24"] }];
+    expect(stripRetiredAgeRanges(clean)[0]).toBe(clean[0]);
   });
 
   it("历史表格里已下线的未成年档被丢弃，整行仍可导入", () => {

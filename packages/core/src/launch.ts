@@ -25,6 +25,29 @@ export const LaunchAgeRangeValues = [
 export const LaunchAgeRangeSchema = z.enum(LaunchAgeRangeValues);
 export type LaunchAgeRange = z.infer<typeof LaunchAgeRangeSchema>;
 
+/**
+ * 剥掉已下线的年龄档并去重。
+ *
+ * 存量数据会带着它们：页面里更新前导入的表格、库里的历史计划行、旧预设。按当前
+ * 枚举硬校验会整条报错，而 zod 的 flatten 只保留顶层路径，用户看到的是
+ * 「launchRows: Array must contain at most N element(s)」这种指不到年龄字段的话。
+ *
+ * 刻意做成函数而不是塞进 schema：schema 里用 preprocess / transform 会让输入与
+ * 输出类型分叉，凡是按输入类型构造、又按输出类型回存计划行的地方（storage）全部
+ * 编译不过。净化只发生在数据入口。
+ */
+export function stripRetiredAgeRanges<T extends { ageRanges?: unknown }>(rows: T[]): T[] {
+  const supported = new Set<string>(LaunchAgeRangeValues);
+  return rows.map((row) => {
+    if (!Array.isArray(row.ageRanges)) return row;
+    const kept = [...new Set(row.ageRanges.map(String).filter((item) => supported.has(item)))];
+    return kept.length === row.ageRanges.length ? row : { ...row, ageRanges: kept };
+  });
+}
+
+
+
+
 export const LaunchPlanItemStatusSchema = z.enum([
   "pending",
   "running",
@@ -184,8 +207,7 @@ export const CreationPresetConfigSchema = z.object({
   countryCodes: z.array(z.number().int()).max(100).default([]),
   placementIds: z.array(z.number().int()).max(100).default([]),
   gender: LaunchGenderSchema.optional(),
-  ageRanges: z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length)
-    .optional(),
+  ageRanges: z.array(LaunchAgeRangeSchema).min(1).max(LaunchAgeRangeValues.length).optional(),
   smartTargeting: z.boolean().default(true),
   commentDisabled: z.boolean().default(false),
   shareDisabled: z.boolean().default(false),
