@@ -12,8 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "build": "node build.mjs",
-    "dist": "node build.mjs && electron-builder --win nsis --x64 && node scripts/verify-packaged-scheduler.mjs",
-    "dist:signed": "node scripts/require-signing-env.mjs && node build.mjs && electron-builder --win nsis --x64 && node scripts/verify-packaged-scheduler.mjs && node scripts/verify-release-signature.mjs",
+    "dist": "pnpm --filter @tk-auto/web build && node build.mjs && electron-builder --win nsis --x64 && node scripts/verify-packaged-scheduler.mjs",
+    "dist:signed": "node scripts/require-signing-env.mjs && pnpm --filter @tk-auto/web build && node build.mjs && electron-builder --win nsis --x64 && node scripts/verify-packaged-scheduler.mjs && node scripts/verify-release-signature.mjs",
     "release:manifest": "node scripts/generate-signed-update-manifest.mjs"
   },
   "devDependencies": {
