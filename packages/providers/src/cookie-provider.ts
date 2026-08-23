@@ -421,6 +421,70 @@ export class CookieAdsProvider implements AdsProvider {
     return results;
   }
 
+  /**
+   * 只回读一个实体，用于状态写入后的确认。
+   *
+   * 此前每改一条状态都跑一次 syncReadOnly：把系列/广告组/广告全部分页拉一遍，
+   * 生产实测 64.8 秒、15 个请求、322 个实体，只为核对其中 1 个。自动启停是逐条
+   * 串行的，20 条就是 20 分钟。
+   *
+   * 列表接口本身支持按 ID 精确筛选，字段名三层各不相同（实测：ad_id 会被静默
+   * 忽略并返回整页，adgroup_id 直接报错 1300400001）：
+   *   campaign -> campaign_ids
+   *   ad-group -> ad_ids
+   *   ad       -> creative_ids
+   */
+  async readEntityById(
+    context: ProviderContext,
+    entityType: "campaign" | "ad-group" | "ad",
+    externalId: string,
+  ): Promise<ProviderEntity | null> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const importedAdGroupRead = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    const captured = credential.requestTemplates?.find((item) => item.target === entityType)
+      ?? (entityType === "campaign" && importedAdGroupRead
+        ? siblingListRequest(importedAdGroupRead, "campaign")
+        : entityType === "ad"
+          ? deriveFinalAdReadRequest(importedAdGroupRead)
+          : undefined);
+    if (!captured?.body) return null;
+    // 必须走与 syncReadOnly 相同的逐层规范化。广告层尤其关键：账户里存着的 ad 模板
+    // 往往是早期从广告组派生的，只换了路径、仍带 dimensions:["ad_id"]，TikTok 会按
+    // 广告组维度作答——每行 creative_id 是 "0" 占位，externalId 永远匹配不上。
+    // 广告的身份在写入侧就是 creative_id（creative_list），读侧也必须是这个维度。
+    const normalized = entityType === "campaign"
+      ? campaignMetricsListRequest(captured)
+      : entityType === "ad"
+        ? adFinalListRequest(captured)
+        : captured;
+    if (!normalized.body) return null;
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(normalized.body) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    const commonReq = isRecord(body.common_req) ? body.common_req : null;
+    if (!commonReq) return null;
+    const filterField = ENTITY_ID_FILTER_FIELDS[entityType];
+    // 保留原有的非 ID 筛选（例如 no_delete），只追加 ID 这一条。
+    const existing = Array.isArray(commonReq.filters) ? commonReq.filters : [];
+    commonReq.filters = [
+      ...existing.filter((item) => !isRecord(item) || item.field !== filterField),
+      { field: filterField, filter_type: 0, in_field_values: [externalId] },
+    ];
+    commonReq.page = 1;
+    commonReq.page_size = 20;
+    const request: CapturedCookieRequest = { ...normalized, body: JSON.stringify(body) };
+    const windowed = withTodayMetricWindow(request, context.timezone ?? "UTC", new Date());
+    const payload = await requestCookieJson(windowed, credential);
+    const matched = extractEntities(payload, entityType)
+      .find((entity) => entity.externalId === externalId);
+    return matched ?? null;
+  }
+
   async syncReadOnly(context: ProviderContext): Promise<ProviderSyncOutput> {
     const settings = CookieConnectionSettingsSchema.parse(context.settings);
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -1094,6 +1158,14 @@ export class CookieAdsProvider implements AdsProvider {
           `ad_snap/copy 仅返回广告组草稿，未返回可发布的创意草稿标识；${scheduledStart ? "排期" : "广告组设置"}已保存，但已停止发布且禁止自动重试。`,
         );
       }
+      // 复制克隆的是源组的自动优化，这里改成与创建流程同一套组合。失败不阻断。
+      publishItems = await applyCopiedCreativeAutomationStrategies({
+        sessionRequest,
+        credential,
+        dispatchState,
+        publishItems,
+        riskInfo,
+      });
       // 2.5) 生成 CTA（程序化创意必需，否则发布报缺少行动引导/URL）。
       const checkInfo = publishItems.map((item) => ({
         ad_id: "",
@@ -1738,6 +1810,116 @@ function draftGroupToPublishItem(group: CopiedCampaignDraftGroup): DraftPublishI
       need_publish: true as const,
     })),
   };
+}
+
+/**
+ * 把复制出来的创意草稿改成与创建流程一致的自动优化组合。
+ *
+ * 扩组走的是 TikTok 的 `ad_snap/copy`（with_creative），新组的自动优化是从**源组
+ * 克隆**来的，不是我们生成的。源组是早期建的时候，那套设置往往是空的或过时的，
+ * 于是扩出来的新组也一直是老的——用户只能重新走一遍创建流程（导表格）才拿得到
+ * 当前这套组合。这里在发布前直接改草稿，扩组就不必再绕这一圈。
+ *
+ * 组合取 DefaultTikTokCreativeAutomationStrategyIds，与创建路径同一个事实源。
+ * 这里**不**先问 creative_automation_option 拿「账户支持哪些」：那个接口要按完整
+ * 投放上下文提问（objective_type / optimize_goal / external_action / 版位…），而复制
+ * 路径手里只有源组 ID，凑不出这些参数；问得不对反而会拿到一份更窄的列表。
+ *
+ * 刻意做成**失败不阻断**：自动优化是锦上添花，不该让一整批扩组因为它整批失败。
+ * 任何一步出错就保持原样发布，与加这段之前的行为完全一致。
+ */
+async function applyCopiedCreativeAutomationStrategies(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  publishItems: DraftPublishItem[];
+  riskInfo: Record<string, unknown>;
+}): Promise<DraftPublishItem[]> {
+  const strategyIds = [...new Set<string>(DefaultTikTokCreativeAutomationStrategyIds)];
+  if (strategyIds.length === 0) return input.publishItems;
+
+  const result: DraftPublishItem[] = [];
+  for (const publishItem of input.publishItems) {
+    try {
+      const creativeSketchIds = publishItem.creative_snap_info_list
+        .map((creative) => creative.creative_sketch_id)
+        .filter(Boolean);
+      if (creativeSketchIds.length === 0) { result.push(publishItem); continue; }
+
+      const detail = await requestCreationStep(
+        "creative_sketch/detail",
+        () => creationPathGetRequest(
+          input.sessionRequest,
+          "/mi/api/v4/i18n/creation/creative_sketch/detail/",
+          { creative_sketch_ids: creativeSketchIds.join(",") },
+        ),
+        input.credential,
+        { semantics: "preflight-read", dispatchState: input.dispatchState },
+      );
+      const detailData = isRecord(detail.data) ? detail.data : undefined;
+      const detailMap = detailData && isRecord(detailData.creative_sketch_info_map)
+        ? detailData.creative_sketch_info_map
+        : undefined;
+      if (!detailMap) { result.push(publishItem); continue; }
+
+      const forms = publishItem.creative_snap_info_list.map((creative) => {
+        const entry: unknown = detailMap[creative.creative_sketch_id];
+        const info = isRecord(entry) ? entry : undefined;
+        const rawForm = info && isRecord(info.asset_group_sketch_form_data)
+          ? info.asset_group_sketch_form_data
+          : undefined;
+        if (!rawForm) return null;
+        return {
+          ...cloneRecord(rawForm),
+          // 原地更新这份草稿，不是新建一份：带上它自己的 snap id。
+          creative_snap_id: creative.creative_snap_id,
+          creative_sketch_id: creative.creative_sketch_id,
+          creative_automation_type: 2,
+          creative_automation_list: [...strategyIds],
+        };
+      });
+      if (forms.some((form) => form === null)) { result.push(publishItem); continue; }
+
+      const saved = await requestCreationStep(
+        "creative_snap/save",
+        () => creationRequest(input.sessionRequest, "creative_snap/save", {
+          asset_group_sketch_form_data_list: forms,
+          spc_upgrade_mode: 1,
+          with_sketch: true,
+          ad_snap_id: publishItem.ad_snap_id,
+          ad_sketch_id: publishItem.ad_sketch_id,
+          risk_info: input.riskInfo,
+        }),
+        input.credential,
+        { semantics: "mutation", dispatchState: input.dispatchState },
+      );
+      const savedData = isRecord(saved.data) ? saved.data : undefined;
+      const snapIds = savedData && Array.isArray(savedData.creative_snap_ids)
+        ? savedData.creative_snap_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+        : [];
+      const sketchIds = savedData && Array.isArray(savedData.creative_sketch_ids)
+        ? savedData.creative_sketch_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+        : [];
+      // 保存成功但没回全 ID 时保持原样发布：拿半套 ID 去发布只会更糟。
+      if (snapIds.length !== forms.length || sketchIds.length !== forms.length) {
+        result.push(publishItem);
+        continue;
+      }
+      result.push({
+        ...publishItem,
+        creative_snap_info_list: snapIds.map((creativeSnapId, index) => ({
+          creative_id: "",
+          creative_snap_id: creativeSnapId,
+          creative_sketch_id: sketchIds[index]!,
+          need_publish: true as const,
+        })),
+      });
+    } catch {
+      // 见上：自动优化改不动就按源组原样发布，绝不因此让扩组失败。
+      result.push(publishItem);
+    }
+  }
+  return result;
 }
 
 async function materializeSimpleCopyCreativeDrafts(input: {
@@ -3727,6 +3909,10 @@ async function runCookieDraftChain(
       campaignSnapId,
       adSnapId,
       creativeInfo: singleAsset,
+      optimizeGoal: mutation.preset.optimizeGoal,
+      externalAction: mutation.preset.externalAction,
+      placementIds: mutation.preset.placementIds,
+      externalUrl: creationRow.productUrl,
     });
     const creativeDraft: Record<string, unknown> = {
       ...drafts.creative,
@@ -4237,6 +4423,11 @@ interface SparkPreparationContext {
   campaignSnapId: string;
   adSnapId: string;
   creativeInfo: Record<string, unknown>;
+  // 自动优化能力查询要按投放上下文提问，少一个参数 TikTok 就换一套答案。
+  optimizeGoal: unknown;
+  externalAction: unknown;
+  placementIds: number[];
+  externalUrl: string;
 }
 
 async function prepareSparkPosts(
@@ -4279,7 +4470,29 @@ async function prepareSparkPosts(
     () => creationPathRequest(
       sessionRequest,
       "/api/v4/i18n/creation/creative/creative_automation_option/",
-      { identity_type: sparkVideos[0]?.identityType ?? 2 },
+      // 必须按真机那份完整提问：这个接口返回的「可用策略」取决于投放上下文，
+      // 只发 identity_type 时 TikTok 会给出另一套列表（实测不含 CTA 优化 100001
+      // 与生成广告卡片 100002），于是这两项被当成「账户不支持」过滤掉，
+      // 广告建出来只剩视频质量一项。常量取自已验证抓包。
+      {
+        objective_type: context.objectiveType,
+        universal_type: 1,
+        app_campaign_type: 0,
+        search_campaign_type: 0,
+        web_all_in_one_catalog: 2,
+        languages: [],
+        country_ids: context.countryIds.map((id) => String(id)),
+        external_type: 102,
+        external_action: context.externalAction,
+        optimize_goal: context.optimizeGoal,
+        inventory_flows: [...context.placementIds],
+        promotion_target_type: 0,
+        external_url: context.externalUrl ? [context.externalUrl] : [],
+        identity_type: sparkVideos[0]?.identityType ?? 2,
+        material_types: [1],
+        product_platform_id: null,
+        catalog_setup: numericValue(context.creativeInfo.catalog_setup) ?? 0,
+      },
     ),
     credential,
   );
@@ -4358,10 +4571,12 @@ async function prepareSparkPosts(
  *
  * 两条规则都是从真机成功抓包里读出来的，别凭感觉改：
  *
- * 1. **过滤的是创意上已有的那份列表**，不是写死的默认值。创建模板重放的是真机
- *    验证过的组合（例如 4 项，含翻译配音 7419232909960003601），拿默认值覆盖它
- *    等于把模板的意义抹掉，也解释了为什么导入模板后仍然发出 3 项。
- *    只有创意上没有列表时才退回默认值。
+ * 1. **过滤的是产品选定的组合**（DefaultTikTokCreativeAutomationStrategyIds），
+ *    不是模板里那份。模板的列表只反映抓包那一刻手动勾了什么，不是规格。
+ *
+ *    另外注意 creative_automation_option 必须按完整投放上下文提问：只发
+ *    identity_type 时 TikTok 会返回另一套更小的可用列表（实测不含 100001/100002），
+ *    于是 CTA 与生成广告卡片会被误判成「账户不支持」而过滤掉。
  *
  * 2. **非空列表必须配 `creative_automation_type = 2`**。真机成功那次就是 2；
  *    此前这里写死成 1，而 TikTok 对「type=1 且列表非空」直接回
@@ -4376,11 +4591,11 @@ function applySupportedCreativeAutomationStrategies(
   const data = response && isRecord(response.data) ? response.data : response;
   if (!data || !Array.isArray(data.strategy_ids)) return;
   const supported = new Set(data.strategy_ids.map((value) => String(value)));
-  const current = creativeInfo.creative_automation_list
-    .map((value) => String(value))
-    .filter((value) => value !== "");
-  const base = current.length > 0 ? current : [...DefaultTikTokCreativeAutomationStrategyIds];
-  const selected = [...new Set(base)].filter((strategyId) => supported.has(strategyId));
+  // 用产品选定的组合，不是模板里那份。模板是从某次真机手动创建抓来的，它的
+  // 自动优化列表只是「抓包那一刻那个人勾了什么」，不是规格；沿用它会把当时多勾
+  // 的项（例如翻译和配音）一直带下去。账户不支持的照旧过滤掉。
+  const selected = [...new Set<string>(DefaultTikTokCreativeAutomationStrategyIds)]
+    .filter((strategyId) => supported.has(strategyId));
   creativeInfo.creative_automation_list = selected;
   creativeInfo.creative_automation_type = selected.length > 0 ? 2 : 0;
 }
@@ -6707,6 +6922,13 @@ const LIST_REQUEST_RETRY_DELAY_MS = 750;
  * 失败的代价不只是界面上一个黄标：那一轮同步会被判为 partial，而删除和自动复制
  * 都要求最近一次同步是 healthy，会连带跳过。
  */
+/** 列表接口按 ID 精确筛选时，三个层级各自的字段名（实测确认）。 */
+const ENTITY_ID_FILTER_FIELDS = {
+  campaign: "campaign_ids",
+  "ad-group": "ad_ids",
+  ad: "creative_ids",
+} as const;
+
 async function requestAllCookieListPagesWithRetry(
   template: CapturedCookieRequest,
   credential: ParsedCookieCredential,

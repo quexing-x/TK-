@@ -1508,31 +1508,49 @@ export class AutomationService {
     }
     let syncWarning: string | null = null;
     try {
-      const refreshed = await this.providers.syncReadOnly(
-        account.providerKind,
-        context,
-      );
-      this.store.saveReadOnlySync(
-        task.accountId,
-        account.providerKind,
-        refreshed.entities,
-        refreshed.result,
-      );
       const desiredStatus = input.action === "enable" ? "enabled" : "disabled";
+      // 先试定向回读：只拉这一个实体，实测 1～2 秒 / 1 个请求，而全量同步是
+      // 89.8 秒 / 15 个请求 / 1618 个实体——只为核对其中 1 个。自动启停是逐条串行
+      // 的，全量的代价会乘以条数。provider 不支持（如素材层）或没读到时退回全量。
+      const targeted = isTargetedReadbackEntity(input.entityType)
+        ? await this.providers
+          .readEntityById(account.providerKind, context, input.entityType, input.externalId)
+          .catch(() => null)
+        : null;
+      let readbackUsable = true;
+      if (targeted) {
+        this.store.refreshProviderEntity(task.accountId, account.providerKind, targeted);
+      } else {
+        const refreshed = await this.providers.syncReadOnly(
+          account.providerKind,
+          context,
+        );
+        this.store.saveReadOnlySync(
+          task.accountId,
+          account.providerKind,
+          refreshed.entities,
+          refreshed.result,
+        );
+        // 覆盖度闸门只对全量同步有意义：它回答的是「这一层本轮取全了吗」。
+        // 定向回读拿的就是目标实体本身，不存在漏取。
+        readbackUsable = this.isEntitySyncUsable(
+          task.accountId,
+          account.providerKind,
+          refreshed.result.quality,
+          input,
+        );
+        if (!readbackUsable) {
+          syncWarning = `状态写入后同步数据不完整：${refreshed.result.warnings.join("；")}`;
+        }
+      }
       const observedStatus = this.store.listManagedEntities(
         task.accountId,
         account.providerKind,
       ).find(
         (entity) => entity.entityType === input.entityType && entity.externalId === input.externalId,
       )?.status;
-      const readbackUsable = this.isEntitySyncUsable(
-        task.accountId,
-        account.providerKind,
-        refreshed.result.quality,
-        input,
-      );
       if (!readbackUsable) {
-        syncWarning = `状态写入后同步数据不完整：${refreshed.result.warnings.join("；")}`;
+        // 警告已在上面写好，这里不覆盖。
       } else if (observedStatus !== desiredStatus) {
         syncWarning = `状态写入后回读未确认目标状态：期望 ${desiredStatus}，实际 ${observedStatus ?? "未返回"}`;
       }
@@ -2276,6 +2294,16 @@ export class AutomationScheduler {
       this.ticking = false;
     }
   }
+}
+
+/**
+ * 能走定向回读的层级。素材不在其列：它没有独立的列表筛选接口，只能跟着广告一起
+ * 拉（见 cookie-provider 的 mix_material 报表），退回全量同步。
+ */
+function isTargetedReadbackEntity(
+  entityType: SyncEntityType,
+): entityType is "campaign" | "ad-group" | "ad" {
+  return entityType === "campaign" || entityType === "ad-group" || entityType === "ad";
 }
 
 function safeMessage(cause: unknown): string {

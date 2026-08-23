@@ -692,3 +692,31 @@
 .expand-timing-when input:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: transparent; }
 .expand-timing-when small,
 .expand-timing-hint { font-size: 12px; color: var(--ink-faint); }
+
+/* 一键扩组：历史记录。沿用账户区块的容器观感，只是不参与勾选。 */
+.expand-history {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  overflow: hidden;
+  box-shadow: var(--prototype-shadow);
+}
+.expand-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.expand-history-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.expand-history .status { display: inline-flex; align-items: center; gap: 4px; }

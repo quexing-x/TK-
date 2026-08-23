@@ -85,6 +85,23 @@ export interface ProviderDescriptor {
   capabilities: ProviderCapability[];
 }
 
+/** 一次扩组的落库记录。uncertain 表示写请求已发出但结果未知，禁止自动重试。 */
+export interface AdGroupExpandTask {
+  taskKey: string;
+  accountId: string;
+  sourceAdGroupId: string;
+  sourceCampaignId: string | null;
+  status: "running" | "succeeded";
+  uncertain: boolean;
+  claimedAt: string;
+  updatedAt: string;
+  localDate: string | null;
+  requestedCount: number;
+  generatedNames: string[];
+  generatedIds: string[];
+  executorKind: string;
+}
+
 export type MetaAssetEntityType = "campaign" | "ad-group" | "ad";
 
 /**
@@ -716,6 +733,11 @@ export const api = {
     request<{ createdGroups: number; scheduled: number; failed: Array<{ name: string; message: string }>; skipped: number }>(
       "/api/ad-groups/batch-expand",
       { method: "POST", body: JSON.stringify(input) },
+    ),
+  /** 扩组历史：不限源组、不限日期，按时间倒序。 */
+  listAdGroupExpandHistory: (accountIds: string[], limit = 100) =>
+    request<{ tasks: AdGroupExpandTask[] }>(
+      `/api/ad-group-expand-tasks?accountIds=${encodeURIComponent(accountIds.join(","))}&limit=${limit}`,
     ),
   /** 扩组重复提交预检：只查不写，返回值仅用于二次确认弹窗。 */
   preflightBatchExpandAdGroups: (input: {

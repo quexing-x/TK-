@@ -6,6 +6,7 @@ import {
   type ProviderKind,
   type LaunchOriginalPost,
   type LaunchProductInfo,
+  type ProviderEntity,
 } from "@tk-auto/core";
 import { CookieAdsProvider } from "./cookie-provider.js";
 import { OfficialApiAdsProvider } from "./official-api-provider.js";
@@ -17,6 +18,7 @@ import {
 import { RetryableCreationError } from "./types.js";
 import type {
   AdsProvider,
+  ReadProvider,
   ProviderDescriptor,
   ProviderHealth,
   ProviderContext,
@@ -187,6 +189,18 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持读取广告数据。`);
     }
     return provider.syncReadOnly(context);
+  }
+
+  /** 定向回读单个实体；provider 不支持时返回 null，由调用方决定退路。 */
+  async readEntityById(
+    kind: ProviderKind,
+    context: ProviderContext,
+    entityType: "campaign" | "ad-group" | "ad",
+    externalId: string,
+  ): Promise<ProviderEntity | null> {
+    const provider = this.get(kind) as { readEntityById?: ReadProvider["readEntityById"] };
+    if (!provider.readEntityById) return null;
+    return provider.readEntityById(context, entityType, externalId);
   }
 
   discoverMetaAdAccounts(

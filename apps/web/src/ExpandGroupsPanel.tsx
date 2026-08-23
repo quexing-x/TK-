@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { CheckCircle2, CopyPlus, Inbox, Info, RefreshCcw, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, XCircle } from "lucide-react";
 import type {
   AccountConfig,
   AccountProviderCapabilities,
@@ -8,7 +8,7 @@ import type {
   ProviderConnection,
   ReadOnlySyncResult,
 } from "@tk-auto/core";
-import { api } from "./api";
+import { api, type AdGroupExpandTask } from "./api";
 import { accountAccessStatus } from "./provider-capability-view";
 import { useOverlays } from "./ui/overlays";
 
@@ -162,6 +162,8 @@ export function ExpandGroupsPanel({
   const accountQueues = useRef(new Map<string, Promise<unknown>>());
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
+  const [history, setHistory] = useState<AdGroupExpandTask[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const accountName = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.displayName])),
@@ -231,6 +233,30 @@ export function ExpandGroupsPanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleAccountIds]);
+
+  // 历史记录跟着「可扩组账户」走，而不是跟着当前展示的账户：刚扩完就把账户取消
+  // 勾选，记录不该跟着消失。
+  const historyAccountIds = useMemo(
+    () => eligibleStates.map((state) => state.accountId),
+    [eligibleStates],
+  );
+  const loadHistory = async (accountIds: string[]) => {
+    if (accountIds.length === 0) { setHistory([]); return; }
+    setHistoryLoading(true);
+    try {
+      const { tasks } = await api.listAdGroupExpandHistory(accountIds);
+      setHistory(tasks);
+    } catch (cause) {
+      // 历史读不出来不该把整个扩组面板拖垮，它只是回顾用的。
+      onError(messageOf(cause));
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+  useEffect(() => {
+    void loadHistory(historyAccountIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyAccountIds.join(",")]);
 
   const visibleStates = useMemo(
     () => eligibleStates.filter((state) => visibleAccountIds.includes(state.accountId)),
@@ -432,6 +458,7 @@ export function ExpandGroupsPanel({
             result.failed.length > 0 ? "error" : "success",
           );
           void loadAccount(accountId);
+          void loadHistory(historyAccountIds);
         } catch (cause) {
           onError(messageOf(cause));
         } finally {
@@ -551,6 +578,31 @@ export function ExpandGroupsPanel({
         </section>;
       })}
     </div>}
+
+    <section className="expand-history">
+      <header className="expand-history-head">
+        <span><History size={15} /> 扩组记录</span>
+        <button className="secondary-button compact-button" disabled={historyLoading} onClick={() => void loadHistory(historyAccountIds)} type="button">
+          <RefreshCcw className={historyLoading ? "spin" : ""} size={13} /> {historyLoading ? "读取中" : "刷新"}
+        </button>
+      </header>
+      {history.length === 0
+        ? <p className="expand-account-empty">{historyLoading ? "读取中…" : "还没有扩组记录。"}</p>
+        : <div className="table-wrap expand-table"><table><thead><tr><th>时间</th><th>账户</th><th>新组名</th><th className="expand-num">个数</th><th>结果</th></tr></thead><tbody>
+          {history.map((task) => {
+            // 结果未知优先于成功/进行中显示：这类记录禁止自动重试，必须让人一眼看见。
+            const tone = task.uncertain ? "danger" : task.status === "succeeded" ? "active" : "warning";
+            const label = task.uncertain ? "结果未知，需人工核实" : task.status === "succeeded" ? "成功" : "进行中";
+            return <tr key={task.taskKey}>
+              <td className="expand-muted">{fmtDate(task.updatedAt)}</td>
+              <td className="expand-muted">{accountName.get(task.accountId) ?? task.accountId}</td>
+              <td className="expand-name">{task.generatedNames.join("、") || "—"}</td>
+              <td className="expand-num">{task.requestedCount}</td>
+              <td><span className={`status ${tone}`}>{task.uncertain && <AlertTriangle size={12} />} {label}</span></td>
+            </tr>;
+          })}
+        </tbody></table></div>}
+    </section>
 
     {presetHost ? createPortal(presetPanel, presetHost) : presetPanel}
 
