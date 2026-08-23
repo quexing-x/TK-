@@ -3727,6 +3727,10 @@ async function runCookieDraftChain(
       campaignSnapId,
       adSnapId,
       creativeInfo: singleAsset,
+      optimizeGoal: mutation.preset.optimizeGoal,
+      externalAction: mutation.preset.externalAction,
+      placementIds: mutation.preset.placementIds,
+      externalUrl: creationRow.productUrl,
     });
     const creativeDraft: Record<string, unknown> = {
       ...drafts.creative,
@@ -4237,6 +4241,11 @@ interface SparkPreparationContext {
   campaignSnapId: string;
   adSnapId: string;
   creativeInfo: Record<string, unknown>;
+  // 自动优化能力查询要按投放上下文提问，少一个参数 TikTok 就换一套答案。
+  optimizeGoal: unknown;
+  externalAction: unknown;
+  placementIds: number[];
+  externalUrl: string;
 }
 
 async function prepareSparkPosts(
@@ -4279,7 +4288,29 @@ async function prepareSparkPosts(
     () => creationPathRequest(
       sessionRequest,
       "/api/v4/i18n/creation/creative/creative_automation_option/",
-      { identity_type: sparkVideos[0]?.identityType ?? 2 },
+      // 必须按真机那份完整提问：这个接口返回的「可用策略」取决于投放上下文，
+      // 只发 identity_type 时 TikTok 会给出另一套列表（实测不含 CTA 优化 100001
+      // 与生成广告卡片 100002），于是这两项被当成「账户不支持」过滤掉，
+      // 广告建出来只剩视频质量一项。常量取自已验证抓包。
+      {
+        objective_type: context.objectiveType,
+        universal_type: 1,
+        app_campaign_type: 0,
+        search_campaign_type: 0,
+        web_all_in_one_catalog: 2,
+        languages: [],
+        country_ids: context.countryIds.map((id) => String(id)),
+        external_type: 102,
+        external_action: context.externalAction,
+        optimize_goal: context.optimizeGoal,
+        inventory_flows: [...context.placementIds],
+        promotion_target_type: 0,
+        external_url: context.externalUrl ? [context.externalUrl] : [],
+        identity_type: sparkVideos[0]?.identityType ?? 2,
+        material_types: [1],
+        product_platform_id: null,
+        catalog_setup: numericValue(context.creativeInfo.catalog_setup) ?? 0,
+      },
     ),
     credential,
   );
@@ -4358,10 +4389,12 @@ async function prepareSparkPosts(
  *
  * 两条规则都是从真机成功抓包里读出来的，别凭感觉改：
  *
- * 1. **过滤的是创意上已有的那份列表**，不是写死的默认值。创建模板重放的是真机
- *    验证过的组合（例如 4 项，含翻译配音 7419232909960003601），拿默认值覆盖它
- *    等于把模板的意义抹掉，也解释了为什么导入模板后仍然发出 3 项。
- *    只有创意上没有列表时才退回默认值。
+ * 1. **过滤的是产品选定的组合**（DefaultTikTokCreativeAutomationStrategyIds），
+ *    不是模板里那份。模板的列表只反映抓包那一刻手动勾了什么，不是规格。
+ *
+ *    另外注意 creative_automation_option 必须按完整投放上下文提问：只发
+ *    identity_type 时 TikTok 会返回另一套更小的可用列表（实测不含 100001/100002），
+ *    于是 CTA 与生成广告卡片会被误判成「账户不支持」而过滤掉。
  *
  * 2. **非空列表必须配 `creative_automation_type = 2`**。真机成功那次就是 2；
  *    此前这里写死成 1，而 TikTok 对「type=1 且列表非空」直接回
@@ -4376,11 +4409,11 @@ function applySupportedCreativeAutomationStrategies(
   const data = response && isRecord(response.data) ? response.data : response;
   if (!data || !Array.isArray(data.strategy_ids)) return;
   const supported = new Set(data.strategy_ids.map((value) => String(value)));
-  const current = creativeInfo.creative_automation_list
-    .map((value) => String(value))
-    .filter((value) => value !== "");
-  const base = current.length > 0 ? current : [...DefaultTikTokCreativeAutomationStrategyIds];
-  const selected = [...new Set(base)].filter((strategyId) => supported.has(strategyId));
+  // 用产品选定的组合，不是模板里那份。模板是从某次真机手动创建抓来的，它的
+  // 自动优化列表只是「抓包那一刻那个人勾了什么」，不是规格；沿用它会把当时多勾
+  // 的项（例如翻译和配音）一直带下去。账户不支持的照旧过滤掉。
+  const selected = [...new Set<string>(DefaultTikTokCreativeAutomationStrategyIds)]
+    .filter((strategyId) => supported.has(strategyId));
   creativeInfo.creative_automation_list = selected;
   creativeInfo.creative_automation_type = selected.length > 0 ? 2 : 0;
 }
