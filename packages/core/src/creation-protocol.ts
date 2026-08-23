@@ -148,6 +148,22 @@ const TikTokAgeRanges: Record<LaunchAgeRange, [number, number]> = {
   "55-100": [55, 100],
 };
 
+/**
+ * TikTok 年龄档的**完整池子**，含未成年档。
+ *
+ * 这不是投放目标，而是 `limited_audience.age` 要求的「可选范围」——TikTok 用它表达
+ * 「这个广告组允许在哪些档位里挑」。真机抓包与线上实测都确认：Smart+ 广告组必须原样
+ * 带上全部六档，少一档就会被判成「自定义年龄」，以
+ * audience_age_smart_age_validate_error（文案是「仅限向 18 岁以上投放」，具有误导性）
+ * 拒绝创建。未成年是否投放由 TikTok 按政策自行排除，不由这里控制。
+ *
+ * 实际投放年龄走 `age` 字段（空数组 = 不限）。用户可选项见 LaunchAgeRangeValues，
+ * 那里**不含**未成年档。
+ */
+const TIKTOK_AGE_RANGE_POOL: number[][] = [
+  [13, 17], [18, 24], [25, 34], [35, 44], [45, 54], [55, 100],
+];
+
 function materializeAgeRanges(values: readonly LaunchAgeRange[]): number[][] {
   // 历史计划里可能存着已下线的年龄档，映射不到就丢弃——绝不能产出 undefined 元素
   // 塞进定向载荷。
@@ -173,8 +189,16 @@ function resolvedRowTargeting(
     ? row.ageRanges
     : config.ageRanges?.length ? config.ageRanges : undefined;
   const selectedGender = row.gender ?? config.gender;
+  // 选满全部可选档 == 不限：真机「不限年龄」发的是空 age，保持一致，
+  // 否则 TikTok 界面会把它显示成一串自定义档位而不是「全部」。
+  const coversEveryBand = Boolean(selectedAgeRanges)
+    && LaunchAgeRangeValues.every((band) => selectedAgeRanges!.includes(band));
   return {
     ageRanges: materializeAgeRanges(selectedAgeRanges ?? LaunchAgeRangeValues),
+    // 实际投放年龄：空数组 = 不限。
+    restrictedAgeRanges: !selectedAgeRanges?.length || coversEveryBand
+      ? []
+      : materializeAgeRanges(selectedAgeRanges),
     gender: materializeGender(selectedGender),
     hasExplicitAgeRanges: Boolean(selectedAgeRanges?.length),
     hasExplicitGender: selectedGender !== undefined,
@@ -214,7 +238,7 @@ export function buildDraftPayloads(
     adGroupBudget: row.dailyBudget,
     smartPlus,
   });
-  const { ageRanges, gender, hasExplicitAgeRanges } = resolvedRowTargeting(row, config);
+  const { ageRanges, restrictedAgeRanges, gender, hasExplicitAgeRanges } = resolvedRowTargeting(row, config);
   return {
     campaign: {
       campaign_sketch_form_data: {
@@ -330,7 +354,8 @@ export function buildDraftPayloads(
         flow_control_mode: 1,
         language_list: [],
         gender,
-        age: !smartPlus && hasExplicitAgeRanges ? ageRanges : [],
+        // Smart+ 与非 Smart+ 都走同一套语义：age 是实际投放年龄，空数组 = 不限。
+        age: smartPlus ? restrictedAgeRanges : hasExplicitAgeRanges ? ageRanges : [],
         ac: [],
         ad_tag_v2: [],
         android_osv: "",
@@ -365,7 +390,8 @@ export function buildDraftPayloads(
         ios14_quota_type: 1,
         suitability_non_garm_category: [],
         anti_discrimination: 0,
-        exclude_age_under_eighteen: 1,
+        // 见 TIKTOK_AGE_RANGE_POOL：未成年由 TikTok 按政策排除，这里恒为 0。
+        exclude_age_under_eighteen: 0,
         duration_time_range: 0,
         attribution_window_click: 7,
         attribution_window_view: 1,
@@ -379,7 +405,7 @@ export function buildDraftPayloads(
         smart_gender: smartPlus ? 3 : 0,
         custom_audience_tag_relation: 0,
         suggestion_audience_toggle: smartPlus ? 3 : 0,
-        limited_audience: { age: smartPlus ? ageRanges : [] },
+        limited_audience: { age: smartPlus ? TIKTOK_AGE_RANGE_POOL : [] },
         ad_ref_onsite_event_source_type: 0,
         auto_pull_toggle: 0,
         ttms_account_id: "",
@@ -519,6 +545,7 @@ function applyCreationConfigOverrides(
   const smartPlus = config.objectiveType === 3;
   const {
     ageRanges,
+    restrictedAgeRanges,
     gender,
     hasExplicitGender,
     hasExplicitAgeRanges,
@@ -581,10 +608,11 @@ function applyCreationConfigOverrides(
   adForm.automated_targeting = config.objectiveType === 3 ? 0 : config.smartTargeting ? 1 : 0;
   if (smartPlus) {
     Object.assign(adForm, {
-      age: [],
+      // age = 实际投放年龄（空数组 = 不限）；limited_audience = 可选范围，恒为全池。
+      age: restrictedAgeRanges,
       ...(hasExplicitGender ? { gender } : {}),
-      exclude_age_under_eighteen: 1,
-      limited_audience: { age: ageRanges },
+      exclude_age_under_eighteen: 0,
+      limited_audience: { age: TIKTOK_AGE_RANGE_POOL },
       smart_interest_behavior: 3,
       smart_audience: 3,
       smart_age: 3,
@@ -666,11 +694,12 @@ function applyCreationConfigOverrides(
     custom_audience_tag_relation: 0,
     suggestion_audience_toggle: 0,
     limited_audience: {
+      // Smart+ 的可选范围恒为全池；非 Smart+ 沿用原有行为。
       age: smartPlus
-        ? ageRanges
+        ? TIKTOK_AGE_RANGE_POOL
         : hasExplicitAgeRanges
           ? []
-          : [[18, 24], [25, 34], [35, 44], [45, 54], [55, 100]],
+          : materializeAgeRanges(LaunchAgeRangeValues),
     },
     ad_ref_onsite_event_source_type: 0,
     auto_pull_toggle: 0,

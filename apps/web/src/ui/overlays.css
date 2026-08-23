@@ -4,7 +4,10 @@
 .unified-modal .modal-heading-main { display: flex; align-items: center; gap: 13px; min-width: 0; }
 .unified-modal .modal-heading-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 12px; color: var(--primary); background: color-mix(in srgb, var(--primary) 13%, transparent); }
 .unified-modal.is-danger .modal-heading-icon { color: var(--danger, #c74d57); background: color-mix(in srgb, var(--danger, #c74d57) 13%, transparent); }
-.dialog-body { padding: 22px 24px 6px; display: grid; gap: 15px; }
+/* 内容再长也不能把操作按钮顶出屏幕：正文自己滚动。
+   min-height: 0 是关键——flex 子项不写它就不会收缩到小于内容高度。 */
+.dialog-body { padding: 22px 24px 6px; display: grid; gap: 15px; overflow-y: auto; min-height: 0; }
+.unified-modal .modal-actions { flex: none; }
 /* pre-line：确认文案要能逐条列出冲突项，换行不能被折叠掉。 */
 .dialog-body p { margin: 0; color: var(--ink-soft); line-height: 1.65; font-size: 13px; white-space: pre-line; }
 .dialog-body input { width: 100%; box-sizing: border-box; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-raised); color: var(--ink); font-size: 13px; transition: border-color .15s, box-shadow .15s; }

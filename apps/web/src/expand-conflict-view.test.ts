@@ -90,3 +90,27 @@ describe("扩组重复提交的确认文案", () => {
     expect(message).not.toContain("立即开始投放");
   });
 });
+
+describe("确认弹窗的长度控制", () => {
+  it("冲突很多时只列前 8 条，其余折成计数——否则弹窗会把按钮顶出屏幕", () => {
+    const lines = Array.from({ length: 20 }, (_unused, index) => `· 源组${index + 1}：今天已扩过 1 次、共 1 个组`);
+    const message = buildExpandConfirmMessage({
+      conflictLines: lines, sourceCount: 20, countPerSource: 1, immediate: false,
+    });
+
+    expect(message).toContain("20 个源组已经有进行中或今天扩过的记录");
+    expect(message).toContain("· 源组8：");
+    expect(message).not.toContain("· 源组9：");
+    expect(message).toContain("另有 12 个源组同样有记录");
+    // 行数受控：标题 + 8 条 + 折叠行 + 空行 + 结论
+    expect(message.split("\n").length).toBeLessThanOrEqual(12);
+  });
+
+  it("不超过上限时不显示折叠行", () => {
+    const message = buildExpandConfirmMessage({
+      conflictLines: ["· 源组1：今天已扩过 1 次、共 1 个组"],
+      sourceCount: 1, countPerSource: 1, immediate: false,
+    });
+    expect(message).not.toContain("另有");
+  });
+});
