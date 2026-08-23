@@ -805,6 +805,17 @@ export async function createApp(
     }
   });
 
+  app.get("/api/ad-group-expand-tasks", async (request, reply) => {
+    const query = z.object({
+      accountIds: z.string().min(1),
+      limit: z.coerce.number().int().min(1).max(500).default(100),
+    }).parse(request.query);
+    const accountIds = query.accountIds.split(",").map((id) => id.trim()).filter(Boolean);
+    return reply.send({
+      tasks: dependencies.store.listAdGroupExpandHistory(accountIds, query.limit),
+    });
+  });
+
   app.post("/api/launch-plans/:planId/execute", async (request, reply) => {
     const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
     const plan = dependencies.store.getMultiAccountLaunchPlan(planId);

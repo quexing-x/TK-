@@ -4044,6 +4044,108 @@ describe("CookieAdsProvider", () => {
     },
   );
 
+  /**
+   * 扩组的自动优化本来是从源组克隆的，老源组带来的就是老设置。这两条钉住
+   * 「发布前改成创建流程那套」以及「改不动也不能让扩组失败」。
+   */
+  function stubExpandCopyFetch(overrides: {
+    creativeSnapSave?: () => Response;
+  } = {}): { requests: Array<{ path: string; body: Record<string, unknown> }> } {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const path = new URL(url).pathname;
+      let body: Record<string, unknown> = {};
+      try { body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>; } catch { body = {}; }
+      requests.push({ path, body });
+      if (url.includes("ad_snap/copy")) {
+        return jsonResponse({ code: 0, data: { all_copy_result: { ad_and_creative_copy_result_list: [{
+          new_ad_snap_info_item: { ad_snap_id: "ad-snap" },
+          new_ad_sketch_id: "ad-sketch",
+          new_creative_snap_info_item_list: [{ creative_snap_id: "creative-snap-old" }],
+          new_creative_sketch_ids: ["creative-sketch"],
+        }] } } });
+      }
+      if (url.includes("/snap/detail/")) {
+        return jsonResponse({ code: 0, data: { ad_snap_map: { "ad-snap": {
+          ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch", ad_name: "copied group",
+          schedule_type: 0, budget: "50", cpa_bid: "7", spc_upgrade_mode: 1,
+        } } } });
+      }
+      if (url.includes("ad_snap/save")) return jsonResponse({ code: 0, data: { ad_snap_id: "ad-snap", ad_sketch_id: "ad-sketch" } });
+      if (url.includes("creative_sketch/detail")) {
+        return jsonResponse({ code: 0, data: { creative_sketch_info_map: {
+          "creative-sketch": { asset_group_sketch_form_data: {
+            creative_sketch_id: "creative-sketch",
+            creative_name: "copied creative",
+            // 源组带来的旧设置：只开了翻译配音，正是要被覆盖掉的那种。
+            creative_automation_type: 2,
+            creative_automation_list: ["7419232909960003601"],
+          } },
+        } } });
+      }
+      if (url.includes("creative_snap/save")) {
+        return overrides.creativeSnapSave?.() ?? jsonResponse({ code: 0, data: {
+          creative_snap_ids: ["creative-snap-new"],
+          creative_sketch_ids: ["creative-sketch"],
+        } });
+      }
+      if (url.includes("batch_create_cta_id")) return jsonResponse({ code: 0, data: { cta_id_map: {} } });
+      if (url.includes("async_creation/detail")) return jsonResponse({ code: 0, data: { status: 1, result: {
+        campaign_id: "campaign",
+        ad_and_creative: { 0: { ad_id: "adgroup", asset_group_result: { 0: { creative_items: { 0: { id: "creative" } } } } } },
+      } } });
+      return jsonResponse({ code: 0, data: { async_request_id: "async" } });
+    }));
+    return { requests };
+  }
+
+  it("扩组发布前把创意草稿的自动优化改成创建流程那套，而不是沿用源组克隆来的", async () => {
+    const { requests } = stubExpandCopyFetch();
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+      dailyBudget: 50,
+      bid: 7,
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    const save = requests.find((request) => request.path.includes("/creative_snap/save/"));
+    const forms = save?.body.asset_group_sketch_form_data_list as Array<Record<string, unknown>>;
+    expect(forms?.[0]).toMatchObject({
+      creative_automation_type: 2,
+      // 视频质量 + CTA 优化 + 生成广告卡片；源组那份翻译配音必须被换掉。
+      creative_automation_list: ["100001", "100002", "7455417586723028993"],
+      // 原地更新这份草稿，不是新建：带着它自己的 snap id。
+      creative_snap_id: "creative-snap-old",
+    });
+    // 保存后返回的新 snap id 必须被采纳进发布报文，否则发布的是改之前那份。
+    const publish = requests.find((request) => request.path.includes("/async_creation/create_by_snap/"));
+    expect(JSON.stringify(publish?.body)).toContain("creative-snap-new");
+  });
+
+  it("自动优化改不动时按源组原样发布，不让一整批扩组因此失败", async () => {
+    const { requests } = stubExpandCopyFetch({
+      creativeSnapSave: () => jsonResponse({ code: 40000, msg: "creative_automation_not_supported" }),
+    });
+
+    const result = await new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup",
+      existingCampaignId: "campaign",
+      names: ["copied group"],
+      initialStatus: "disabled",
+      dailyBudget: 50,
+      bid: 7,
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    const publish = requests.find((request) => request.path.includes("/async_creation/create_by_snap/"));
+    expect(JSON.stringify(publish?.body)).toContain("creative-snap-old");
+  });
+
   it("writes and verifies TikTok native scheduling before publishing copied ad groups as enabled", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-23T00:00:00.000Z"));

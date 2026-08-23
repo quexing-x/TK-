@@ -1029,6 +1029,40 @@ describe("local API", () => {
     });
   });
 
+  it("列出扩组历史：不限源组也不限日期，结果未知的那条要带着标记出来", async () => {
+    store.claimAdGroupExpandTask("history-done", "demo-account", "adgroup-a", {
+      sourceCampaignId: "campaign-1",
+      localDate: "2026-01-01",
+      requestedCount: 2,
+      generatedNames: ["A组-0101-060000-1", "A组-0101-060000-2"],
+    });
+    store.finishAdGroupExpandTask("history-done", "succeeded");
+    store.claimAdGroupExpandTask("history-unknown", "demo-account", "adgroup-b", {
+      sourceCampaignId: "campaign-2",
+      localDate: "2026-01-02",
+      requestedCount: 1,
+      generatedNames: ["B组-0102-060000-1"],
+    });
+    store.markAdGroupExpandTaskDispatching("history-unknown");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/ad-group-expand-tasks?accountIds=demo-account",
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    const tasks = response.json().tasks as Array<Record<string, unknown>>;
+    // 预检那条查询会把这两条都过滤掉（限定源组 + 只看当天），历史必须两条都在。
+    expect(tasks.map((task) => task.taskKey).sort()).toEqual(["history-done", "history-unknown"]);
+    expect(tasks.find((task) => task.taskKey === "history-done")).toMatchObject({
+      status: "succeeded", uncertain: false, requestedCount: 2,
+      generatedNames: ["A组-0101-060000-1", "A组-0101-060000-2"],
+    });
+    expect(tasks.find((task) => task.taskKey === "history-unknown")).toMatchObject({
+      status: "running", uncertain: true,
+    });
+  });
+
   it("creates a launch preset from the default launch-page form payload", async () => {
     const response = await app.inject({
       method: "POST",

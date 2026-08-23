@@ -1158,6 +1158,14 @@ export class CookieAdsProvider implements AdsProvider {
           `ad_snap/copy 仅返回广告组草稿，未返回可发布的创意草稿标识；${scheduledStart ? "排期" : "广告组设置"}已保存，但已停止发布且禁止自动重试。`,
         );
       }
+      // 复制克隆的是源组的自动优化，这里改成与创建流程同一套组合。失败不阻断。
+      publishItems = await applyCopiedCreativeAutomationStrategies({
+        sessionRequest,
+        credential,
+        dispatchState,
+        publishItems,
+        riskInfo,
+      });
       // 2.5) 生成 CTA（程序化创意必需，否则发布报缺少行动引导/URL）。
       const checkInfo = publishItems.map((item) => ({
         ad_id: "",
@@ -1802,6 +1810,116 @@ function draftGroupToPublishItem(group: CopiedCampaignDraftGroup): DraftPublishI
       need_publish: true as const,
     })),
   };
+}
+
+/**
+ * 把复制出来的创意草稿改成与创建流程一致的自动优化组合。
+ *
+ * 扩组走的是 TikTok 的 `ad_snap/copy`（with_creative），新组的自动优化是从**源组
+ * 克隆**来的，不是我们生成的。源组是早期建的时候，那套设置往往是空的或过时的，
+ * 于是扩出来的新组也一直是老的——用户只能重新走一遍创建流程（导表格）才拿得到
+ * 当前这套组合。这里在发布前直接改草稿，扩组就不必再绕这一圈。
+ *
+ * 组合取 DefaultTikTokCreativeAutomationStrategyIds，与创建路径同一个事实源。
+ * 这里**不**先问 creative_automation_option 拿「账户支持哪些」：那个接口要按完整
+ * 投放上下文提问（objective_type / optimize_goal / external_action / 版位…），而复制
+ * 路径手里只有源组 ID，凑不出这些参数；问得不对反而会拿到一份更窄的列表。
+ *
+ * 刻意做成**失败不阻断**：自动优化是锦上添花，不该让一整批扩组因为它整批失败。
+ * 任何一步出错就保持原样发布，与加这段之前的行为完全一致。
+ */
+async function applyCopiedCreativeAutomationStrategies(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  publishItems: DraftPublishItem[];
+  riskInfo: Record<string, unknown>;
+}): Promise<DraftPublishItem[]> {
+  const strategyIds = [...new Set<string>(DefaultTikTokCreativeAutomationStrategyIds)];
+  if (strategyIds.length === 0) return input.publishItems;
+
+  const result: DraftPublishItem[] = [];
+  for (const publishItem of input.publishItems) {
+    try {
+      const creativeSketchIds = publishItem.creative_snap_info_list
+        .map((creative) => creative.creative_sketch_id)
+        .filter(Boolean);
+      if (creativeSketchIds.length === 0) { result.push(publishItem); continue; }
+
+      const detail = await requestCreationStep(
+        "creative_sketch/detail",
+        () => creationPathGetRequest(
+          input.sessionRequest,
+          "/mi/api/v4/i18n/creation/creative_sketch/detail/",
+          { creative_sketch_ids: creativeSketchIds.join(",") },
+        ),
+        input.credential,
+        { semantics: "preflight-read", dispatchState: input.dispatchState },
+      );
+      const detailData = isRecord(detail.data) ? detail.data : undefined;
+      const detailMap = detailData && isRecord(detailData.creative_sketch_info_map)
+        ? detailData.creative_sketch_info_map
+        : undefined;
+      if (!detailMap) { result.push(publishItem); continue; }
+
+      const forms = publishItem.creative_snap_info_list.map((creative) => {
+        const entry: unknown = detailMap[creative.creative_sketch_id];
+        const info = isRecord(entry) ? entry : undefined;
+        const rawForm = info && isRecord(info.asset_group_sketch_form_data)
+          ? info.asset_group_sketch_form_data
+          : undefined;
+        if (!rawForm) return null;
+        return {
+          ...cloneRecord(rawForm),
+          // 原地更新这份草稿，不是新建一份：带上它自己的 snap id。
+          creative_snap_id: creative.creative_snap_id,
+          creative_sketch_id: creative.creative_sketch_id,
+          creative_automation_type: 2,
+          creative_automation_list: [...strategyIds],
+        };
+      });
+      if (forms.some((form) => form === null)) { result.push(publishItem); continue; }
+
+      const saved = await requestCreationStep(
+        "creative_snap/save",
+        () => creationRequest(input.sessionRequest, "creative_snap/save", {
+          asset_group_sketch_form_data_list: forms,
+          spc_upgrade_mode: 1,
+          with_sketch: true,
+          ad_snap_id: publishItem.ad_snap_id,
+          ad_sketch_id: publishItem.ad_sketch_id,
+          risk_info: input.riskInfo,
+        }),
+        input.credential,
+        { semantics: "mutation", dispatchState: input.dispatchState },
+      );
+      const savedData = isRecord(saved.data) ? saved.data : undefined;
+      const snapIds = savedData && Array.isArray(savedData.creative_snap_ids)
+        ? savedData.creative_snap_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+        : [];
+      const sketchIds = savedData && Array.isArray(savedData.creative_sketch_ids)
+        ? savedData.creative_sketch_ids.map(nonEmptyId).filter((id): id is string => Boolean(id))
+        : [];
+      // 保存成功但没回全 ID 时保持原样发布：拿半套 ID 去发布只会更糟。
+      if (snapIds.length !== forms.length || sketchIds.length !== forms.length) {
+        result.push(publishItem);
+        continue;
+      }
+      result.push({
+        ...publishItem,
+        creative_snap_info_list: snapIds.map((creativeSnapId, index) => ({
+          creative_id: "",
+          creative_snap_id: creativeSnapId,
+          creative_sketch_id: sketchIds[index]!,
+          need_publish: true as const,
+        })),
+      });
+    } catch {
+      // 见上：自动优化改不动就按源组原样发布，绝不因此让扩组失败。
+      result.push(publishItem);
+    }
+  }
+  return result;
 }
 
 async function materializeSimpleCopyCreativeDrafts(input: {

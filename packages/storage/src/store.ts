@@ -3683,6 +3683,73 @@ export class AutomationStore {
     });
   }
 
+  /**
+   * 扩组的历史记录（按账户，按时间倒序）。
+   *
+   * 与 listAdGroupExpandActivity 的区别：那个是给重复提交预检用的，只看指定的几个
+   * 源组、且只看当天，回答「这次点下去会不会撞车」。这里回答的是「我扩过些什么」，
+   * 所以不限源组、不限日期，只按条数截断。
+   */
+  listAdGroupExpandHistory(
+    accountIds: string[],
+    limit = 100,
+  ): Array<{
+    taskKey: string;
+    accountId: string;
+    sourceAdGroupId: string;
+    sourceCampaignId: string | null;
+    status: "running" | "succeeded";
+    uncertain: boolean;
+    claimedAt: string;
+    updatedAt: string;
+    localDate: string | null;
+    requestedCount: number;
+    generatedNames: string[];
+    generatedIds: string[];
+    executorKind: string;
+  }> {
+    const wanted = [...new Set(accountIds.filter((id) => id.trim() !== ""))];
+    if (wanted.length === 0) return [];
+    const placeholders = wanted.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT task_key, account_id, source_ad_group_id, source_campaign_id, status, uncertain,
+              claimed_at, updated_at, local_date, requested_count,
+              generated_names_json, generated_ids_json, executor_kind
+         FROM ad_group_expand_tasks
+        WHERE account_id IN (${placeholders})
+        ORDER BY updated_at DESC
+        LIMIT ?`,
+    ).all(...wanted, Math.max(1, Math.min(500, limit))) as SqlRow[];
+    const parseList = (value: unknown): string[] => {
+      try {
+        const parsed = JSON.parse(String(value ?? "[]")) as unknown;
+        return Array.isArray(parsed)
+          ? parsed.map((item) => String(item ?? "").trim()).filter(Boolean)
+          : [];
+      } catch {
+        // 损坏的历史行只该少显示几个名字，不该让整张列表打不开。
+        return [];
+      }
+    };
+    return rows.map((row) => ({
+      taskKey: String(row.task_key),
+      accountId: String(row.account_id),
+      sourceAdGroupId: String(row.source_ad_group_id),
+      sourceCampaignId: row.source_campaign_id === null || row.source_campaign_id === undefined
+        ? null
+        : String(row.source_campaign_id),
+      status: String(row.status) === "succeeded" ? "succeeded" as const : "running" as const,
+      uncertain: Number(row.uncertain ?? 0) === 1,
+      claimedAt: String(row.claimed_at),
+      updatedAt: String(row.updated_at),
+      localDate: row.local_date === null || row.local_date === undefined ? null : String(row.local_date),
+      requestedCount: Number(row.requested_count ?? 0),
+      generatedNames: parseList(row.generated_names_json),
+      generatedIds: parseList(row.generated_ids_json),
+      executorKind: String(row.executor_kind ?? "manual-expand"),
+    }));
+  }
+
   // 成功永久跳过；明确失败允许重试；结果未知永久保留且禁止自动重试。
   markAdGroupExpandTaskDispatching(taskKey: string): void {
     this.db.prepare(
