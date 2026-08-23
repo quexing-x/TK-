@@ -97,6 +97,9 @@ export function describeExpandConflicts(conflicts: ExpandConflict[]): string[] {
   });
 }
 
+/** 弹窗里最多逐条列几个源组，其余折成计数。 */
+const MAX_LISTED_CONFLICTS = 8;
+
 /** 二次确认的完整文案：先列冲突，再说清这一次还要建多少个。 */
 export function buildExpandConfirmMessage(input: {
   conflictLines: string[];
@@ -104,9 +107,14 @@ export function buildExpandConfirmMessage(input: {
   countPerSource: number;
   immediate: boolean;
 }): string {
+  // 逐条列出是为了让用户认出「这是我刚点过的那批」，但一次列几十条只会变成一堵
+  // 墙——真要逐条核对，任务列表里看得更清楚。
+  const shown = input.conflictLines.slice(0, MAX_LISTED_CONFLICTS);
+  const rest = input.conflictLines.length - shown.length;
   return [
     `${input.conflictLines.length} 个源组已经有进行中或今天扩过的记录：`,
-    ...input.conflictLines,
+    ...shown,
+    ...(rest > 0 ? [`· 另有 ${rest} 个源组同样有记录（详见任务列表）`] : []),
     "",
     `继续将为 ${input.sourceCount} 个源组各创建 ${input.countPerSource} 个新组（共 ${input.sourceCount * input.countPerSource} 个）${input.immediate ? "并【立即开始投放】" : ""}。确认继续？`,
   ].join("\n");
