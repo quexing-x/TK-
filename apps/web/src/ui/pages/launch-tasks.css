@@ -720,3 +720,34 @@
   color: var(--ink);
 }
 .expand-history .status { display: inline-flex; align-items: center; gap: 4px; }
+.expand-history-actions { display: inline-flex; align-items: center; gap: 10px; }
+.expand-history-count { font-size: 12px; color: var(--ink-faint); }
+/* 「结果未知」的汇总条：这是整块记录里唯一需要人动手的信息，不能和成功记录同重量。 */
+.expand-history-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0;
+  padding: 11px 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--danger);
+  background: var(--danger-tint);
+  border-bottom: 1px solid var(--line);
+}
+.expand-history-alert svg { flex: none; margin-top: 2px; }
+/* 展开后也不让它无限长：滚动条留在表格自己身上，页面不被撑开。 */
+.expand-history-table { max-height: 460px; overflow-y: auto; }
+.expand-history-flagged > td { background: var(--danger-tint); }
+.expand-history-more {
+  display: block;
+  width: 100%;
+  padding: 9px 16px;
+  font-size: 13px;
+  color: var(--ink-faint);
+  background: var(--surface);
+  border: 0;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+.expand-history-more:hover { color: var(--ink); background: var(--surface-raised); }
