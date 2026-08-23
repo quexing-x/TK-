@@ -59,6 +59,26 @@
   --ambient-shadow-hover: 0 28px 64px rgba(0, 0, 0, 0.28), inset 0 1px rgba(255, 255, 255, 0.05);
 }
 
+/*
+ * lucide 的 strokeWidth 默认是 2，全项目从没显式设过，图标一律又粗又黑——
+ * 这就是「系统默认图标」的观感来源。CSS 的 stroke-width 会覆盖 SVG 上的属性值，
+ * 所以在这里一次改掉，不必动任何 tsx 里的图标调用。
+ */
+.sidebar svg,
+.nav-item svg,
+.panel-icon svg,
+.topbar svg,
+td svg,
+button svg {
+  stroke-width: 1.5px;
+}
+
+/* 侧栏图标尺寸统一。原本 15/16/18/20 四种混用，大小不一最显廉价。 */
+.nav-item svg {
+  width: 16px;
+  height: 16px;
+}
+
 * { box-sizing: border-box; }
 
 html {
@@ -71,7 +91,9 @@ body {
   min-width: 760px;
   color: var(--ink);
   background: var(--canvas);
-  font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 中文字体必须排在拉丁字体前面：Segoe 在 Windows 上能匹配到 CJK 字形，
+     放前面就轮不到后面的中文字体，换了等于没换。 */
+  font-family: "Noto Sans SC", "Segoe UI Variable Text", "Segoe UI", "PingFang SC", sans-serif;
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
