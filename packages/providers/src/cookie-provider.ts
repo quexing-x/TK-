@@ -421,6 +421,70 @@ export class CookieAdsProvider implements AdsProvider {
     return results;
   }
 
+  /**
+   * 只回读一个实体，用于状态写入后的确认。
+   *
+   * 此前每改一条状态都跑一次 syncReadOnly：把系列/广告组/广告全部分页拉一遍，
+   * 生产实测 64.8 秒、15 个请求、322 个实体，只为核对其中 1 个。自动启停是逐条
+   * 串行的，20 条就是 20 分钟。
+   *
+   * 列表接口本身支持按 ID 精确筛选，字段名三层各不相同（实测：ad_id 会被静默
+   * 忽略并返回整页，adgroup_id 直接报错 1300400001）：
+   *   campaign -> campaign_ids
+   *   ad-group -> ad_ids
+   *   ad       -> creative_ids
+   */
+  async readEntityById(
+    context: ProviderContext,
+    entityType: "campaign" | "ad-group" | "ad",
+    externalId: string,
+  ): Promise<ProviderEntity | null> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const importedAdGroupRead = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    const captured = credential.requestTemplates?.find((item) => item.target === entityType)
+      ?? (entityType === "campaign" && importedAdGroupRead
+        ? siblingListRequest(importedAdGroupRead, "campaign")
+        : entityType === "ad"
+          ? deriveFinalAdReadRequest(importedAdGroupRead)
+          : undefined);
+    if (!captured?.body) return null;
+    // 必须走与 syncReadOnly 相同的逐层规范化。广告层尤其关键：账户里存着的 ad 模板
+    // 往往是早期从广告组派生的，只换了路径、仍带 dimensions:["ad_id"]，TikTok 会按
+    // 广告组维度作答——每行 creative_id 是 "0" 占位，externalId 永远匹配不上。
+    // 广告的身份在写入侧就是 creative_id（creative_list），读侧也必须是这个维度。
+    const normalized = entityType === "campaign"
+      ? campaignMetricsListRequest(captured)
+      : entityType === "ad"
+        ? adFinalListRequest(captured)
+        : captured;
+    if (!normalized.body) return null;
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(normalized.body) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    const commonReq = isRecord(body.common_req) ? body.common_req : null;
+    if (!commonReq) return null;
+    const filterField = ENTITY_ID_FILTER_FIELDS[entityType];
+    // 保留原有的非 ID 筛选（例如 no_delete），只追加 ID 这一条。
+    const existing = Array.isArray(commonReq.filters) ? commonReq.filters : [];
+    commonReq.filters = [
+      ...existing.filter((item) => !isRecord(item) || item.field !== filterField),
+      { field: filterField, filter_type: 0, in_field_values: [externalId] },
+    ];
+    commonReq.page = 1;
+    commonReq.page_size = 20;
+    const request: CapturedCookieRequest = { ...normalized, body: JSON.stringify(body) };
+    const windowed = withTodayMetricWindow(request, context.timezone ?? "UTC", new Date());
+    const payload = await requestCookieJson(windowed, credential);
+    const matched = extractEntities(payload, entityType)
+      .find((entity) => entity.externalId === externalId);
+    return matched ?? null;
+  }
+
   async syncReadOnly(context: ProviderContext): Promise<ProviderSyncOutput> {
     const settings = CookieConnectionSettingsSchema.parse(context.settings);
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -6740,6 +6804,13 @@ const LIST_REQUEST_RETRY_DELAY_MS = 750;
  * 失败的代价不只是界面上一个黄标：那一轮同步会被判为 partial，而删除和自动复制
  * 都要求最近一次同步是 healthy，会连带跳过。
  */
+/** 列表接口按 ID 精确筛选时，三个层级各自的字段名（实测确认）。 */
+const ENTITY_ID_FILTER_FIELDS = {
+  campaign: "campaign_ids",
+  "ad-group": "ad_ids",
+  ad: "creative_ids",
+} as const;
+
 async function requestAllCookieListPagesWithRetry(
   template: CapturedCookieRequest,
   credential: ParsedCookieCredential,

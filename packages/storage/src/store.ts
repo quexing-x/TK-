@@ -2303,6 +2303,35 @@ export class AutomationStore {
     return toPublicProviderConnection(connection);
   }
 
+  /**
+   * 只刷新一个实体的快照，用于状态写入后的定向回读。
+   *
+   * 不能借用 saveReadOnlySync：那个方法会按层级把未出现在本次结果里的实体整片
+   * 下线（is_current=0），拿一条数据调用它等于把该层其余实体全部作废。
+   */
+  refreshProviderEntity(
+    accountId: string,
+    providerKind: ProviderKind,
+    entity: ProviderEntity,
+    syncedAt = new Date().toISOString(),
+  ): void {
+    this.db.prepare(
+      `INSERT INTO provider_entities (
+         account_id, provider_kind, entity_type, external_id, payload_json, synced_at, is_current
+       ) VALUES (?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(account_id, provider_kind, entity_type, external_id)
+       DO UPDATE SET payload_json = excluded.payload_json,
+         synced_at = excluded.synced_at, is_current = 1`,
+    ).run(
+      accountId,
+      providerKind,
+      entity.entityType,
+      entity.externalId,
+      JSON.stringify(entity.payload),
+      syncedAt,
+    );
+  }
+
   saveReadOnlySync(
     accountId: string,
     kind: ProviderKind,

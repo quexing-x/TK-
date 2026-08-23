@@ -3427,6 +3427,108 @@ describe("local API", () => {
     });
   });
 
+  it("状态写入后只回读目标实体，不再为核对 1 个而全量同步整个账户", async () => {
+    const syncReadOnly = vi.fn<NonNullable<AdsProvider["syncReadOnly"]>>(async () => {
+      throw new Error("不应该走全量同步");
+    });
+    const readEntityById = vi.fn<NonNullable<AdsProvider["readEntityById"]>>(
+      async (_context, entityType, externalId) => ({
+        entityType,
+        externalId,
+        payload: { primary_status: "disable" },
+      }),
+    );
+    await installLaunchTestProvider(
+      async (_context, mutations) => mutations.map((mutation) => ({
+        ...mutation, ok: true, campaignId: "campaign", adGroupId: "group", adId: "ad", message: "created",
+      })),
+      [apiLaunchRow(2)],
+      syncReadOnly,
+      undefined,
+      undefined,
+      readEntityById,
+    );
+    const syncedAt = new Date().toISOString();
+    // 同层还有一个无关实体：定向回读绝不能像 saveReadOnlySync 那样把它整片下线。
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "ad-group", externalId: "adgroup-1", payload: { primary_status: "enable" } },
+      { entityType: "ad-group", externalId: "adgroup-2", payload: { primary_status: "enable" } },
+    ], {
+      startedAt: syncedAt,
+      finishedAt: syncedAt,
+      counts: { campaign: 0, "ad-group": 2, ad: 0, material: 0 },
+      warnings: [],
+      quality: testSyncQuality(syncedAt),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/entities/status",
+      payload: { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    await vi.waitFor(() => expect(readEntityById).toHaveBeenCalledTimes(1));
+    expect(readEntityById).toHaveBeenCalledWith(
+      expect.anything(), "ad-group", "adgroup-1",
+    );
+    expect(syncReadOnly).not.toHaveBeenCalled();
+    // 看「当前集」而不是全表：单实体刷新如果误用了 saveReadOnlySync，同层其余实体
+    // 会被 is_current=0 整片下线，只有这个接口能看出来。
+    const entities = store.listCurrentManagedEntities("demo-account", "cookie");
+    expect(entities.find((item) => item.externalId === "adgroup-1")?.status).toBe("disabled");
+    expect(entities.find((item) => item.externalId === "adgroup-2")?.status).toBe("enabled");
+  });
+
+  it("定向回读拿不到实体时退回全量同步，而不是把状态判成未确认", async () => {
+    const syncReadOnly = vi.fn<NonNullable<AdsProvider["syncReadOnly"]>>(async () => {
+      const finishedAt = new Date().toISOString();
+      return {
+        entities: [{ entityType: "ad-group" as const, externalId: "adgroup-1", payload: { primary_status: "disable" } }],
+        result: {
+          startedAt: finishedAt,
+          finishedAt,
+          counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
+          warnings: [],
+          quality: testSyncQuality(finishedAt),
+        },
+      };
+    });
+    const readEntityById = vi.fn<NonNullable<AdsProvider["readEntityById"]>>(async () => null);
+    await installLaunchTestProvider(
+      async (_context, mutations) => mutations.map((mutation) => ({
+        ...mutation, ok: true, campaignId: "campaign", adGroupId: "group", adId: "ad", message: "created",
+      })),
+      [apiLaunchRow(2)],
+      syncReadOnly,
+      undefined,
+      undefined,
+      readEntityById,
+    );
+    const syncedAt = new Date().toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "ad-group", externalId: "adgroup-1", payload: { primary_status: "enable" } },
+    ], {
+      startedAt: syncedAt,
+      finishedAt: syncedAt,
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
+      warnings: [],
+      quality: testSyncQuality(syncedAt),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/entities/status",
+      payload: { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    await vi.waitFor(() => expect(syncReadOnly).toHaveBeenCalledTimes(1));
+    // 回读落库发生在 syncReadOnly 返回之后，等状态本身而不是等调用次数。
+    await vi.waitFor(() => expect(store.listManagedEntities("demo-account", "cookie")
+      .find((item) => item.externalId === "adgroup-1")?.status).toBe("disabled"));
+  });
+
   it("allows an explicitly requested launch while account automation is disabled", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({
@@ -4603,6 +4705,7 @@ describe("local API", () => {
     }),
     changeStatus: NonNullable<AdsProvider["changeStatus"]> = async (_context, mutations) =>
       mutations.map((mutation) => ({ ...mutation, ok: true, message: "ok" })),
+    readEntityById?: AdsProvider["readEntityById"],
   ): Promise<string> {
     store.updateLaunchPreset("default-launch-preset", {
       name: "创建测试预设",
@@ -4673,6 +4776,7 @@ describe("local API", () => {
       capabilities: new Set(["read-campaigns", "create-campaigns", "copy-ads", "change-status"]),
       checkHealth,
       syncReadOnly: resolvedSyncReadOnly,
+      ...(readEntityById ? { readEntityById } : {}),
       changeStatus,
       create: async (context, mutations) => {
         const results = await createFromPreset(
