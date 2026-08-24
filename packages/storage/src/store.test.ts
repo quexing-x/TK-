@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { createDefaultAutomationSwitches, defaultAutomationFeatureSettings, type LaunchCopyPreviewInput, type LaunchOriginalPost } from "@tk-auto/core";
+import { automationRuleDefinitions, createDefaultAutomationSwitches, defaultAutomationFeatureSettings, type LaunchCopyPreviewInput, type LaunchOriginalPost } from "@tk-auto/core";
 import { AutomationStore } from "./store.js";
 import { MigrationRunner } from "./migration-runner.js";
 import {
@@ -498,7 +498,8 @@ describe("AutomationStore", () => {
       lookbackHours: 48,
       layers: { campaign: false, adGroup: true, ad: true },
     });
-    expect(store.getRuleConfiguration().rules).toHaveLength(9);
+    // 跟定义数联动，加规则时不用改这个数字
+    expect(store.getRuleConfiguration().rules).toHaveLength(automationRuleDefinitions.length);
     expect(store.getGlobalAutomationSettings()).toMatchObject({
       pollingIntervalMinutes: 5,
       maxActionsPerRun: 15,
@@ -710,14 +711,16 @@ describe("AutomationStore", () => {
   it("updates only the global rule configuration", () => {
     const configuration = store.getRuleConfiguration();
     configuration.layers.campaign = true;
-    configuration.rules[0]!.enabled = false;
-    configuration.rules[0]!.values.cpc = 0.9;
+    // 按规则码定位，不按下标：下标会随规则顺序变动而指到别的规则上，
+    // 而不同规则支持的参数不同，写进去会被 schema 判为「不支持的参数」。
+    const target = configuration.rules.find((rule) => rule.code === "CV1_CPC_CLOSE")!;
+    target.enabled = false;
+    target.values.cpc = 0.9;
 
     const updated = store.updateRuleConfiguration(configuration);
 
     expect(updated.layers.campaign).toBe(true);
-    expect(updated.rules[0]).toMatchObject({
-      code: "CV1_CPC_CLOSE",
+    expect(updated.rules.find((rule) => rule.code === "CV1_CPC_CLOSE")).toMatchObject({
       enabled: false,
       values: { cpc: 0.9 },
     });
@@ -3809,3 +3812,89 @@ function saveEntity(
     },
   );
 }
+
+/**
+ * 新增固有规则时，存量库里那份旧配置必须能自动补齐。
+ *
+ * 没有回填的话，getRuleConfiguration 的 schema 校验（规则数必须等于定义数、每个码都
+ * 要在）会直接抛错——不是少一条规则，是规则页和规则引擎一起读不出来。用真实文件库
+ * 加独立连接改写 rules_json 来模拟升级前的状态，不给生产 API 开测试专用后门。
+ */
+describe("规则码回填", () => {
+  const legacyStore = (mutate: (rules: unknown[]) => unknown[]) => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-rule-backfill-"));
+    const databasePath = join(directory, "legacy.db");
+    const seeded = new AutomationStore(databasePath);
+    seeded.seed();
+    const before = seeded.getRuleConfiguration().rules;
+    seeded.close();
+
+    const raw = new DatabaseSync(databasePath);
+    raw.prepare("UPDATE global_rule_configuration SET rules_json = ? WHERE id = 1")
+      .run(JSON.stringify(mutate(structuredClone(before) as unknown[])));
+    raw.close();
+
+    const reopened = new AutomationStore(databasePath);
+    reopened.seed();
+    return { store: reopened, directory };
+  };
+
+  const drop = (code: string) => (rules: unknown[]) =>
+    rules.filter((rule) => (rule as { code: string }).code !== code);
+
+  it("旧配置缺新规则码时自动补上，且不动用户调过的值", () => {
+    const { store, directory } = legacyStore((rules) =>
+      drop("CV1_LOW_CART_CPA_CLOSE")(rules).map((rule) =>
+        (rule as { code: string }).code === "CV1_CPC_CLOSE"
+          ? { ...(rule as object), values: { conversions: 1, cpc: 0.55 } }
+          : rule));
+
+    const loaded = store.getRuleConfiguration();
+
+    expect(loaded.rules.some((rule) => rule.code === "CV1_LOW_CART_CPA_CLOSE")).toBe(true);
+    expect(loaded.rules.find((rule) => rule.code === "CV1_CPC_CLOSE")?.values.cpc).toBe(0.55);
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("补进来的新规则默认关闭，升级不会自己开始关广告组", () => {
+    const { store, directory } = legacyStore(drop("CV1_LOW_CART_CPA_CLOSE"));
+
+    expect(
+      store.getRuleConfiguration().rules
+        .find((rule) => rule.code === "CV1_LOW_CART_CPA_CLOSE")?.enabled,
+    ).toBe(false);
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  // 生产上「单次转化 CPA 过高」是 5，而新规则的默认值是 9。直接落默认值会当场违反
+  // 「不得高于」的约束，整份配置在升级后连读都读不出来。
+  it("新规则的 CPA 跟随存量里的单次转化 CPA，不会因为默认值更高而违反约束", () => {
+    const { store, directory } = legacyStore((rules) =>
+      drop("CV1_LOW_CART_CPA_CLOSE")(rules).map((rule) =>
+        (rule as { code: string }).code === "CV1_CPA_CLOSE"
+          ? { ...(rule as object), values: { conversions: 1, cpa: 5 } }
+          : rule));
+
+    // 读得出来本身就是断言：读不出来会在这里抛错
+    const loaded = store.getRuleConfiguration();
+
+    expect(loaded.rules.find((rule) => rule.code === "CV1_LOW_CART_CPA_CLOSE")?.values.cpa)
+      .toBe(5);
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  // 规则被删除时同样会让长度校验失败，一并兜住。
+  it("配置里出现定义里没有的码时会被丢掉", () => {
+    const { store, directory } = legacyStore((rules) =>
+      [...rules, { code: "SOME_REMOVED_RULE", enabled: true, values: {} }]);
+
+    const loaded = store.getRuleConfiguration();
+
+    expect(loaded.rules.some((rule) => String(rule.code) === "SOME_REMOVED_RULE")).toBe(false);
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+});

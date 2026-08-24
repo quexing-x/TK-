@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { automationRuleDefinitions } from "@tk-auto/core";
 import { AutomationStore } from "@tk-auto/storage";
 import { createApp } from "./app.js";
 import {
@@ -1177,16 +1178,22 @@ describe("local API", () => {
     expect(credential.body).not.toContain("app-password-secret");
   });
 
-  it("returns and updates the nine global rules", async () => {
+  it("returns and updates the global rules", async () => {
     const existing = await app.inject({ method: "GET", url: "/api/rules" });
     const body = existing.json();
     expect(body.lookbackHours).toBe(48);
-    expect(body.rules).toHaveLength(9);
+    // 跟定义数联动，加规则时不用改这个数字
+    expect(body.rules).toHaveLength(automationRuleDefinitions.length);
     expect(body.layers).toEqual({ campaign: false, adGroup: true, ad: true, material: true });
 
     body.layers.campaign = true;
-    body.rules[0].enabled = false;
-    body.rules[0].values.cpc = 0.9;
+    // 按规则码定位，不按下标：下标会随规则顺序变动指到别的规则，而不同规则支持的
+    // 参数不同，写进去会被 schema 判为「不支持的参数」。
+    const target = body.rules.find(
+      (rule: { code: string }) => rule.code === "CV1_CPC_CLOSE",
+    );
+    target.enabled = false;
+    target.values.cpc = 0.9;
     const updated = await app.inject({
       method: "PUT",
       url: "/api/rules",
@@ -1198,8 +1205,9 @@ describe("local API", () => {
       lookbackHours: 48,
       layers: { campaign: true, adGroup: true, ad: true },
     });
-    expect(updated.json().rules[0]).toMatchObject({
-      code: "CV1_CPC_CLOSE",
+    expect(
+      updated.json().rules.find((rule: { code: string }) => rule.code === "CV1_CPC_CLOSE"),
+    ).toMatchObject({
       enabled: false,
       values: { conversions: 1, cpc: 0.9 },
     });
