@@ -401,6 +401,14 @@ function normalizeStatus(
     if (typeof value !== "string" || !value.trim()) continue;
     hasProviderStatus = true;
     const normalized = value.trim().toLowerCase();
+    // 已删除的对象既不是「开着」也不是「关着」，判为 unknown。
+    //
+    // 这是最后一道网：正常路径上 provider 解析时就把已删行滤掉了，走不到这里。但
+    // 兜底的 "enabled" 分支太宽——delete 落进去会让已删对象被当成开着的，规则会对
+    // 它派发关闭、过夜排期会把它排进 23:45 的关停队列，写请求必被 TikTok 拒，连续
+    // 失败会打开写入熔断器停掉整账户。判成 unknown 的好处是评估器会显式跳过并留下
+    // 原因，而不是静默地把它当成正常对象。
+    if (normalized.includes("delete")) return "unknown";
     if (
       normalized === "disable" ||
       normalized === "disabled" ||

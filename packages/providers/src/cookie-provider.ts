@@ -6499,6 +6499,33 @@ const entityListKeys: Record<SyncEntityType, string[]> = {
   ad: ["ads", "ad_list", "table", "list", "items"],
 };
 
+/**
+ * 这一行代表的对象是不是已经被删除了。
+ *
+ * 判据只看状态字段里的 delete 词根，不看 is_del：真机上 is_del 并不总是出现在列表
+ * 响应里，而 *_primary_status 一直有。刻意只匹配 delete 这一个词根——宁可漏判，也
+ * 不要把正常对象误滤出快照（对象凭空消失比多留一行难查得多）。
+ */
+function isDeletedEntityRow(lookup: (key: string) => unknown): boolean {
+  const keys = [
+    "ad_primary_status",
+    "adgroup_primary_status",
+    "campaign_primary_status",
+    "creative_primary_status",
+    "material_primary_status",
+    "primary_status",
+    "operation_status",
+    "ad_status",
+    "campaign_status",
+  ];
+  for (const key of keys) {
+    const value = lookup(key);
+    if (typeof value !== "string") continue;
+    if (value.trim().toLowerCase().includes("delete")) return true;
+  }
+  return false;
+}
+
 function extractEntities(
   payload: Record<string, unknown>,
   entityType: SyncEntityType,
@@ -6525,6 +6552,18 @@ function extractEntities(
     ) {
       return [];
     }
+    // 已删除的对象不进快照。
+    //
+    // TikTok 的列表接口会把已删除的广告组和广告一起返回，状态字段写作 delete，而
+    // normalizeStatus 只认 disable/paused 系的词，delete 会落进兜底的 "enabled"
+    // 分支——2026-08-24 生产上因此有 166 个已删广告组 + 166 个已删广告被判为
+    // 「已开启」堆在广告管理列表里。真正的危险不在界面：enrollNightlyAdGroups
+    // 在 23:45 会把所有 enabled 的广告组排队关闭，对已删对象发写请求必被拒，连续
+    // 失败会打开写入熔断器、停掉整个账户的自动化。
+    //
+    // 素材层当年在请求里加 is_del=0 解决同一个问题，但那依赖 TikTok 认这个筛选字段。
+    // 这里在解析侧按状态判，不依赖对端行为，三个层级一致生效。
+    if (isDeletedEntityRow(lookup)) return [];
     const idKeys: Record<SyncEntityType, string[]> = {
       // 素材的 ID 走 materialDraftId：真机把它写成 "[1872777743628513]"，
       // 是个字符串包着的数组，直接当 ID 用会连方括号一起发出去。
