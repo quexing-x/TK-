@@ -176,6 +176,20 @@ export function compareAdsManagementSpend(
   return (right.metrics.spend ?? 0) - (left.metrics.spend ?? 0);
 }
 
+/**
+ * 失效对象一律排到最后。
+ *
+ * 「失效」= 状态待确认（unknown）。这类行在界面上点不了任何按钮——启停按钮对
+ * status === "unknown" 的对象根本不渲染——占着前排纯属噪音。已删除的对象若绕过了
+ * provider 侧的过滤，也会落成 unknown，一并沉底。
+ *
+ * 只按可操作性分档，不动档内的既有排序（消耗降序），免得把「新建但还没花钱」的
+ * 广告组一起沉下去——那类是要盯着的。
+ */
+export function adsManagementRank(entity: ManagedEntityRecord): number {
+  return entity.status === "unknown" ? 1 : 0;
+}
+
 export function sumAdsManagementConversions(entities: ManagedEntityRecord[]): number {
   return entities.reduce((total, entity) => total + (entity.metrics.conversions ?? 0), 0);
 }
@@ -221,7 +235,8 @@ export function filterAdsManagementEntities(
         || entity.externalId.toLowerCase().includes(normalizedQuery);
     })
     .sort((left, right) => (
-      compareAdsManagementSpend(left.entity, right.entity)
+      adsManagementRank(left.entity) - adsManagementRank(right.entity)
+      || compareAdsManagementSpend(left.entity, right.entity)
       || left.index - right.index
     ))
     .map(({ entity }) => entity);
