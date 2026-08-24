@@ -19,7 +19,7 @@ type ConnectionState = {
   capabilities: AccountProviderCapabilities;
 };
 
-type TimeFilter = "all" | "24h" | "7d";
+export type TimeFilter = "today" | "yesterday" | "all";
 type ConversionFilter = "all" | "has" | "none";
 type StatusFilter = "all" | "enabled" | "disabled";
 
@@ -52,13 +52,29 @@ function defaultNextSixOClock(): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function withinWindow(createdAt: string | null | undefined, filter: TimeFilter, now: number): boolean {
+/**
+ * 按**自然日**判定，不是滚动小时窗。
+ *
+ * 原来的「近 24 小时」在早上八点看会把昨天上午创建的组算进来，而人想的是「今天建的」。
+ * 广告投放本来就是按天结算的，筛选口径跟着自然日走才对得上直觉。
+ *
+ * 用浏览器本地时区切日：这个面板是纯前端筛选，而账户时区与操作者时区在生产上一致
+ * （都是 Asia/Shanghai）。真出现跨时区运营时这里要改成按账户时区切。
+ */
+export function withinWindow(
+  createdAt: string | null | undefined,
+  filter: TimeFilter,
+  now: number,
+): boolean {
   if (filter === "all") return true;
   if (!createdAt) return false;
   const created = new Date(createdAt).getTime();
   if (!Number.isFinite(created)) return false;
-  const hours = filter === "24h" ? 24 : 24 * 7;
-  return created >= now - hours * 60 * 60_000;
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  // today = 今天零点起；yesterday = 昨天零点起（即今天+昨天两天）
+  if (filter === "yesterday") midnight.setDate(midnight.getDate() - 1);
+  return created >= midnight.getTime();
 }
 
 export type ExpandConflict = {
@@ -512,7 +528,7 @@ export function ExpandGroupsPanel({
     </div>}
 
     <div className="expand-toolbar">
-      <label className="expand-filter"><span>时间范围</span><select value={timeFilter} onChange={(event) => setTimeFilter(event.target.value as TimeFilter)}><option value="all">全部</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select></label>
+      <label className="expand-filter"><span>时间范围</span><select value={timeFilter} onChange={(event) => setTimeFilter(event.target.value as TimeFilter)}><option value="today">今天</option><option value="yesterday">今天 + 昨天</option><option value="all">全部</option></select></label>
       <label className="expand-filter"><span>转化</span><select value={conversionFilter} onChange={(event) => setConversionFilter(event.target.value as ConversionFilter)}><option value="all">全部</option><option value="has">有转化</option><option value="none">无转化</option></select></label>
       <label className="expand-filter"><span>状态</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}><option value="all">全部</option><option value="enabled">投放中</option><option value="disabled">已暂停</option></select></label>
       <label className="expand-filter grow"><span>搜索</span><input placeholder="广告组名称或 ID" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
