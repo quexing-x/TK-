@@ -22,7 +22,9 @@ export class WecomNotificationSender implements NotificationSender {
       "qyapi.weixin.qq.com",
       "/cgi-bin/webhook/send",
     );
-    const body = settings.mentionAll
+    // 消息级设置优先于渠道级：失效提醒必须 @所有人，哪怕渠道平时关着 @。
+    const mentionAll = message.mentionAll ?? settings.mentionAll;
+    const body = mentionAll
       ? {
           msgtype: "text",
           text: { content: message.text, mentioned_list: ["@all"] },
@@ -56,7 +58,7 @@ export class FeishuNotificationSender implements NotificationSender {
     const body: Record<string, unknown> = {
       msg_type: "text",
       content: {
-        text: `${message.text}${settings.mentionAll ? "\n<at user_id=\"all\">所有人</at>" : ""}`,
+        text: `${message.text}${(message.mentionAll ?? settings.mentionAll) ? "\n<at user_id=\"all\">所有人</at>" : ""}`,
       },
     };
     if (credential.signingSecret) {

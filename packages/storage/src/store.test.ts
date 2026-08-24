@@ -996,6 +996,73 @@ describe("AutomationStore", () => {
     expect(store.listDueNotificationDeliveries()).toHaveLength(1);
   });
 
+  // 账户失效提醒只在**跳变**时发。失效会持续几小时甚至几天，而轮询最短 45 秒一轮，
+  // 按「当前所有失效账户」推送等于持续 @所有人 刷群。
+  describe("账户失效提醒的跳变判定", () => {
+    const runCycle = (status: "no-action" | "failed", message: string | null = null) => {
+      const cycle = store.createPollCycle();
+      store.savePollAccountResult(cycle.id, {
+        accountId: "demo-account",
+        accountName: "演示广告账户",
+        runId: null,
+        status,
+        enabledCount: 0,
+        disabledCount: 0,
+        failureCount: status === "failed" ? 1 : 0,
+        message,
+      });
+      store.finishPollCycle(cycle.id);
+      return cycle.id;
+    };
+
+    it("第一次失效会报出来", () => {
+      const id = runCycle("failed", "Cookie 已失效");
+
+      const invalid = store.listNewlyInvalidAutomationAccounts(id);
+      expect(invalid).toHaveLength(1);
+      expect(invalid[0]).toMatchObject({
+        accountId: "demo-account",
+        message: "Cookie 已失效",
+      });
+    });
+
+    it("连续失效不再重复报", () => {
+      runCycle("failed", "Cookie 已失效");
+      const second = runCycle("failed", "Cookie 已失效");
+
+      expect(store.listNewlyInvalidAutomationAccounts(second)).toEqual([]);
+    });
+
+    it("恢复之后再次失效，会重新报一次", () => {
+      runCycle("failed", "Cookie 已失效");
+      runCycle("no-action");
+      const again = runCycle("failed", "又失效了");
+
+      expect(store.listNewlyInvalidAutomationAccounts(again)).toHaveLength(1);
+    });
+
+    it("正常的批次不报", () => {
+      const id = runCycle("no-action");
+
+      expect(store.listNewlyInvalidAutomationAccounts(id)).toEqual([]);
+    });
+
+    // 自动化没开的账户失效不影响投放，不值得把所有人叫起来。
+    it("自动化未开启的账户失效不报", () => {
+      const account = store.getAccount("demo-account")!;
+      store.updateAccountSettings("demo-account", {
+        displayName: account.displayName,
+        accountType: account.accountType,
+        enabled: false,
+        providerKind: account.providerKind,
+      });
+
+      const id = runCycle("failed", "Cookie 已失效");
+
+      expect(store.listNewlyInvalidAutomationAccounts(id)).toEqual([]);
+    });
+  });
+
   describe("自动化在管的关停广告组", () => {
     const recordDecision = (
       externalId: string,

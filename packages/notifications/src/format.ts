@@ -4,8 +4,20 @@ import type {
   PollCycleRecord,
 } from "@tk-auto/core";
 
+/**
+ * 刚刚失效的、且自动化开着的账户。
+ *
+ * 只传「刚跳变的」，不是「当前所有失效的」：账户失效会持续几小时甚至几天，每轮
+ * 轮询都 @所有人 会把群刷爆（轮询间隔最短 45 秒）。判据放在调用方，这里只负责渲染。
+ */
+export interface InvalidAutomationAccount {
+  accountName: string;
+  message: string | null;
+}
+
 export function renderPollCycle(
   cycle: PollCycleRecord,
+  newlyInvalid: readonly InvalidAutomationAccount[] = [],
 ): NotificationRenderedMessage {
   const totals = summarize(cycle.accounts);
   const finishedAt = cycle.finishedAt ?? cycle.startedAt;
@@ -15,7 +27,37 @@ export function renderPollCycle(
     hour12: false,
     timeZone: "Asia/Shanghai",
   }).format(new Date(finishedAt));
-  const subject = `TK Ads 轮询报告：开启 ${totals.enabled} / 关闭 ${totals.disabled} / 无操作 ${totals.noAction}`;
+  // 失效提醒盖过常规汇总标题：这条要让人一眼看出是出事了，不是例行报告。
+  const subject = newlyInvalid.length > 0
+    ? `TK Ads 账户失效：${newlyInvalid.length} 个已开启自动化的账户连接异常`
+    : `TK Ads 轮询报告：开启 ${totals.enabled} / 关闭 ${totals.disabled} / 无操作 ${totals.noAction}`;
+  const alertText = newlyInvalid.length > 0
+    ? [
+        `⚠️ 以下 ${newlyInvalid.length} 个账户已开启自动化，但连接失效，投放正在停摆：`,
+        ...newlyInvalid.map((item) =>
+          `  · ${item.accountName}${item.message ? `：${item.message}` : ""}`),
+        "请尽快到「用户管理」重新导入 Cookie 或检查接入。",
+        "",
+      ]
+    : [];
+  const alertMarkdown = newlyInvalid.length > 0
+    ? [
+        `## ⚠️ ${newlyInvalid.length} 个已开启自动化的账户连接失效`,
+        ...newlyInvalid.map((item) =>
+          `- **${item.accountName}**${item.message ? `：${item.message}` : ""}`),
+        "",
+        "请尽快到「用户管理」重新导入 Cookie 或检查接入。",
+        "",
+      ]
+    : [];
+  const alertHtml = newlyInvalid.length > 0
+    ? `<div style="border-left:4px solid #d33;padding:8px 12px;margin-bottom:12px">
+        <p><strong>⚠️ ${newlyInvalid.length} 个已开启自动化的账户连接失效，投放正在停摆</strong></p>
+        <ul>${newlyInvalid.map((item) =>
+          `<li>${escapeHtml(item.accountName)}${item.message ? `：${escapeHtml(item.message)}` : ""}</li>`).join("")}</ul>
+        <p>请尽快到「用户管理」重新导入 Cookie 或检查接入。</p>
+      </div>`
+    : "";
   const summary = `汇总：开启 ${totals.enabled}，关闭 ${totals.disabled}，无操作 ${totals.noAction}，失败 ${totals.failed}，跳过 ${totals.skipped}`;
   const textRows = cycle.accounts.map(formatTextAccount);
   const markdownRows = cycle.accounts.map(formatMarkdownAccount);
@@ -23,7 +65,10 @@ export function renderPollCycle(
 
   return {
     subject,
+    // 有失效账户时强制 @所有人，覆盖渠道自身的 mentionAll 设置。
+    ...(newlyInvalid.length > 0 ? { mentionAll: true } : {}),
     text: [
+      ...alertText,
       "TK Ads 自动化轮询报告",
       `完成时间：${displayTime}`,
       summary,
@@ -31,6 +76,7 @@ export function renderPollCycle(
       ...textRows,
     ].join("\n"),
     markdown: [
+      ...alertMarkdown,
       "# TK Ads 自动化轮询报告",
       `> 完成时间：${displayTime}`,
       `**${summary}**`,
@@ -38,6 +84,7 @@ export function renderPollCycle(
       ...markdownRows,
     ].join("\n"),
     html: `
+      ${alertHtml}
       <h2>TK Ads 自动化轮询报告</h2>
       <p>完成时间：${escapeHtml(displayTime)}</p>
       <p><strong>${escapeHtml(summary)}</strong></p>
