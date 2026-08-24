@@ -9,6 +9,7 @@ import {
   splitVideoCodes,
   deriveTikTokCreationRequest,
   formatCampaignBudgetAmount,
+  mapWithConcurrency,
   normalizeProviderEntity,
   type CapturedCookieRequest,
   type ProviderEntity,
@@ -510,7 +511,13 @@ export class CookieAdsProvider implements AdsProvider {
       (item) => item.target === "ad-group" && !item.derived,
     );
 
-    for (const entityType of ["campaign", "ad-group", "ad"] as const) {
+    // 三个层级互不依赖，先各自把请求准备好，再并发打出去。串行时一轮 = 三层耗时
+    // 相加（生产实测三层合计 89.8 秒），并发后 = 最慢的那一层，而最慢的广告层本来
+    // 就是它们里的大头。
+    //
+    // 请求准备留在同步阶段、结果按固定层级顺序合并：告警文案和 partialFailures 会
+    // 进快照并显示在界面上，顺序随网络快慢漂移会让同一份数据每轮看起来都不一样。
+    const layerPlans = (["campaign", "ad-group", "ad"] as const).map((entityType) => {
       const captured = credential.requestTemplates?.find(
         (item) => item.target === entityType,
       );
@@ -523,9 +530,7 @@ export class CookieAdsProvider implements AdsProvider {
             : undefined) ??
         legacyRequest(legacyEndpoints[entityType]);
       if (!request) {
-        warnings.push(`${entityType} 尚未导入只读请求。`);
-        partialFailures.push(`${entityType}:request-missing`);
-        continue;
+        return { entityType, ready: false as const };
       }
       // A captured list cURL may have been copied while the TikTok UI was set
       // to 3/7/30 days.  When a report window is explicitly present, rewrite
@@ -545,33 +550,68 @@ export class CookieAdsProvider implements AdsProvider {
         context.timezone ?? "UTC",
         new Date(),
       );
-      if (!hasExplicitMetricWindow(windowedRequest)) {
+      return {
+        entityType,
+        ready: true as const,
+        derived: Boolean(entityRequest.derived),
+        windowedRequest,
+        coverageKnown: hasExplicitMetricWindow(windowedRequest),
+      };
+    });
+
+    // 失败在这里只记录、不抛出：某一层该不该让整轮同步失败，取决于它是不是派生
+    // 请求，而这个判定必须留到按层级顺序合并时再做，否则谁先失败谁说了算。
+    const layerOutcomes = await mapWithConcurrency(
+      layerPlans,
+      LIST_LAYER_CONCURRENCY,
+      async (plan) => {
+        if (!plan.ready) return null;
+        try {
+          return {
+            ok: true as const,
+            ...(await requestAllCookieListPagesWithRetry(plan.windowedRequest, credential)),
+          };
+        } catch (cause) {
+          return { ok: false as const, cause };
+        }
+      },
+    );
+
+    for (const [index, plan] of layerPlans.entries()) {
+      const { entityType } = plan;
+      if (!plan.ready) {
+        warnings.push(`${entityType} 尚未导入只读请求。`);
+        partialFailures.push(`${entityType}:request-missing`);
+        continue;
+      }
+      if (!plan.coverageKnown) {
         coverageKnown = false;
         warnings.push(`${entityType} 请求未提供日期范围，已沿用 TikTok 默认数据范围。`);
       }
-      let pages: Record<string, unknown>[];
-      let entityPaginationComplete = false;
-      try {
-        const result = await requestAllCookieListPagesWithRetry(windowedRequest, credential);
-        pages = result.pages;
-        entityPaginationComplete = result.complete;
-      } catch (cause) {
-        if (!entityRequest.derived) throw cause;
+      const outcome = layerOutcomes[index]!;
+      if (!outcome.ok) {
+        // 导入的（非派生）请求失败仍然让整轮同步失败，和串行时一样。区别只是另外
+        // 两层这时已经并发发出去了——多读一次没有副作用，结果丢弃即可。
+        if (!plan.derived) throw outcome.cause;
         // 原因必须落库。此前这里直接丢掉 cause，只留一句泛化的"请求失败"，事后
         // 完全无法区分是限流、超时还是会话失效——39 条历史失败记录里一条线索都没有。
         // 加上之后第一时间就翻出了真凶：不是限流，是我们自己的超时预算到点。
-        const reason = cause instanceof Error
-          ? withCauseDetail(cause.message, cause).slice(0, 200)
+        const reason = outcome.cause instanceof Error
+          ? withCauseDetail(outcome.cause.message, outcome.cause).slice(0, 200)
           : "未知错误。";
         // 重试与否要如实说：超时走的是不重试那条分支，写死"已重试 1 次"会让日后
         // 排障的人以为重试机制在跑。
-        const attempts = isRequestTimeoutError(cause) ? "未重试，超时不重试" : "已重试 1 次";
+        const attempts = isRequestTimeoutError(outcome.cause)
+          ? "未重试，超时不重试"
+          : "已重试 1 次";
         warnings.push(
           `${entityType} 自动补全请求失败（${attempts}）：${reason} 如需该层级数据，请补充一条真实列表 cURL。`,
         );
         partialFailures.push(`${entityType}:derived-request-failed`);
         continue;
       }
+      const pages = outcome.pages;
+      const entityPaginationComplete = outcome.complete;
       const entityContractValid = pages.every(
         (payload) => hasRecognizedEntityList(payload, entityType),
       );
@@ -616,39 +656,55 @@ export class CookieAdsProvider implements AdsProvider {
       let materialEntitiesExtracted = 0;
       const materialAdIdsToFetch = spendingAdIds.slice(0, MAX_MATERIAL_ADS_PER_SYNC);
       materialUnavailableAdIds.push(...spendingAdIds.slice(MAX_MATERIAL_ADS_PER_SYNC));
-      for (const creativeId of materialAdIdsToFetch) {
-        try {
-          // 过一遍 withTodayMetricWindow，和其它三层共用同一套日期改写 + 规则指标
-          // 保障（ensureStatisticsMetric）。日期在 materialListRequest 里已设成当天，
-          // 这里的改写是幂等的；真正的意义是：将来给规则加新指标时改
-          // ensureStatisticsMetric，素材层会自动跟上，不再各写各的、悄悄落下。
-          const payload = await requestCookieJson(
-            withTodayMetricWindow(
-              materialListRequest(importedAdGroupRead, creativeId, {
-                startDate: formatDateInTimezone(materialNow, materialTimezone),
-                endDate: formatDateInTimezone(materialNow, materialTimezone),
-              }),
-              materialTimezone,
-              materialNow,
-            ),
-            credential,
-          );
-          const extracted = extractEntities(payload, "material");
-          materialRowsSeen += countEntityListRows(payload, "material");
-          materialEntitiesExtracted += extracted.length;
-          entities.push(...extracted);
-        } catch (cause) {
+      // 这一层是目前单轮里最大的一块：上限 40 个广告，逐个串行就是 40 次往返。
+      // 限并发而不是全量并发——40 个请求同时打出去，同一个 Cookie 会话大概率被
+      // TikTok 限流，而限流会让整轮同步降级成 partial，删除和自动复制随即跳过。
+      const materialOutcomes = await mapWithConcurrency(
+        materialAdIdsToFetch,
+        MATERIAL_FETCH_CONCURRENCY,
+        async (creativeId) => {
+          try {
+            // 过一遍 withTodayMetricWindow，和其它三层共用同一套日期改写 + 规则指标
+            // 保障（ensureStatisticsMetric）。日期在 materialListRequest 里已设成当天，
+            // 这里的改写是幂等的；真正的意义是：将来给规则加新指标时改
+            // ensureStatisticsMetric，素材层会自动跟上，不再各写各的、悄悄落下。
+            const payload = await requestCookieJson(
+              withTodayMetricWindow(
+                materialListRequest(importedAdGroupRead, creativeId, {
+                  startDate: formatDateInTimezone(materialNow, materialTimezone),
+                  endDate: formatDateInTimezone(materialNow, materialTimezone),
+                }),
+                materialTimezone,
+                materialNow,
+              ),
+              credential,
+            );
+            return { ok: true as const, payload };
+          } catch (cause) {
+            return { ok: false as const, creativeId, cause };
+          }
+        },
+      );
+      // 按广告顺序合并，与串行时逐个 push 的结果完全一致：
+      // materialUnavailableAdIds 会进同步快照，顺序漂移会让相同的一轮看着像变了。
+      for (const outcome of materialOutcomes) {
+        if (!outcome.ok) {
           materialFailures += 1;
-          materialUnavailableAdIds.push(creativeId);
+          materialUnavailableAdIds.push(outcome.creativeId);
           // 和上面派生请求失败那段用同一套：undici 把网络错误一律写成
           // `fetch failed`，真正的 errno 挂在 cause 上，只取 message 会得到
           // 一句和原来的空 catch 一样没信息的话。
           materialFailureReasons.add(
-            cause instanceof Error
-              ? withCauseDetail(cause.message, cause).slice(0, 200)
+            outcome.cause instanceof Error
+              ? withCauseDetail(outcome.cause.message, outcome.cause).slice(0, 200)
               : "未知错误。",
           );
+          continue;
         }
+        const extracted = extractEntities(outcome.payload, "material");
+        materialRowsSeen += countEntityListRows(outcome.payload, "material");
+        materialEntitiesExtracted += extracted.length;
+        entities.push(...extracted);
       }
       if (spendingAdIds.length > MAX_MATERIAL_ADS_PER_SYNC) {
         // 静默截断会让人以为素材都覆盖到了。宁可吵一点。
@@ -6637,6 +6693,18 @@ function materialListRequest(
  * 生产上"当天有消耗的广告"通常是十几个；真超过了就如实告警，不静默截断。
  */
 const MAX_MATERIAL_ADS_PER_SYNC = 40;
+
+/** 系列 / 广告组 / 广告三层一起打出去：它们互不依赖，串行只是白等。 */
+const LIST_LAYER_CONCURRENCY = 3;
+
+/**
+ * 素材层的并发度。上限 40 个广告、逐个一次往返，是单轮里最大的一块。
+ *
+ * 取 5 而不是拉满：这些请求全部复用同一个 Cookie 会话，并发一高 TikTok 就限流，
+ * 而限流的代价不只是慢——整轮同步会降级成 partial，删除和自动复制都要求最近一次
+ * 同步取全，会连带跳过。5 已经把这一层压到原来的五分之一。
+ */
+const MATERIAL_FETCH_CONCURRENCY = 5;
 
 /** 实体当天的消耗。列表接口可能把指标放在顶层，也可能放在 row_data / stat_data 里。 */
 function entitySpend(payload: Record<string, unknown>): number {

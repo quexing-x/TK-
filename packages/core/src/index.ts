@@ -1,5 +1,6 @@
 export * from "./account.js";
 export * from "./automation.js";
+export * from "./concurrency.js";
 export * from "./connection.js";
 export * from "./decision.js";
 export * from "./management.js";

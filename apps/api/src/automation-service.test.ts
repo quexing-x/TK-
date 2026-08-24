@@ -646,6 +646,42 @@ describe("AutomationService", () => {
 
   });
 
+  /** 再挂一个和 demo-account 同构的 TikTok 账户，用来观察账户之间的调度行为。 */
+  async function setupExtraTikTokAccount(displayName: string) {
+    const account = store.createAccount({
+      displayName,
+      platform: "tiktok",
+      accountType: "standard",
+      enabled: true,
+      providerKind: "cookie",
+    });
+    store.saveProviderConnectionSettings(account.id, {
+      kind: "cookie",
+      advertiserId: "123",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const reference = await vault.create(
+      JSON.stringify({
+        kind: "cookie",
+        cookie: "sessionid=test-cookie",
+        csrfHeaderName: "x-csrftoken",
+      }),
+    );
+    store.setProviderCredentialReference(account.id, "cookie", reference);
+    store.updateProviderStatus(account.id, "cookie", "ready", "ready");
+    store.updateProviderAuthorization(account.id, "cookie", {
+      status: "active",
+      capabilityVersion: provider.capabilityVersion,
+      capabilities: ["read-campaigns", "read-ad-groups", "change-status"],
+    });
+    const sync = await provider.syncReadOnly();
+    store.saveReadOnlySync(account.id, "cookie", sync.entities, sync.result);
+    return account;
+  }
+
   async function setupMetaAccount(input: {
     enabled: boolean;
     liveMode: "read-only" | "manual-status" | "automation-status";
@@ -1565,9 +1601,11 @@ describe("AutomationService", () => {
 
     expect(run.failureCount).toBe(1);
     expect(provider.mutations).toHaveLength(1);
+    // 写入失败不能把连接打成失效：会话本身是好的，这一轮只读同步就是证据。
+    // lastMessage 记的正是那次成功的同步，而不是失败的写入。
     expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
       status: "ready",
-      lastMessage: "ready",
+      lastMessage: "Cookie 会话可用：只读同步成功。",
     });
     expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
@@ -2586,6 +2624,221 @@ describe("AutomationService", () => {
     vi.useRealTimers();
     expect(store.listPollCycles()).toHaveLength(0);
     expect(deletions).toHaveBeenCalledWith("demo-account");
+  });
+
+  // 回归：定时执行器和只读同步原先同在一跳里，共用一把重入锁。轮询长跑期间新的
+  // 一跳会被整个丢掉，定时执行器跟着一起丢——而自动申诉只在每个整点的第 0 分钟
+  // 有机会（30 秒一跳 = 2 次机会），一轮长跑跨过整点，这一小时的申诉就整个不跑。
+  it("轮询还没跑完时，定时执行器照常按时评估", async () => {
+    let releasePoll = (): void => {};
+    const pollInFlight = new Promise<void>((resolve) => {
+      releasePoll = resolve;
+    });
+    vi.spyOn(service, "runAccount").mockImplementation(async () => {
+      await pollInFlight;
+      throw new Error("轮询在测试里被主动放行后结束");
+    });
+    const appeals = vi.spyOn(service, "runScheduledAppeals");
+    const schedules = vi.spyOn(service, "runDueScheduledActions");
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    // 上一轮轮询还卡在同步里，故意不 await。
+    const polling = scheduler.runPollCycle();
+    await scheduler.runMaintenance();
+
+    expect(appeals).toHaveBeenCalledWith("demo-account");
+    expect(schedules).toHaveBeenCalledWith("demo-account");
+
+    releasePoll();
+    await polling;
+    vi.useRealTimers();
+  });
+
+  // 账户之间没有任何数据依赖，串行纯粹是在排队等网络：一轮的耗时原先是所有账户
+  // 相加，队尾账户还要额外背上前面所有账户的耗时。
+  it("同一批次里的账户并发轮询，而不是一个接一个排队", async () => {
+    await setupExtraTikTokAccount("第二个账户");
+    await setupExtraTikTokAccount("第三个账户");
+    let inFlight = 0;
+    let peak = 0;
+    provider.afterSync = async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+    };
+    const scheduler = new AutomationScheduler(store, service);
+    // shouldAdvanceTime：既要把时钟推到到期，又要让 afterSync 里的真实延迟走得动。
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    expect(peak).toBeGreaterThan(1);
+    // 三个账户都进了同一个批次，一个都没漏。
+    expect(store.listPollCycles()).toHaveLength(1);
+    expect(store.listPollCycles()[0]?.accounts).toHaveLength(3);
+  });
+
+  // 并发不能把出口打爆：账户并发 × 层内并发才是真正打到 TikTok 的峰值。
+  it("账户并发有上限，不会把所有账户一次性全放出去", async () => {
+    for (let index = 0; index < 6; index += 1) {
+      await setupExtraTikTokAccount(`批量账户 ${index}`);
+    }
+    let inFlight = 0;
+    let peak = 0;
+    provider.afterSync = async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+    };
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    expect(store.listPollCycles()[0]?.accounts).toHaveLength(7);
+    expect(peak).toBe(3);
+  });
+
+  // 并发之后一个账户抛错会直接拒绝掉整批的 promise，其余账户的结果跟着一起丢。
+  it("一个账户失败不带走同批次的其他账户", async () => {
+    const failing = await setupExtraTikTokAccount("会失败的账户");
+    const original = service.runAccount.bind(service);
+    vi.spyOn(service, "runAccount").mockImplementation(async (accountId, trigger) => {
+      if (accountId === failing.id) throw new Error("这个账户炸了");
+      return original(accountId, trigger);
+    });
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    const accounts = store.listPollCycles()[0]?.accounts ?? [];
+    expect(accounts).toHaveLength(2);
+    expect(accounts.find((item) => item.accountId === failing.id)).toMatchObject({
+      status: "failed",
+      message: "这个账户炸了",
+    });
+    expect(accounts.find((item) => item.accountId === "demo-account")?.status)
+      .not.toBe("failed");
+  });
+
+  // 消息推送的契约：每个存在到期账户的批次结束后各渠道发一份账户汇总。并发是
+  // 批次**内部**的事，拆成每账户一条会让用户的推送量直接乘以账户数。
+  it("并发轮询后仍然是一个批次一份汇总", async () => {
+    await setupExtraTikTokAccount("第二个账户");
+    const cycles: Parameters<PollNotificationDispatcher["enqueueAndDispatch"]>[0][] = [];
+    const dispatcher: PollNotificationDispatcher = {
+      flushPending: vi.fn(async () => undefined),
+      enqueueAndDispatch: vi.fn(async (cycle) => {
+        cycles.push(cycle);
+      }),
+    };
+    const scheduler = new AutomationScheduler(store, service, dispatcher);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.accounts).toHaveLength(2);
+  });
+
+  // 同一件事在生产入口上再验一次：start() 必须真的挂出两条互不相干的定时器，
+  // 否则前一条测试保证的只是「分开调用时互不阻塞」，而生产上没人会分开调用。
+  it("start() 挂出的两条循环互不阻塞：轮询卡住时定时执行器照常跳", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+    let releasePoll = (): void => {};
+    const pollInFlight = new Promise<void>((resolve) => {
+      releasePoll = resolve;
+    });
+    vi.spyOn(service, "runAccount").mockImplementation(async () => {
+      await pollInFlight;
+      throw new Error("轮询在测试里被主动放行后结束");
+    });
+    const appeals = vi.spyOn(service, "runScheduledAppeals");
+    const scheduler = new AutomationScheduler(store, service);
+
+    scheduler.start();
+    // 首跳（5 秒）把轮询卡住，再走过一个 30 秒的维护间隔。
+    await vi.advanceTimersByTimeAsync(40_000);
+
+    // 合成一条循环时，卡住的轮询会让后面每一跳都被重入锁整个丢掉，这里只会有 1 次。
+    expect(appeals.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    scheduler.stop();
+    releasePoll();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+  });
+
+  // 到期判定原先读连接上的 lastTestedAt，而它是在每个账户轮询**开头**刷新的，
+  // 于是这一轮自身的耗时被算进了下一轮的间隔：一轮 6 分钟、间隔 5 分钟，跑完立刻
+  // 又到期，轮询退化成「跑完马上再跑」，设置里的间隔形同虚设。
+  it("下一次到期从本轮结束起算，一轮跑超过间隔也不会立刻再跑", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+    // 轮询间隔默认 5 分钟；让这一轮跑 6 分钟。
+    provider.afterSync = () => {
+      vi.setSystemTime(new Date(Date.now() + 6 * 60_000));
+    };
+    const scheduler = new AutomationScheduler(store, service);
+
+    await scheduler.runPollCycle();
+    expect(store.listPollCycles()).toHaveLength(1);
+
+    provider.afterSync = null;
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    expect(store.listPollCycles()).toHaveLength(1);
+  });
+
+  // 连接检测紧接着就是一次真实的只读同步，同一个会话连查两遍，每账户白白多一次
+  // 往返。同步成功本身就是最强的连接检测。
+  it("ready 的账户不再为轮询单独探一次连接检测", async () => {
+    const health = vi.spyOn(provider, "checkHealth");
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    expect(health).not.toHaveBeenCalled();
+    // 但「最近检查」必须由这一轮同步接上，否则界面上的连接状态会一直停在旧时刻。
+    expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({
+      status: "ready",
+      lastMessage: "Cookie 会话可用：只读同步成功。",
+    });
+    expect(store.listPollCycles()[0]?.accounts[0]).toMatchObject({ accountId: "demo-account" });
+  });
+
+  // 反过来这一次探测不能省：失效连接靠它自动恢复，省掉就再也回不来了。
+  it("连接失效的账户仍然先探一次，探通了继续跑规则", async () => {
+    store.updateProviderStatus("demo-account", "cookie", "failed", "Cookie 已失效");
+    const health = vi.spyOn(provider, "checkHealth");
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    expect(health).toHaveBeenCalledTimes(1);
+    expect(store.getProviderConnection("demo-account", "cookie")).toMatchObject({ status: "ready" });
+    expect(store.listPollCycles()[0]?.accounts[0]?.status).not.toBe("failed");
   });
 
   // 同一条恢复规则，只把时间挪进 23:45–零点，就不该再派发开启。

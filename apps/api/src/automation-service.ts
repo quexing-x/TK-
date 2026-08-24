@@ -9,6 +9,7 @@ import {
   evaluateMetaRuleConfiguration,
   evaluateRuleConfiguration,
   filterEntitiesToRecentWindow,
+  mapWithConcurrency,
   networkUnreachableMessagePrefix,
   MetaAccessSecretBundleInputSchema,
   stripAutomaticAdGroupNameSuffixes,
@@ -567,6 +568,23 @@ export class AutomationService {
             : `API 数据同步异常：${message}`,
         );
         throw cause;
+      }
+      // 同步成功就是一次成功的连接检测——它比 checkHealth 走的路更长、更能说明
+      // 会话可用。调度器因此不再为 ready 账户单独探一次健康检查；这里必须把「最近
+      // 检查」时间补上，否则界面上的连接状态会一直停在上一次真正探测的时刻。
+      // 失败方向由上面的 catch 覆盖，两个方向合起来才是完整的连接状态。
+      try {
+        this.store.updateProviderStatus(
+          accountId,
+          account.providerKind,
+          "ready",
+          account.providerKind === "cookie"
+            ? "Cookie 会话可用：只读同步成功。"
+            : "API 连接可用：只读同步成功。",
+        );
+      } catch {
+        // 纯记账：连接在同步期间被重置或删除都会走到这里。数据已经取回来了，
+        // 规则该照常判，不能让一次状态回写把成功的一轮翻成失败。
       }
       const metaRuleConfiguration = account.platform === "meta"
         ? this.store.getMetaRuleConfiguration()
@@ -2138,9 +2156,42 @@ function hasStartedBy(scheduledStartAt: string | null | undefined, now: Date): b
   return Number.isFinite(timestamp) && timestamp <= now.getTime();
 }
 
+/**
+ * 一个轮询批次里同时处理多少个账户。
+ *
+ * 账户之间没有任何数据依赖：各自的 Cookie、各自的实体、各自的写入熔断器，
+ * 每账户的重入由 runningAccounts 单独兜着。串行纯粹是在排队等网络。
+ *
+ * 不拉满的理由是出口：所有账户共用同一个出口 IP（还可能是同一个代理），真正打到
+ * TikTok 的峰值是「账户并发 × 层内并发」。3 × 5 = 15，接近一个普通浏览器同域并发
+ * 的量级。要加并发优先动这个数，层内那两个受单账户数据量约束，上界更难预测。
+ */
+const pollAccountConcurrency = 3;
+
+/** 定时执行器（申诉、定时启停、过夜排期、删除）的评估间隔。 */
+const maintenanceTickIntervalMs = 30_000;
+/** 轮询到期检查的间隔。真正的每账户节奏由各自的轮询间隔设置决定。 */
+const pollTickIntervalMs = 30_000;
+/** 进程刚起来时先让存储和连接就绪，别在启动瞬间抢跑。 */
+const initialTickDelayMs = 5_000;
+
 export class AutomationScheduler {
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private ticking = false;
+  private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private maintaining = false;
+  private polling = false;
+  /**
+   * 每账户最近一次轮询**结束**的时刻。
+   *
+   * 到期判定原先读的是连接上的 lastTestedAt，而它是在每个账户轮询**开头**的连接
+   * 检测里刷新的，于是这一轮自身的耗时被算进了下一轮的间隔里：一轮跑 6 分钟、间隔
+   * 设 5 分钟，跑完立刻又到期，轮询退化成「跑完马上再跑」，设置里的间隔形同虚设。
+   * 排在队尾的账户还要额外背上前面所有账户的耗时。
+   *
+   * 改成从本轮结束起算，并与连接检测彻底解耦——后者现在不是每轮都跑了。
+   * 只存在内存里：轮询节奏不需要持久化，重启后按 lastTestedAt 重新起算即可。
+   */
+  private readonly lastPolledAt = new Map<string, number>();
 
   constructor(
     private readonly store: AutomationStore,
@@ -2149,24 +2200,48 @@ export class AutomationScheduler {
   ) {}
 
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => void this.tick(), 30_000);
-    this.timer.unref?.();
-    setTimeout(() => void this.tick(), 5_000).unref?.();
+    if (this.maintenanceTimer || this.pollTimer) return;
+    // 两条独立的循环，各自有各自的重入锁。
+    //
+    // 合成一条的代价是实测过的：轮询长跑期间，新的一跳会被重入锁整个丢掉，而定时
+    // 执行器和轮询同在那一跳里，于是一起被丢。自动申诉只在每个整点的第 0 分钟这一
+    // 分钟内有机会（30 秒一跳 = 2 次机会），一轮长跑跨过整点，这一小时的申诉就整个
+    // 不跑；定时启停（含过夜零点开回来）同样被推迟到长跑结束。
+    // 定时执行器全是本地判定 + 少量写，跟慢速的只读同步没有任何理由绑在一起。
+    this.maintenanceTimer = setInterval(
+      () => void this.runMaintenance(),
+      maintenanceTickIntervalMs,
+    );
+    this.maintenanceTimer.unref?.();
+    this.pollTimer = setInterval(() => void this.runPollCycle(), pollTickIntervalMs);
+    this.pollTimer.unref?.();
+    setTimeout(() => void this.tick(), initialTickDelayMs).unref?.();
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.maintenanceTimer = null;
+    this.pollTimer = null;
   }
 
+  /** 两条循环各跑一次。生产上由 start() 分别驱动，这里供手动触发与测试使用。 */
   async tick(): Promise<void> {
-    if (this.ticking) return;
-    this.ticking = true;
+    await this.runMaintenance();
+    await this.runPollCycle();
+  }
+
+  /**
+   * 定时执行器：过夜排期、自动申诉、到期定时启停、自动删除。
+   *
+   * 全部按账户本地时间判定窗口，窗口最窄的（自动申诉）只有一分钟，所以这条循环
+   * 必须准时，且不能被只读同步的耗时挤掉。
+   */
+  async runMaintenance(): Promise<void> {
+    if (this.maintaining) return;
+    this.maintaining = true;
     try {
-      const systemRuntimeEnabled = this.store.getSystemRuntimeState().enabled;
-      const metaRuntime = this.store.getMetaAutomationRuntime();
-      if (!systemRuntimeEnabled) return;
+      if (!this.store.getSystemRuntimeState().enabled) return;
       try {
         await this.notifications?.flushPending();
       } catch {
@@ -2192,7 +2267,21 @@ export class AutomationScheduler {
           await this.service.runScheduledDeletions(account.id);
         }
       }
-      const dueAccounts = this.store.listAccounts().filter((account) => {
+    } finally {
+      this.maintaining = false;
+    }
+  }
+
+  /** 只读同步 + 规则执行。慢的那条，被跳过只影响数据新鲜度，不影响定时执行器。 */
+  async runPollCycle(): Promise<void> {
+    if (this.polling) return;
+    this.polling = true;
+    try {
+      if (!this.store.getSystemRuntimeState().enabled) return;
+      const metaRuntime = this.store.getMetaAutomationRuntime();
+      const accounts = this.store.listAccounts();
+      this.forgetRemovedAccounts(accounts);
+      const dueAccounts = accounts.filter((account) => {
         const connection = this.store.getProviderConnection(
           account.id,
           account.providerKind,
@@ -2210,68 +2299,34 @@ export class AutomationScheduler {
         const pollingIntervalMinutes = account.platform === "meta"
           ? metaRuntime.pollingIntervalMinutes
           : this.store.getGlobalAutomationSettings().pollingIntervalMinutes;
-        const dueAt = connection.lastTestedAt
-          ? new Date(connection.lastTestedAt).getTime() +
-            pollingIntervalMinutes * 60_000
-          : 0;
-        return Date.now() >= dueAt;
+        // 存的是「上一轮结束时刻」而不是「下一次到期时刻」：间隔设置改小之后要立刻
+        // 生效，存到期时刻会让新间隔等一个旧周期才开始起作用。
+        const startedFrom = this.lastPolledAt.get(account.id)
+          ?? (connection.lastTestedAt
+            ? new Date(connection.lastTestedAt).getTime()
+            : null);
+        if (startedFrom === null) return true;
+        return Date.now() >= startedFrom + pollingIntervalMinutes * 60_000;
       });
       if (dueAccounts.length === 0) return;
 
       const cycle = this.store.createPollCycle();
-      for (const account of dueAccounts) {
+      // 账户之间并发，但仍然是同一个批次。
+      //
+      // 「一个账户一个批次」也能做，但会改掉消息推送的契约：现在是每个存在到期账户
+      // 的批次结束后各渠道发一份账户汇总，拆开就变成每账户一条，用户那边的推送量
+      // 直接乘以账户数。批次内并发已经把该拿的都拿到了——一轮的耗时从「所有账户
+      // 相加」变成「最慢的那条链」，而账户之间本来就没有任何数据依赖。
+      //
+      // 上限的意义和素材层一样：这些请求最终从同一个出口 IP 发出去，账户并发 ×
+      // 层内并发才是真正打到 TikTok 的峰值（3 × 5 = 15）。要调先调这里，别去调
+      // 层内的，层内那两个的上界受单账户数据量约束，更难预测。
+      await mapWithConcurrency(dueAccounts, pollAccountConcurrency, async (account) => {
         try {
-          await this.service.checkAccountConnection(account.id);
-          const refreshed = this.store.getProviderConnection(
-            account.id,
-            account.providerKind,
-          );
-          if (!account.enabled) {
-            this.store.savePollAccountResult(cycle.id, {
-              accountId: account.id,
-              accountName: account.displayName,
-              runId: null,
-              status: "skipped",
-              enabledCount: 0,
-              disabledCount: 0,
-              failureCount: 0,
-              message: "账户自动化已关闭。",
-            });
-            continue;
-          }
-          if (refreshed?.status !== "ready") {
-            this.store.savePollAccountResult(cycle.id, {
-              accountId: account.id,
-              accountName: account.displayName,
-              runId: null,
-              status: "failed",
-              enabledCount: 0,
-              disabledCount: 0,
-              failureCount: 1,
-              message: refreshed?.lastMessage ?? "账户连接检测失败。",
-            });
-            continue;
-          }
-          const run = await this.service.runAccount(account.id, "scheduler");
-          if (account.platform === "tiktok") {
-            await this.service.runScheduledAutoCopies(account.id);
-          }
-          const counts = this.store.summarizeAutomationRun(run.id);
-          const failed = run.status === "failed" || counts.failureCount > 0;
-          this.store.savePollAccountResult(cycle.id, {
-            accountId: account.id,
-            accountName: account.displayName,
-            runId: run.id,
-            status: failed
-              ? "failed"
-              : counts.enabledCount + counts.disabledCount > 0
-                ? "changed"
-                : "no-action",
-            ...counts,
-            failureCount: Math.max(counts.failureCount, run.failureCount),
-            message: run.errorMessage,
-          });
+          await this.pollAccount(cycle.id, account);
         } catch (cause) {
+          // 一个账户失败不能带走整批：这里必须自己吞掉，否则会把其余账户的结果
+          // 一起拒绝掉。失败如实记进本批次的账户结果里。
           this.store.savePollAccountResult(cycle.id, {
             accountId: account.id,
             accountName: account.displayName,
@@ -2282,8 +2337,11 @@ export class AutomationScheduler {
             failureCount: 1,
             message: safeMessage(cause),
           });
+        } finally {
+          this.lastPolledAt.set(account.id, Date.now());
         }
-      }
+        return null;
+      });
       const completed = this.store.finishPollCycle(cycle.id);
       try {
         await this.notifications?.enqueueAndDispatch(completed);
@@ -2291,7 +2349,79 @@ export class AutomationScheduler {
         // The completed poll cycle remains available for audit and retry.
       }
     } finally {
-      this.ticking = false;
+      this.polling = false;
+    }
+  }
+
+  private async pollAccount(
+    cycleId: string,
+    account: ReturnType<AutomationStore["listAccounts"]>[number],
+  ): Promise<void> {
+    // 连接检测原先每个到期账户每轮都跑一次，紧接着就是一次真实的只读同步——同一
+    // 个会话连查两遍，每账户白白多一次往返。同步成功本身就是最强的连接检测（见
+    // runAccount 里同步成功后的状态回写），所以 ready 的账户不再单独探。
+    // 非 ready 的必须探：那是失效连接自动恢复的唯一入口，省掉就再也回不来了。
+    if (this.store.getProviderConnection(account.id, account.providerKind)?.status !== "ready") {
+      await this.service.checkAccountConnection(account.id);
+    }
+    const connection = this.store.getProviderConnection(
+      account.id,
+      account.providerKind,
+    );
+    if (!account.enabled) {
+      this.store.savePollAccountResult(cycleId, {
+        accountId: account.id,
+        accountName: account.displayName,
+        runId: null,
+        status: "skipped",
+        enabledCount: 0,
+        disabledCount: 0,
+        failureCount: 0,
+        message: "账户自动化已关闭。",
+      });
+      return;
+    }
+    if (connection?.status !== "ready") {
+      this.store.savePollAccountResult(cycleId, {
+        accountId: account.id,
+        accountName: account.displayName,
+        runId: null,
+        status: "failed",
+        enabledCount: 0,
+        disabledCount: 0,
+        failureCount: 1,
+        message: connection?.lastMessage ?? "账户连接检测失败。",
+      });
+      return;
+    }
+    const run = await this.service.runAccount(account.id, "scheduler");
+    if (account.platform === "tiktok") {
+      await this.service.runScheduledAutoCopies(account.id);
+    }
+    const counts = this.store.summarizeAutomationRun(run.id);
+    const failed = run.status === "failed" || counts.failureCount > 0;
+    this.store.savePollAccountResult(cycleId, {
+      accountId: account.id,
+      accountName: account.displayName,
+      runId: run.id,
+      status: failed
+        ? "failed"
+        : counts.enabledCount + counts.disabledCount > 0
+          ? "changed"
+          : "no-action",
+      ...counts,
+      failureCount: Math.max(counts.failureCount, run.failureCount),
+      message: run.errorMessage,
+    });
+  }
+
+  private forgetRemovedAccounts(
+    accounts: ReturnType<AutomationStore["listAccounts"]>,
+  ): void {
+    if (this.lastPolledAt.size === 0) return;
+    const known = new Set(accounts.map((account) => account.id));
+    for (const accountId of this.lastPolledAt.keys()) {
+      if (!known.has(accountId)) this.lastPolledAt.delete(accountId);
     }
   }
 }
