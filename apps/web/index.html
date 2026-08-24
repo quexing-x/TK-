@@ -13,6 +13,16 @@
       }
     </script>
     <title>TK Ads 自动化</title>
+    <!--
+      Noto Sans SC 随客户端打包，不依赖系统安装——机器上没装就会静默退回微软雅黑，
+      不报错、只是变丑，是最难发现的那类问题。
+      取自 @fontsource/noto-sans-sc，只保留 400/500 两个字重的中文简体与拉丁子集
+      （4 个 woff2，共约 3MB），不是整包 74MB。
+    -->
+    <link rel="stylesheet" href="/fonts/noto/chinese-simplified-400.css" />
+    <link rel="stylesheet" href="/fonts/noto/chinese-simplified-500.css" />
+    <link rel="stylesheet" href="/fonts/noto/latin-400.css" />
+    <link rel="stylesheet" href="/fonts/noto/latin-500.css" />
   </head>
   <body>
     <div id="root"></div>
