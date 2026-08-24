@@ -640,9 +640,15 @@ export class CookieAdsProvider implements AdsProvider {
     if (importedAdGroupRead) {
       const materialTimezone = context.timezone ?? "UTC";
       const materialNow = new Date();
+      // 按消耗从高到低排。截断本身不可能完全消灭（上限总有到顶的一天），所以留下
+      // 的那批必须是消耗最低的：被截断的广告会进 materialUnavailableAdIds，而那份
+      // 名单会让**这些广告和它们的素材本轮都不能自动写入**（见 automation-service
+      // 的 isEntitySyncUsable）。换句话说截断等于给这些广告停一轮自动化，停在花钱
+      // 最多的广告上代价最大。原先取的是 TikTok 列表顺序，等于随机挑谁停。
       const spendingAdIds = entities
         .filter((entity) => entity.entityType === "ad")
         .filter((entity) => entitySpend(entity.payload) > 0)
+        .sort((left, right) => entitySpend(right.payload) - entitySpend(left.payload))
         .map((entity) => entity.externalId);
       let materialFailures = 0;
       // 失败原因必须留下来。原先这里是空 catch，素材整层拉不动时界面上只有
@@ -656,8 +662,8 @@ export class CookieAdsProvider implements AdsProvider {
       let materialEntitiesExtracted = 0;
       const materialAdIdsToFetch = spendingAdIds.slice(0, MAX_MATERIAL_ADS_PER_SYNC);
       materialUnavailableAdIds.push(...spendingAdIds.slice(MAX_MATERIAL_ADS_PER_SYNC));
-      // 这一层是目前单轮里最大的一块：上限 40 个广告，逐个串行就是 40 次往返。
-      // 限并发而不是全量并发——40 个请求同时打出去，同一个 Cookie 会话大概率被
+      // 这一层是目前单轮里最大的一块：按广告逐个查，上限 MAX_MATERIAL_ADS_PER_SYNC。
+      // 限并发而不是全量并发——上百个请求同时打出去，同一个 Cookie 会话大概率被
       // TikTok 限流，而限流会让整轮同步降级成 partial，删除和自动复制随即跳过。
       const materialOutcomes = await mapWithConcurrency(
         materialAdIdsToFetch,
@@ -6690,9 +6696,20 @@ function materialListRequest(
 
 /**
  * 单轮同步最多为多少个广告拉素材。素材列表只能按广告逐个查，这是唯一的量级熔断。
- * 生产上"当天有消耗的广告"通常是十几个；真超过了就如实告警，不静默截断。
+ *
+ * 从 40 提到 150 的依据（2026-08-24 生产实测，最大的那个账户）：当天有消耗的广告
+ * 中位 68 个、峰值 130 个，40 这个值每一轮都在截断，24 小时里触发了 215 次。
+ *
+ * 截断的代价比"素材数据旧一点"重得多：被截断的广告会进 materialUnavailableAdIds，
+ * 而 automation-service 的 isEntitySyncUsable 会因此**同时**禁掉这些广告和它们素材
+ * 的自动写入。也就是说每一轮都有 28～90 个正在花钱的广告被停掉自动化。
+ * （已存素材快照不会被清空——截断时 material 不进 completeEntityTypes——所以表现
+ * 为自动化被挂起，而不是数据消失，这也是它一直没被发现的原因。）
+ *
+ * 之所以现在敢提：素材层已经改成并发 5。150 个广告 = 30 轮往返，仍然**少于**改成
+ * 并发之前 40 个串行的 40 轮。也就是覆盖翻了近 4 倍，耗时反而比改动前低。
  */
-const MAX_MATERIAL_ADS_PER_SYNC = 40;
+const MAX_MATERIAL_ADS_PER_SYNC = 150;
 
 /** 系列 / 广告组 / 广告三层一起打出去：它们互不依赖，串行只是白等。 */
 const LIST_LAYER_CONCURRENCY = 3;
