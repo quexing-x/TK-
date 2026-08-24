@@ -3755,15 +3755,24 @@ export class AutomationStore {
     const wanted = [...new Set(accountIds.filter((id) => id.trim() !== ""))];
     if (wanted.length === 0) return [];
     const placeholders = wanted.map(() => "?").join(", ");
-    const rows = this.db.prepare(
-      `SELECT task_key, account_id, source_ad_group_id, source_campaign_id, status, uncertain,
+    const columns = `task_key, account_id, source_ad_group_id, source_campaign_id, status, uncertain,
               claimed_at, updated_at, local_date, requested_count,
-              generated_names_json, generated_ids_json, executor_kind
-         FROM ad_group_expand_tasks
-        WHERE account_id IN (${placeholders})
-        ORDER BY updated_at DESC
-        LIMIT ?`,
-    ).all(...wanted, Math.max(1, Math.min(500, limit))) as SqlRow[];
+              generated_names_json, generated_ids_json, executor_kind`;
+    // 「结果未知」无视条数上限，一条都不能漏。这类记录禁止自动重试、只能人工去
+    // TikTok 后台核实，正是最需要被看见的；而它们按时间排往往早就被近期的成功记录
+    // 挤出前 N 条（实测生产库里第二条排在第 186 位，limit=100 根本取不到）。
+    const rows = this.db.prepare(
+      `SELECT ${columns} FROM ad_group_expand_tasks
+        WHERE account_id IN (${placeholders}) AND uncertain = 1
+       UNION
+       SELECT * FROM (
+         SELECT ${columns} FROM ad_group_expand_tasks
+          WHERE account_id IN (${placeholders}) AND uncertain = 0
+          ORDER BY updated_at DESC
+          LIMIT ?
+       )
+       ORDER BY updated_at DESC`,
+    ).all(...wanted, ...wanted, Math.max(1, Math.min(500, limit))) as SqlRow[];
     const parseList = (value: unknown): string[] => {
       try {
         const parsed = JSON.parse(String(value ?? "[]")) as unknown;

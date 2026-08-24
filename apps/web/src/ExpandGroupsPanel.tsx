@@ -136,6 +136,12 @@ export function buildExpandConfirmMessage(input: {
   ].join("\n");
 }
 
+/**
+ * 历史默认只铺这么多行。一次扩几十组是常态，全铺出来表格能有五千多像素高
+ * （实测 100 条 = 5617px），把「一键扩组」按钮推到几屏之外。
+ */
+const HISTORY_COLLAPSED_ROWS = 8;
+
 /** 扩组预设的初始值，按当前投放习惯定；面板里仍可逐次改。 */
 const DEFAULT_COPY_COUNT = 1;
 const DEFAULT_DAILY_BUDGET = 50;
@@ -180,6 +186,7 @@ export function ExpandGroupsPanel({
   const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
   const [history, setHistory] = useState<AdGroupExpandTask[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
 
   const accountName = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.displayName])),
@@ -250,11 +257,12 @@ export function ExpandGroupsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleAccountIds]);
 
-  // 历史记录跟着「可扩组账户」走，而不是跟着当前展示的账户：刚扩完就把账户取消
-  // 勾选，记录不该跟着消失。
+  // 历史记录取**全部账户**，不看当前展示的是谁、也不看账户此刻能不能扩组：
+  // 取消勾选账户、或者某个账户 Cookie 失效了，都不该让已经发生过的记录消失
+  // ——尤其「结果未知」那类，正是账户出问题时最需要被看见的。
   const historyAccountIds = useMemo(
-    () => eligibleStates.map((state) => state.accountId),
-    [eligibleStates],
+    () => accounts.map((account) => account.id),
+    [accounts],
   );
   const loadHistory = async (accountIds: string[]) => {
     if (accountIds.length === 0) { setHistory([]); return; }
@@ -273,6 +281,15 @@ export function ExpandGroupsPanel({
     void loadHistory(historyAccountIds);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyAccountIds.join(",")]);
+
+  const needsReview = useMemo(() => history.filter((task) => task.uncertain), [history]);
+  // 「结果未知」永远排在最前，与时间无关：99 条成功刷屏时，它按时间排会被挤到第
+  // 65 行去（实测），而它恰恰是唯一需要人动手的那类。
+  const sortedHistory = useMemo(
+    () => [...needsReview, ...history.filter((task) => !task.uncertain)],
+    [history, needsReview],
+  );
+  const shownHistory = historyExpanded ? sortedHistory : sortedHistory.slice(0, HISTORY_COLLAPSED_ROWS);
 
   const visibleStates = useMemo(
     () => eligibleStates.filter((state) => visibleAccountIds.includes(state.accountId)),
@@ -598,18 +615,24 @@ export function ExpandGroupsPanel({
     <section className="expand-history">
       <header className="expand-history-head">
         <span><History size={15} /> 扩组记录</span>
-        <button className="secondary-button compact-button" disabled={historyLoading} onClick={() => void loadHistory(historyAccountIds)} type="button">
-          <RefreshCcw className={historyLoading ? "spin" : ""} size={13} /> {historyLoading ? "读取中" : "刷新"}
-        </button>
+        <div className="expand-history-actions">
+          {history.length > 0 && <span className="expand-history-count">{history.length} 条</span>}
+          <button className="secondary-button compact-button" disabled={historyLoading} onClick={() => void loadHistory(historyAccountIds)} type="button">
+            <RefreshCcw className={historyLoading ? "spin" : ""} size={13} /> {historyLoading ? "读取中" : "刷新"}
+          </button>
+        </div>
       </header>
+      {needsReview.length > 0 && <p className="expand-history-alert">
+        <AlertTriangle size={15} />
+        <span><strong>{needsReview.length} 条结果未知，需人工核实。</strong>写请求已发出但没拿到结果，禁止自动重试——请到 TikTok 后台确认这些组到底建成没有。</span>
+      </p>}
       {history.length === 0
         ? <p className="expand-account-empty">{historyLoading ? "读取中…" : "还没有扩组记录。"}</p>
-        : <div className="table-wrap expand-table"><table><thead><tr><th>时间</th><th>账户</th><th>新组名</th><th className="expand-num">个数</th><th>结果</th></tr></thead><tbody>
-          {history.map((task) => {
-            // 结果未知优先于成功/进行中显示：这类记录禁止自动重试，必须让人一眼看见。
+        : <><div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>时间</th><th>账户</th><th>新组名</th><th className="expand-num">个数</th><th>结果</th></tr></thead><tbody>
+          {shownHistory.map((task) => {
             const tone = task.uncertain ? "danger" : task.status === "succeeded" ? "active" : "warning";
             const label = task.uncertain ? "结果未知，需人工核实" : task.status === "succeeded" ? "成功" : "进行中";
-            return <tr key={task.taskKey}>
+            return <tr className={task.uncertain ? "expand-history-flagged" : ""} key={task.taskKey}>
               <td className="expand-muted">{fmtDate(task.updatedAt)}</td>
               <td className="expand-muted">{accountName.get(task.accountId) ?? task.accountId}</td>
               <td className="expand-name">{task.generatedNames.join("、") || "—"}</td>
@@ -617,7 +640,10 @@ export function ExpandGroupsPanel({
               <td><span className={`status ${tone}`}>{task.uncertain && <AlertTriangle size={12} />} {label}</span></td>
             </tr>;
           })}
-        </tbody></table></div>}
+        </tbody></table></div>
+        {history.length > HISTORY_COLLAPSED_ROWS && <button className="expand-history-more" onClick={() => setHistoryExpanded((current) => !current)} type="button">
+          {historyExpanded ? "收起" : `展开全部 ${history.length} 条`}
+        </button>}</>}
     </section>
 
     {presetHost ? createPortal(presetPanel, presetHost) : presetPanel}

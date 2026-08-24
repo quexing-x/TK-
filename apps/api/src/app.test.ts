@@ -1064,6 +1064,37 @@ describe("local API", () => {
     });
   });
 
+  it("结果未知的扩组记录无视条数上限：被近期成功记录挤出 limit 也必须返回", async () => {
+    // 先埋一条「结果未知」，再拿一批更新的成功记录把它挤到 limit 之外。
+    store.claimAdGroupExpandTask("old-unknown", "demo-account", "adgroup-old", {
+      sourceCampaignId: "campaign-1",
+      localDate: "2026-01-01",
+      requestedCount: 1,
+      generatedNames: ["很久以前那组-0101-060000-1"],
+    });
+    store.markAdGroupExpandTaskDispatching("old-unknown");
+    for (let index = 0; index < 5; index += 1) {
+      store.claimAdGroupExpandTask(`recent-${index}`, "demo-account", `adgroup-${index}`, {
+        sourceCampaignId: "campaign-1",
+        localDate: "2026-02-01",
+        requestedCount: 1,
+        generatedNames: [`新组-0201-060000-${index}`],
+      });
+      store.finishAdGroupExpandTask(`recent-${index}`, "succeeded");
+    }
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/ad-group-expand-tasks?accountIds=demo-account&limit=3",
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    const tasks = response.json().tasks as Array<Record<string, unknown>>;
+    // limit=3 只约束成功记录；那条未知的必须照样在，否则界面上永远看不见它。
+    expect(tasks.filter((task) => task.uncertain === false)).toHaveLength(3);
+    expect(tasks.map((task) => task.taskKey)).toContain("old-unknown");
+  });
+
   it("creates a launch preset from the default launch-page form payload", async () => {
     const response = await app.inject({
       method: "POST",
