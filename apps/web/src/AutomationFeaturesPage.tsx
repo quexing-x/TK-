@@ -1,11 +1,11 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { Copy, FileWarning, Save, Settings2, Trash2 } from "lucide-react";
+import { Copy, FileWarning, Save, Settings2, Sunrise, Trash2 } from "lucide-react";
 import type { AutomationFeatureSettingsInput } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
 import "./ui/pages/automation-rules.css";
 
-type FeatureKey = "appeal" | "copy" | "deletion";
+type FeatureKey = "appeal" | "copy" | "deletion" | "dailyEnable";
 
 export function AutomationFeaturesPage({ onError }: { onError: (message: string | null) => void }) {
   const auth = useAuth();
@@ -25,6 +25,7 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
     ? Number(settings.appeal.enabled)
       + Number(settings.copy.autoCopyEnabled)
       + Number(settings.deletion.enabled)
+      + Number(settings.dailyEnable.enabled)
     : 0, [settings]);
 
   const applyAll = async (event: FormEvent) => {
@@ -47,7 +48,7 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
         },
       });
       setSettings(result.settings);
-      setAppliedMessage(`已将三项执行器开关和规则应用到 ${result.accountCount} 个账户。`);
+      setAppliedMessage(`已将各项执行器开关和规则应用到 ${result.accountCount} 个账户。`);
       onError(null);
     } catch (cause) {
       setAppliedMessage(null);
@@ -82,15 +83,15 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
         <span className="automation-extension-summary-icon"><Settings2 size={17} /></span>
         <span>
           <strong>自动化执行器</strong>
-          <small>申诉、复制和删除均由轮询引擎静默执行；结果未知时禁止自动重试</small>
+          <small>申诉、复制、删除与定时开启均由轮询引擎静默执行；结果未知时禁止自动重试</small>
         </span>
-        <span className="automation-extension-state">{enabledCount}/3 已开启</span>
+        <span className="automation-extension-state">{enabledCount}/4 已开启</span>
       </summary>
       <form onSubmit={(event) => void applyAll(event)}>
         <div className="automation-extension-toolbar">
           <div>
             <h2>执行器与规则</h2>
-            <p>在此统一配置三项功能。点击右侧按钮后，全部开关和规则会一次应用到所有账户。</p>
+            <p>在此统一配置各项功能。点击右侧按钮后，全部开关和规则会一次应用到所有账户。</p>
           </div>
           <button className="primary-button" disabled={saving || !canManageRules} type="submit">
             <Save size={16} /> {saving ? "应用中…" : "一键应用到所有账户"}
@@ -140,6 +141,27 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
                 <label className="field"><span>复制后预算（留空=同源）</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyBudget ?? ""} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyBudget: event.target.value === "" ? null : Math.max(0, Number(event.target.value)) } })} /></label>
                 <label className="field"><span>复制后出价（留空=同源）</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyBid ?? ""} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyBid: event.target.value === "" ? null : Math.max(0, Number(event.target.value)) } })} /></label>
                 <p>固定策略：只统计账户时区当天数据；立即投放；同一来源只触发一次（不是每天一次）；自动生成组不再作为复制来源；命名固定为「源名-投放日期-时间」；每账户每日最多创建 {settings.copy.autoCopyDailyAccountLimit} 组。</p>
+              </div>
+            )}
+          </article>
+
+          <article className={`automation-executor-card ${settings.dailyEnable.enabled ? "enabled" : ""}`}>
+            <header>
+              <span className="automation-executor-icon"><Sunrise size={18} /></span>
+              <div><strong>前一日转化达标自动开启</strong><small>广告组与广告 · 每日 {formatHour(settings.dailyEnable.scheduleHour)} 回看一次</small></div>
+              <span className="executor-status">{settings.dailyEnable.enabled ? "已开启" : "已关闭"}</span>
+            </header>
+            <div className="executor-actions">
+              <label className="executor-switch"><span>启用执行器</span><input aria-label="启用前一日转化达标自动开启" checked={settings.dailyEnable.enabled} onChange={(event) => setSettings({ ...settings, dailyEnable: { ...settings.dailyEnable, enabled: event.target.checked } })} role="switch" type="checkbox" /></label>
+              <button className="secondary-button" onClick={() => setEditing(editing === "dailyEnable" ? null : "dailyEnable")} type="button">{editing === "dailyEnable" ? "收起规则" : "配置规则"}</button>
+            </div>
+            <p className="executor-rule-summary">前一自然日转化 ≥ {settings.dailyEnable.minConversions} 的已关闭对象，在当地 {formatHour(settings.dailyEnable.scheduleHour)} 开回来</p>
+            {editing === "dailyEnable" && (
+              <div className="executor-rule-editor two-column">
+                <label className="field"><span>前一日转化 ≥</span><input min={1} max={1000} step={1} type="number" value={settings.dailyEnable.minConversions} onChange={(event) => setSettings({ ...settings, dailyEnable: { ...settings.dailyEnable, minConversions: Math.max(1, Number(event.target.value) || 1) } })} /><small>按账户时区的整个自然日累计，不是最近 24 小时。</small></label>
+                <label className="field"><span>执行时刻</span><input min={0} max={23} step={1} type="number" value={settings.dailyEnable.scheduleHour} onChange={(event) => setSettings({ ...settings, dailyEnable: { ...settings.dailyEnable, scheduleHour: Math.min(23, Math.max(0, Number(event.target.value) || 0)) } })} /><small>账户当地整点，0–23。</small></label>
+                <div className="executor-safety-list"><span>不进规则链：规则链按 48 小时滚动窗口每轮评估，这条按自然日、每天只生效一次</span><span>父系列或父广告组关着时不开子级</span><span>已经开着的对象不重复写入</span></div>
+                <p className="danger-copy">开启闸门与规则链上的「达标恢复」一致，只看父级是否关着，不区分对象当初是被自动化关的还是人工暂停的。</p>
               </div>
             )}
           </article>

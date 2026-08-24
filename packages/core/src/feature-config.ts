@@ -31,6 +31,16 @@ export const AutomationFeatureSettingsInputSchema = z.object({
     autoCopyLaunchImmediately: z.boolean().default(true),
     autoCopySameCampaign: z.boolean().default(true),
   }),
+  // 每早定点回看前一自然日：转化达标就把关着的对象开回来。
+  //
+  // 它**不进规则链**。规则链是 48 小时滚动窗口、每轮轮询即时评估、命中第一条就 break；
+  // 这条用的是自然日口径且一天只该生效一次，塞进链里既会被反复评估，又会占位置让后面
+  // 的规则 break 不到。所以按 deletion / copy 那样做成独立的每日执行器。
+  dailyEnable: z.object({
+    enabled: z.boolean().default(false),
+    minConversions: z.number().int().min(1).max(1000).default(5),
+    scheduleHour: z.number().int().min(0).max(23).default(6),
+  }).default({ enabled: false, minConversions: 5, scheduleHour: 6 }),
   deletion: z.object({
     enabled: z.boolean().default(false),
     onlyDisabled: z.boolean(),
@@ -76,6 +86,11 @@ export const defaultAutomationFeatureSettings: AutomationFeatureSettingsInput = 
     autoCopyCutoffHour: 12,
     autoCopyLaunchImmediately: true,
     autoCopySameCampaign: true,
+  },
+  dailyEnable: {
+    enabled: false,
+    minConversions: 5,
+    scheduleHour: 6,
   },
   deletion: {
     enabled: false,
