@@ -128,6 +128,12 @@ describe("规则分组（仅界面表述）", () => {
       next = applyGroupEnabled(group, true, next);
     }
 
+    // 独立卡片的规则不归分组管，但校验会跨规则查约束：「单次转化且加购不足」的
+    // CPA 不得高于分组里的「单次转化 CPA 过高」，所以要一起调下来。
+    next = next.map((rule) => rule.code === "CV1_LOW_CART_CPA_CLOSE"
+      ? { ...rule, values: { ...rule.values, cpa: 1.5 } }
+      : rule);
+
     const parsed = RuleConfigurationInputSchema.safeParse({
       layers: defaultRuleConfiguration.layers,
       rules: next,
@@ -135,10 +141,15 @@ describe("规则分组（仅界面表述）", () => {
     expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
   });
 
-  // 没有恢复方向的两条无从合并，必须留在独立卡片里。
-  it("零转化那两条保持独立", () => {
+  // 没有恢复方向的规则无从合并，必须留在独立卡片里。
+  it("没有恢复方向的规则保持独立", () => {
     const codes = ungroupedRuleDefinitions.map((d) => d.code);
-    expect(codes).toEqual(["NO_CONV_SPEND_CLOSE", "NO_CONV_CPC_CLOSE"]);
+    expect(codes).toEqual([
+      // 更严的关闭条件，没有对应的恢复方向；卡片上单独一条，阈值也独立于分组
+      "CV1_LOW_CART_CPA_CLOSE",
+      "NO_CONV_SPEND_CLOSE",
+      "NO_CONV_CPC_CLOSE",
+    ]);
   });
 
   describe("加购组", () => {

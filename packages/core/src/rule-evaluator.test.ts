@@ -285,3 +285,127 @@ describe("nine fixed rules", () => {
     });
   });
 });
+
+/**
+ * 单次转化且加购不足。
+ *
+ * 这条规则最大的风险不是判据写错，而是**位置写错**：评估器命中第一条就 break，而
+ * 转化量等于设定值时，CPC过高 / CPA过高 / 达标恢复三条是穷尽的（cpa 与 cpc 都有值时
+ * 必命中其一）。它一旦被挪到那三条之后就永远轮不到，且不会有任何报错——测试是唯一
+ * 能守住这件事的地方。
+ */
+describe("单次转化且加购不足", () => {
+  const entity = (input: {
+    conversions: number;
+    carts: number;
+    cpa: number;
+    cpc?: number;
+    status?: string;
+  }): ProviderEntity => ({
+    entityType: "ad-group",
+    externalId: "group-1",
+    payload: {
+      campaign_id: "c1",
+      adgroup_id: "group-1",
+      ad_primary_status: input.status ?? "enable",
+      create_time: "2026-07-15T00:00:00.000Z",
+      row_data: {
+        campaign_id: "c1",
+        stat_cost: 20,
+        cpc: input.cpc ?? 0.4,
+        click_cnt: 50,
+        time_attr_convert_cnt: input.conversions,
+        time_attr_conversion_cost: input.cpa,
+        time_attr_on_web_cart: input.carts,
+      },
+    },
+  });
+
+  const withRule = (values: { conversions: number; carts: number; cpa: number }) => {
+    const config = configuration();
+    config.rules = config.rules.map((rule) =>
+      rule.code === "CV1_LOW_CART_CPA_CLOSE" ? { ...rule, enabled: true, values } : rule);
+    return config;
+  };
+
+  it("转化达标、加购不足、CPA 超标时关闭", () => {
+    const evaluation = evaluateRuleConfiguration(
+      [entity({ conversions: 1, carts: 1, cpa: 8 })],
+      withRule({ conversions: 1, carts: 1, cpa: 6 }),
+    );
+
+    expect(evaluation.candidates[0]).toMatchObject({
+      thresholdCode: "CV1_LOW_CART_CPA_CLOSE",
+      action: "disable",
+    });
+  });
+
+  // 位置正确性的守门测试：默认 CPA 上限是 5，这条设 3。CPA=4 时「CPA过高」不命中
+  // （4 < 5），若这条排在它后面就轮不到；排在前面才会命中。
+  it("排在其余单次转化规则之前，不会被它们抢先 break 掉", () => {
+    const evaluation = evaluateRuleConfiguration(
+      [entity({ conversions: 1, carts: 0, cpa: 4, cpc: 0.5 })],
+      withRule({ conversions: 1, carts: 1, cpa: 3 }),
+    );
+
+    // CPA=4 <= 默认上限 5 且 CPC=0.5 <= 0.8，本来会被「达标恢复」命中并 break；
+    // 这条排在前面，所以先按更严的标准关掉。
+    expect(evaluation.candidates[0]).toMatchObject({
+      thresholdCode: "CV1_LOW_CART_CPA_CLOSE",
+      action: "disable",
+    });
+  });
+
+  // cpa 取 12：默认配置里「单次转化 CPA 过高」的上限是 9，要真的超过它才会接手。
+  it("加购超过上限就不归它管，交回原有规则", () => {
+    const evaluation = evaluateRuleConfiguration(
+      [entity({ conversions: 1, carts: 5, cpa: 12 })],
+      withRule({ conversions: 1, carts: 1, cpa: 6 }),
+    );
+
+    expect(evaluation.candidates[0]?.thresholdCode).toBe("CV1_CPA_CLOSE");
+  });
+
+  it("CPA 没超标就不关", () => {
+    const evaluation = evaluateRuleConfiguration(
+      [entity({ conversions: 1, carts: 0, cpa: 2, cpc: 0.5 })],
+      withRule({ conversions: 1, carts: 1, cpa: 6 }),
+    );
+
+    expect(
+      evaluation.candidates.some((c) => c.thresholdCode === "CV1_LOW_CART_CPA_CLOSE"),
+    ).toBe(false);
+  });
+
+  it("转化量对不上就不归它管", () => {
+    const evaluation = evaluateRuleConfiguration(
+      [entity({ conversions: 3, carts: 0, cpa: 8 })],
+      withRule({ conversions: 1, carts: 1, cpa: 6 }),
+    );
+
+    expect(
+      evaluation.candidates.some((c) => c.thresholdCode === "CV1_LOW_CART_CPA_CLOSE"),
+    ).toBe(false);
+  });
+
+  // 缺加购数据时不能当成「加购为零」——那会把没数据的广告组误关。
+  it("拿不到加购数据时不判定", () => {
+    const noCart = entity({ conversions: 1, carts: 0, cpa: 8 });
+    delete (noCart.payload.row_data as Record<string, unknown>).time_attr_on_web_cart;
+
+    const evaluation = evaluateRuleConfiguration([noCart], withRule({
+      conversions: 1, carts: 1, cpa: 6,
+    }));
+
+    expect(
+      evaluation.candidates.some((c) => c.thresholdCode === "CV1_LOW_CART_CPA_CLOSE"),
+    ).toBe(false);
+  });
+
+  it("默认关闭，不会在升级后自己开始关广告组", () => {
+    const rule = defaultRuleConfiguration.rules
+      .find((item) => item.code === "CV1_LOW_CART_CPA_CLOSE");
+
+    expect(rule?.enabled).toBe(false);
+  });
+});

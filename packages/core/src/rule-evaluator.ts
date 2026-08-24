@@ -143,6 +143,16 @@ function matchRule(
   const value = (key: string): number => rule.values[key] ?? Number.NaN;
 
   switch (rule.code) {
+    case "CV1_LOW_CART_CPA_CLOSE":
+      // 加购用「不超过上限」（<=），跟「有消耗无加购」那条的等于零判据不是一回事：
+      // 这条针对的是「有转化，但加购没跟上，而且单次转化还贵」。
+      return conversions === value("conversions") &&
+        carts !== null &&
+        carts <= value("carts") &&
+        cpa !== null &&
+        cpa > value("cpa")
+        ? primary("cost_per_conversion", cpa, "gt", value("cpa"))
+        : null;
     case "CV1_CPC_CLOSE":
       return conversions === value("conversions") && cpc !== null && cpc > value("cpc")
         ? primary("cost_per_click", cpc, "gt", value("cpc"))

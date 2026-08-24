@@ -65,6 +65,7 @@ import {
   automationSwitchDefinitions,
   createDefaultAutomationSwitches,
   defaultThresholds,
+  automationRuleDefinitions,
   defaultRuleConfiguration,
   RULE_LOOKBACK_HOURS,
   RuleConfigurationInputSchema,
@@ -7822,6 +7823,83 @@ export class AutomationStore {
     this.migrationRunner.apply(key, migrate);
   }
 
+  /**
+   * 给已存在的规则配置补上新增的规则码。
+   *
+   * 没有这一步，新增一条固有规则就会打死存量库：getRuleConfiguration 用 schema 严格
+   * 校验，要求规则数恰好等于定义数且每个码都在，而 ensureGlobalDefaults 的
+   * INSERT OR IGNORE 只在整行不存在时才写默认值，不会往已有行里补字段。结果是规则页
+   * 和规则引擎一起解析失败——不是少一条规则，是整套自动化读不出来。
+   *
+   * 只补缺失的码、保留用户已经调过的值；顺带丢掉定义里已经没有的码（规则被删除时
+   * 同样会让长度校验失败）。这样以后再加规则不用再写一次迁移。
+   */
+  private backfillGlobalRuleCodes(now: string): void {
+    const row = this.db
+      .prepare("SELECT rules_json FROM global_rule_configuration WHERE id = 1")
+      .get() as SqlRow | undefined;
+    if (!row) return;
+    let stored: unknown;
+    try {
+      stored = JSON.parse(String(row.rules_json));
+    } catch {
+      // 存的东西已经不是 JSON 了，交给下游 schema 报错，这里不猜。
+      return;
+    }
+    if (!Array.isArray(stored)) return;
+    const byCode = new Map<string, unknown>();
+    for (const rule of stored) {
+      if (rule && typeof rule === "object" && "code" in rule) {
+        byCode.set(String((rule as { code: unknown }).code), rule);
+      }
+    }
+    const merged = automationRuleDefinitions.map((definition) =>
+      byCode.get(definition.code)
+        ?? defaultRuleConfiguration.rules.find((rule) => rule.code === definition.code),
+    );
+    if (merged.some((rule) => rule === undefined)) return;
+    this.alignBackfilledLowCartCpa(merged, byCode);
+    const unchanged = merged.length === stored.length
+      && automationRuleDefinitions.every((definition) => byCode.has(definition.code));
+    if (unchanged) return;
+    this.db
+      .prepare(
+        "UPDATE global_rule_configuration SET rules_json = ?, updated_at = ? WHERE id = 1",
+      )
+      .run(JSON.stringify(merged), now);
+  }
+
+  /**
+   * 回填「单次转化且加购不足」时，让它的 CPA 跟随存量里「单次转化 CPA 过高」的值。
+   *
+   * 校验锁死了前者不得高于后者。默认值是按代码里的默认配置（9）给的，而用户调过的
+   * 值通常更低（生产上是 5）——直接落默认值会让整份配置在升级后立刻非法，规则页
+   * 连打开都打不开。回填只在这条是新补进来的时候才动它，用户自己存过的值不碰。
+   */
+  private alignBackfilledLowCartCpa(
+    merged: unknown[],
+    existing: Map<string, unknown>,
+  ): void {
+    if (existing.has("CV1_LOW_CART_CPA_CLOSE")) return;
+    const readCpa = (rule: unknown): number | null => {
+      if (!rule || typeof rule !== "object") return null;
+      const values = (rule as { values?: Record<string, unknown> }).values;
+      const cpa = values?.cpa;
+      return typeof cpa === "number" && Number.isFinite(cpa) ? cpa : null;
+    };
+    const cv1Cpa = readCpa(existing.get("CV1_CPA_CLOSE"));
+    if (cv1Cpa === null) return;
+    const index = merged.findIndex((rule) =>
+      rule !== null
+      && typeof rule === "object"
+      && (rule as { code?: unknown }).code === "CV1_LOW_CART_CPA_CLOSE");
+    if (index < 0) return;
+    const target = merged[index] as { values: Record<string, unknown> };
+    const current = readCpa(target);
+    if (current === null || current <= cv1Cpa) return;
+    merged[index] = { ...target, values: { ...target.values, cpa: cv1Cpa } };
+  }
+
   private ensureGlobalDefaults(): void {
     const now = new Date().toISOString();
     this.db
@@ -7854,6 +7932,7 @@ export class AutomationStore {
         JSON.stringify(defaultRuleConfiguration.rules),
         now,
       );
+    this.backfillGlobalRuleCodes(now);
 
     this.db
       .prepare(
