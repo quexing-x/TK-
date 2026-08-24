@@ -335,4 +335,59 @@ describe("素材同步", () => {
     const material = output.entities.find((entity) => entity.entityType === "material");
     expect(material?.payload).toMatchObject({ adgroup_id: "1872777456951841" });
   });
+
+  // 超过上限的广告会进 materialUnavailableAdIds，而这份名单会让 automation-service
+  // 的 isEntitySyncUsable **同时**禁掉这些广告和它们素材的自动写入——截断等于给这批
+  // 广告停一轮自动化。所以留下来的必须是消耗最低的那批，停在花钱最多的广告上代价最大。
+  // 原先取的是 TikTok 列表顺序，等于随机挑谁停。
+  it("超过单轮上限时，优先保住消耗最高的广告", async () => {
+    // 消耗故意与列表顺序相反：只有真的按消耗排过序才能通过。
+    const count = 160;
+    const adRows = Array.from({ length: count }, (_, index) => ({
+      campaign_id: "c1",
+      ad_id: "g1",
+      creative_id: `ad-${String(index).padStart(3, "0")}`,
+      stat_cost: String(index + 1),
+    }));
+    const requested = stub(adRows, [materialRow()]);
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    const fetched = requested
+      .filter((item) => item.path.includes("expand/material/list"))
+      .map((item) => {
+        const commonReq = item.body.common_req as Record<string, unknown>;
+        const filters = commonReq.filters as Array<Record<string, unknown>>;
+        return (filters.find((f) => f.field === "creative_id")
+          ?.in_field_values as string[])[0]!;
+      });
+
+    // 上限是 150：160 个有消耗的广告里，消耗最低的 10 个被截断。
+    expect(fetched).toHaveLength(150);
+    const skipped = adRows.slice(0, 10).map((row) => row.creative_id);
+    for (const id of skipped) expect(fetched).not.toContain(id);
+    expect(fetched[0]).toBe("ad-159");
+    expect(output.result.quality.materialUnavailableAdIds).toEqual(skipped.reverse());
+  });
+
+  // 生产实测（2026-08-24 最大账户）：当天有消耗的广告中位 68、峰值 130。
+  // 上限若退回 40，这个量级会每一轮都截断——24 小时触发过 215 次。
+  it("生产峰值量级（130 个有消耗广告）不触发截断", async () => {
+    const adRows = Array.from({ length: 130 }, (_, index) => ({
+      campaign_id: "c1",
+      ad_id: "g1",
+      creative_id: `ad-${index}`,
+      stat_cost: "5",
+    }));
+    const requested = stub(adRows, [materialRow()]);
+
+    const output = await new CookieAdsProvider().syncReadOnly!(context());
+
+    expect(requested.filter((i) => i.path.includes("expand/material/list"))).toHaveLength(130);
+    // 一个广告都没被挡下：字段本身只在非空时才写出来（见 buildSyncDataQuality）。
+    expect(output.result.quality.materialUnavailableAdIds).toBeUndefined();
+    expect(output.result.quality.partialFailures).not.toContain("material:truncated");
+    // 没有截断 = 素材层这一轮算取全，规则才敢对素材自动写入。
+    expect(output.result.quality.completeEntityTypes).toContain("material");
+  });
 });
