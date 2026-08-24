@@ -1,0 +1,125 @@
+/*
+ * 广告管理页密度层。
+ *
+ * 只收间距、行高、字号，**不动任何颜色**——2026-08-23 那版把密度和配色捆在一起
+ * 改，配色被否掉时密度也一起葬送了。这次拆开，颜色维持现状。
+ *
+ * 起因：1440×900 下这页首屏只看得到 4 行数据，266 个广告组要滚 15 屏。实测首屏
+ * 被外壳吃掉的高度：账户条 56 + 指标卡 128 + 筛选面板 219 + 区块标题 76 = 479px，
+ * 表格连开始都还没开始。
+ *
+ * 不采用就删掉本文件与 index.css 里那行 @import。
+ */
+
+/* ---------- 指标条：128px 的卡片阵 → 一行数字 ---------- */
+.ads-page .ads-metric-rail {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 10px 0;
+}
+
+.ads-page .ads-metric-rail article {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 0 18px 0 0;
+  margin-right: 18px;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+}
+.ads-page .ads-metric-rail article:last-child {
+  border-right: 0;
+  margin-right: 0;
+}
+
+/* 数值在前、标签在后：一行扫完，不用上下找。 */
+.ads-page .ads-metric-rail article strong {
+  order: 1;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.ads-page .ads-metric-rail article small {
+  order: 2;
+  font-size: 12px;
+}
+/* 第三行说明在这个密度下是噪音；它的内容在别处也读得到。 */
+.ads-page .ads-metric-rail article span { display: none; }
+
+/* ---------- 筛选：219px 的五行栅格 → 横向控制栏 ---------- */
+.ads-page .filter-panel { padding: 0; }
+
+.ads-page .management-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 0;
+  margin: 0;
+}
+
+/* 标签从字段上方挪到输入框左侧：一个字段从 65px 压到 32px。 */
+.ads-page .management-filters .field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+}
+.ads-page .management-filters .field > span { flex: none; }
+
+.ads-page .management-filters input,
+.ads-page .management-filters select {
+  height: 32px;
+  min-width: 0;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+/* ---------- 区块标题：76px → 一行 ---------- */
+.ads-page .panel-heading {
+  min-height: 0;
+  padding: 14px 20px;
+}
+.ads-page .panel-heading p { display: none; }
+
+/* ---------- 表格 ---------- */
+/* 表头吸顶：滚到第 200 行也知道自己在看哪一列。 */
+.ads-page thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  height: 34px;
+  padding: 0 14px;
+}
+
+.ads-page tbody td {
+  height: 36px;
+  padding: 0 14px;
+  vertical-align: middle;
+}
+
+/* 名称与 ID 原本靠 <br> 拆两行，把行顶到 50px。改成同行并排，ID 走等宽降一级
+   ——人读的名字和机器认的 ID 不该长得一样。 */
+.ads-page tbody td br { display: none; }
+.ads-page tbody td small {
+  margin-left: 9px;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 10.5px;
+}
+
+/* 行内按钮收窄，别和数据抢视线。 */
+.ads-page tbody td button {
+  height: 25px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+/* 窄屏退回可换行的控制栏，不做横向滚动。 */
+@media (max-width: 1100px) {
+  .ads-page .ads-metric-rail { flex-wrap: wrap; gap: 8px 0; }
+  .ads-page .ads-metric-rail article { border-right: 0; }
+}

@@ -8,6 +8,8 @@
 @import "./structure.css";
 @import "./system.css";
 @import "./pages/ads-analytics.css";
+/* 广告管理页密度层（试行）。只收间距，不动颜色；不采用就删掉这一行与该文件。 */
+@import "./pages/ads-density.css";
 @import "./pages/automation-rules.css";
 @import "./pages/connection.css";
 @import "./pages/launch-tasks.css";
