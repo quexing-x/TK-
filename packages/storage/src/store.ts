@@ -1620,6 +1620,12 @@ export class AutomationStore {
       appeal: { ...defaultAutomationFeatureSettings.appeal, ...(stored.appeal as object ?? {}) },
       copy: { ...defaultAutomationFeatureSettings.copy, ...(stored.copy as object ?? {}) },
       deletion: { ...defaultAutomationFeatureSettings.deletion, ...(stored.deletion as object ?? {}) },
+      // 新增小节也必须写进这里：这个合并是逐节列举的，漏掉哪节，存进去的值就永远读
+      // 不回来——schema 上的 default 会把它悄悄填回默认值，界面上像是「保存没生效」。
+      dailyEnable: {
+        ...defaultAutomationFeatureSettings.dailyEnable,
+        ...(stored.dailyEnable as object ?? {}),
+      },
       updatedAt: row.updated_at,
     };
     return AutomationFeatureSettingsSchema.parse(merged);
@@ -5706,6 +5712,67 @@ export class AutomationStore {
       conversions: Number(row.conversions),
       carts: Number(row.carts),
       days: Number(row.days),
+    }));
+  }
+
+  /**
+   * 单个账户本地自然日里每个对象的指标，口径与 listEntityRangeMetrics 一致：
+   * 取该对象当天最后一个健康快照。TikTok 报表当天给的是累计值，最后一个快照就是
+   * 整日合计。
+   *
+   * 「前一日转化」这类判据必须走它，**不能拿当前快照上的 metrics**：那是「今天」的
+   * 累计值，早上 6 点跑的时候今天才刚开始，几乎恒为 0，判据会永远不成立。
+   */
+  listEntityMetricsForLocalDate(
+    accountId: string,
+    kind: ProviderKind,
+    localDate: string,
+    entityType?: ProviderEntity["entityType"],
+  ): EntityRangeMetricRecord[] {
+    const account = this.getAccount(accountId);
+    const offsetMinutes = utcOffsetMinutes(account?.timezone ?? "UTC");
+    const dayShift = `${offsetMinutes >= 0 ? "+" : "-"}${Math.abs(offsetMinutes)} minutes`;
+    const typeFilter = entityType ? "AND entity_type = ?" : "";
+    // 绑定顺序必须跟 SQL 里 ? 出现的顺序一致：account、kind、(entityType)、dayShift、
+    // localDate。dayShift 在这里位于 WHERE 而不是 SELECT，跟 listEntityRangeMetrics 不同。
+    const parameters: string[] = [accountId, kind];
+    if (entityType) parameters.push(entityType);
+    parameters.push(dayShift, localDate);
+
+    const rows = this.db
+      .prepare(
+        `WITH scoped AS (
+           SELECT entity_type, external_id, captured_at, metrics_json
+           FROM entity_metric_snapshots
+           WHERE account_id = ? AND provider_kind = ? ${typeFilter}
+             AND sync_quality_status = 'healthy'
+             AND date(captured_at, ?) = ?
+         ),
+         day_last AS (
+           SELECT entity_type, external_id, MAX(captured_at) AS last_captured
+           FROM scoped GROUP BY entity_type, external_id
+         )
+         SELECT d.entity_type AS entity_type, d.external_id AS external_id,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.spend') AS REAL), 0)) AS spend,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.conversions') AS REAL), 0)) AS conversions,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.carts') AS REAL), 0)) AS carts
+         FROM day_last d
+         JOIN scoped s
+           ON s.entity_type = d.entity_type AND s.external_id = d.external_id
+          AND s.captured_at = d.last_captured
+         GROUP BY d.entity_type, d.external_id`,
+      )
+      .all(...parameters) as SqlRow[];
+
+    return rows.map((row) => ({
+      entityType: row.entity_type as EntityRangeMetricRecord["entityType"],
+      externalId: String(row.external_id),
+      spend: Number(row.spend),
+      clicks: Number(row.clicks),
+      conversions: Number(row.conversions),
+      carts: Number(row.carts),
+      days: 1,
     }));
   }
 

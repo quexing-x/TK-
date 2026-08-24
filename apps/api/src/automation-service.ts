@@ -324,6 +324,95 @@ export class AutomationService {
     }
   }
 
+  /**
+   * 每早定点回看前一自然日：转化达标就把关着的对象开回来。
+   *
+   * 为什么不做成规则链上的一条：规则链是 48 小时滚动窗口、每轮轮询即时评估、命中第一条
+   * 就 break。这条用自然日口径、一天只该生效一次，塞进链里既会被反复评估，又会占位置
+   * 让后面的规则 break 不到（#86 刚踩过这个坑）。所以按 deletion / copy 的样子做成独立
+   * 的每日执行器，由 claimDailyAutomationRun 保证每账户每个本地日只跑一次。
+   *
+   * 开启的闸门与规则链上的 OPEN 规则保持一致：只看父级是否关着，不查「是不是本工具
+   * 关的」。两套口径不一致更难解释，代价是人工暂停过的对象也可能被开回来。
+   */
+  async runScheduledDailyEnables(accountId: string, asOf = new Date()): Promise<void> {
+    const settings = this.store.getAutomationFeatureSettings().dailyEnable;
+    const account = this.store.getAccount(accountId);
+    if (
+      !settings.enabled
+      || !account?.enabled
+      || !this.store.getSystemRuntimeState().enabled
+    ) return;
+    // 与删除执行器同理：整个计划小时内都可触发，靠日任务保证只跑一次。锁死在第 0
+    // 分钟会因为前面账户跑得久而整点错过。
+    if (timePartsInTimeZone(asOf, account.timezone).hour !== settings.scheduleHour) return;
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    if (connection?.status !== "ready") return;
+
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    // 「前一日」按账户时区退一天。用 UTC 减 24 小时会在跨时区账户上错开一整天。
+    const previousDate = dateKeyInTimeZone(
+      new Date(asOf.getTime() - 24 * 60 * 60 * 1000),
+      account.timezone,
+    );
+    if (this.store.claimDailyAutomationRun(accountId, "daily-enable", localDate) !== "claimed") {
+      return;
+    }
+    try {
+      const managed = this.store.listCurrentManagedEntities(accountId, account.providerKind);
+      const statusOf = new Map(managed.map((entity) => [
+        `${entity.entityType}:${entity.externalId}`,
+        entity.status,
+      ]));
+      const parentOf = new Map(managed.map((entity) => [
+        `${entity.entityType}:${entity.externalId}`,
+        entity,
+      ]));
+      const metrics = this.store.listEntityMetricsForLocalDate(
+        accountId,
+        account.providerKind,
+        previousDate,
+      );
+      for (const record of metrics) {
+        if (record.entityType !== "ad-group" && record.entityType !== "ad") continue;
+        if (record.conversions < settings.minConversions) continue;
+        const key = `${record.entityType}:${record.externalId}`;
+        // 已经开着的不必再写：一次真实写入换不到任何变化，还会占掉写入配额。
+        if (statusOf.get(key) !== "disabled") continue;
+        const entity = parentOf.get(key);
+        if (!entity) continue;
+        // 父级关着时不开子级，口径与 getSkipReason 里那两条一致：广告组开着而广告关着
+        // 这种状态投不出去，界面上还看不出来。
+        if (
+          entity.parentCampaignId
+          && statusOf.get(`campaign:${entity.parentCampaignId}`) === "disabled"
+        ) continue;
+        if (
+          record.entityType === "ad"
+          && entity.parentAdGroupId
+          && statusOf.get(`ad-group:${entity.parentAdGroupId}`) === "disabled"
+        ) continue;
+        try {
+          await this.changeStatus(
+            accountId,
+            { entityType: record.entityType, externalId: record.externalId, action: "enable" },
+            "scheduled",
+            { id: "automation-scheduler", name: "自动化调度器", kind: "system" },
+            undefined,
+            true,
+            undefined,
+            `前一日（${previousDate}）转化 ${record.conversions} 次达到 ${settings.minConversions}，自动开启。`,
+          );
+        } catch {
+          // 单个对象写失败不该带走整轮，后面的对象照常处理。这里不另外记一笔：
+          // changeStatus 失败时写入内核已经把任务连同失败原因落了库，界面上查得到。
+        }
+      }
+    } finally {
+      this.store.finishDailyAutomationRun(accountId, "daily-enable", localDate);
+    }
+  }
+
   async runScheduledAutoCopies(accountId: string, asOf = new Date()): Promise<void> {
     const account = this.store.getAccount(accountId);
     const copy = this.store.getAutomationFeatureSettings().copy;
@@ -2265,6 +2354,9 @@ export class AutomationScheduler {
           // dueAccounts 循环里意味着只有恰好在计划时刻到期的那一轮才有机会评估，
           // 实测 19 天里只命中过 7 次，删除因此一次都没跑起来。
           await this.service.runScheduledDeletions(account.id);
+          // 同理待在这里而不是 dueAccounts 循环里：它也靠「整点小时内任意一轮」触发，
+          // 挂在轮询到期过滤之后会几乎永远错过计划小时。
+          await this.service.runScheduledDailyEnables(account.id);
         }
       }
     } finally {

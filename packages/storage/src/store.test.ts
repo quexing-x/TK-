@@ -1199,6 +1199,52 @@ describe("AutomationStore", () => {
       expect(days.find((day) => day.date === "2026-08-19")?.lastLocalTime).toBe("23:30");
     });
 
+    // 「前一日转化达标自动开启」在早上 6 点跑，判据必须是昨天整日的累计值。拿当前
+    // 快照上的 metrics 是今天的累计值，那时候今天才刚开始、几乎恒为 0，判据永远不成立。
+    it("按本地自然日取每个对象当天最后一条累计值", () => {
+      const captureConversions = (finishedAt: string, counts: Record<string, number>) => {
+        store.saveReadOnlySync("demo-account", "cookie",
+          Object.entries(counts).map(([externalId, conversion]) => ({
+            entityType: "ad-group" as const,
+            externalId,
+            payload: { ad_name: externalId, conversion },
+          })),
+          {
+            startedAt: finishedAt,
+            finishedAt,
+            counts: { campaign: 0, "ad-group": Object.keys(counts).length, ad: 0, material: 0 },
+            warnings: [],
+            quality: healthySyncQuality(finishedAt),
+          },
+        );
+      };
+
+      captureConversions("2026-08-19T01:00:00.000Z", { g1: 2, g2: 1 });  // 当地 08-19 09:00
+      captureConversions("2026-08-19T15:30:00.000Z", { g1: 7, g2: 3 });  // 当地 08-19 23:30
+      captureConversions("2026-08-19T16:30:00.000Z", { g1: 1, g2: 0 });  // 当地 08-20 00:30，已归零
+
+      const yesterday = new Map(
+        store.listEntityMetricsForLocalDate("demo-account", "cookie", "2026-08-19", "ad-group")
+          .map((record) => [record.externalId, record.conversions]),
+      );
+
+      // 取当天最后一条（7 / 3），而不是把两个批次相加成 9 / 4。
+      expect(yesterday.get("g1")).toBe(7);
+      expect(yesterday.get("g2")).toBe(3);
+
+      // UTC 16:00 之后已经属于账户本地的第二个自然日，不能算进 08-19。
+      const today = new Map(
+        store.listEntityMetricsForLocalDate("demo-account", "cookie", "2026-08-20", "ad-group")
+          .map((record) => [record.externalId, record.conversions]),
+      );
+      expect(today.get("g1")).toBe(1);
+      expect(today.get("g2")).toBe(0);
+
+      expect(store.listEntityMetricsForLocalDate(
+        "demo-account", "cookie", "2026-08-18", "ad-group",
+      )).toEqual([]);
+    });
+
     it("同步中断的日子把截止时刻如实带出来，供界面标注偏低", () => {
       capture("2026-08-19T00:06:00.000Z", { g1: 4.6 }); // 当地 08-19 08:06 之后再无快照
 
@@ -1736,8 +1782,24 @@ describe("AutomationStore", () => {
     expect(settings.deletion.maxConversions).toBe(0);
     expect(settings.deletion.maxCarts).toBe(4);
     expect(settings.deletion.scheduleHour).toBe(6);
+    // 整个 dailyEnable 小节都晚于这行存量配置，缺节时必须落到默认值而不是抛错。
+    expect(settings.dailyEnable).toEqual(defaultAutomationFeatureSettings.dailyEnable);
     reopened.close();
     rmSync(dbPath, { force: true });
+  });
+
+  // getAutomationFeatureSettings 是逐节列举着合并的，新增小节一旦忘了加进那个列表，
+  // 存进去的值永远读不回来——schema 上的 default 会把它悄悄填回默认值，界面上看起来
+  // 就是「保存了但没生效」，而且不报任何错。
+  it("每个执行器小节存进去的值都读得回来", () => {
+    const saved = store.updateAutomationFeatureSettings({
+      ...store.getAutomationFeatureSettings(),
+      dailyEnable: { enabled: true, minConversions: 8, scheduleHour: 9 },
+    });
+    expect(saved.dailyEnable).toEqual({ enabled: true, minConversions: 8, scheduleHour: 9 });
+
+    const reread = store.getAutomationFeatureSettings();
+    expect(reread.dailyEnable).toEqual({ enabled: true, minConversions: 8, scheduleHour: 9 });
   });
 
   it("persists the global runtime, extension settings, and ad-group schedules", () => {
