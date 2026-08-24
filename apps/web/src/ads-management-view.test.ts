@@ -8,6 +8,7 @@ import {
   ADS_MANAGEMENT_DEFAULT_SPEND_RANGE,
   ADS_MANAGEMENT_RECENT_WINDOW_HOURS,
   adsManagementParticipation,
+  adsManagementRank,
   adsManagementSpendRangeDays,
   adsManagementSpendRangeLabel,
   applyEntityRangeMetrics,
@@ -298,5 +299,63 @@ describe("消耗区间", () => {
     expect(adsManagementSpendRangeDays("7d")).toBe(7);
     expect(adsManagementSpendRangeLabel("today")).toContain("今天");
     expect(adsManagementSpendRangeLabel("30d")).toBe("最近 30 天");
+  });
+});
+
+// 失效对象（状态待确认）排到最后。这类行在界面上点不了任何按钮——启停按钮对
+// status === "unknown" 根本不渲染——占着前排纯属噪音。
+describe("失效对象沉底", () => {
+  const entity = (
+    externalId: string,
+    status: ManagedEntityRecord["status"],
+    spend: number,
+  ): ManagedEntityRecord => ({
+    entityType: "ad-group",
+    externalId,
+    name: externalId,
+    status,
+    parentCampaignId: "c1",
+    parentAdGroupId: null,
+    campaignBudget: null,
+    campaignBudgetOptimized: false,
+    ignored: false,
+    metrics: {
+      spend, conversions: 0, carts: 0, clicks: 0, impressions: 0,
+      cost_per_conversion: null, cost_per_click: null, cost_per_cart: null, budget: null,
+    },
+  } as ManagedEntityRecord);
+
+  it("消耗再高的失效对象也排在正常对象后面", () => {
+    const sorted = filterAdsManagementEntities(
+      [entity("失效高消耗", "unknown", 999), entity("正常零消耗", "enabled", 0)],
+      { level: "all", status: "all", query: "" },
+    );
+
+    expect(sorted.map((item) => item.externalId)).toEqual(["正常零消耗", "失效高消耗"]);
+  });
+
+  it("失效对象内部仍按消耗降序", () => {
+    const sorted = filterAdsManagementEntities(
+      [entity("失效小", "unknown", 1), entity("失效大", "unknown", 50), entity("正常", "enabled", 5)],
+      { level: "all", status: "all", query: "" },
+    );
+
+    expect(sorted.map((item) => item.externalId)).toEqual(["正常", "失效大", "失效小"]);
+  });
+
+  // 新建但还没花钱的广告组是要盯着的，不能跟失效的一起沉底。
+  it("零消耗但状态正常的对象不沉底", () => {
+    const sorted = filterAdsManagementEntities(
+      [entity("失效", "unknown", 0), entity("新建未消耗", "enabled", 0), entity("已关停", "disabled", 0)],
+      { level: "all", status: "all", query: "" },
+    );
+
+    expect(sorted[sorted.length - 1]?.externalId).toBe("失效");
+  });
+
+  it("adsManagementRank 只把 unknown 判为失效", () => {
+    expect(adsManagementRank(entity("a", "enabled", 0))).toBe(0);
+    expect(adsManagementRank(entity("b", "disabled", 0))).toBe(0);
+    expect(adsManagementRank(entity("c", "unknown", 0))).toBe(1);
   });
 });

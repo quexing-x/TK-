@@ -119,6 +119,7 @@ import {
   adsManagementSpendRangeDays,
   adsManagementSpendRangeLabel,
   applyEntityRangeMetrics,
+  adsManagementRank,
   compareAdsManagementSpend,
   filterAdsManagementEntities,
   paginateAdsManagementItems,
@@ -1365,9 +1366,12 @@ function AdsManagementPage({
   const filtered = useMemo(() => {
     if (spendRange === "today" || !rangeMetrics) return scoped;
     const applied = applyEntityRangeMetrics(scoped, rangeMetrics);
-    // 换成区间口径后按区间消耗重排，人工接管仍置顶。
+    // 换成区间口径后按区间消耗重排，失效对象沉底、人工接管仍置顶。
     return [...applied]
-      .sort(compareAdsManagementSpend)
+      .sort((left, right) => (
+        adsManagementRank(left) - adsManagementRank(right)
+        || compareAdsManagementSpend(left, right)
+      ))
       .sort((left, right) => Number(Boolean(right.ignored)) - Number(Boolean(left.ignored)));
   }, [rangeMetrics, scoped, spendRange]);
   const {
@@ -1751,7 +1755,8 @@ function AllAccountsAdsView({
         && (createdWindow === "all" || adsManagementParticipation(entity, { now }) !== "outside-window")
       ))
       .sort((left, right) => (
-        compareAdsManagementSpend(left.item.entity, right.item.entity)
+        adsManagementRank(left.item.entity) - adsManagementRank(right.item.entity)
+        || compareAdsManagementSpend(left.item.entity, right.item.entity)
         || left.index - right.index
       ))
       .map(({ item }) => item);
@@ -1770,7 +1775,10 @@ function AllAccountsAdsView({
         account,
         entity: applyEntityRangeMetrics([entity], rangeMetricsByAccount[account.id] ?? [])[0] ?? entity,
       }))
-      .sort((left, right) => compareAdsManagementSpend(left.entity, right.entity));
+      .sort((left, right) => (
+        adsManagementRank(left.entity) - adsManagementRank(right.entity)
+        || compareAdsManagementSpend(left.entity, right.entity)
+      ));
   }, [rangeMetricsByAccount, spendRange, visible]);
   const {
     items: paged,
