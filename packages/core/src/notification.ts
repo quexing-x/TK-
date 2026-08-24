@@ -164,4 +164,12 @@ export interface NotificationRenderedMessage {
   text: string;
   markdown: string;
   html: string;
+  /**
+   * 这一条消息强制 @所有人，覆盖渠道自身的 mentionAll 设置。
+   *
+   * 账户失效提醒用它：轮询汇总平时不该吵人，但「自动化开着的账户连不上了」是投放
+   * 正在停摆，必须有人立刻看到。渠道设置表达不了「按消息类型决定要不要 @」，所以
+   * 放在消息上。不设时沿用渠道设置。
+   */
+  mentionAll?: boolean;
 }

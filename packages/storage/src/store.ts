@@ -946,6 +946,49 @@ export class AutomationStore {
       );
   }
 
+  /**
+   * 这一轮里「刚刚失效」的、且自动化开着的账户。
+   *
+   * 只返回**跳变**的：该账户在本轮判为 failed，而它上一次出现在轮询批次里时不是
+   * failed。账户失效会持续几小时甚至几天，如果按「当前所有失效账户」推送，轮询最短
+   * 45 秒一轮，等于持续 @所有人 刷群。提醒的意义在于第一时间知道，不在于反复喊。
+   *
+   * 只看 account.enabled（自动化已开启）的账户：自动化没开的账户失效不影响投放，
+   * 不值得把所有人叫起来。
+   */
+  listNewlyInvalidAutomationAccounts(cycleId: string): Array<{
+    accountId: string;
+    accountName: string;
+    message: string | null;
+  }> {
+    // 「上一次出现」按写入顺序（rowid）判，不按 poll_cycles.started_at。
+    // started_at 是毫秒精度的字符串，两个批次落在同一毫秒时会打平，而
+    // `pc.started_at < c.started_at` 会把打平的上一轮整个排除掉，于是持续失效被
+    // 误判成「刚失效」，每轮都 @所有人。rowid 单调递增，不会打平。
+    const rows = this.db.prepare(
+      `SELECT a.account_id AS account_id, a.account_name AS account_name, a.message AS message
+       FROM poll_cycle_accounts a
+       JOIN accounts acc ON acc.id = a.account_id
+       WHERE a.cycle_id = ?
+         AND a.result_status = 'failed'
+         AND acc.enabled = 1
+         AND COALESCE((
+           SELECT prev.result_status
+           FROM poll_cycle_accounts prev
+           WHERE prev.account_id = a.account_id
+             AND prev.rowid < a.rowid
+           ORDER BY prev.rowid DESC
+           LIMIT 1
+         ), 'none') <> 'failed'
+       ORDER BY a.account_name`,
+    ).all(cycleId) as SqlRow[];
+    return rows.map((row) => ({
+      accountId: String(row.account_id),
+      accountName: String(row.account_name),
+      message: typeof row.message === "string" ? row.message : null,
+    }));
+  }
+
   finishPollCycle(cycleId: string): PollCycleRecord {
     const result = this.db
       .prepare(

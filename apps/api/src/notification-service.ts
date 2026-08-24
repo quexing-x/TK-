@@ -63,9 +63,12 @@ export class NotificationService {
         throw new Error("通知对应的轮询批次尚未完成。");
       }
       const context = await this.loadChannel(sending.channelKind);
+      // 失效提醒随本批次的汇总一起发，并强制 @所有人。只带「刚跳变成失效」的账户，
+      // 持续失效不会每轮重复轰炸（判据见 listNewlyInvalidAutomationAccounts）。
+      const newlyInvalid = this.store.listNewlyInvalidAutomationAccounts(cycle.id);
       await this.senders
         .get(sending.channelKind)
-        .send(context.settings, context.credential, renderPollCycle(cycle));
+        .send(context.settings, context.credential, renderPollCycle(cycle, newlyInvalid));
       this.store.markNotificationDeliverySent(sending.id);
     } catch (cause) {
       this.store.markNotificationDeliveryFailed(
