@@ -205,6 +205,23 @@ export const defaultRuleConfiguration: RuleConfigurationInput = {
   ],
 };
 
+/**
+ * 某个参数被别的规则限制出来的上限，没有限制时返回 null。
+ *
+ * 和 validateRuleConfiguration 里那条跨规则约束是同一件事，**必须放在一起**：界面
+ * 封顶和保存校验一旦各写各的就会漂移——滑块拉得到的值保存时被拒，或者反过来滑块
+ * 封死了一个其实合法的值。这里是唯一的知识来源，两边都从这里取。
+ */
+export function ruleValueCeiling(
+  code: AutomationRuleCode,
+  parameterKey: string,
+  rules: readonly AutomationRule[],
+): number | null {
+  if (code !== "CV1_LOW_CART_CPA_CLOSE" || parameterKey !== "cpa") return null;
+  const cv1Cpa = rules.find((rule) => rule.code === "CV1_CPA_CLOSE")?.values.cpa;
+  return typeof cv1Cpa === "number" && Number.isFinite(cv1Cpa) ? cv1Cpa : null;
+}
+
 export function getAutomationRuleDefinition(
   code: AutomationRuleCode,
 ): AutomationRuleDefinition {
@@ -240,18 +257,24 @@ function validateRuleConfiguration(
   // 更高，cpa 落在两者之间的广告组会先被这条以「加购不足」的名义关掉，而真正该负责的
   // 是后者；设得再高些则整条形同虚设，因为后者会先兜走所有超标的。两种情形都不是用户
   // 想要的，与其让人对着两个数字猜，不如直接锁死关系。
+  //
+  // 上限本身由 ruleValueCeiling 算，界面的滑块封顶也从那里取——两边共用一处知识，
+  // 才不会出现「滑块拉得到的值保存时被拒」或「滑块封死了一个其实合法的值」。
   const lowCart = configuration.rules.find((rule) => rule.code === "CV1_LOW_CART_CPA_CLOSE");
-  const cv1Close = configuration.rules.find((rule) => rule.code === "CV1_CPA_CLOSE");
   const lowCartCpa = lowCart?.values.cpa;
-  const cv1Cpa = cv1Close?.values.cpa;
+  const lowCartCpaCeiling = ruleValueCeiling(
+    "CV1_LOW_CART_CPA_CLOSE",
+    "cpa",
+    configuration.rules,
+  );
   if (
     typeof lowCartCpa === "number"
-    && typeof cv1Cpa === "number"
-    && lowCartCpa > cv1Cpa
+    && lowCartCpaCeiling !== null
+    && lowCartCpa > lowCartCpaCeiling
   ) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `「单次转化且加购不足」的 CPA 上限（${lowCartCpa}）不能高于「单次转化 CPA 过高」的上限（${cv1Cpa}）：它排在前面且判据更宽，阈值不更严就没有意义。`,
+      message: `「单次转化且加购不足」的 CPA 上限（${lowCartCpa}）不能高于「单次转化 CPA 过高」的上限（${lowCartCpaCeiling}）：它排在前面且判据更宽，阈值不更严就没有意义。`,
       path: [
         "rules",
         configuration.rules.findIndex((rule) => rule.code === "CV1_LOW_CART_CPA_CLOSE"),

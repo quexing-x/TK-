@@ -3,6 +3,7 @@ import {
   RuleConfigurationInputSchema,
   automationRuleDefinitions,
   defaultRuleConfiguration,
+  ruleValueCeiling,
 } from "./rules.js";
 
 describe("global rule configuration", () => {
@@ -82,5 +83,36 @@ describe("单次转化 CPA 的跨规则约束", () => {
 
   it("默认配置本身满足这条约束", () => {
     expect(RuleConfigurationInputSchema.safeParse(defaultRuleConfiguration).success).toBe(true);
+  });
+
+  // 界面靠 ruleValueCeiling 给滑块封顶，保存靠 schema 校验。两边一旦各写各的就会漂移：
+  // 滑块拉得到的值保存时被拒，或者滑块封死了一个其实合法的值。这里把两者钉死在一起
+  // ——封顶算出来允许的，schema 必须收；封顶不允许的，schema 必须拒。
+  it("滑块封顶与保存校验对同一批取值给出一致结论", () => {
+    const cv1 = 9;
+    for (const lowCart of [0, 0.5, 3, 8.9, 9, 9.1, 12, 100]) {
+      const configuration = withCpa(lowCart, cv1);
+      const ceiling = ruleValueCeiling("CV1_LOW_CART_CPA_CLOSE", "cpa", configuration.rules);
+
+      expect(ceiling).toBe(cv1);
+      expect(RuleConfigurationInputSchema.safeParse(configuration).success)
+        .toBe(lowCart <= ceiling!);
+    }
+  });
+
+  it("封顶跟着「单次转化 CPA 过高」当前的值走，不是写死的数", () => {
+    for (const cv1 of [0, 1.5, 9, 30]) {
+      expect(ruleValueCeiling("CV1_LOW_CART_CPA_CLOSE", "cpa", withCpa(0, cv1).rules)).toBe(cv1);
+    }
+  });
+
+  // 没有约束的参数必须返回 null，否则界面会给一条本无上限的滑块凭空封顶。
+  it("不受约束的规则与参数返回 null", () => {
+    const { rules } = withCpa(3, 9);
+
+    expect(ruleValueCeiling("CV1_LOW_CART_CPA_CLOSE", "carts", rules)).toBeNull();
+    expect(ruleValueCeiling("CV1_LOW_CART_CPA_CLOSE", "conversions", rules)).toBeNull();
+    expect(ruleValueCeiling("CV1_CPA_CLOSE", "cpa", rules)).toBeNull();
+    expect(ruleValueCeiling("CV2_CPA_CLOSE", "cpa", rules)).toBeNull();
   });
 });

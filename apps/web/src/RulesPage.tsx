@@ -8,6 +8,7 @@ import {
   isGroupMixed,
   minimumGroupValue,
   readGroupValue,
+  ruleValueCeiling,
   ungroupedRuleDefinitions,
   type AutomationRuleDefinition,
   type AutomationRuleGroup,
@@ -18,7 +19,12 @@ import {
 } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
-import { adjustRuleValue, formatRuleValue, getRuleSliderMaximum } from "./rule-controls";
+import {
+  adjustRuleValue,
+  formatRuleValue,
+  getRuleSliderMaximum,
+  resolveRuleSliderMaximum,
+} from "./rule-controls";
 import "./ui/pages/automation-rules.css";
 
 export function RulesPage({
@@ -372,6 +378,7 @@ export function RuleCards({
                 item.code === definition.code
                   ? { ...item, values: { ...item.values, [key]: value } }
                   : item))}
+              rules={rules}
               values={rule.values}
             />
           </article>
@@ -447,11 +454,13 @@ function RuleGroupControls({
 function RuleControls({
   definition,
   values,
+  rules,
   disabled,
   onChange,
 }: {
   definition: AutomationRuleDefinition;
   values: Record<string, number>;
+  rules: RuleConfiguration["rules"];
   disabled: boolean;
   onChange: (key: string, value: number) => void;
 }) {
@@ -481,6 +490,7 @@ function RuleControls({
         <div className="rule-threshold-list">
           {thresholdParameters.map((parameter) => (
             <RuleThreshold
+              ceiling={ruleValueCeiling(definition.code, parameter.key, rules)}
               definitionLabel={definition.label}
               disabled={disabled}
               key={parameter.key}
@@ -499,12 +509,15 @@ function RuleControls({
 }
 
 function RuleThreshold({
+  ceiling = null,
   definitionLabel,
   parameter,
   value,
   disabled,
   onChange,
 }: {
+  /** 被其他规则约束出来的硬上限，来自 core 的 ruleValueCeiling；没有约束时为 null。 */
+  ceiling?: number | null;
   definitionLabel: string;
   parameter: AutomationRuleDefinition["parameters"][number];
   value: number;
@@ -512,11 +525,15 @@ function RuleThreshold({
   onChange: (value: number) => void;
 }) {
   const interactionStep = 0.1;
-  const [maximum, setMaximum] = useState(() => getRuleSliderMaximum(parameter.key, value));
+  const [headroom, setHeadroom] = useState(() => getRuleSliderMaximum(parameter.key, value));
 
   useEffect(() => {
-    setMaximum((current) => Math.max(current, getRuleSliderMaximum(parameter.key, value)));
+    setHeadroom((current) => Math.max(current, getRuleSliderMaximum(parameter.key, value)));
   }, [parameter.key, value]);
+
+  // 存量配置里 value 可能已经超出硬上限（旧版界面存得下），这时滑块顶到头、上调键
+  // 禁用，但上面显示的仍是真实值——只能往下调回合法区间。
+  const maximum = resolveRuleSliderMaximum(ceiling, headroom);
 
   return (
     <label className="rule-threshold">
@@ -551,7 +568,13 @@ function RuleThreshold({
           type="button"
         ><ChevronUp size={14} /></button>
       </span>
-      <span className="rule-range-scale"><span>0</span><span>安全 ↔ 超限</span><span>{formatRuleValue(maximum, parameter.step)}</span></span>
+      <span className="rule-range-scale">
+        <span>0</span>
+        <span>安全 ↔ 超限</span>
+        <span title={ceiling === null ? undefined : "上限受其他规则约束，不能再往上调"}>
+          {formatRuleValue(maximum, parameter.step)}{ceiling === null ? "" : " ·封顶"}
+        </span>
+      </span>
     </label>
   );
 }
