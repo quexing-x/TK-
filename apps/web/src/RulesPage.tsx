@@ -1,8 +1,15 @@
 import { ChevronDown, ChevronUp, Clock3, Gauge, RefreshCcw, Save } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
-  automationRuleDefinitions,
+  applyGroupEnabled,
+  applyGroupValue,
+  automationRuleGroups,
+  isGroupEnabled,
+  isGroupMixed,
+  readGroupValue,
+  ungroupedRuleDefinitions,
   type AutomationRuleDefinition,
+  type AutomationRuleGroup,
   type GlobalAutomationSettings,
   type RuleConfiguration,
   type RuleConfigurationInput,
@@ -56,10 +63,18 @@ export function RulesPage({
     });
   }, [settings]);
 
-  const enabledRules = useMemo(
-    () => configuration?.rules.filter((rule) => rule.enabled).length ?? 0,
-    [configuration],
-  );
+  // 计数按界面上的卡片数来，跟用户看到的一致；底层仍然是九条。
+  const ruleCardCount = automationRuleGroups.length + ungroupedRuleDefinitions.length;
+  const enabledRules = useMemo(() => {
+    if (!configuration) return 0;
+    const groups = automationRuleGroups.filter((group) =>
+      isGroupEnabled(group, configuration.rules),
+    ).length;
+    const singles = ungroupedRuleDefinitions.filter((definition) =>
+      configuration.rules.find((rule) => rule.code === definition.code)?.enabled,
+    ).length;
+    return groups + singles;
+  }, [configuration]);
 
   const updateLayer = (entityType: SyncEntityType, enabled: boolean) => {
     if (!configuration || !canManageRules) return;
@@ -89,6 +104,23 @@ export function RulesPage({
           ? { ...rule, values: { ...rule.values, [key]: value } }
           : rule,
       ),
+    });
+  };
+
+  // 分组卡片改的仍然是底层那几条规则，只是一次写多条。存储结构没有变化。
+  const updateGroupEnabled = (group: AutomationRuleGroup, enabled: boolean) => {
+    if (!configuration || !canManageRules) return;
+    setConfiguration({
+      ...configuration,
+      rules: applyGroupEnabled(group, enabled, configuration.rules),
+    });
+  };
+
+  const updateGroupValue = (group: AutomationRuleGroup, key: string, value: number) => {
+    if (!configuration || !canManageRules) return;
+    setConfiguration({
+      ...configuration,
+      rules: applyGroupValue(group, key, value, configuration.rules),
     });
   };
 
@@ -152,7 +184,7 @@ export function RulesPage({
           <div><h1>规则配置</h1><p>九条全局规则按固定优先级顺序执行，阈值与应用层级可在当前页面维护。</p></div>
         </div>
         <dl>
-          <div><dt>规则状态</dt><dd>{enabledRules}/9 已启用</dd></div>
+          <div><dt>规则状态</dt><dd>{enabledRules}/{ruleCardCount} 已启用</dd></div>
           <div><dt>权限</dt><dd>{canManageRules ? "可编辑" : "仅查看"}</dd></div>
           <div><dt>最近保存</dt><dd>{new Date(configuration.updatedAt).toLocaleString()}</dd></div>
         </dl>
@@ -222,12 +254,17 @@ export function RulesPage({
           <div>
             <span className="panel-icon"><Gauge size={18} /></span>
             <div>
-              <h2>九条固定规则</h2>
-              <p>拖动滑块设定阈值，次数用加减按钮调整；九条规则的动作和保存逻辑保持不变。</p>
+              <h2>固定规则</h2>
+              <p>
+                拖动滑块设定阈值，次数用加减按钮调整。同一指标的「超标关闭」与「达标恢复」
+                合并成一条展示，改一次两个方向一起生效；判定逻辑与保存结果没有变化。
+              </p>
             </div>
           </div>
           <div className="row-actions">
-            <span className="status active">已启用 {enabledRules}/9</span>
+            <span className="status active">
+              已启用 {enabledRules}/{ruleCardCount}
+            </span>
             <button
               className="primary-button"
               disabled={savingRules || savingSettings || !canManageRules}
@@ -241,39 +278,168 @@ export function RulesPage({
         <div className="rule-table-head" aria-hidden="true">
           <span>规则与状态</span><span>触发条件与阈值</span><span>执行动作</span>
         </div>
-        <div className="rule-card-grid">
-          {automationRuleDefinitions.map((definition, index) => {
-            const rule = configuration.rules.find((item) => item.code === definition.code);
-            if (!rule) return null;
-            return (
-              <article className={rule.enabled ? "rule-card rule-row" : "rule-card rule-row disabled"} key={definition.code}>
-                <header>
-                  <div className="rule-title">
-                    <span className="rule-number">{index + 1}</span>
-                    <div>
-                      <strong>{definition.label}</strong>
-                      <span>优先级 {definition.priority} · {definition.action === "enable" ? "开启" : "关闭"}</span>
-                    </div>
-                  </div>
-                  <Toggle
-                    checked={rule.enabled}
-                    disabled={!canManageRules}
-                    label={`${definition.label}${rule.enabled ? "已启用" : "已停用"}`}
-                    onChange={(checked) => updateRuleEnabled(definition.code, checked)}
-                  />
-                </header>
-                <RuleControls
-                  definition={definition}
-                  disabled={!canManageRules}
-                  onChange={(key, value) => updateRuleValue(definition.code, key, value)}
-                  values={rule.values}
-                />
-              </article>
-            );
-          })}
-        </div>
+        <RuleCards
+          canManage={canManageRules}
+          onChange={(rules) => setConfiguration({ ...configuration, rules })}
+          rules={configuration.rules}
+        />
       </section>
     </section>
+  );
+}
+
+/**
+ * 规则卡片列表：先是合并了「超标关闭 + 达标恢复」的分组卡，再是没有恢复方向、
+ * 保持独立的单条规则卡。
+ *
+ * 从页面里拆出来是为了能脱离登录态单独渲染验证——这块的输入直接决定真实的广告
+ * 启停，只靠类型检查过关是不够的。
+ */
+export function RuleCards({
+  rules,
+  canManage,
+  onChange,
+}: {
+  rules: RuleConfiguration["rules"];
+  canManage: boolean;
+  onChange: (rules: RuleConfiguration["rules"]) => void;
+}) {
+  return (
+    <div className="rule-card-grid">
+      {automationRuleGroups.map((group, index) => {
+        const enabled = isGroupEnabled(group, rules);
+        const mixed = isGroupMixed(group, rules);
+        return (
+          <article className={enabled ? "rule-card rule-row" : "rule-card rule-row disabled"} key={group.key}>
+            <header>
+              <div className="rule-title">
+                <span className="rule-number">{index + 1}</span>
+                <div>
+                  <strong>{group.label}</strong>
+                  <span>优先级 {group.priority} · 关闭与恢复</span>
+                </div>
+              </div>
+              <Toggle
+                checked={enabled}
+                disabled={!canManage}
+                label={`${group.label}${enabled ? "已启用" : "已停用"}`}
+                onChange={(checked) => onChange(applyGroupEnabled(group, checked, rules))}
+              />
+            </header>
+            {mixed ? (
+              // 存量配置里可能只开了一个方向。合并后一个开关表达不了这种状态，
+              // 必须说出来——静默统一等于替用户改了规则。
+              <p className="rule-mixed-note" role="status">
+                这条规则的关闭与恢复方向当前开关状态不一致（旧版界面可以分开设置）。
+                拨动上面的开关会把两个方向统一为同一状态。
+              </p>
+            ) : null}
+            <RuleGroupControls
+              disabled={!canManage}
+              group={group}
+              onChange={(key, value) => onChange(applyGroupValue(group, key, value, rules))}
+              rules={rules}
+            />
+          </article>
+        );
+      })}
+      {ungroupedRuleDefinitions.map((definition, index) => {
+        const rule = rules.find((item) => item.code === definition.code);
+        if (!rule) return null;
+        return (
+          <article className={rule.enabled ? "rule-card rule-row" : "rule-card rule-row disabled"} key={definition.code}>
+            <header>
+              <div className="rule-title">
+                <span className="rule-number">{automationRuleGroups.length + index + 1}</span>
+                <div>
+                  <strong>{definition.label}</strong>
+                  <span>优先级 {definition.priority} · {definition.action === "enable" ? "开启" : "关闭"}</span>
+                </div>
+              </div>
+              <Toggle
+                checked={rule.enabled}
+                disabled={!canManage}
+                label={`${definition.label}${rule.enabled ? "已启用" : "已停用"}`}
+                onChange={(checked) => onChange(rules.map((item) =>
+                  item.code === definition.code ? { ...item, enabled: checked } : item))}
+              />
+            </header>
+            <RuleControls
+              definition={definition}
+              disabled={!canManage}
+              onChange={(key, value) => onChange(rules.map((item) =>
+                item.code === definition.code
+                  ? { ...item, values: { ...item.values, [key]: value } }
+                  : item))}
+              values={rule.values}
+            />
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 分组卡片的输入区。和 RuleControls 长得一样，区别只在于：一个输入框会写进
+ * 分组覆盖的每一条底层规则，右侧的动作标签同时标出关闭与恢复两个方向。
+ */
+function RuleGroupControls({
+  group,
+  rules,
+  disabled,
+  onChange,
+}: {
+  group: AutomationRuleGroup;
+  rules: RuleConfiguration["rules"];
+  disabled: boolean;
+  onChange: (key: string, value: number) => void;
+}) {
+  const countParameters = group.parameters.filter((parameter) => parameter.step >= 1);
+  const thresholdParameters = group.parameters.filter((parameter) => parameter.step < 1);
+  const valueOf = (key: string) => {
+    const value = readGroupValue(group, key, rules);
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  return (
+    <div className="rule-controls">
+      <div className="rule-condition-cell">
+        <div className="rule-sentence">
+          <span>{group.description}</span>
+          {countParameters.map((parameter) => (
+            <span className="rule-inline-value" key={parameter.key}>
+              <span>{parameter.label}</span>
+              <InlineStepper
+                disabled={disabled}
+                label={parameter.label}
+                minimum={0}
+                onChange={(value) => onChange(parameter.key, value)}
+                step={parameter.step}
+                value={valueOf(parameter.key)}
+              />
+              <small>{parameter.unit}</small>
+            </span>
+          ))}
+        </div>
+        <div className="rule-threshold-list">
+          {thresholdParameters.map((parameter) => (
+            <RuleThreshold
+              definitionLabel={group.label}
+              disabled={disabled}
+              key={parameter.key}
+              parameter={parameter}
+              value={valueOf(parameter.key)}
+              onChange={(value) => onChange(parameter.key, value)}
+            />
+          ))}
+        </div>
+      </div>
+      <span className="rule-action-cell rule-action-pair">
+        <span className="rule-action-badge disable">超标关闭</span>
+        <span className="rule-action-badge enable">达标恢复</span>
+      </span>
+    </div>
   );
 }
 

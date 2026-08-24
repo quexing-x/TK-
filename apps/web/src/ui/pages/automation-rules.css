@@ -647,6 +647,35 @@
 .rule-action-cell.enable { color: var(--primary); background: transparent; }
 .rule-action-cell.disable { color: var(--danger); background: transparent; }
 
+/* 合并卡片同时承担两个方向，动作格里竖排两个标签而不是一个。 */
+.rule-action-pair {
+  display: grid;
+  gap: 6px;
+  place-content: center;
+  justify-items: center;
+  padding: 0 10px;
+}
+
+.rule-action-pair .rule-action-badge {
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.rule-action-pair .rule-action-badge.disable { color: var(--danger); }
+.rule-action-pair .rule-action-badge.enable { color: var(--primary); }
+
+/* 存量配置里两个方向开关不一致时的提示。少见，但不能不出声。 */
+.rule-mixed-note {
+  margin: 0 16px 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--text-secondary, inherit);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 @media (max-width: 1180px) {
   .automation-page { grid-template-columns: 1fr; }
   .automation-status-band { grid-template-columns: 1fr; gap: 24px; }
