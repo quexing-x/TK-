@@ -6,6 +6,7 @@ export * from "./decision.js";
 export * from "./management.js";
 export * from "./threshold.js";
 export * from "./rules.js";
+export * from "./rule-groups.js";
 export * from "./rule-evaluator.js";
 export * from "./meta-rules.js";
 export * from "./meta-rule-evaluator.js";
