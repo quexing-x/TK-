@@ -1564,9 +1564,9 @@ function AdsManagementPage({
         </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
+            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPA</th><th>点击量</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
             <tbody>
-              {filtered.length === 0 ? <tr><td colSpan={10}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
+              {filtered.length === 0 ? <tr><td colSpan={11}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
                 const statusPending = pendingStatusKeys.has(key);
                 const breach = metricBreaches(entity.metrics, ruleValues);
@@ -1577,6 +1577,7 @@ function AdsManagementPage({
                     <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
                     <td className={breach.spend ? "metric-breach" : undefined}>{formatMetric(entity.metrics.spend)}</td>
                     <td className={breach.cpa ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
+                    <td>{formatMetric(entity.metrics.clicks)}</td>
                     <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
                     <td>{formatMetric(entity.metrics.conversions)}</td>
                     <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
@@ -1851,11 +1852,11 @@ function AllAccountsAdsView({
           </div>
         </div>
         <div className="table-wrap"><table>
-          <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
-          <tbody>{rows.length === 0 ? <tr><td colSpan={10}>最新健康同步中暂无符合当前筛选的广告组；若在找历史对象，把「创建时间」切到「全部」。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
+          <thead><tr><th>账户</th><th>对象</th><th>状态</th><th>消耗</th><th>CPA</th><th>点击量</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
+          <tbody>{rows.length === 0 ? <tr><td colSpan={11}>最新健康同步中暂无符合当前筛选的广告组；若在找历史对象，把「创建时间」切到「全部」。</td></tr> : paged.map(({ account, entity }) => <tr key={`${account.id}:${entity.externalId}`}>
             <td>{account.displayName}</td><td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
             <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
-            <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
+            <td>{formatMetric(entity.metrics.spend)}</td><td>{formatMetric(entity.metrics.cost_per_conversion)}</td><td>{formatMetric(entity.metrics.clicks)}</td><td>{formatMetric(entity.metrics.carts)}</td><td>{formatMetric(entity.metrics.conversions)}</td><td>{formatMetric(entity.metrics.cost_per_click)}</td>
             <td>{renderAdsManagementParticipation(participationByKey.get(`${entity.entityType}:${entity.externalId}`) ?? "participating")}</td>
             <td><div className="row-actions">{entity.status !== "unknown" && <button disabled={busy !== null || !canOperateAds || !hasProviderCapability(accountCapabilities[account.id], "change-status")} title={!hasProviderCapability(accountCapabilities[account.id], "change-status") ? "当前接入不支持启停写入" : undefined} onClick={() => setStatusConfirming({ account, entity })} type="button">{entity.status === "disabled" ? "开启" : "关闭"}</button>}<button disabled={busy !== null || !canOperateAds} onClick={() => void toggleManualTakeover(account, entity)} type="button">{entity.ignored ? "恢复自动化" : "人工接管"}</button>{hasProviderCapability(accountCapabilities[account.id], "change-status") && <button disabled={busy !== null || !canOperateAds} onClick={() => { const overnight = nextOvernightScheduleTimes(); setScheduling({ account, entity }); setScheduleKind("once"); setScheduledAction("disable"); setRunAt(nextLocalMidnightInputValue()); setDisableAt(localDateTimeInputValue(overnight.disableAt)); setEnableAt(localDateTimeInputValue(overnight.enableAt)); }} type="button">定时 / 过夜</button>}</div></td>
           </tr>)}</tbody>
