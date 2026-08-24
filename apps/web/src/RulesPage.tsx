@@ -6,6 +6,7 @@ import {
   automationRuleGroups,
   isGroupEnabled,
   isGroupMixed,
+  minimumGroupValue,
   readGroupValue,
   ungroupedRuleDefinitions,
   type AutomationRuleDefinition,
@@ -413,7 +414,7 @@ function RuleGroupControls({
               <InlineStepper
                 disabled={disabled}
                 label={parameter.label}
-                minimum={0}
+                minimum={minimumGroupValue(group, parameter.key)}
                 onChange={(value) => onChange(parameter.key, value)}
                 step={parameter.step}
                 value={valueOf(parameter.key)}

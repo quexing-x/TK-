@@ -30,6 +30,20 @@ export interface AutomationRuleGroupParameter {
   appliesTo: readonly AutomationRuleCode[];
 }
 
+/**
+ * 分组里不给用户调、但必须钉死的参数。
+ *
+ * 目前只有加购组用到：它的关闭侧判据是 `carts === Y`（等于，不是小于），只有 Y=0
+ * 才说得通。Y 一旦不是 0 就会漏——比如 Y=2 时，加购 0 个和 1 个的对象两条规则都不
+ * 匹配，卡在中间没人管。既然界面上不再暴露这个值，就在每次编辑该分组时把它钉回 0，
+ * 顺带修正历史上可能存进去的怪值。
+ */
+export interface AutomationRuleGroupFixedValue {
+  code: AutomationRuleCode;
+  key: string;
+  value: number;
+}
+
 export interface AutomationRuleGroup {
   key: string;
   label: string;
@@ -39,14 +53,11 @@ export interface AutomationRuleGroup {
   closeCodes: readonly AutomationRuleCode[];
   openCodes: readonly AutomationRuleCode[];
   parameters: readonly AutomationRuleGroupParameter[];
+  fixedValues?: readonly AutomationRuleGroupFixedValue[];
 }
 
 /**
  * 合并了关闭 / 恢复两个方向的分组。
- *
- * 「有消耗无加购 / 有加购恢复」**刻意没有合并**：两条的 carts 参数含义不同——关闭是
- * `carts === 0`，恢复是 `carts >= 1`。合成一个输入框后填 0，恢复条件会变成 carts >= 0
- * 恒真，把所有有消耗的对象全部开启。这组要合得单独设计判据，不能套用本文件的模式。
  *
  * 「零转化消耗过高」「零转化 CPC 过高」没有对应的恢复规则，无从合并，保持独立。
  */
@@ -106,6 +117,35 @@ export const automationRuleGroups: readonly AutomationRuleGroup[] = [
         appliesTo: ["CV2_CPA_CLOSE", "CV2_CPA_OPEN"],
       },
     ],
+  },
+  {
+    key: "CART",
+    label: "加购达标",
+    // 措辞要说清中间地带：加购数在 1 与「最低加购」之间时两条都不匹配，对象保持
+    // 现状。这不是漏洞而是有意的——有一点加购但还不够，先不急着动它。
+    description: "消耗达到设定值后：加购数达到最低加购则开启，一个加购都没有则关闭。",
+    priority: 6,
+    closeCodes: ["NO_CART_CLOSE"],
+    openCodes: ["HAS_CART_OPEN"],
+    parameters: [
+      {
+        key: "spend",
+        label: "最低消耗",
+        unit: "账户币种",
+        step: 0.01,
+        appliesTo: ["NO_CART_CLOSE", "HAS_CART_OPEN"],
+      },
+      {
+        // 只写开启侧。关闭侧的 carts 是「等于」判据，只有 0 说得通，
+        // 由 fixedValues 钉死，不做成输入框。
+        key: "carts",
+        label: "最低加购",
+        unit: "次",
+        step: 1,
+        appliesTo: ["HAS_CART_OPEN"],
+      },
+    ],
+    fixedValues: [{ code: "NO_CART_CLOSE", key: "carts", value: 0 }],
   },
 ] as const;
 
@@ -175,6 +215,16 @@ export function isGroupMixed(
   return states.length > 0 && states.some(Boolean) && !states.every(Boolean);
 }
 
+/**
+ * 分组输入框的下限。
+ *
+ * 加购的开启阈值填 0 会让判据变成 `carts >= 0` 恒真，把所有达到消耗门槛的对象全部
+ * 开启——这是真会烧钱的一步，不能只靠界面上的 min 属性拦。其余参数沿用 0 下限。
+ */
+export function minimumGroupValue(group: AutomationRuleGroup, parameterKey: string): number {
+  return group.key === "CART" && parameterKey === "carts" ? 1 : 0;
+}
+
 /** 把一个分组输入框的值写回它覆盖的每一条底层规则。 */
 export function applyGroupValue(
   group: AutomationRuleGroup,
@@ -184,14 +234,36 @@ export function applyGroupValue(
 ): AutomationRule[] {
   const parameter = group.parameters.find((item) => item.key === parameterKey);
   if (!parameter) return [...rules];
+  const safeValue = Math.max(value, minimumGroupValue(group, parameterKey));
   const targets = new Set<AutomationRuleCode>(parameter.appliesTo);
-  return rules.map((rule) => {
+  const written = rules.map((rule) => {
     if (!targets.has(rule.code)) return rule;
     // 底层规则不认识的参数键会被 schema 拒收，这里按定义再挡一道。
     const supported = getAutomationRuleDefinition(rule.code).parameters
       .some((item) => item.key === parameterKey);
     if (!supported) return rule;
-    return { ...rule, values: { ...rule.values, [parameterKey]: value } };
+    return { ...rule, values: { ...rule.values, [parameterKey]: safeValue } };
+  });
+  return applyGroupFixedValues(group, written);
+}
+
+/**
+ * 把分组里不可调的参数钉回约定值。
+ *
+ * 每次编辑分组都跑一遍，顺带修正历史上存进去的怪值——界面已经不显示它了，
+ * 留一个看不见又能改变判定的数在库里是最难查的那类问题。
+ */
+export function applyGroupFixedValues(
+  group: AutomationRuleGroup,
+  rules: readonly AutomationRule[],
+): AutomationRule[] {
+  if (!group.fixedValues?.length) return [...rules];
+  return rules.map((rule) => {
+    const fixed = group.fixedValues!.filter((item) => item.code === rule.code);
+    if (fixed.length === 0) return rule;
+    const values = { ...rule.values };
+    for (const item of fixed) values[item.key] = item.value;
+    return { ...rule, values };
   });
 }
 

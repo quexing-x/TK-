@@ -7,6 +7,7 @@ import {
   groupedRuleCodes,
   isGroupEnabled,
   isGroupMixed,
+  minimumGroupValue,
   readGroupValue,
   ungroupedRuleDefinitions,
 } from "./rule-groups.js";
@@ -134,15 +135,53 @@ describe("规则分组（仅界面表述）", () => {
     expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
   });
 
-  // 加购那组刻意没合并：两条的 carts 含义不同（关闭 ===0，恢复 >=1），
-  // 合成一个输入框填 0 会让恢复条件恒真，把有消耗的对象全开。
-  it("加购组保持独立，没有被并进分组", () => {
-    expect(groupedRuleCodes.has("NO_CART_CLOSE")).toBe(false);
-    expect(groupedRuleCodes.has("HAS_CART_OPEN")).toBe(false);
+  // 没有恢复方向的两条无从合并，必须留在独立卡片里。
+  it("零转化那两条保持独立", () => {
     const codes = ungroupedRuleDefinitions.map((d) => d.code);
-    expect(codes).toContain("NO_CART_CLOSE");
-    expect(codes).toContain("HAS_CART_OPEN");
-    expect(codes).toContain("NO_CONV_SPEND_CLOSE");
-    expect(codes).toContain("NO_CONV_CPC_CLOSE");
+    expect(codes).toEqual(["NO_CONV_SPEND_CLOSE", "NO_CONV_CPC_CLOSE"]);
+  });
+
+  describe("加购组", () => {
+    const cart = () => getAutomationRuleGroup("CART");
+
+    // 界面上只给「最低加购」一个输入框，写的是开启侧。关闭侧是「加购 === Y」的
+    // 等于判据，只有 Y=0 说得通，所以不做成输入框。
+    it("最低加购只写开启侧，关闭侧固定为零加购", () => {
+      const updated = applyGroupValue(cart(), "carts", 3, rules());
+
+      expect(updated.find((r) => r.code === "HAS_CART_OPEN")?.values.carts).toBe(3);
+      expect(updated.find((r) => r.code === "NO_CART_CLOSE")?.values.carts).toBe(0);
+    });
+
+    // 关键的钱包安全：填 0 会让开启判据变成 carts >= 0 恒真，
+    // 把所有达到消耗门槛的对象全部开启。
+    it("最低加购不接受 0，会被抬到 1", () => {
+      const updated = applyGroupValue(cart(), "carts", 0, rules());
+
+      expect(updated.find((r) => r.code === "HAS_CART_OPEN")?.values.carts).toBe(1);
+      expect(minimumGroupValue(cart(), "carts")).toBe(1);
+    });
+
+    it("最低消耗两个方向一起改", () => {
+      const updated = applyGroupValue(cart(), "spend", 1.25, rules());
+
+      expect(updated.find((r) => r.code === "NO_CART_CLOSE")?.values.spend).toBe(1.25);
+      expect(updated.find((r) => r.code === "HAS_CART_OPEN")?.values.spend).toBe(1.25);
+    });
+
+    // 界面已经不显示关闭侧的 carts，库里若存着怪值就再也看不见却仍在改变判定
+    // （比如 2 会让加购 0 个和 1 个的对象两条都不匹配）。编辑时顺手钉回 0。
+    it("历史上存进去的怪值会在编辑时被钉回零", () => {
+      const weird = rules().map((rule) =>
+        rule.code === "NO_CART_CLOSE" ? { ...rule, values: { ...rule.values, carts: 2 } } : rule);
+
+      const updated = applyGroupValue(cart(), "spend", 1, weird);
+
+      expect(updated.find((r) => r.code === "NO_CART_CLOSE")?.values.carts).toBe(0);
+    });
+
+    it("显示的最低加购取开启侧的值", () => {
+      expect(readGroupValue(cart(), "carts", rules())).toBe(1);
+    });
   });
 });
