@@ -31,6 +31,8 @@ import type {
   TemplateCopyMutation,
   DeleteAdGroupMutation,
   DeleteAdGroupMutationResult,
+  AdGroupBudgetMutation,
+  AdGroupBudgetMutationResult,
 } from "./types.js";
 import {
   resolveLegacyTargetAccountPixelId,
@@ -57,6 +59,7 @@ import {
 } from "./network-error.js";
 
 const capabilities = new Set<ProviderCapability>([
+  "update-ad-group-budget",
   "read-campaigns",
   "read-ad-groups",
   "read-ads",
@@ -359,6 +362,93 @@ export class CookieAdsProvider implements AdsProvider {
         };
       }
     }));
+  }
+
+  async updateAdGroupBudgets(
+    context: ProviderContext,
+    mutations: AdGroupBudgetMutation[],
+  ): Promise<AdGroupBudgetMutationResult[]> {
+    let credential: ParsedCookieCredential;
+    try {
+      CookieConnectionSettingsSchema.parse(context.settings);
+      credential = CookieCredentialInputSchema.parse(context.credential);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Cookie 预算写入参数无效。";
+      return mutations.map((mutation) => ({ ...mutation, ok: false, failureKind: "retryable", message }));
+    }
+    // 沿用广告组关闭那条 cURL 做会话载体：签名参数（msToken / X-Bogus / X-Gnarly）与
+    // Cookie 都在它身上，我们只改路径、查询串与报文。
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group-status" && item.action === "disable",
+    );
+    if (!sessionRequest) {
+      return mutations.map((mutation) => ({
+        ...mutation,
+        ok: false,
+        failureKind: "retryable",
+        message: "缺少广告组关闭 cURL，无法安全派生预算写入请求。",
+      }));
+    }
+    const advertiserId = new URL(sessionRequest.url).searchParams.get("aadvid")?.trim() ?? "";
+    if (!advertiserId) {
+      return mutations.map((mutation) => ({
+        ...mutation,
+        ok: false,
+        failureKind: "retryable",
+        message: "会话 cURL 上缺少 aadvid，无法定位广告账户。",
+      }));
+    }
+    const profile = credential.creationProfile;
+    const riskInfo = profile && isRecord(profile.publishPayload) && isRecord(profile.publishPayload.risk_info)
+      ? profile.publishPayload.risk_info
+      : {};
+
+    const results: AdGroupBudgetMutationResult[] = [];
+    for (const mutation of mutations) {
+      let request: CapturedCookieRequest;
+      try {
+        request = buildAdGroupBudgetRequest(sessionRequest, advertiserId, mutation, riskInfo);
+      } catch (cause) {
+        results.push({
+          ...mutation,
+          ok: false,
+          failureKind: "retryable",
+          message: cause instanceof Error ? cause.message : "预算写入请求构造失败。",
+        });
+        continue;
+      }
+      try {
+        const payload = await requestCookieJson(request, credential);
+        if (payload.code !== 0) {
+          // 预算改没改成不能靠猜：响应没给明确成功码就判 unknown，交人工核实。
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "unknown",
+            message: "预算写入请求已发送，但 TikTok 响应缺少明确成功代码。",
+          });
+          continue;
+        }
+        results.push({ ...mutation, ok: true, message: `TikTok 已确认日预算改为 ${mutation.budget}。` });
+      } catch (cause) {
+        if (isDefinitelyUnsentNetworkError(cause)) {
+          results.push({
+            ...mutation,
+            ok: false,
+            failureKind: "retryable",
+            message: `预算写入请求未发出：${cause instanceof Error ? cause.message : String(cause)}`,
+          });
+          continue;
+        }
+        results.push({
+          ...mutation,
+          ok: false,
+          failureKind: "unknown",
+          message: `预算写入结果无法确认：${cause instanceof Error ? cause.message : String(cause)}`,
+        });
+      }
+    }
+    return results;
   }
 
   async deleteAdGroups(
@@ -6169,6 +6259,65 @@ async function enableCreatedCreatives(
     }
   }
   return failures;
+}
+
+/**
+ * 广告组日预算的写入请求。
+ *
+ * 形状对照 2026-08-25 的真机抓包，逐项都有出处：
+ *   POST /api/v3/i18n/overture/ad/{广告组 ID}/update_budget/?aadvid=...&req_src=ad_creation
+ *   content-type: multipart/form-data
+ *   budget=<数字>  ad_channel=1  risk_info[...]=<浏览器指纹>
+ *
+ * 三个要点：
+ *
+ * 1. 路径段写作 `ad`，装的却是**广告组** ID——与申诉、素材启停同一套口径（2026-08-06
+ *    申诉全败就是把广告 ID 填进了这个位置）。
+ * 2. 报文是 multipart，不是 JSON。抓包里就是 multipart，没有 JSON 版本的证据，因此
+ *    这里不去猜服务端是否也收 JSON。
+ * 3. `risk_info[...]` 在抓包里装的是真实浏览器指纹（分辨率、语言、UA）。**不伪造**：
+ *    只透传账户创建档案里已有的那份；没有就整段不发。素材启停接口用空 risk_info 是
+ *    能过的，但那是另一个接口，不能拿来给这个接口背书——所以这条留作真机验证项。
+ */
+function buildAdGroupBudgetRequest(
+  sessionRequest: CapturedCookieRequest,
+  advertiserId: string,
+  mutation: AdGroupBudgetMutation,
+  riskInfo: Record<string, unknown>,
+): CapturedCookieRequest {
+  const adGroupId = mutation.externalId.trim();
+  if (!adGroupId) throw new Error("缺少广告组 ID，无法构造预算写入请求。");
+  if (!Number.isFinite(mutation.budget) || mutation.budget <= 0) {
+    throw new Error("预算必须是大于 0 的数字。");
+  }
+  const url = new URL(sessionRequest.url);
+  url.pathname = `/api/v3/i18n/overture/ad/${encodeURIComponent(adGroupId)}/update_budget/`;
+  url.searchParams.set("aadvid", advertiserId);
+  url.searchParams.set("req_src", "ad_creation");
+
+  const boundary = `----TkAutoBoundary${adGroupId}`;
+  const fields: Array<[string, string]> = [
+    ["budget", String(mutation.budget)],
+    ["ad_channel", "1"],
+  ];
+  for (const [key, value] of Object.entries(riskInfo)) {
+    if (value === null || value === undefined) continue;
+    fields.push([`risk_info[${key}]`, String(value)]);
+  }
+  const body = `${fields
+    .map(([name, value]) =>
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
+    .join("")}--${boundary}--\r\n`;
+
+  return {
+    ...sessionRequest,
+    target: "ad-group-budget",
+    derived: true,
+    method: "POST",
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    url: url.toString(),
+    body,
+  };
 }
 
 function materializeDeletionRequest(
