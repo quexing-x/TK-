@@ -125,6 +125,14 @@ button { cursor: pointer; }
 .budget-mode-switch button.active { background: #245bdb; color: #fff; }
 .budget-mode-field small { margin-top: 6px; color: #7a869a; font-size: 12px; }
 .campaign-copy-sources { margin-top: 18px; }
+/* 系列复制的两个入口。样式对齐「选择创建方式」那组卡片，让人一眼看出这是同一类
+   「先选一种口径」的选择，而不是一个附加过滤。 */
+.campaign-copy-kind-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.campaign-copy-kind-tabs button { text-align: left; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-raised); padding: 12px 14px; color: inherit; }
+.campaign-copy-kind-tabs button.active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); background: var(--primary-tint); }
+.campaign-copy-kind-tabs strong, .campaign-copy-kind-tabs span { display: block; }
+.campaign-copy-kind-tabs strong { font-size: 13px; }
+.campaign-copy-kind-tabs span { margin-top: 3px; font-size: 12px; opacity: .75; }
 .campaign-copy-sources > strong { display: block; margin-bottom: 8px; font-size: 14px; }
 .campaign-copy-source-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
 .campaign-copy-source-toolbar > strong { font-size: 14px; margin-right: auto; }

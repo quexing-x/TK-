@@ -38,6 +38,28 @@ function defaultNextSixOClock(): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+export type CampaignBudgetKind = "campaign" | "adgroup";
+
+/**
+ * 某个系列该出现在哪个入口下。
+ *
+ * 预算方式未知的系列**两个入口下都出现**：判定依据不足时（系列行没回传预算字段、又
+ * 没有子广告组可兜底），用户比我们清楚，藏起来只会让它彻底够不着。代价是它在两边都
+ * 露面，因此列表项上必须标注「预算方式未知」。
+ */
+export function belongsToBudgetKind(
+  budgetKind: CampaignBudgetKind,
+  campaignId: string,
+  modes: {
+    optimizedByCampaignId: Map<string, boolean>;
+    undeterminedCampaignIds: Set<string>;
+  },
+): boolean {
+  if (modes.undeterminedCampaignIds.has(campaignId)) return true;
+  const optimized = modes.optimizedByCampaignId.get(campaignId) === true;
+  return budgetKind === "campaign" ? optimized : !optimized;
+}
+
 export interface ResolvedCampaignCopyLaunchTiming {
   initialStatus: "enabled" | "disabled";
   scheduledStartAt: string | null;
@@ -84,7 +106,11 @@ export function CopyCampaignPanel(props: {
   // 记录「被取消勾选的广告组」而不是「已勾选的」：新勾选的源系列天然默认全选，
   // 取消源系列后也不会残留脏状态。
   const [excludedAdGroupIds, setExcludedAdGroupIds] = useState<string[]>([]);
-  const [onlyCampaignBudget, setOnlyCampaignBudget] = useState(true);
+  // 两个入口：系列预算的系列复制 / 广告组预算的系列复制。原本是一个「只显示系列预算」
+  // 的过滤勾选，两类系列可以同时选中，而它们要填的参数根本不同——系列预算的新系列各自
+  // 持有一份预算，组预算的系列则由组自己带。混选时那个「系列日预算」框到底作用在谁身上
+  // 说不清楚。改成先选口径，列表和参数都跟着口径走。
+  const [budgetKind, setBudgetKind] = useState<CampaignBudgetKind>("campaign");
   const [query, setQuery] = useState("");
   const [campaignCopies, setCampaignCopies] = useState(2);
   const [groupsPerCampaign, setGroupsPerCampaign] = useState(1);
@@ -154,15 +180,23 @@ export function CopyCampaignPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [allCampaigns, budgetModes],
   );
+  // 只数判定明确的。预算方式未知的两个入口下都会列出来，但不计进任何一侧的条数——
+  // 否则两个入口的数字加起来会超过实际系列数，看着像重复计算。
+  const adgroupCount = useMemo(
+    () => allCampaigns.filter((entity) => !isCbo(entity.externalId)
+      && !budgetModes.undeterminedCampaignIds.has(entity.externalId)).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allCampaigns, budgetModes],
+  );
   const visibleCampaigns = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return allCampaigns
-      .filter((entity) => !onlyCampaignBudget || isCbo(entity.externalId))
+      .filter((entity) => belongsToBudgetKind(budgetKind, entity.externalId, budgetModes))
       .filter((entity) => !normalized
         || entity.name.toLowerCase().includes(normalized)
         || entity.externalId.toLowerCase().includes(normalized));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allCampaigns, onlyCampaignBudget, query, budgetModes]);
+  }, [allCampaigns, budgetKind, query, budgetModes]);
 
   const adGroupsByCampaign = useMemo(() => {
     const map = new Map<string, ManagedEntityRecord[]>();
@@ -235,7 +269,6 @@ export function CopyCampaignPanel(props: {
 
   const previewError = preview && "error" in preview ? preview.error : null;
   const previewPlan = preview && !("error" in preview) ? preview : null;
-  const anySourceIsCbo = sourceCampaignIds.some((id) => isCbo(id));
 
   const toggleCampaign = (externalId: string) => {
     setSourceCampaignIds((current) => current.includes(externalId)
@@ -317,7 +350,6 @@ export function CopyCampaignPanel(props: {
   };
 
   const disabled = props.busy || submitting || loading;
-  const hiddenCount = allCampaigns.length - visibleCampaigns.length;
 
   return (
     <div className="panel campaign-copy-panel">
@@ -385,9 +417,11 @@ export function CopyCampaignPanel(props: {
           <small>勾选的源广告组按顺序轮转填入。</small>
         </label>
         <label className="field"><span>系列日预算（留空继承源系列）</span>
-          <input disabled={disabled || !anySourceIsCbo} min="0.01" step="0.01" type="number" value={campaignBudgetText}
+          <input disabled={disabled || budgetKind !== "campaign"} min="0.01" step="0.01" type="number" value={campaignBudgetText}
             onChange={(event) => setCampaignBudgetText(event.target.value)} />
-          <small>{anySourceIsCbo ? "每个新系列各自持有这一份预算。" : "所选源系列使用广告组预算，此处不适用。"}</small>
+          {/* 由入口口径决定，不再看「选中的里面有没有系列预算的」：那种判定在混选时
+              会让这个框对一部分源系列生效、对另一部分静默失效。 */}
+          <small>{budgetKind === "campaign" ? "每个新系列各自持有这一份预算。" : "广告组预算口径下不适用，预算跟着广告组走。"}</small>
         </label>
         <label className="field"><span>出价（留空继承源系列）</span>
           <input disabled={disabled} min="0" step="0.01" type="number" value={bidText}
@@ -407,13 +441,22 @@ export function CopyCampaignPanel(props: {
       </div>
 
       <div className="campaign-copy-sources">
+        {/* 两个入口。切换会清空已选：两类系列要填的参数不同，带着上一个口径的选择过来
+            只会让「系列日预算」作用在说不清的对象上。 */}
+        <div className="campaign-copy-kind-tabs" role="group" aria-label="选择系列复制的预算口径">
+          <button aria-pressed={budgetKind === "campaign"} className={budgetKind === "campaign" ? "active" : ""} disabled={disabled}
+            onClick={() => { setBudgetKind("campaign"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); }} type="button">
+            <strong>系列预算的系列复制</strong>
+            <span>每个新系列各自持有一份系列预算（共 {cboCount} 条）</span>
+          </button>
+          <button aria-pressed={budgetKind === "adgroup"} className={budgetKind === "adgroup" ? "active" : ""} disabled={disabled}
+            onClick={() => { setBudgetKind("adgroup"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); setCampaignBudgetText(""); }} type="button">
+            <strong>广告组预算的系列复制</strong>
+            <span>预算跟着广告组走，新系列不带系列预算（共 {adgroupCount} 条）</span>
+          </button>
+        </div>
         <div className="campaign-copy-source-toolbar">
           <strong>源推广系列（可多选，已选 {sourceCampaignIds.length}）</strong>
-          <label className="campaign-copy-filter">
-            <input checked={onlyCampaignBudget} disabled={disabled} type="checkbox"
-              onChange={(event) => setOnlyCampaignBudget(event.target.checked)} />
-            <span>只显示系列预算（共 {cboCount} 条）</span>
-          </label>
           <input aria-label="搜索推广系列" disabled={disabled} placeholder="搜索系列名称或 ID"
             value={query} onChange={(event) => setQuery(event.target.value)} />
           <button className="secondary-button compact-button" disabled={disabled} type="button"
@@ -425,9 +468,11 @@ export function CopyCampaignPanel(props: {
           ? <p className="target-account-empty">
               {allCampaigns.length === 0
                 ? "该账户在当前同步快照中没有推广系列，请先执行只读同步。"
-                : onlyCampaignBudget
-                  ? `没有系列预算的推广系列${hiddenCount > 0 ? `（已隐藏 ${hiddenCount} 条广告组预算的系列）` : ""}。取消勾选上方过滤即可看到全部。`
-                  : "没有匹配的推广系列。"}
+                : query.trim()
+                  ? "没有匹配的推广系列。"
+                  : budgetKind === "campaign"
+                    ? `该账户没有系列预算的推广系列${adgroupCount > 0 ? `（另有 ${adgroupCount} 条广告组预算的系列，切到上方另一个入口）` : ""}。`
+                    : `该账户没有广告组预算的推广系列${cboCount > 0 ? `（另有 ${cboCount} 条系列预算的系列，切到上方另一个入口）` : ""}。`}
             </p>
           : <div className="target-account-grid">
             {visibleCampaigns.map((entity) => (
@@ -440,7 +485,7 @@ export function CopyCampaignPanel(props: {
               </label>
             ))}
           </div>}
-        {!onlyCampaignBudget && hiddenCount === 0 && cboCount === 0 && allCampaigns.length > 0 && (
+        {budgetKind === "campaign" && cboCount === 0 && allCampaigns.length > 0 && (
           <p className="target-account-empty">当前账户没有识别到系列预算的推广系列。若与 TikTok 后台不符，请先执行一次只读同步。</p>
         )}
       </div>
