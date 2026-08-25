@@ -15,7 +15,10 @@ describe("launch spreadsheet", () => {
     ]);
   });
 
-  it("reads the first worksheet and applies the selected preset", async () => {
+  // 整仓并行跑时这条会偶发超时（实测 6.8s / 9.0s，单跑该包只要 1.3s）：它要动态加载
+  // 930KB 的 exceljs，多个测试进程同时抢 CPU 与磁盘时，5 秒的默认上限不够用。
+  // 超时和真实回归长得一模一样，会掩盖真问题，所以按最慢一次的三倍给足余量。
+  it("reads the first worksheet and applies the selected preset", { timeout: 30_000 }, async () => {
     const { Workbook } = await import("exceljs");
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet("批量创建");
