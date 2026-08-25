@@ -744,6 +744,20 @@ export async function createApp(
     return dependencies.store.listStuckCampaignCopyTasks(accountId);
   });
 
+  // 人工核实后一次清掉这些账户下所有「结果未知」的扩组记录。这类记录禁止自动重试，
+  // 只能靠人收口；没有这个入口，界面顶部的红色横幅只进不出，最后没人再看它。
+  app.post("/api/ad-group-expand-tasks/resolve-uncertain", async (request, reply) => {
+    const { accountIds } = z.object({
+      accountIds: z.array(z.string().min(1)).min(1).max(200),
+    }).parse(request.body);
+    if (hasMetaOfflineAccount(dependencies.store, accountIds)) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    return reply.send({
+      cleared: dependencies.store.resolveUncertainAdGroupExpandTasks(accountIds),
+    });
+  });
+
   app.post("/api/accounts/:accountId/campaign-copy-tasks/:taskKey/reset", async (request, reply) => {
     const { accountId, taskKey } = z.object({
       accountId: z.string().min(1),

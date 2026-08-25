@@ -506,6 +506,29 @@ describe("AutomationStore", () => {
     });
   });
 
+  // 「结果未知」禁止自动重试，只能靠人去 TikTok 后台核实后收口。没有这个出口，界面顶部
+  // 那条红色横幅只进不出，涨到没人再看它，真正需要处理的新记录也跟着被淹掉。
+  it("人工核实后可以一次清掉「结果未知」，且只清这一类", () => {
+    store.claimAdGroupExpandTask("unknown-a", "demo-account", "adgroup-1");
+    store.finishAdGroupExpandTask("unknown-a", "unknown");
+    store.claimAdGroupExpandTask("unknown-b", "demo-account", "adgroup-2");
+    store.finishAdGroupExpandTask("unknown-b", "unknown");
+    store.claimAdGroupExpandTask("done", "demo-account", "adgroup-3");
+    store.finishAdGroupExpandTask("done", "succeeded");
+
+    expect(store.resolveUncertainAdGroupExpandTasks(["demo-account"])).toBe(2);
+
+    // 清掉即释放幂等键：这两个源组重新允许扩组。
+    expect(store.claimAdGroupExpandTask("unknown-a", "demo-account", "adgroup-1")).toBe("claimed");
+    // 成功记录不受影响，仍然挡着重复扩组。
+    expect(store.claimAdGroupExpandTask("done", "demo-account", "adgroup-3")).toBe("succeeded");
+  });
+
+  it("没有结果未知时清除返回 0，不报错", () => {
+    expect(store.resolveUncertainAdGroupExpandTasks(["demo-account"])).toBe(0);
+    expect(store.resolveUncertainAdGroupExpandTasks([])).toBe(0);
+  });
+
   it("never reclaims an expansion task whose remote result is unknown, while confirmed failures remain retryable", () => {
     expect(store.claimAdGroupExpandTask("unknown-task", "demo-account", "adgroup-1")).toBe("claimed");
     store.finishAdGroupExpandTask("unknown-task", "unknown");
