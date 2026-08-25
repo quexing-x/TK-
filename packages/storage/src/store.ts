@@ -3935,6 +3935,27 @@ export class AutomationStore {
    * 这不会去 TikTok 删除任何草稿或系列——那必须由人工确认后在后台自行处理；
    * 这里只是清掉本地的「结果未知」锁，允许同样的任务下次重新被领取执行。
    */
+  /**
+   * 人工核实之后，把这些账户下所有「结果未知」的扩组记录一次清掉。
+   *
+   * 只删 uncertain=1 的行。删掉即释放幂等键，这些源广告组之后可以再次扩组——所以调用方
+   * 的二次确认必须把组名列出来，让人对着具体清单确认，而不是一个空泛的「确定吗」。
+   *
+   * 之所以要批量：这类记录禁止自动重试、只能靠人收口，而人是一次去 TikTok 后台把几条
+   * 一起核实完的。逼他回来一条条点，只会让他干脆不点——于是红色横幅只进不出，涨到没人
+   * 再看它，真正需要处理的新记录也跟着被淹掉。
+   */
+  resolveUncertainAdGroupExpandTasks(accountIds: readonly string[]): number {
+    const wanted = [...new Set(accountIds.filter((id) => id.trim() !== ""))];
+    if (wanted.length === 0) return 0;
+    const placeholders = wanted.map(() => "?").join(", ");
+    const result = this.db.prepare(
+      `DELETE FROM ad_group_expand_tasks
+        WHERE account_id IN (${placeholders}) AND uncertain = 1`,
+    ).run(...wanted);
+    return Number(result.changes);
+  }
+
   resetCampaignCopyTask(accountId: string, taskKey: string): boolean {
     const result = this.db.prepare(
       "DELETE FROM campaign_copy_tasks WHERE task_key = ? AND account_id = ? AND uncertain = 1",

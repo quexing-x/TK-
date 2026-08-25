@@ -793,6 +793,11 @@ export const api = {
       generatedCampaignId: string | null;
       generatedAdGroupIds: string[];
     }>>(`/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks`),
+  resolveUncertainAdGroupExpandTasks: (accountIds: string[]) =>
+    request<{ cleared: number }>("/api/ad-group-expand-tasks/resolve-uncertain", {
+      method: "POST",
+      body: JSON.stringify({ accountIds }),
+    }),
   resetCampaignCopyTask: (accountId: string, taskKey: string) =>
     request<{ ok: true }>(
       `/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks/${encodeURIComponent(taskKey)}/reset`,

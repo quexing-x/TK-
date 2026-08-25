@@ -187,6 +187,7 @@ export function ExpandGroupsPanel({
   const [history, setHistory] = useState<AdGroupExpandTask[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [resolving, setResolving] = useState(false);
 
   const accountName = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.displayName])),
@@ -264,6 +265,40 @@ export function ExpandGroupsPanel({
     () => accounts.map((account) => account.id),
     [accounts],
   );
+  /**
+   * 人工核实之后，把所有「结果未知」一次清掉。
+   *
+   * 这类记录禁止自动重试、只能靠人收口，而人是一次去 TikTok 后台把几条一起核实完的。
+   * 逼他回来一条条点只会让他干脆不点——于是红色横幅只进不出，涨到没人再看它，真正需要
+   * 处理的新记录也跟着被淹掉。
+   *
+   * 清除即释放幂等键，这些源组之后可以再次扩组。所以二次确认里把组名逐条列出来：让人
+   * 对着具体清单确认，而不是一个空泛的「确定吗」。
+   */
+  const resolveAllStuckTasks = async () => {
+    const names = needsReview
+      .map((task) => task.generatedNames.join("、") || "（未记录组名）");
+    const list = names.map((name, index) => `${index + 1}. ${name}`).join("\n");
+    const confirmed = await confirm({
+      title: `清除 ${needsReview.length} 条「结果未知」`,
+      message: `请先在 TikTok 广告后台逐条确认下面这些组到底建成没有：\n\n${list}\n\n清除后这些记录消失，对应的源广告组也重新允许扩组——没核实就清除，可能把已经建好的组再建一遍。确认全部已核实？`,
+      confirmLabel: `已全部核实，清除 ${needsReview.length} 条`,
+      danger: true,
+    });
+    if (!confirmed) return;
+    setResolving(true);
+    onError(null);
+    try {
+      const { cleared } = await api.resolveUncertainAdGroupExpandTasks(historyAccountIds);
+      toast(`已清除 ${cleared} 条`, "success");
+      await loadHistory(historyAccountIds);
+    } catch (cause) {
+      onError(messageOf(cause));
+    } finally {
+      setResolving(false);
+    }
+  };
+
   const loadHistory = async (accountIds: string[]) => {
     if (accountIds.length === 0) { setHistory([]); return; }
     setHistoryLoading(true);
@@ -625,6 +660,10 @@ export function ExpandGroupsPanel({
       {needsReview.length > 0 && <p className="expand-history-alert">
         <AlertTriangle size={15} />
         <span><strong>{needsReview.length} 条结果未知，需人工核实。</strong>写请求已发出但没拿到结果，禁止自动重试——请到 TikTok 后台确认这些组到底建成没有。</span>
+        <button className="secondary-button compact-button" disabled={resolving}
+          onClick={() => void resolveAllStuckTasks()} type="button">
+          {resolving ? "清除中…" : "已核实，全部清除"}
+        </button>
       </p>}
       {history.length === 0
         ? <p className="expand-account-empty">{historyLoading ? "读取中…" : "还没有扩组记录。"}</p>
