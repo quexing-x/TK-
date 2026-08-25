@@ -163,7 +163,7 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
                 <label className="field"><span>当天转化 ≥</span><input min={1} step={1} type="number" value={settings.budgetBump.minConversions} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, minConversions: Math.max(1, Number(event.target.value) || 1) } })} /></label>
                 <label className="field"><span>CPA &lt;</span><input min={0} step={0.01} type="number" value={settings.budgetBump.maxCpa} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, maxCpa: Math.max(0, Number(event.target.value) || 0) } })} /><small>严格小于，等于不算达标。</small></label>
                 <label className="field"><span>日预算调整为</span><input min={0.01} step={0.01} type="number" value={settings.budgetBump.targetBudget} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, targetBudget: Math.max(0.01, Number(event.target.value) || 0.01) } })} /></label>
-                <div className="executor-safety-list"><span>系列预算(CBO)的广告组一律跳过：预算在系列上，不在组上</span><span>转化或 CPA 取不到时不动——提额是花钱的动作，不确定就不做</span><span>关着的、被忽略的广告组不处理</span><span>每个广告组每天最多调一次</span></div>
+                <div className="executor-safety-list"><span>系列预算(CBO)的广告组一律跳过：预算在系列上，不在组上</span><span>转化或 CPA 取不到时不动——提额是花钱的动作，不确定就不做</span><span>关闭中的广告组照样提额（它被开回来时才用得上新预算）；被忽略的不处理</span><span>每个广告组每天最多调一次</span></div>
                 <p className="danger-copy">这条会直接改真实日预算。预算写入接口尚未经过真机验证，首次启用前建议先手动在一个不重要的广告组上验证一次。</p>
               </div>
             )}
