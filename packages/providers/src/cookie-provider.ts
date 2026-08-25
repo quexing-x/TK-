@@ -85,7 +85,14 @@ export class CookieAdsProvider implements AdsProvider {
   readonly implementationStatus = "available" as const;
   // v4：新增 copy-campaigns（系列级复制）。契约版本变更会让所有已接入账户显示
   // “能力契约已更新，请重新检测连接”，重新检测后才会开放新能力。
-  readonly capabilityVersion = "cookie-capabilities-v4-2026-07";
+  // v5：新增 update-ad-group-budget。
+  //
+  // **加能力必须同时升这个版本号。** authorizedCapabilities 是账户上次连接检测时记下的
+  // 集合，新能力不在里面；而 available 要求 ready && authorizedCapabilities.has(...)，
+  // 版本不升则 contractCurrent 仍为 true、界面不会提示重新检测，于是新能力对所有存量账户
+  // 永久不可用——执行器每轮在能力闸门静默 return，开关打开了也毫无动静。
+  // 2026-08-25 的提额规则就是这么白开了一整天。
+  readonly capabilityVersion = "cookie-capabilities-v5-2026-08";
   readonly capabilities = capabilities;
   private readonly creationBatchLocks = new Map<string, Promise<void>>();
 

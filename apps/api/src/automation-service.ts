@@ -522,16 +522,15 @@ export class AutomationService {
       .filter((entity) => selectBudgetBumpCandidate(entity, settings));
 
     for (const entity of candidates) {
-      // 领一次「今天这个组的提额」。写入本身是幂等的（目标是绝对值，重复写收敛到同一个
-      // 数），但快照要等下一轮同步才会反映新预算，没有这道闸就会在这期间反复发同一笔。
-      const reservation = this.store.reserveAutomaticAction({
-        accountId,
-        actionKey: `budget-bump:${accountId}:${localDate}:${entity.externalId}:${settings.targetBudget}`,
-        localDate,
-        // 0 = 不限次数，这里只借它做幂等去重，与自动启停的用法一致。
-        dailyLimit: 0,
-      });
-      if (reservation !== "claimed") continue;
+      // **不设每日闸、不因结果未知跳过，命中就写。**
+      //
+      // 这跟创建类操作是两回事：建广告组时重试可能建出第二个，所以「结果未知」必须锁死；
+      // 而预算写的是绝对值，重复写收敛到同一个数，最坏情况只是多发一笔一模一样的请求。
+      // 反过来，预算没改成等于什么都没做——为了一个没有副作用的重试而把它锁到明天，
+      // 代价完全不对等。
+      //
+      // 自然的收敛条件是判据本身：改成功后预算不再等于 sourceBudget，下一轮同步一到就
+      // 不再命中。代价是从写入到快照刷新之间可能重复发一两笔，这是可以接受的。
       try {
         await this.providers.updateAdGroupBudgets(
           account.providerKind,
