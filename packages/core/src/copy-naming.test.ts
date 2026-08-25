@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DuplicateNameError,
+  allocateExpandBaseName,
   assertCampaignNameAvailable,
   dateTimeSuffix,
   planGeneratedNames,
@@ -151,5 +152,72 @@ describe("stripGeneratedNameSuffixes", () => {
   it("与广告组命名共用同一套清洗规则", () => {
     expect(stripGeneratedNameSuffixes("A-0730-1-0731-2")).toBe("A");
     expect(stripGeneratedNameSuffixes("A")).toBe("A");
+  });
+});
+
+// 2026-08-25 07:47–07:49 那一批 8 条扩组废了 2 条，两条的生成名都跟同批先成功的一条一字不差。
+// 根因：后缀取的是【投放档位】而非创建时刻，同一批共用；两个源组本身就是同一产品在不同档位
+// 扩出来的，旧后缀被 strip 掉后基名完全相同，于是新名撞死。
+describe("扩组基名在批内唯一", () => {
+  const deliveryAt = new Date("2026-08-25T09:00:00.000Z"); // 台北 17:00
+  const timeZone = "Asia/Taipei";
+
+  it("第一个源组拿到不带偏移的名字", () => {
+    expect(allocateExpandBaseName({
+      cleanedSourceName: "FY13011雙頭唇綫筆低价测试1",
+      deliveryAt,
+      timeZone,
+      usedBaseNames: new Set(),
+    })).toBe("FY13011雙頭唇綫筆低价测试1-0825-170000");
+  });
+
+  // 生产上真实发生的那一对：源组分别是 -0825-130000-1 和 -0825-060000-1，洗完基名相同。
+  it("同批第二个同基名的源组往后推一秒，不再撞名", () => {
+    const first = "FY13011雙頭唇綫筆低价测试1-0825-170000";
+    expect(allocateExpandBaseName({
+      cleanedSourceName: "FY13011雙頭唇綫筆低价测试1",
+      deliveryAt,
+      timeZone,
+      usedBaseNames: new Set([first]),
+    })).toBe("FY13011雙頭唇綫筆低价测试1-0825-170001");
+  });
+
+  it("连撞多个就一直往后排，各不相同", () => {
+    const used = new Set<string>();
+    const names = [1, 2, 3, 4].map(() => {
+      const name = allocateExpandBaseName({
+        cleanedSourceName: "同名产品",
+        deliveryAt,
+        timeZone,
+        usedBaseNames: used,
+      });
+      used.add(name);
+      return name;
+    });
+
+    expect(new Set(names).size).toBe(4);
+    expect(names[0]).toBe("同名产品-0825-170000");
+    expect(names[3]).toBe("同名产品-0825-170003");
+  });
+
+  // 账户里已经有 `${基名}-1` 时也要让开——实际创建出来的是带序号的那个名字。
+  it("账户里已存在同名的第一个副本时跳过", () => {
+    expect(allocateExpandBaseName({
+      cleanedSourceName: "早餐機_新",
+      deliveryAt,
+      timeZone,
+      usedBaseNames: new Set(),
+      existingNames: new Set(["早餐機_新-0825-170000-1"]),
+    })).toBe("早餐機_新-0825-170001");
+  });
+
+  it("不同源组之间互不影响", () => {
+    const used = new Set(["甲-0825-170000"]);
+    expect(allocateExpandBaseName({
+      cleanedSourceName: "乙",
+      deliveryAt,
+      timeZone,
+      usedBaseNames: used,
+    })).toBe("乙-0825-170000");
   });
 });
