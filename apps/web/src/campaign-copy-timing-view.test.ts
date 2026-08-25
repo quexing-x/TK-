@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
+import { belongsToBudgetKind, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
 
 const now = new Date("2026-08-01T10:00:00.000Z");
 
@@ -44,5 +44,48 @@ describe("resolveCampaignCopyLaunchTiming", () => {
 
     const exactlyNow = resolveCampaignCopyLaunchTiming("scheduled", toDatetimeLocal(now), now);
     expect(exactlyNow.ok).toBe(false);
+  });
+});
+
+// 系列复制拆成两个入口后，「哪个系列出现在哪个入口下」是新的分流点。分错的后果不是
+// 报错，而是用户在错的口径下填了「系列日预算」——对组预算的系列而言那个值静默失效。
+describe("系列复制的两个入口", () => {
+  const modes = (
+    optimized: Record<string, boolean>,
+    undetermined: string[] = [],
+  ) => ({
+    optimizedByCampaignId: new Map(Object.entries(optimized)),
+    undeterminedCampaignIds: new Set(undetermined),
+  });
+
+  it("系列预算的系列只出现在系列预算入口", () => {
+    const m = modes({ cbo: true });
+
+    expect(belongsToBudgetKind("campaign", "cbo", m)).toBe(true);
+    expect(belongsToBudgetKind("adgroup", "cbo", m)).toBe(false);
+  });
+
+  it("广告组预算的系列只出现在广告组预算入口", () => {
+    const m = modes({ abo: false });
+
+    expect(belongsToBudgetKind("campaign", "abo", m)).toBe(false);
+    expect(belongsToBudgetKind("adgroup", "abo", m)).toBe(true);
+  });
+
+  // 判定依据不足时用户比我们清楚，藏起来它就彻底够不着了。代价是两边都露面，所以
+  // 列表项上标了「预算方式未知」。
+  it("预算方式未知的系列两个入口下都出现", () => {
+    const m = modes({ unknown: false }, ["unknown"]);
+
+    expect(belongsToBudgetKind("campaign", "unknown", m)).toBe(true);
+    expect(belongsToBudgetKind("adgroup", "unknown", m)).toBe(true);
+  });
+
+  // 快照里没有这个系列时不能默认归到系列预算：那会让它带上一个并不存在的系列预算框。
+  it("完全没有记录的系列按广告组预算处理", () => {
+    const m = modes({});
+
+    expect(belongsToBudgetKind("campaign", "missing", m)).toBe(false);
+    expect(belongsToBudgetKind("adgroup", "missing", m)).toBe(true);
   });
 });
