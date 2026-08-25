@@ -12,6 +12,7 @@ export const ProviderCapabilitySchema = z.enum([
   "copy-campaigns",
   "change-status",
   "delete-ad-groups",
+  "update-ad-group-budget",
   "appeal-ads",
 ]);
 export type ProviderCapability = z.infer<typeof ProviderCapabilitySchema>;
@@ -204,6 +205,7 @@ export const CapturedCookieRequestSchema = z.object({
     // 两者都从会话请求派生，不需要用户单独导入 cURL。
     "material",
     "material-status",
+    "ad-group-budget",
   ]),
   action: z.enum(["enable", "disable"]).optional(),
   url: TikTokHttpsUrlSchema,

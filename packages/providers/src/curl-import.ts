@@ -39,7 +39,8 @@ export interface TikTokCurlImportResult {
       | "ad-status"
       | "appeal"
       | "material"
-      | "material-status";
+      | "material-status"
+      | "ad-group-budget";
   };
 }
 

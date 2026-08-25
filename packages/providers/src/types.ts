@@ -290,6 +290,26 @@ export interface DeleteAdGroupProvider extends ProviderContract {
   ): Promise<DeleteAdGroupMutationResult[]>;
 }
 
+export interface AdGroupBudgetMutation {
+  /** 广告组 ID。update_budget 的路径段虽然写作 `ad`，装的却是广告组——与申诉、素材启停同一套口径。 */
+  externalId: string;
+  /** 目标日预算，账户币种。 */
+  budget: number;
+}
+
+export interface AdGroupBudgetMutationResult extends AdGroupBudgetMutation {
+  ok: boolean;
+  message: string;
+  failureKind?: "retryable" | "unknown";
+}
+
+export interface AdGroupBudgetProvider extends ProviderContract {
+  updateAdGroupBudgets(
+    context: ProviderContext,
+    mutations: AdGroupBudgetMutation[],
+  ): Promise<AdGroupBudgetMutationResult[]>;
+}
+
 export type AdsProvider = ProviderContract
   & Partial<ReadProvider>
   & Partial<OriginalPostMigrationProvider>
@@ -298,7 +318,8 @@ export type AdsProvider = ProviderContract
   & Partial<CreationProvider>
   & Partial<TemplateCopyProvider>
   & Partial<AppealProvider>
-  & Partial<DeleteAdGroupProvider>;
+  & Partial<DeleteAdGroupProvider>
+  & Partial<AdGroupBudgetProvider>;
 
 export interface ProviderDescriptor {
   kind: ProviderKind;
