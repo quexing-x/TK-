@@ -42,6 +42,39 @@ const threshold: ThresholdConfig = {
   updatedAt: "2026-07-14T00:00:00.000Z",
 };
 
+// TikTok 会间歇性地整个不回 cpc 键（实测生产库广告组 86 条有消耗有点击的里缺 27 条）。
+// 后果不止界面少个数字：CV1_CPC_CLOSE、NO_CONV_CPC_CLOSE、CV1_CPA_OPEN 三条规则都以
+// cpc !== null 为前提，缺这个键就对该对象静默失效。
+describe("CPC 在平台不回该字段时现算", () => {
+  const adGroup = (payload: Record<string, unknown>) =>
+    normalizeProviderEntity({ entityType: "ad-group", externalId: "g1", payload });
+
+  it("平台给了就用平台的，不自己算", () => {
+    // 12.02 / 42 = 0.286…，但平台说 0.3 就以 0.3 为准，跟后台显示保持一致。
+    expect(adGroup({ stat_cost: 12.02, click_cnt: 42, cpc: 0.3 }).metrics.cost_per_click)
+      .toBe(0.3);
+  });
+
+  it("平台不回时用 消耗÷点击 补上", () => {
+    expect(adGroup({ stat_cost: 12.02, click_cnt: 42 }).metrics.cost_per_click)
+      .toBeCloseTo(0.2862, 4);
+  });
+
+  it("点击为 0 时仍然是 null，不是 0", () => {
+    // 除不出来就该是「没有」。给成 0 会让「CPC 超标就关」的规则把它当成极优对象。
+    expect(adGroup({ stat_cost: 5, click_cnt: 0 }).metrics.cost_per_click).toBeNull();
+  });
+
+  it("缺消耗或缺点击时不硬凑", () => {
+    expect(adGroup({ click_cnt: 42 }).metrics.cost_per_click).toBeNull();
+    expect(adGroup({ stat_cost: 12.02 }).metrics.cost_per_click).toBeNull();
+  });
+
+  it("消耗为 0 但有点击时算出 0，这是真实的免费点击", () => {
+    expect(adGroup({ stat_cost: 0, click_cnt: 7 }).metrics.cost_per_click).toBe(0);
+  });
+});
+
 describe("evaluateAutomation", () => {
   it("recognizes TikTok delivery_ok campaign status as enabled", () => {
     const snapshot = normalizeProviderEntity({

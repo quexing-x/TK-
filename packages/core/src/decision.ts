@@ -301,6 +301,8 @@ export function normalizeProviderEntity(
       ? null
       : firstNumber(source, ["ad_budget", "budget"]);
 
+  const spend = firstNumber(source, ["stat_cost", "spend", "cost"]);
+  const clicks = firstNumber(source, ["click_cnt", "clicks"]);
   return {
     entityType: entity.entityType,
     externalId: entity.externalId,
@@ -329,20 +331,30 @@ export function normalizeProviderEntity(
         "cost_per_conversion",
         "cost_per_result",
       ]),
-      cost_per_click: firstNumber(source, ["cpc", "cost_per_click"]),
+      // TikTok 会间歇性地整个不回 cpc 这个键——实测生产库里「有消耗且有点击」的广告组
+      // 86 条中缺 27 条，广告层同样，系列层 58 条缺 11 条；而消耗与点击两个字段一直都在。
+      //
+      // 这不只是界面上少个数字。**三条规则都以 `cpc !== null` 为前提**：CV1_CPC_CLOSE、
+      // NO_CONV_CPC_CLOSE，以及 CV1_CPA_OPEN（要 cpa 与 cpc 同时达标才开）。平台不回这个
+      // 键，这三条就对该对象**静默失效**——不报错，界面上也只是显示「—」。
+      //
+      // 平台给了就用平台的（与 TikTok 后台显示保持一致），没给才用 消耗÷点击 现算。
+      // 点击为 0 时除不出来，仍然是 null，界面照旧显示「—」，那是正确的。
+      cost_per_click: firstNumber(source, ["cpc", "cost_per_click"])
+        ?? (spend !== null && clicks !== null && clicks > 0 ? spend / clicks : null),
       cost_per_cart: firstNumber(source, [
         "time_attr_cost_per_on_web_cart",
         "cost_per_cart",
       ]),
       budget: ownBudget,
-      spend: firstNumber(source, ["stat_cost", "spend", "cost"]),
+      spend,
       conversions: firstNumber(source, [
         "time_attr_convert_cnt",
         "conversion",
         "conversions",
         "result",
       ]),
-      clicks: firstNumber(source, ["click_cnt", "clicks"]),
+      clicks,
       carts: firstNumber(source, [
         "time_attr_on_web_cart",
         "onsite_on_web_cart",
