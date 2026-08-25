@@ -1626,6 +1626,10 @@ export class AutomationStore {
         ...defaultAutomationFeatureSettings.dailyEnable,
         ...(stored.dailyEnable as object ?? {}),
       },
+      budgetBump: {
+        ...defaultAutomationFeatureSettings.budgetBump,
+        ...(stored.budgetBump as object ?? {}),
+      },
       updatedAt: row.updated_at,
     };
     return AutomationFeatureSettingsSchema.parse(merged);

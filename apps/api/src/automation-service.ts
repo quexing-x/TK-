@@ -28,6 +28,7 @@ import {
   type WriteTaskActor,
   type ManagedEntitySnapshot,
   normalizeProviderEntity,
+  selectBudgetBumpCandidate,
   selectDeletionCandidates,
   syncLayerComplete,
   creativeNeedsAppeal,
@@ -461,6 +462,86 @@ export class AutomationService {
       }
     } finally {
       this.store.finishDailyAutomationRun(accountId, "daily-enable", localDate);
+    }
+  }
+
+  /**
+   * 跑得好的广告组自动提额：转化量 ≥ N 且 CPA < M 时，把日预算改成设定值。
+   *
+   * **只作用于日预算恰好等于 sourceBudget 的广告组**（默认 50）。这条限制同时就是幂等
+   * 机制——调完预算不再等于 50，下一轮自然不命中，不需要额外的「已处理」台账。
+   *
+   * 判据用当天累计口径，与自动复制一致：两者触发条件几乎相同（转化达标 + CPA 够低），
+   * 只是动作不同，口径再分家只会让人对着两套数字猜。
+   *
+   * 系列预算(CBO)的广告组一律跳过：它们没有自己的日预算，预算在系列上，
+   * 往组上写预算既无意义也可能被拒。
+   */
+  async runScheduledBudgetBumps(accountId: string, asOf = new Date()): Promise<void> {
+    const settings = this.store.getAutomationFeatureSettings().budgetBump;
+    const account = this.store.getAccount(accountId);
+    if (
+      !settings.enabled
+      || !account?.enabled
+      || !this.store.getSystemRuntimeState().enabled
+    ) return;
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    const latestSync = this.store.getLatestReadOnlySync(accountId, account.providerKind);
+    const syncAge = latestSync
+      ? asOf.getTime() - new Date(latestSync.finishedAt).getTime()
+      : Number.POSITIVE_INFINITY;
+    if (
+      connection?.status !== "ready"
+      // 判据全部来自广告组层，不因广告层拉不到而跳过整轮；但广告组层本身必须取全，
+      // 否则「没看到的组」和「不达标的组」分不出来。
+      || !syncLayerComplete(latestSync?.quality, "ad-group")
+      || !hasCurrentDayMetricCoverage(latestSync, localDate, account.timezone)
+      || syncAge < 0
+      || syncAge > destructiveSyncFreshnessMs
+    ) return;
+    try {
+      this.providers.requireAccountCapability(
+        accountId,
+        account.providerKind,
+        connection,
+        "update-ad-group-budget",
+      );
+    } catch {
+      return;
+    }
+    const context = await this.loadContext(accountId, account.providerKind, account.timezone);
+    const provider = this.providers.get(account.providerKind);
+    if (
+      !provider.updateAdGroupBudgets
+      || !provider.resolveCapabilities?.(context).has("update-ad-group-budget")
+    ) return;
+
+    const candidates = this.store
+      .listCurrentManagedEntities(accountId, account.providerKind)
+      .filter((entity) => selectBudgetBumpCandidate(entity, settings));
+
+    for (const entity of candidates) {
+      // 领一次「今天这个组的提额」。写入本身是幂等的（目标是绝对值，重复写收敛到同一个
+      // 数），但快照要等下一轮同步才会反映新预算，没有这道闸就会在这期间反复发同一笔。
+      const reservation = this.store.reserveAutomaticAction({
+        accountId,
+        actionKey: `budget-bump:${accountId}:${localDate}:${entity.externalId}:${settings.targetBudget}`,
+        localDate,
+        // 0 = 不限次数，这里只借它做幂等去重，与自动启停的用法一致。
+        dailyLimit: 0,
+      });
+      if (reservation !== "claimed") continue;
+      try {
+        await this.providers.updateAdGroupBudgets(
+          account.providerKind,
+          context,
+          [{ externalId: entity.externalId, budget: settings.targetBudget }],
+        );
+      } catch {
+        // 单个组失败不带走整轮。失败原因由 provider 结果带出；这条动作今天不会再重试
+        // ——预算写入结果不确定时重发的风险高于晚一天调整。
+      }
     }
   }
 
@@ -2540,6 +2621,9 @@ export class AutomationScheduler {
     const run = await this.service.runAccount(account.id, "scheduler");
     if (account.platform === "tiktok") {
       await this.service.runScheduledAutoCopies(account.id);
+      // 与自动复制同一处触发：两者判据同源（当天转化 + CPA），跟着同一批新鲜数据走，
+      // 免得一个用刚同步的数、另一个用上一轮的。
+      await this.service.runScheduledBudgetBumps(account.id);
     }
     const counts = this.store.summarizeAutomationRun(run.id);
     const failed = run.status === "failed" || counts.failureCount > 0;

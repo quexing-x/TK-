@@ -27,6 +27,8 @@ import type {
   StatusMutationResult,
   CreationMutation,
   CreationMutationResult,
+  AdGroupBudgetMutation,
+  AdGroupBudgetMutationResult,
   DeleteAdGroupMutation,
   DeleteAdGroupMutationResult,
   NewCreationMutation,
@@ -285,6 +287,18 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持删除广告组。`);
     }
     return provider.deleteAdGroups(context, mutations);
+  }
+
+  updateAdGroupBudgets(
+    kind: ProviderKind,
+    context: ProviderContext,
+    mutations: AdGroupBudgetMutation[],
+  ): Promise<AdGroupBudgetMutationResult[]> {
+    const provider = this.get(kind);
+    if (!provider.updateAdGroupBudgets || !provider.capabilities.has("update-ad-group-budget")) {
+      throw new Error(`${provider.displayName} 暂不支持调整广告组预算。`);
+    }
+    return provider.updateAdGroupBudgets(context, mutations);
   }
 
   async create(

@@ -1784,6 +1784,7 @@ describe("AutomationStore", () => {
     expect(settings.deletion.scheduleHour).toBe(6);
     // 整个 dailyEnable 小节都晚于这行存量配置，缺节时必须落到默认值而不是抛错。
     expect(settings.dailyEnable).toEqual(defaultAutomationFeatureSettings.dailyEnable);
+    expect(settings.budgetBump).toEqual(defaultAutomationFeatureSettings.budgetBump);
     reopened.close();
     rmSync(dbPath, { force: true });
   });
@@ -1792,14 +1793,18 @@ describe("AutomationStore", () => {
   // 存进去的值永远读不回来——schema 上的 default 会把它悄悄填回默认值，界面上看起来
   // 就是「保存了但没生效」，而且不报任何错。
   it("每个执行器小节存进去的值都读得回来", () => {
+    const bump = { enabled: true, minConversions: 4, maxCpa: 7, targetBudget: 120, sourceBudget: 50 };
     const saved = store.updateAutomationFeatureSettings({
       ...store.getAutomationFeatureSettings(),
       dailyEnable: { enabled: true, minConversions: 8, scheduleHour: 9 },
+      budgetBump: bump,
     });
     expect(saved.dailyEnable).toEqual({ enabled: true, minConversions: 8, scheduleHour: 9 });
+    expect(saved.budgetBump).toEqual(bump);
 
     const reread = store.getAutomationFeatureSettings();
     expect(reread.dailyEnable).toEqual({ enabled: true, minConversions: 8, scheduleHour: 9 });
+    expect(reread.budgetBump).toEqual(bump);
   });
 
   it("persists the global runtime, extension settings, and ad-group schedules", () => {
