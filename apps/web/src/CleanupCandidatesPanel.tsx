@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { AccountConfig } from "@tk-auto/core";
 import { RefreshCcw, Trash2 } from "lucide-react";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
@@ -13,15 +14,15 @@ type Settings = Awaited<ReturnType<typeof api.getCleanupCandidates>>["settings"]
  * 删的那一批——删除不可恢复，「看到的」和「删掉的」不是同一批没有补救余地。
  */
 export function CleanupCandidatesPanel({
-  accountId,
-  accountName,
+  accounts,
   onError,
 }: {
-  accountId: string;
-  accountName: string;
+  accounts: AccountConfig[];
   onError(message: string): void;
 }) {
   const auth = useAuth();
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const accountName = accounts.find((account) => account.id === accountId)?.displayName ?? "";
   const canOperate = auth.status.permissions.includes("ads:operate");
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -72,10 +73,10 @@ export function CleanupCandidatesPanel({
     }
   };
 
-  if (!accountId) {
+  if (accounts.length === 0) {
     return (
       <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><Trash2 size={18} /></span><div><h2>待清理广告组</h2><p>先在上面选择一个账户。待清理列表按账户计算。</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><Trash2 size={18} /></span><div><h2>待清理广告组</h2><p>还没有配置广告账户。</p></div></div></div>
       </div>
     );
   }
@@ -88,13 +89,19 @@ export function CleanupCandidatesPanel({
           <div>
             <h2>待清理广告组</h2>
             <p>
-              {accountName} · {settings
+              {accountName ? `${accountName} · ` : ""}{settings
                 ? `已关闭超过 ${settings.gracePeriodHours} 小时、转化 ≤ ${settings.maxConversions}、加购 ≤ ${settings.maxCarts}${settings.maxConversions > 0 ? `、有转化时 CPA ≥ ${settings.minCpa}` : ""}，每个系列至少保留 1 组`
                 : "按「自动化执行器」页的删除配置计算"}
             </p>
           </div>
         </div>
         <div className="task-center-actions">
+          <label className="field cleanup-account-picker">
+            <span>账户</span>
+            <select disabled={busy} value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+              {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}
+            </select>
+          </label>
           <button className="secondary-button" disabled={loading || busy} onClick={() => void load()} type="button">
             <RefreshCcw size={15} /> {loading ? "读取中…" : "刷新"}
           </button>

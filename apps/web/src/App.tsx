@@ -648,7 +648,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         ) : page === "system-users" ? (
           <SystemUsersPage onError={setError} />
         ) : page === "maintenance" ? (
-          <MaintenancePage onError={setError} />
+          <MaintenancePage accounts={bootstrap.accounts} onError={setError} />
         ) : page === "meta-assets" ? (
           <MetaAssetsPage
             accounts={metaAccounts}

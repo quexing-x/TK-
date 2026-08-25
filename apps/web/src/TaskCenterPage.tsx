@@ -9,7 +9,6 @@ import type {
   WriteTaskSummaryRecord,
 } from "@tk-auto/core";
 import { api, type WriteTaskAttemptRecord } from "./api";
-import { CleanupCandidatesPanel } from "./CleanupCandidatesPanel";
 import { useAuth } from "./AuthGate";
 
 interface TaskCenterPageProps {
@@ -164,12 +163,6 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
         <label className="field"><span>账户</span><select value={accountId} onChange={(event) => setAccountId(event.target.value)}><option value="">全部账户</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select></label>
       </div>
     </div>
-
-    <CleanupCandidatesPanel
-      accountId={accountId}
-      accountName={accountId ? accountName(accounts, accountId) : ""}
-      onError={onError}
-    />
 
     <div className="task-workbench">
 
