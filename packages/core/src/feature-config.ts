@@ -31,6 +31,25 @@ export const AutomationFeatureSettingsInputSchema = z.object({
     autoCopyLaunchImmediately: z.boolean().default(true),
     autoCopySameCampaign: z.boolean().default(true),
   }),
+  // 跑得好的广告组自动提额：转化量达标且 CPA 够低时，把日预算改成设定值。
+  //
+  // **只作用于日预算恰好等于 sourceBudget 的广告组**（默认 50）。这一条同时也是幂等
+  // 机制：调完预算就不再等于 50，下一轮自然不再命中，不需要额外的「已处理」台账。
+  budgetBump: z.object({
+    enabled: z.boolean().default(false),
+    minConversions: z.number().int().min(1).max(1000).default(3),
+    maxCpa: z.number().min(0).default(9),
+    /** 命中后把日预算改成这个值。 */
+    targetBudget: z.number().min(0.01).max(100000).default(100),
+    /** 只处理当前日预算等于这个值的广告组。 */
+    sourceBudget: z.number().min(0.01).max(100000).default(50),
+  }).default({
+    enabled: false,
+    minConversions: 3,
+    maxCpa: 9,
+    targetBudget: 100,
+    sourceBudget: 50,
+  }),
   // 每早定点回看前一自然日：转化达标就把关着的对象开回来。
   //
   // 它**不进规则链**。规则链是 48 小时滚动窗口、每轮轮询即时评估、命中第一条就 break；
@@ -86,6 +105,13 @@ export const defaultAutomationFeatureSettings: AutomationFeatureSettingsInput = 
     autoCopyCutoffHour: 12,
     autoCopyLaunchImmediately: true,
     autoCopySameCampaign: true,
+  },
+  budgetBump: {
+    enabled: false,
+    minConversions: 3,
+    maxCpa: 9,
+    targetBudget: 100,
+    sourceBudget: 50,
   },
   dailyEnable: {
     enabled: false,

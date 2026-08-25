@@ -1,11 +1,11 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { Copy, FileWarning, Save, Settings2, Sunrise, Trash2 } from "lucide-react";
+import { Copy, FileWarning, Save, Settings2, Sunrise, Trash2, TrendingUp } from "lucide-react";
 import type { AutomationFeatureSettingsInput } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
 import "./ui/pages/automation-rules.css";
 
-type FeatureKey = "appeal" | "copy" | "deletion" | "dailyEnable";
+type FeatureKey = "appeal" | "copy" | "deletion" | "dailyEnable" | "budgetBump";
 
 export function AutomationFeaturesPage({ onError }: { onError: (message: string | null) => void }) {
   const auth = useAuth();
@@ -26,6 +26,7 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
       + Number(settings.copy.autoCopyEnabled)
       + Number(settings.deletion.enabled)
       + Number(settings.dailyEnable.enabled)
+      + Number(settings.budgetBump.enabled)
     : 0, [settings]);
 
   const applyAll = async (event: FormEvent) => {
@@ -85,7 +86,7 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
           <strong>自动化执行器</strong>
           <small>申诉、复制、删除与定时开启均由轮询引擎静默执行；结果未知时禁止自动重试</small>
         </span>
-        <span className="automation-extension-state">{enabledCount}/4 已开启</span>
+        <span className="automation-extension-state">{enabledCount}/5 已开启</span>
       </summary>
       <form onSubmit={(event) => void applyAll(event)}>
         <div className="automation-extension-toolbar">
@@ -141,6 +142,29 @@ export function AutomationFeaturesPage({ onError }: { onError: (message: string 
                 <label className="field"><span>复制后预算（留空=同源）</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyBudget ?? ""} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyBudget: event.target.value === "" ? null : Math.max(0, Number(event.target.value)) } })} /></label>
                 <label className="field"><span>复制后出价（留空=同源）</span><input min={0} step={0.01} type="number" value={settings.copy.autoCopyBid ?? ""} onChange={(event) => setSettings({ ...settings, copy: { ...settings.copy, autoCopyBid: event.target.value === "" ? null : Math.max(0, Number(event.target.value)) } })} /></label>
                 <p>固定策略：只统计账户时区当天数据；立即投放；同一来源只触发一次（不是每天一次）；自动生成组不再作为复制来源；命名固定为「源名-投放日期-时间」；每账户每日最多创建 {settings.copy.autoCopyDailyAccountLimit} 组。</p>
+              </div>
+            )}
+          </article>
+
+          <article className={`automation-executor-card ${settings.budgetBump.enabled ? "enabled" : ""}`}>
+            <header>
+              <span className="automation-executor-icon"><TrendingUp size={18} /></span>
+              <div><strong>跑得好就提额</strong><small>广告组 · 当天数据达标即调整日预算</small></div>
+              <span className="executor-status">{settings.budgetBump.enabled ? "已开启" : "已关闭"}</span>
+            </header>
+            <div className="executor-actions">
+              <label className="executor-switch"><span>启用执行器</span><input aria-label="启用跑得好就提额" checked={settings.budgetBump.enabled} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, enabled: event.target.checked } })} role="switch" type="checkbox" /></label>
+              <button className="secondary-button" onClick={() => setEditing(editing === "budgetBump" ? null : "budgetBump")} type="button">{editing === "budgetBump" ? "收起规则" : "配置规则"}</button>
+            </div>
+            <p className="executor-rule-summary">日预算 = {settings.budgetBump.sourceBudget} 且当天转化 ≥ {settings.budgetBump.minConversions}、CPA &lt; {settings.budgetBump.maxCpa} 时，日预算改为 {settings.budgetBump.targetBudget}</p>
+            {editing === "budgetBump" && (
+              <div className="executor-rule-editor two-column">
+                <label className="field"><span>只处理日预算 =</span><input min={0.01} step={0.01} type="number" value={settings.budgetBump.sourceBudget} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, sourceBudget: Math.max(0.01, Number(event.target.value) || 0.01) } })} /><small>这条同时也是「只调一次」的机制：调完就不再等于这个数。</small></label>
+                <label className="field"><span>当天转化 ≥</span><input min={1} step={1} type="number" value={settings.budgetBump.minConversions} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, minConversions: Math.max(1, Number(event.target.value) || 1) } })} /></label>
+                <label className="field"><span>CPA &lt;</span><input min={0} step={0.01} type="number" value={settings.budgetBump.maxCpa} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, maxCpa: Math.max(0, Number(event.target.value) || 0) } })} /><small>严格小于，等于不算达标。</small></label>
+                <label className="field"><span>日预算调整为</span><input min={0.01} step={0.01} type="number" value={settings.budgetBump.targetBudget} onChange={(event) => setSettings({ ...settings, budgetBump: { ...settings.budgetBump, targetBudget: Math.max(0.01, Number(event.target.value) || 0.01) } })} /></label>
+                <div className="executor-safety-list"><span>系列预算(CBO)的广告组一律跳过：预算在系列上，不在组上</span><span>转化或 CPA 取不到时不动——提额是花钱的动作，不确定就不做</span><span>关着的、被忽略的广告组不处理</span><span>每个广告组每天最多调一次</span></div>
+                <p className="danger-copy">这条会直接改真实日预算。预算写入接口尚未经过真机验证，首次启用前建议先手动在一个不重要的广告组上验证一次。</p>
               </div>
             )}
           </article>
