@@ -112,6 +112,9 @@ export class CookieAdsProvider implements AdsProvider {
     // 光有关闭模板还不够：删除请求是把这条模板里的开关字段改写成 delete 派生出来的，
     // 模板里没有可改写的开关字段就派生不出来。此前只检查模板存在与否，于是界面报
     // “删除：可用”、执行器领了当天任务，然后 66 次全部在发出前失败。
+    const hasAdGroupStatusSession = templates.some(
+      (item) => item.target === "ad-group-status" && item.action === "disable",
+    );
     const hasAdGroupDeleteSession = templates.some(
       (item) => item.target === "ad-group-status"
         && item.action === "disable"
@@ -136,6 +139,14 @@ export class CookieAdsProvider implements AdsProvider {
       // imported list session, so no per-account appeal cURL is required.
       ...(hasListSession ? ["appeal-ads"] as const : []),
       ...(hasAdGroupDeleteSession ? ["delete-ad-groups"] as const : []),
+      // 预算写入只需要广告组关闭那条 cURL 当会话载体（签名参数、Cookie 都在它身上），
+      // 报文是另起的 multipart，不像删除那样要改写模板里的开关字段——所以这里只要模板
+      // 存在即可，不叠加 hasRewritableStatusField。
+      //
+      // **这个列表是逐条列举的：加了新能力必须同时加进来。** 漏加的后果是它永远进不了
+      // authorizedCapabilities，执行器每轮在能力闸门静默 return，而界面上一切正常——
+      // 2026-08-25 的提额规则就是这么白开了一整天，重新检测多少次都没用。
+      ...(hasAdGroupStatusSession ? ["update-ad-group-budget"] as const : []),
     ]);
   }
 

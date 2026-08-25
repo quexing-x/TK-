@@ -149,3 +149,45 @@ describe("广告组日预算写入", () => {
     expect(results[0]?.failureKind).toBe("unknown");
   });
 });
+
+// #93 加了 update-ad-group-budget 这个能力，却漏了两处：capabilityVersion 没升、
+// resolveCapabilities 没列它。后果是它永远进不了 authorizedCapabilities，执行器每轮在
+// 能力闸门静默 return，而界面上一切正常——开关打开、无提示、无动静、无日志。
+describe("预算写入能力的授权", () => {
+  const provider = new CookieAdsProvider();
+  const withTemplates = (templates: unknown[]) => ({
+    ...budgetContext(),
+    credential: { ...(budgetContext() as never as { credential: object }).credential, requestTemplates: templates },
+  }) as unknown as ProviderContext;
+
+  it("有广告组关闭 cURL 时开放", () => {
+    const caps = provider.resolveCapabilities!(withTemplates([
+      { target: "ad-group-status", action: "disable", url: "https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=1", method: "POST", body: "{}", contentType: "application/json" },
+    ]));
+
+    expect(caps.has("update-ad-group-budget")).toBe(true);
+  });
+
+  // 那条 cURL 是会话载体：签名参数和 Cookie 都在它身上，没有它派生不出请求。
+  it("没有那条 cURL 时不开放", () => {
+    const caps = provider.resolveCapabilities!(withTemplates([
+      { target: "ad-group", url: "https://ads.tiktok.com/api/v3/i18n/statistics/op/adgroup/list/?aadvid=1", method: "POST", body: "{}", contentType: "application/json" },
+    ]));
+
+    expect(caps.has("update-ad-group-budget")).toBe(false);
+  });
+
+  // 与删除不同：删除要改写模板里的开关字段，预算是另起的 multipart，不需要这个前提。
+  it("不要求模板里有可改写的开关字段（删除才要求）", () => {
+    const caps = provider.resolveCapabilities!(withTemplates([
+      { target: "ad-group-status", action: "disable", url: "https://ads.tiktok.com/api/v3/i18n/overture/ad/update_status/?aadvid=1", method: "POST", body: "{}", contentType: "application/json" },
+    ]));
+
+    expect(caps.has("update-ad-group-budget")).toBe(true);
+    expect(caps.has("delete-ad-groups")).toBe(false);
+  });
+
+  it("能力已在 provider 的静态能力集里", () => {
+    expect(provider.capabilities.has("update-ad-group-budget")).toBe(true);
+  });
+});
