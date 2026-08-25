@@ -26,7 +26,9 @@ import {
   type SyncEntityType,
   type ProviderKind,
   type WriteTaskActor,
+  type ManagedEntitySnapshot,
   normalizeProviderEntity,
+  selectDeletionCandidates,
   syncLayerComplete,
   creativeNeedsAppeal,
 } from "@tk-auto/core";
@@ -237,91 +239,140 @@ export class AutomationService {
       asOf.getTime() - settings.gracePeriodHours * 60 * 60 * 1000,
     ).toISOString();
     try {
-      const currentGroups = this.store
-        .listCurrentManagedEntities(accountId, account.providerKind)
-        .filter((entity) => entity.entityType === "ad-group" && entity.parentCampaignId);
-      const currentCountByCampaign = new Map<string, number>();
-      for (const entity of currentGroups) {
-        currentCountByCampaign.set(
-          entity.parentCampaignId!,
-          (currentCountByCampaign.get(entity.parentCampaignId!) ?? 0) + 1,
-        );
-      }
-      const candidatesByCampaign = new Map<string, ReturnType<typeof normalizeProviderEntity>[]>();
-      for (const providerEntity of this.store.listDeletionReadyAdGroups(
-        accountId,
-        account.providerKind,
-        disabledBefore,
-      )) {
-        const entity = normalizeProviderEntity(providerEntity);
-        const conversions = entity.metrics.conversions;
-        const carts = entity.metrics.carts;
-        if (
-          entity.status !== "disabled"
-          || !entity.parentCampaignId
-          || conversions === null
-          || carts === null
-          || conversions > settings.maxConversions
-          || carts > settings.maxCarts
-          || (conversions > 0
-            && (entity.metrics.cost_per_conversion === null
-              || entity.metrics.cost_per_conversion < settings.minCpa))
-        ) continue;
-        const list = candidatesByCampaign.get(entity.parentCampaignId) ?? [];
-        list.push(entity);
-        candidatesByCampaign.set(entity.parentCampaignId, list);
-      }
-
-      const candidates = [...candidatesByCampaign.entries()].flatMap(
-        ([campaignId, entries]) => {
-          const maximumDeletions = Math.max(
-            0,
-            (currentCountByCampaign.get(campaignId) ?? 0) - 1,
-          );
-          return entries
-            .sort(compareDeletionPriority)
-            .slice(0, maximumDeletions);
-        },
-      );
-      for (const entity of candidates) {
-        const task = this.store.queueAdGroupDeletionIfAbsent(
-          accountId,
-          account.providerKind,
-          entity.externalId,
-        );
-        if (!task) continue;
-        try {
-          const [result] = await this.providers.deleteAdGroups(
-            account.providerKind,
-            context,
-            [{ externalId: entity.externalId }],
-          );
-          if (result?.ok) {
-            this.store.completeAdGroupDeletion(task.id, "succeeded", result.message);
-          } else if (result?.failureKind === "unknown") {
-            this.store.completeAdGroupDeletion(
-              task.id,
-              "unknown",
-              result.message || "删除请求已发送，但结果无法确认。",
-            );
-          } else {
-            this.store.completeAdGroupDeletion(
-              task.id,
-              "failed",
-              result?.message || "TikTok 已明确拒绝删除广告组。",
-            );
-          }
-        } catch (cause) {
-          this.store.completeAdGroupDeletion(
-            task.id,
-            "unknown",
-            `删除请求结果无法确认：${safeMessage(cause)}`,
-          );
-        }
-      }
+      // 判据与排序都在 core 的 selectDeletionCandidates 里，界面上的「待清理」列表走的是
+      // 同一个函数——各写一份就会漂移，而删除不可恢复，「看到的」和「删掉的」不一致
+      // 没有补救余地。
+      const candidates = selectDeletionCandidates({
+        readyAdGroups: this.store
+          .listDeletionReadyAdGroups(accountId, account.providerKind, disabledBefore)
+          .map(normalizeProviderEntity),
+        currentAdGroups: this.store.listCurrentManagedEntities(accountId, account.providerKind),
+        settings,
+      });
+      await this.deleteAdGroupCandidates(accountId, account.providerKind, context, candidates);
     } finally {
       this.store.finishDailyAutomationRun(accountId, "delete-ad-groups", localDate);
     }
+  }
+
+  /**
+   * 界面上的「待清理」列表。与定时执行器同一批候选、同一个排序，只是不写。
+   *
+   * 这里刻意不套执行器的那些前置闸门（连接就绪、同步新鲜度、能力契约、计划小时）：
+   * 那些决定的是「现在能不能安全地删」，而列表要回答的是「按当前配置，哪些组够格删」。
+   * 把两者混在一起，用户会在闸门没过时看到一张空列表，误以为没有待清理对象。
+   */
+  listCleanupCandidates(accountId: string, asOf = new Date()): ManagedEntitySnapshot[] {
+    const account = this.store.getAccount(accountId);
+    if (!account) return [];
+    const settings = this.store.getAutomationFeatureSettings().deletion;
+    const disabledBefore = new Date(
+      asOf.getTime() - settings.gracePeriodHours * 60 * 60 * 1000,
+    ).toISOString();
+    return selectDeletionCandidates({
+      readyAdGroups: this.store
+        .listDeletionReadyAdGroups(accountId, account.providerKind, disabledBefore)
+        .map(normalizeProviderEntity),
+      currentAdGroups: this.store.listCurrentManagedEntities(accountId, account.providerKind),
+      settings,
+    });
+  }
+
+  /**
+   * 「一键删除」：立刻删掉待清理列表里的广告组。
+   *
+   * 与定时执行器的区别只有两点——不看计划小时、不占当日的日任务名额（人工点了就该执行，
+   * 而且不该让当天的定时那一轮因为名额被占而跳过）。**其余闸门一个都不能少**：
+   * 连接、能力契约、同步新鲜度决定的是「现在删安不安全」，跟谁触发的无关。
+   */
+  async deleteCleanupCandidatesNow(accountId: string, asOf = new Date()): Promise<{
+    deleted: number;
+    skipped: number;
+  }> {
+    const account = this.store.getAccount(accountId);
+    if (!account?.enabled) throw new Error("账号不存在或已停用。");
+    if (!this.store.getSystemRuntimeState().enabled) throw new Error("自动化总开关已关闭。");
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    const latestSync = this.store.getLatestReadOnlySync(accountId, account.providerKind);
+    const syncAge = latestSync
+      ? asOf.getTime() - new Date(latestSync.finishedAt).getTime()
+      : Number.POSITIVE_INFINITY;
+    if (connection?.status !== "ready") throw new Error("账户连接未就绪，暂不能删除。");
+    if (
+      !syncLayerComplete(latestSync?.quality, "ad-group")
+      || !syncLayerComplete(latestSync?.quality, "campaign")
+      || !hasCurrentDayMetricCoverage(latestSync, localDate, account.timezone)
+      || syncAge < 0
+      || syncAge > destructiveSyncFreshnessMs
+    ) {
+      throw new Error("最近一次同步不完整或已过期，删除前需要先同步到最新数据。");
+    }
+    this.providers.requireAccountCapability(
+      accountId,
+      account.providerKind,
+      connection,
+      "delete-ad-groups",
+    );
+    const context = await this.loadContext(accountId, account.providerKind, account.timezone);
+    const provider = this.providers.get(account.providerKind);
+    if (!provider.deleteAdGroups || !provider.resolveCapabilities?.(context).has("delete-ad-groups")) {
+      throw new Error("当前账户不具备删除广告组的能力。");
+    }
+    const candidates = this.listCleanupCandidates(accountId, asOf);
+    return this.deleteAdGroupCandidates(accountId, account.providerKind, context, candidates);
+  }
+
+  private async deleteAdGroupCandidates(
+    accountId: string,
+    providerKind: ProviderKind,
+    context: ProviderContext,
+    candidates: readonly ManagedEntitySnapshot[],
+  ): Promise<{ deleted: number; skipped: number }> {
+    let deleted = 0;
+    let skipped = 0;
+    for (const entity of candidates) {
+      const task = this.store.queueAdGroupDeletionIfAbsent(
+        accountId,
+        providerKind,
+        entity.externalId,
+      );
+      // 没排上队意味着这个组已经有一条未了结的删除记录（含「结果未知」），不再重复发。
+      if (!task) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const [result] = await this.providers.deleteAdGroups(
+          providerKind,
+          context,
+          [{ externalId: entity.externalId }],
+        );
+        if (result?.ok) {
+          this.store.completeAdGroupDeletion(task.id, "succeeded", result.message);
+          deleted += 1;
+        } else if (result?.failureKind === "unknown") {
+          this.store.completeAdGroupDeletion(
+            task.id,
+            "unknown",
+            result.message || "删除请求已发送，但结果无法确认。",
+          );
+        } else {
+          this.store.completeAdGroupDeletion(
+            task.id,
+            "failed",
+            result?.message || "TikTok 已明确拒绝删除广告组。",
+          );
+        }
+      } catch (cause) {
+        this.store.completeAdGroupDeletion(
+          task.id,
+          "unknown",
+          `删除请求结果无法确认：${safeMessage(cause)}`,
+        );
+      }
+    }
+    return { deleted, skipped };
   }
 
   /**
@@ -2589,23 +2640,6 @@ function timePartsInTimeZone(value: Date, timeZone: string): {
   return { hour: part("hour"), minute: part("minute"), second: part("second") };
 }
 
-function compareDeletionPriority(
-  left: ReturnType<typeof normalizeProviderEntity>,
-  right: ReturnType<typeof normalizeProviderEntity>,
-): number {
-  const conversionOrder = (left.metrics.conversions ?? Number.POSITIVE_INFINITY)
-    - (right.metrics.conversions ?? Number.POSITIVE_INFINITY);
-  if (conversionOrder !== 0) return conversionOrder;
-  const cartOrder = (left.metrics.carts ?? Number.POSITIVE_INFINITY)
-    - (right.metrics.carts ?? Number.POSITIVE_INFINITY);
-  if (cartOrder !== 0) return cartOrder;
-  const leftCpa = left.metrics.cost_per_conversion ?? Number.POSITIVE_INFINITY;
-  const rightCpa = right.metrics.cost_per_conversion ?? Number.POSITIVE_INFINITY;
-  if (leftCpa !== rightCpa) return rightCpa - leftCpa;
-  const createdOrder = new Date(left.createdAt ?? 0).getTime()
-    - new Date(right.createdAt ?? 0).getTime();
-  return createdOrder || left.externalId.localeCompare(right.externalId);
-}
 
 function buildAutomaticActionKey(
   accountId: string,
