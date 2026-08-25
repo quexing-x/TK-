@@ -39,8 +39,15 @@ export function selectBudgetBumpCandidate(
 ): boolean {
   if (entity.entityType !== "ad-group") return false;
   if (entity.ignored) return false;
-  // 关着的组提额没有意义，只会在它被开回来时带着一个没人预期的预算。
-  if (entity.status !== "enabled") return false;
+  // **关着的组照样提额。**
+  //
+  // 原先跳过它们，理由是「给关着的组提额没意义」。这个理由站不住：命中这条规则的本来就是
+  // 表现最好的那批（转化达标 + CPA 够低），它们关着通常只是被别的规则临时关停，随时会被
+  // 「达标恢复」开回来。跳过的实际后果是——它被开回来时仍然带着旧预算，而它恰恰是最该放量的
+  // 那个。2026-08-25 实测：唯一命中阈值的对象（转化 6、CPA 3.16）正是这种情况，规则因此
+  // 一次都没触发。
+  //
+  // 预算是「下次投放时用多少」的设定，不是「此刻正在花钱」的状态，对关闭对象设置它完全合法。
   if (entity.campaignBudgetOptimized) return false;
 
   const budget = entity.metrics.budget;

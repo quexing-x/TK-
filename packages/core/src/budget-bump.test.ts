@@ -81,8 +81,14 @@ describe("跑得好的广告组自动提额", () => {
     expect(selectBudgetBumpCandidate(adGroup({ cbo: true }), settings)).toBe(false);
   });
 
-  it("关着的和被忽略的都不动", () => {
-    expect(selectBudgetBumpCandidate(adGroup({ status: "disabled" }), settings)).toBe(false);
+  // 命中这条规则的本来就是表现最好的那批，它们关着通常只是被别的规则临时关停、随时会被
+  // 「达标恢复」开回来。跳过的后果是它被开回来时仍带着旧预算，而它恰恰最该放量。
+  it("关着的组照样提额", () => {
+    expect(selectBudgetBumpCandidate(adGroup({ status: "disabled" }), settings)).toBe(true);
+  });
+
+  // 被忽略 = 人工声明「这个对象不参与自动化」，那是另一回事，仍然要跳过。
+  it("被忽略的对象仍然不动", () => {
     expect(selectBudgetBumpCandidate(adGroup({ ignored: true }), settings)).toBe(false);
   });
 
