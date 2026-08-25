@@ -100,6 +100,8 @@ export interface AdGroupExpandTask {
   generatedNames: string[];
   generatedIds: string[];
   executorKind: string;
+  /** 执行侧是否已经收工。uncertain 同时覆盖「请求还在飞」和「跑完了但确认不了」。 */
+  settled: boolean;
 }
 
 export type MetaAssetEntityType = "campaign" | "ad-group" | "ad";

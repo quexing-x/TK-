@@ -898,6 +898,11 @@ describe("local API", () => {
     expect(first.json().failed[0].message).toContain("禁止自动重试");
     expect(second.json().failed[0].message).toContain("待人工确认");
     expect(copy).toHaveBeenCalledTimes(2);
+
+    // 结果未知是终态，不是「还在跑」。两者在库里都是 status='running'，只有终态
+    // 标记能分开，否则按 status 查生产库会一直捞出这些早就结束的记录。
+    expect(store.listAdGroupExpandHistory(["demo-account"])[0])
+      .toMatchObject({ status: "running", uncertain: true, settled: true });
   });
 
   it("扩组重复提交预检：干净的源组不打扰，扩过之后报出今日已扩记录且不写任何东西", async () => {

@@ -520,6 +520,72 @@ describe("AutomationStore", () => {
     expect(store.claimAdGroupExpandTask("crash-task", "demo-account", "adgroup-3")).toBe("unknown");
   });
 
+  it("跑完但确认不了的扩组会自证已结束，请求还在飞的不会", () => {
+    // status 的 CHECK 只有 running/succeeded，「结果未知」只能借 running 表达，
+    // 于是它和「请求正在飞」在库里长得一模一样。终态列是唯一能分开两者的东西。
+    store.claimAdGroupExpandTask("settled-task", "demo-account", "adgroup-1", {
+      requestedCount: 1,
+      generatedNames: ["组-0822-101500-1"],
+    });
+    store.markAdGroupExpandTaskDispatching("settled-task");
+    store.finishAdGroupExpandTask("settled-task", "unknown");
+
+    store.claimAdGroupExpandTask("inflight-task", "demo-account", "adgroup-2", {
+      requestedCount: 1,
+      generatedNames: ["组-0822-101500-2"],
+    });
+    store.markAdGroupExpandTaskDispatching("inflight-task");
+
+    const byKey = new Map(
+      store.listAdGroupExpandHistory(["demo-account"]).map((row) => [row.taskKey, row]),
+    );
+    expect(byKey.get("settled-task")).toMatchObject({ status: "running", uncertain: true, settled: true });
+    expect(byKey.get("inflight-task")).toMatchObject({ status: "running", uncertain: true, settled: false });
+
+    // 终态标记不解锁重试：禁止自动重试是 uncertain=1 定的，跟收没收工无关。
+    expect(store.claimAdGroupExpandTask("settled-task", "demo-account", "adgroup-1")).toBe("unknown");
+  });
+
+  it("自愈只收编租约过期的半路记录，不碰还没发出请求的、也不改重试口径", () => {
+    // 进程在 dispatch 标记之后被杀：行永远停在 running + uncertain=1，
+    // 按 status='running' 查生产库会一直捞出这条其实早就没人管的记录。
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(Date.now() - 30 * 60_000));
+      store.claimAdGroupExpandTask("interrupted", "demo-account", "adgroup-1");
+      store.markAdGroupExpandTaskDispatching("interrupted");
+      // 只领取、没发请求：uncertain=0 证明请求从未离开本机，重试是安全的，
+      // 不该被打成禁止重试的终态。
+      store.claimAdGroupExpandTask("never-dispatched", "demo-account", "adgroup-2");
+    } finally {
+      vi.useRealTimers();
+    }
+    // 刚领的任务还在自己的超时预算内，扫描不能提前给它判终态。
+    store.claimAdGroupExpandTask("still-running", "demo-account", "adgroup-3");
+    store.markAdGroupExpandTaskDispatching("still-running");
+
+    const staleBefore = new Date(Date.now() - 10 * 60_000).toISOString();
+    expect(store.recoverInterruptedAdGroupExpandTasks(staleBefore)).toBe(1);
+    // 幂等：再扫一次没有新的可收编，不会反复写。
+    expect(store.recoverInterruptedAdGroupExpandTasks(staleBefore)).toBe(0);
+
+    const byKey = new Map(
+      store.listAdGroupExpandHistory(["demo-account"]).map((row) => [row.taskKey, row]),
+    );
+    expect(byKey.get("interrupted")).toMatchObject({ settled: true });
+    expect(byKey.get("still-running")).toMatchObject({ settled: false });
+
+    // 没发出请求的那条既没被标终态，也仍然可以被重新领取。
+    expect(byKey.get("never-dispatched")).toMatchObject({ settled: false, uncertain: false });
+    expect(store.claimAdGroupExpandTask("never-dispatched", "demo-account", "adgroup-2")).toBe("claimed");
+    // 重新领取之后是新的一次执行，不能带着上一轮的终态标记自称已经收工。
+    expect(
+      store.listAdGroupExpandHistory(["demo-account"]).find((row) => row.taskKey === "never-dispatched"),
+    ).toMatchObject({ settled: false });
+    // 被收编的那条依旧禁止自动重试。
+    expect(store.claimAdGroupExpandTask("interrupted", "demo-account", "adgroup-1")).toBe("unknown");
+  });
+
   it("扩组活动查询只回「进行中 + 今日已扩过」：过期租约、往日记录、别的源组都不算", () => {
     const today = "2026-08-22";
     // 今天已扩过：组名与份数都要能回读，预检要靠它们说清楚「扩了哪几个」。

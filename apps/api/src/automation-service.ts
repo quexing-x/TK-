@@ -44,6 +44,14 @@ import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 const statusLeaseHeartbeatMs = 60 * 1000;
 const writeLeaseTimeoutMs = 30 * 60 * 1000;
 const destructiveSyncFreshnessMs = 5 * 60 * 1000;
+/**
+ * 扩组任务多久没写终态就算被中断。
+ *
+ * 必须严格大于 launch-service 里的端到端上限（5 分钟），否则会把一条还在自己
+ * 超时预算内正常跑着的任务提前标成终态。10 分钟是那个上限的两倍，而真实任务的
+ * 生产基线最慢也只有 64.3 秒，不存在误伤。
+ */
+const adGroupExpandLeaseTimeoutMs = 10 * 60 * 1000;
 export class AutomationBusyError extends Error {}
 class WriteBlockedBeforeDispatchError extends Error {}
 
@@ -101,6 +109,9 @@ export class AutomationService {
     );
     this.store.recoverInterruptedScheduledActions(
       new Date(Date.now() - writeLeaseTimeoutMs).toISOString(),
+    );
+    this.store.recoverInterruptedAdGroupExpandTasks(
+      new Date(Date.now() - adGroupExpandLeaseTimeoutMs).toISOString(),
     );
     for (const task of this.store.listPendingManualStatusWriteTasks()) {
       this.queuePersistedManualStatusTask(task);
@@ -2241,6 +2252,12 @@ export class AutomationScheduler {
     if (this.maintaining) return;
     this.maintaining = true;
     try {
+      // 扩组租约的回收放在总开关判定之前：扩组是用户手动触发的，跟自动化开没开
+      // 无关，被中断的记录在开关关着的时候同样需要收敛成终态，否则关一次开关就
+      // 再没人扫它们了。这一步只写终态标记，不发任何请求。
+      this.store.recoverInterruptedAdGroupExpandTasks(
+        new Date(Date.now() - adGroupExpandLeaseTimeoutMs).toISOString(),
+      );
       if (!this.store.getSystemRuntimeState().enabled) return;
       try {
         await this.notifications?.flushPending();

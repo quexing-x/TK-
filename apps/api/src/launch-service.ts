@@ -38,6 +38,58 @@ import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 const launchLeaseTimeoutMs = 30 * 60 * 1000;
 const launchLeaseHeartbeatMs = 60 * 1000;
 
+/**
+ * 单个源组扩组的端到端上限。
+ *
+ * Provider 内部每一跳都有超时（创建 30s、只读列表 45s），但整条链没有天花板，
+ * 所以「请求发出去之后既不返回成功也不抛错」这件事在库里的表现就是一条永远停在
+ * running + uncertain=1 的记录——2026-08-23T07:57:59 那条就是，dispatch 标记写完
+ * 0.17 秒之后再没有任何写入，而进程本身活得好好的（同期 sync_runs 一直在跑）。
+ *
+ * 阈值参考生产基线：succeeded n=1102，p50 13.1s、p99 29.1s、max 64.3s，没有一条
+ * 超过 180s。5 分钟对最慢的真实任务留了近 5 倍余量，不会误伤慢任务。
+ */
+const adGroupExpandDeadlineMs = 5 * 60 * 1000;
+
+/**
+ * 超时必须按「结果未知」处理，不能按失败。
+ *
+ * 超时只证明我们没等到回音，不证明 TikTok 没建组——写请求很可能已经在对面生效。
+ * 判成 failed 会让 finishAdGroupExpandTask 删掉幂等行、放开重试，于是同一批组被
+ * 建第二遍。继承 UnknownCreationStateError 是为了让既有的分支（catch 里的
+ * unknown 判定、上层的错误映射）不用改就得到正确的语义。
+ */
+export class ExpandDeadlineExceededError extends UnknownCreationStateError {}
+
+/**
+ * 到点就把等待方唤醒。底下的工作没法真正取消（Provider 的 fetch 已经飞出去了），
+ * 但调用方必须能落库、能回话，而不是跟着一起永久悬着。
+ *
+ * 输给超时的那条 promise 之后无论 resolve 还是 reject 都已经被 Promise.race 挂上
+ * 了处理器，不会变成 unhandled rejection。
+ */
+export async function withExpandDeadline<T>(
+  work: Promise<T>,
+  timeoutMs: number = adGroupExpandDeadlineMs,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new ExpandDeadlineExceededError(
+            `扩组超过 ${Math.round(timeoutMs / 1000)} 秒仍未返回结果；请求可能已在 TikTok 侧生效，已按结果未知处理并禁止自动重试。`,
+          ));
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface LaunchExecutionItemResult {
   itemId: string;
   accountId: string;
@@ -1302,7 +1354,7 @@ export class LaunchService {
         }
 
         try {
-          const results = await this.copyAdGroupWithinAccount({
+          const results = await withExpandDeadline(this.copyAdGroupWithinAccount({
             accountId: source.accountId,
             sourceCampaignId: source.sourceCampaignId,
             sourceCampaignName: source.sourceCampaignName,
@@ -1315,7 +1367,7 @@ export class LaunchService {
             sameCampaign: input.sameCampaign,
             scheduledStartAt,
             onBeforeDispatch: () => this.store.markAdGroupExpandTaskDispatching(taskKey),
-          });
+          }));
           const ok = results.length > 0 && results.every((result) => result.ok);
           if (ok) {
             createdGroups += count;

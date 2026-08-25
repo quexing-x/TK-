@@ -87,6 +87,30 @@ export type ExpandConflict = {
 };
 
 /**
+ * 扩组记录在「结果」一列怎么显示。
+ *
+ * 结果未知优先于成功/进行中：这类记录禁止自动重试，必须让人一眼看见。
+ *
+ * 但只有已经收工的才催人去核实。uncertain 从写请求发出的那一刻就置位，请求还在飞
+ * 的时候同样是 1——那时候喊「需人工核实」是在让人去查一件还没发生完的事。库里两者
+ * 都是 status='running'（那一列的 CHECK 只有 running/succeeded），只有终态标记能
+ * 分开，2026-08 排查那 5 条记录时就是卡在这一点上。
+ */
+export function describeExpandTaskOutcome(
+  task: Pick<AdGroupExpandTask, "status" | "uncertain" | "settled">,
+): { tone: string; label: string; needsAttention: boolean } {
+  if (task.uncertain && !task.settled) {
+    return { tone: "warning", label: "进行中，结果待确认", needsAttention: false };
+  }
+  if (task.uncertain) {
+    return { tone: "danger", label: "结果未知，需人工核实", needsAttention: true };
+  }
+  return task.status === "succeeded"
+    ? { tone: "active", label: "成功", needsAttention: false }
+    : { tone: "warning", label: "进行中", needsAttention: false };
+}
+
+/**
  * 把预检结果写成人能一眼看懂的几行。
  *
  * 这段文案是「防重复」唯一的实际防线——按钮不再锁死，引擎那道幂等闸门又只拦得住
@@ -606,15 +630,13 @@ export function ExpandGroupsPanel({
         ? <p className="expand-account-empty">{historyLoading ? "读取中…" : "还没有扩组记录。"}</p>
         : <div className="table-wrap expand-table"><table><thead><tr><th>时间</th><th>账户</th><th>新组名</th><th className="expand-num">个数</th><th>结果</th></tr></thead><tbody>
           {history.map((task) => {
-            // 结果未知优先于成功/进行中显示：这类记录禁止自动重试，必须让人一眼看见。
-            const tone = task.uncertain ? "danger" : task.status === "succeeded" ? "active" : "warning";
-            const label = task.uncertain ? "结果未知，需人工核实" : task.status === "succeeded" ? "成功" : "进行中";
+            const { tone, label, needsAttention } = describeExpandTaskOutcome(task);
             return <tr key={task.taskKey}>
               <td className="expand-muted">{fmtDate(task.updatedAt)}</td>
               <td className="expand-muted">{accountName.get(task.accountId) ?? task.accountId}</td>
               <td className="expand-name">{task.generatedNames.join("、") || "—"}</td>
               <td className="expand-num">{task.requestedCount}</td>
-              <td><span className={`status ${tone}`}>{task.uncertain && <AlertTriangle size={12} />} {label}</span></td>
+              <td><span className={`status ${tone}`}>{needsAttention && <AlertTriangle size={12} />} {label}</span></td>
             </tr>;
           })}
         </tbody></table></div>}

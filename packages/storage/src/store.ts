@@ -3636,7 +3636,12 @@ export class AutomationStore {
          ON CONFLICT(task_key) DO UPDATE SET
            status = 'running', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at, uncertain = 0,
            source_campaign_id = excluded.source_campaign_id, local_date = excluded.local_date,
-           requested_count = excluded.requested_count, generated_names_json = excluded.generated_names_json`,
+           requested_count = excluded.requested_count, generated_names_json = excluded.generated_names_json,
+           -- 重新领取就是新的一次执行，上一轮的终态标记必须一起清掉，否则这一轮
+           -- 从第一秒起就自称「已经收工」。claimAutomaticCopyTask 出于同样的理由
+           -- 也清它。能走到这里的行必然 uncertain=0（uncertain=1 在上面就返回
+           -- "unknown" 了），所以这里清掉的只会是陈旧标记，不会放开任何禁止重试的行。
+           automatic_outcome = NULL`,
       ).run(
         taskKey,
         accountId,
@@ -3751,6 +3756,14 @@ export class AutomationStore {
     generatedNames: string[];
     generatedIds: string[];
     executorKind: string;
+    /**
+     * 这条记录是否已经跑完了。
+     *
+     * uncertain=1 同时覆盖两种处境：请求还在飞（还不该催人去核实），以及已经结束但
+     * 结果确认不了（该去核实了）。只看 status 分不出来——两者都是 'running'。
+     * 终态列有值就说明执行侧已经收工。
+     */
+    settled: boolean;
   }> {
     const wanted = [...new Set(accountIds.filter((id) => id.trim() !== ""))];
     if (wanted.length === 0) return [];
@@ -3758,7 +3771,7 @@ export class AutomationStore {
     const rows = this.db.prepare(
       `SELECT task_key, account_id, source_ad_group_id, source_campaign_id, status, uncertain,
               claimed_at, updated_at, local_date, requested_count,
-              generated_names_json, generated_ids_json, executor_kind
+              generated_names_json, generated_ids_json, executor_kind, automatic_outcome
          FROM ad_group_expand_tasks
         WHERE account_id IN (${placeholders})
         ORDER BY updated_at DESC
@@ -3791,6 +3804,8 @@ export class AutomationStore {
       generatedNames: parseList(row.generated_names_json),
       generatedIds: parseList(row.generated_ids_json),
       executorKind: String(row.executor_kind ?? "manual-expand"),
+      settled: String(row.status) === "succeeded"
+        || (row.automatic_outcome !== null && row.automatic_outcome !== undefined),
     }));
   }
 
@@ -3807,12 +3822,50 @@ export class AutomationStore {
         "UPDATE ad_group_expand_tasks SET status = 'succeeded', uncertain = 0, updated_at = ? WHERE task_key = ?",
       ).run(new Date().toISOString(), taskKey);
     } else if (outcome === "unknown") {
+      // 「结果未知」必须同时写 automatic_outcome。status 的 CHECK 只有
+      // running/succeeded，所以未知一直是用 status='running' + uncertain=1 表达的，
+      // 而那与 markAdGroupExpandTaskDispatching 写的「请求正在飞」中间态一模一样：
+      // 2026-08 的排查里，5 条 running 记录光看行本身分不出哪条是跑完了没法确认、
+      // 哪条是进程被杀留在半路的。automatic_outcome 是这张表既有的终态列
+      // （auto-copy 因为同样的原因加的），manual-expand 也用它来自证「已经结束」。
+      // 语义不变：仍然 uncertain=1、仍然永久禁止自动重试。
       this.db.prepare(
-        "UPDATE ad_group_expand_tasks SET status = 'running', uncertain = 1, updated_at = ? WHERE task_key = ?",
+        `UPDATE ad_group_expand_tasks
+         SET status = 'running', uncertain = 1,
+             automatic_outcome = 'unknown', updated_at = ?
+         WHERE task_key = ?`,
       ).run(new Date().toISOString(), taskKey);
     } else {
       this.db.prepare("DELETE FROM ad_group_expand_tasks WHERE task_key = ?").run(taskKey);
     }
+  }
+
+  /**
+   * 崩溃恢复：把租约早已过期、却没有任何终态标记的扩组任务补成终态「结果未知」。
+   *
+   * 进程在 markAdGroupExpandTaskDispatching 之后、finishAdGroupExpandTask 之前被杀，
+   * 行就永远停在 running + uncertain=1，既占着 running 也没人知道它其实早就没人管
+   * 了——按 `status='running'` 查生产库会一直捞出这些早就结束的历史记录。
+   *
+   * 只扫 uncertain=1 的行。uncertain=0 意味着请求根本没发出去（那个标记是在 fetch
+   * 之前写的），claimAdGroupExpandTask 的租约判定本来就允许这种行被重新领取，重试
+   * 是安全的，不该被打成禁止重试的终态。
+   *
+   * 补终态不改判定口径：uncertain=1 在 claim 时本来就返回 "unknown"，扫过之后依旧
+   * 是 "unknown"。这里只让「已结束待人工核实」变得可见，不会解锁任何自动重试。
+   *
+   * 刻意不动 updated_at：它记的是这一行最后一次真实写入的时刻，也是事后唯一能用来
+   * 区分「跑完了但没法确认」（claimed_at 之后十几秒）和「发出去就没了下文」
+   * （claimed_at 之后不到一秒）的证据。扫描把它刷成当前时间就把这条线索抹掉了。
+   */
+  recoverInterruptedAdGroupExpandTasks(staleBefore: string): number {
+    const result = this.db.prepare(
+      `UPDATE ad_group_expand_tasks
+       SET automatic_outcome = 'unknown'
+       WHERE status = 'running' AND uncertain = 1
+         AND automatic_outcome IS NULL AND claimed_at <= ?`,
+    ).run(staleBefore);
+    return Number(result.changes);
   }
 
   // 系列级复制的幂等闸门。语义与扩组一致：

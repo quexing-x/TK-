@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildExpandConfirmMessage,
   describeExpandConflicts,
+  describeExpandTaskOutcome,
   type ExpandConflict,
 } from "./ExpandGroupsPanel";
 
@@ -112,5 +113,29 @@ describe("确认弹窗的长度控制", () => {
       sourceCount: 1, countPerSource: 1, immediate: false,
     });
     expect(message).not.toContain("另有");
+  });
+});
+
+/**
+ * 「结果未知」和「请求还在飞」在库里长得一模一样（status 都是 'running'，
+ * uncertain 都是 1），只有终态标记能分开。分不开的后果是界面对着一个还没跑完的
+ * 任务喊「需人工核实」，把人支去后台查一件还没发生完的事。
+ */
+describe("扩组记录的结果显示", () => {
+  it("跑完了但确认不了：标红、给警告图标、明确要人工核实", () => {
+    expect(describeExpandTaskOutcome({ status: "running", uncertain: true, settled: true }))
+      .toEqual({ tone: "danger", label: "结果未知，需人工核实", needsAttention: true });
+  });
+
+  it("请求还在飞：说清楚还在跑，不催人去核实、也不摆警告图标", () => {
+    expect(describeExpandTaskOutcome({ status: "running", uncertain: false, settled: false }))
+      .toMatchObject({ label: "进行中", needsAttention: false });
+    expect(describeExpandTaskOutcome({ status: "running", uncertain: true, settled: false }))
+      .toEqual({ tone: "warning", label: "进行中，结果待确认", needsAttention: false });
+  });
+
+  it("成功就是成功", () => {
+    expect(describeExpandTaskOutcome({ status: "succeeded", uncertain: false, settled: true }))
+      .toEqual({ tone: "active", label: "成功", needsAttention: false });
   });
 });
