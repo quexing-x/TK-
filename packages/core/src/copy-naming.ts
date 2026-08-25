@@ -120,6 +120,45 @@ export function planGeneratedNames(input: {
   return { baseName, names, reserved };
 }
 
+/**
+ * 给一个源组挑一个批内唯一的基名。
+ *
+ * 扩组的后缀取的是【投放档位】而不是创建时刻，同一批扩到同一档的所有源组共用它。于是两个
+ * 源组只要洗出来的基名相同——常见情形是它们本身就是同一个产品在不同档位扩出来的，旧后缀被
+ * strip 掉后完全一样——生成的新组名就会一字不差地撞上。
+ *
+ * 撞名在建草稿那步不报错、到发布那步才被 TikTok 拒：后台留下一个草稿，本地记一条「结果
+ * 未知」。所以这里必须在发出去之前就把它错开。
+ *
+ * 做法与 planGeneratedNames 一致：撞了就把时刻往后推一秒重算，保住「基名-投放档」的可读性。
+ * `existingNames` 只作兜底跳过，不参与定序号——本地快照可能滞后一整轮轮询，靠它定序号会把
+ * 刚建好、还没同步到的对象误判成名字可用。
+ */
+export function allocateExpandBaseName(input: {
+  cleanedSourceName: string;
+  deliveryAt: Date;
+  timeZone?: string | undefined;
+  /** 本批已占用的基名，调用方需把返回值加进去。 */
+  usedBaseNames: ReadonlySet<string>;
+  /** 账户内已存在的广告组名，用于兜底跳过。 */
+  existingNames?: ReadonlySet<string>;
+}): string {
+  const build = (offsetSeconds: number) => `${input.cleanedSourceName}-${dateTimeSuffix(
+    new Date(input.deliveryAt.getTime() + offsetSeconds * 1000),
+    input.timeZone,
+  )}`;
+  for (let offset = 0; offset <= 600; offset += 1) {
+    const candidate = build(offset);
+    // 实际创建出来的是 `${基名}-${序号}`，所以要拿第一个副本名去比对账户现状。
+    if (input.usedBaseNames.has(candidate)) continue;
+    if (input.existingNames?.has(`${candidate}-1`)) continue;
+    return candidate;
+  }
+  // 600 秒都排不开说明有别的问题，返回原始候选，交由 TikTok 拒绝并落成「结果未知」，
+  // 而不是在这里悄悄编一个奇怪的名字。
+  return build(0);
+}
+
 export class DuplicateNameError extends Error {
   constructor(message: string) {
     super(message);

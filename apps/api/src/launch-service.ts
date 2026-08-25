@@ -23,6 +23,7 @@ import {
   type LaunchSourceSnapshot,
   type LaunchTargetPostMapping,
   type WriteTaskActor,
+  allocateExpandBaseName,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -1256,11 +1257,36 @@ export class LaunchService {
     for (const [expandAccountId, sources] of byAccount) {
       // 投放日期按账户时区取，与用户在界面上看到的投放时间一致。
       const expandTimeZone = this.store.getAccount(expandAccountId)?.timezone;
+      // 批内已占用的基名。
+      //
+      // 后缀取的是【投放档位】而不是创建时刻，同一批扩到同一档的所有源组共用它。于是两个
+      // 源组只要洗出来的基名相同（常见：它们本身就是同一个产品在不同档位扩出来的，旧后缀
+      // 被 strip 掉后完全一样），生成的新组名就会一字不差地撞上。
+      //
+      // 撞名在建草稿那步不报错、到发布那步才被 TikTok 拒——后台留下一个草稿，本地记一条
+      // 「结果未知」。2026-08-25 07:47–07:49 那一批 8 条里就这么废了 2 条。
+      //
+      // 账户里已有的同名对象也一并跳过，但只当兜底：本地快照可能滞后一整轮轮询，不能靠它
+      // 来定序号（与 planGeneratedNames 的取舍一致）。
+      const usedBaseNames = new Set<string>();
+      const existingNames = new Set(
+        this.store
+          .listCurrentManagedEntities(expandAccountId, this.store.getAccount(expandAccountId)?.providerKind ?? "cookie")
+          .filter((entity) => entity.entityType === "ad-group")
+          .map((entity) => entity.name.trim()),
+      );
       for (const source of sources) {
         const sourceBaseName = stripGeneratedAdGroupNameSuffixes(
           source.sourceAdGroupName,
         );
-        const baseAdGroupName = `${sourceBaseName}-${dateTimeSuffix(deliveryDate, expandTimeZone)}`;
+        const baseAdGroupName = allocateExpandBaseName({
+          cleanedSourceName: sourceBaseName,
+          deliveryAt: deliveryDate,
+          timeZone: expandTimeZone,
+          usedBaseNames,
+          existingNames,
+        });
+        usedBaseNames.add(baseAdGroupName);
         const taskKey = createHash("sha256").update(JSON.stringify({
           accountId: source.accountId,
           sourceAdGroupId: source.sourceAdGroupId,
