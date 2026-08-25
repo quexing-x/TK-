@@ -28,6 +28,7 @@ import {
   type WriteTaskActor,
   type ManagedEntitySnapshot,
   normalizeProviderEntity,
+  reconcileExpandTask,
   selectBudgetBumpCandidate,
   selectDeletionCandidates,
   syncLayerComplete,
@@ -873,6 +874,7 @@ export class AutomationService {
         output.entities,
         output.result,
       );
+      this.reconcileUncertainExpands(accountId, account.providerKind);
 
       const eligible: AutomationCandidate[] = [];
       for (const candidate of evaluation.candidates) {
@@ -1815,6 +1817,29 @@ export class AutomationService {
       // task rather than re-dispatching a confirmed provider write.
     }
     return result;
+  }
+
+  /**
+   * 拿刚同步回来的快照，替人回答那些「结果未知」的扩组记录到底建成没有。
+   *
+   * 这类记录禁止自动重试、只能人工去 TikTok 后台核实，于是只进不出、越攒越多，攒到没人
+   * 再看那条红色横幅——真正需要处理的新记录也跟着被淹掉。但绝大多数其实是「建成了，只是
+   * 我们没收到回音」，机器完全答得出来。
+   *
+   * **判据不能只看名字在不在**：草稿也带名字、也出现在广告组列表里。只按名字判会把
+   * 「只建了草稿」误判成成功、把红条清掉，而那恰恰是唯一真正需要人处理的情形。判据放在
+   * core 的 reconcileExpandTask 里，三种结论分开处理。
+   *
+   * 只做减法不做加法：确认建成的收口，其余一律原样留着。
+   */
+  private reconcileUncertainExpands(accountId: string, providerKind: ProviderKind): void {
+    const pending = this.store.listUncertainAdGroupExpandTasks(accountId);
+    if (pending.length === 0) return;
+    const snapshot = this.store.listAdGroupPlatformStatuses(accountId, providerKind);
+    for (const task of pending) {
+      if (reconcileExpandTask(task.generatedNames, snapshot) !== "confirmed") continue;
+      this.store.confirmAdGroupExpandTask(task.taskKey);
+    }
   }
 
   private getSkipReason(

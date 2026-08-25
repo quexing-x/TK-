@@ -19,6 +19,7 @@ export * from "./feature-config.js";
 export * from "./cleanup.js";
 export * from "./budget-bump.js";
 export * from "./expand-scope.js";
+export * from "./expand-reconcile.js";
 export * from "./budget-mode.js";
 export * from "./launch.js";
 export * from "./creation-protocol.js";

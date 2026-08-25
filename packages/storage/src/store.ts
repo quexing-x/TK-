@@ -3945,6 +3945,75 @@ export class AutomationStore {
    * 一起核实完的。逼他回来一条条点，只会让他干脆不点——于是红色横幅只进不出，涨到没人
    * 再看它，真正需要处理的新记录也跟着被淹掉。
    */
+  /**
+   * 广告组的名字 + 平台原始 ad_status，供对账区分「已建成」与「只是草稿」。
+   *
+   * 走 provider_entities 原文而不是 listCurrentManagedEntities：后者返回的是归一化快照，
+   * status 已经被折成 enabled/disabled，草稿和已关停在那一层长得一模一样。
+   */
+  listAdGroupPlatformStatuses(
+    accountId: string,
+    kind: ProviderKind,
+  ): Array<{ name: string; adStatus: string | null }> {
+    const rows = this.db.prepare(
+      `SELECT payload_json FROM provider_entities
+        WHERE account_id = ? AND provider_kind = ? AND entity_type = 'ad-group'`,
+    ).all(accountId, kind) as SqlRow[];
+    const result: Array<{ name: string; adStatus: string | null }> = [];
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
+        const rowData = (payload.row_data ?? {}) as Record<string, unknown>;
+        const source = { ...payload, ...rowData };
+        const name = String(source.ad_name ?? source.adgroup_name ?? "").trim();
+        if (!name) continue;
+        const adStatus = source.ad_status === undefined || source.ad_status === null
+          ? null
+          : String(source.ad_status);
+        result.push({ name, adStatus });
+      } catch {
+        // 损坏的行跳过：少一条只会让对账判 not-found、红条留着，不会误清。
+      }
+    }
+    return result;
+  }
+
+  /** 一条「结果未知」的扩组记录，供轮询后拿快照对账。 */
+  listUncertainAdGroupExpandTasks(accountId: string): Array<{
+    taskKey: string;
+    generatedNames: string[];
+  }> {
+    return this.db.prepare(
+      `SELECT task_key, generated_names_json FROM ad_group_expand_tasks
+        WHERE account_id = ? AND uncertain = 1`,
+    ).all(accountId).map((row) => {
+      const record = row as SqlRow;
+      let names: string[] = [];
+      try {
+        const parsed = JSON.parse(String(record.generated_names_json ?? "[]")) as unknown;
+        if (Array.isArray(parsed)) names = parsed.map((item) => String(item ?? ""));
+      } catch {
+        // 损坏的行按「没有组名」处理：对账会判 not-found，红条留着交人工，不会误清。
+      }
+      return { taskKey: String(record.task_key), generatedNames: names };
+    });
+  }
+
+  /**
+   * 快照证实建成之后收口这一条。
+   *
+   * 落成 succeeded 而不是删掉：这条记录本身是有价值的历史（扩了什么、什么时候扩的），
+   * 而且保留幂等键能继续挡住对同一个源组的重复扩量。清 uncertain 只是把红条摘掉。
+   */
+  confirmAdGroupExpandTask(taskKey: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE ad_group_expand_tasks
+          SET status = 'succeeded', uncertain = 0, updated_at = ?
+        WHERE task_key = ? AND uncertain = 1`,
+    ).run(new Date().toISOString(), taskKey);
+    return Number(result.changes) > 0;
+  }
+
   resolveUncertainAdGroupExpandTasks(accountIds: readonly string[]): number {
     const wanted = [...new Set(accountIds.filter((id) => id.trim() !== ""))];
     if (wanted.length === 0) return 0;
