@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, ArchiveRestore, DatabaseBackup, FileClock, RefreshCw, ShieldCheck } from "lucide-react";
+import { CleanupCandidatesPanel } from "./CleanupCandidatesPanel";
 import type {
+  AccountConfig,
   AuditLogRecord,
   DatabaseBackupRecord,
   MaintenanceStatus,
@@ -11,7 +13,7 @@ import { useAuth } from "./AuthGate";
 import { useOverlays } from "./ui/overlays";
 import "./ui/pages/system-maintenance.css";
 
-export function MaintenancePage({ onError }: { onError: (message: string) => void }) {
+export function MaintenancePage({ accounts, onError }: { accounts: AccountConfig[]; onError: (message: string) => void }) {
   const auth = useAuth();
   const { confirm, toast } = useOverlays();
   const canControlSystem = auth.status.permissions.includes("system:control");
@@ -151,6 +153,10 @@ export function MaintenancePage({ onError }: { onError: (message: string) => voi
           <p className="system-footnote">升级包必须同时通过签名清单、SHA-256 与 Windows 代码签名校验。</p>
         </article>
       </section>
+
+      {/* 待清理列表挂在这里而不是任务中心：任务中心那个页面 App 里根本没有引用，
+          挂上去等于挂在一个点不到的地方。 */}
+      <CleanupCandidatesPanel accounts={accounts} onError={onError} />
     </main>
   );
 }
