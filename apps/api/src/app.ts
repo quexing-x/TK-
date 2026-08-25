@@ -759,6 +759,42 @@ export async function createApp(
     return reply.send({ ok: true });
   });
 
+  // 待清理列表：按当前删除配置，这一刻够格被删的广告组。与定时执行器共用
+  // selectDeletionCandidates，因此列表里看到的就是执行时会删的那一批。
+  app.get("/api/accounts/:accountId/cleanup-candidates", async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    if (hasMetaOfflineAccount(dependencies.store, [accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    const candidates = automation.listCleanupCandidates(accountId);
+    return reply.send({
+      settings: dependencies.store.getAutomationFeatureSettings().deletion,
+      candidates: candidates.map((entity) => ({
+        externalId: entity.externalId,
+        name: entity.name,
+        parentCampaignId: entity.parentCampaignId,
+        conversions: entity.metrics.conversions,
+        carts: entity.metrics.carts,
+        spend: entity.metrics.spend,
+        cpa: entity.metrics.cost_per_conversion,
+      })),
+    });
+  });
+
+  // 一键删除：立刻删掉上面那批。删除不可恢复，闸门与定时执行器完全一致，只是不看
+  // 计划小时、不占当日的日任务名额。
+  app.post("/api/accounts/:accountId/cleanup-candidates/delete", async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    if (hasMetaOfflineAccount(dependencies.store, [accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    try {
+      return reply.send(await automation.deleteCleanupCandidatesNow(accountId));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   // 只读预检：发请求前告诉用户这批源组「有没有在跑的、今天扩过没有」，由用户决定
   // 是否继续。不写任何东西，也不拦截提交。
   app.post("/api/ad-groups/batch-expand/preflight", async (request, reply) => {

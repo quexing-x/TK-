@@ -798,6 +798,24 @@ export const api = {
       `/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks/${encodeURIComponent(taskKey)}/reset`,
       { method: "POST" },
     ),
+  getCleanupCandidates: (accountId: string) =>
+    request<{
+      settings: { maxConversions: number; maxCarts: number; minCpa: number; gracePeriodHours: number };
+      candidates: Array<{
+        externalId: string;
+        name: string;
+        parentCampaignId: string | null;
+        conversions: number | null;
+        carts: number | null;
+        spend: number | null;
+        cpa: number | null;
+      }>;
+    }>(`/api/accounts/${encodeURIComponent(accountId)}/cleanup-candidates`),
+  deleteCleanupCandidates: (accountId: string) =>
+    request<{ deleted: number; skipped: number }>(
+      `/api/accounts/${encodeURIComponent(accountId)}/cleanup-candidates/delete`,
+      { method: "POST" },
+    ),
   getManualTakeovers: (accountId: string) =>
     request<IgnoredEntityRecord[]>(`/api/accounts/${accountId}/manual-takeovers`),
   changeEntityStatus: (accountId: string, input: ManualStatusInput) =>
