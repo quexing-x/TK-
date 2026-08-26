@@ -776,6 +776,34 @@ export async function createApp(
     }
   });
 
+  // 遗留草稿：后台躺着、超过保护期没人动过的草稿广告组。保护期之内的和还挂着「结果未知」
+  // 的一律不列——前者可能是正在跑的扩组或人工正在编辑，后者等人决定发布还是放弃。
+  app.get("/api/accounts/:accountId/draft-candidates", async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    if (hasMetaOfflineAccount(dependencies.store, [accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    try {
+      return reply.send(await launchService.listStaleDraftAdGroups(accountId));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  // 一键清理。候选在服务端重新算一遍，不接受调用方传 ID——界面上看到列表到点下删除之间
+  // 可能过了很久，期间轮询会建新草稿，拿旧 ID 去删删掉的就是正在用的那个。
+  app.post("/api/accounts/:accountId/draft-candidates/delete", async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    if (hasMetaOfflineAccount(dependencies.store, [accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    try {
+      return reply.send(await launchService.deleteStaleDraftAdGroups(accountId));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   app.post("/api/accounts/:accountId/campaign-copy-tasks/:taskKey/reset", async (request, reply) => {
     const { accountId, taskKey } = z.object({
       accountId: z.string().min(1),

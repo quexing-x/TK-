@@ -1492,26 +1492,13 @@ export class CookieAdsProvider implements AdsProvider {
       if (wanted.length === 0) {
         throw new ConfirmedCreationFailureError("这条记录没有记下组名，无法定位草稿。", true);
       }
-      const entries: DraftSketchEntry[] = [];
-      let matchResult = matchDraftSketchesByName(wanted, entries);
-      for (let page = 1; page <= DRAFT_SKETCH_PAGE_LIMIT; page += 1) {
-        const listed = await requestCreationStep(
-          "sketch/ad/list",
-          () => creationPathRequest(
-            sessionRequest,
-            "/api/v4/i18n/statistics/sketch/ad/list/",
-            buildDraftSketchListPayload(page, DRAFT_SKETCH_PAGE_SIZE),
-          ),
-          credential,
-          { semantics: "preflight-read", dispatchState: draftState },
-        );
-        const pageEntries = parseDraftSketchList(listed);
-        entries.push(...pageEntries);
-        matchResult = matchDraftSketchesByName(wanted, entries);
-        if (matchResult.missing.length === 0) break;
-        // 不足一页说明翻到底了，再翻也不会多出来。
-        if (pageEntries.length < DRAFT_SKETCH_PAGE_SIZE) break;
-      }
+      const entries = await readDraftSketches({
+        sessionRequest,
+        credential,
+        dispatchState: draftState,
+        stopWhen: (collected) => matchDraftSketchesByName(wanted, collected).missing.length === 0,
+      });
+      const matchResult = matchDraftSketchesByName(wanted, entries);
       if (matchResult.missing.length > 0) {
         throw new ConfirmedCreationFailureError(
           `TikTok 后台没有找到唯一对应的草稿：${matchResult.missing.join("、")}。可能已经发布或已被删除，也可能同名草稿有多份，需要先去后台确认。`,
@@ -1631,6 +1618,76 @@ export class CookieAdsProvider implements AdsProvider {
           : !dispatched,
       };
     }
+  }
+
+  /**
+   * TikTok 后台现存的草稿广告组。
+   *
+   * 两个用途：轮询后对账要靠它才判得出「只建了草稿」（草稿在独立命名空间里，**根本不出现在
+   * 广告组列表**，只查广告组列表的话这个结论永远做不出来）；界面上的遗留草稿清理也靠它。
+   *
+   * 纯读，不写任何东西。
+   */
+  async listDraftAdGroups(context: ProviderContext): Promise<DraftSketchEntry[]> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      throw new RetryableCreationError("缺少第 1 步 /adgroup/list/ cURL，无法读取草稿列表。");
+    }
+    return readDraftSketches({
+      sessionRequest,
+      credential,
+      dispatchState: { mutationDispatched: false, acceptedMutationCount: 0 },
+    });
+  }
+
+  /**
+   * 删掉指定的草稿广告组。
+   *
+   * **逐条删而不是一次批量删**：一个坏 ID 会让整批被拒，而这里的调用方是「一键清理」，
+   * 半途失败必须能说清哪几条删掉了、哪几条没删。条数本来就小（生产上是个位数）。
+   *
+   * 只删草稿，不碰任何正式广告组。保护期由调用方（core 的 selectStaleDrafts）把关。
+   *
+   * **不要在这里加「删完立刻回读确认」**。草稿列表是最终一致的：2026-08-26 真机删掉 8 条，
+   * 每条都回 code 0，紧接着回读却有 5 条还在；约一分钟后再查，8 条全都没了。加了立即回读
+   * 只会稳定地报出根本不存在的失败。code 0 在这个接口上是可信的。
+   */
+  async deleteDraftAdGroups(
+    context: ProviderContext,
+    input: { adSketchIds: string[] },
+  ): Promise<{ deleted: string[]; failed: Array<{ adSketchId: string; message: string }> }> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      throw new RetryableCreationError("缺少第 1 步 /adgroup/list/ cURL，无法删除草稿。");
+    }
+    const dispatchState: CreationDispatchState = { mutationDispatched: false, acceptedMutationCount: 0 };
+    const deleted: string[] = [];
+    const failed: Array<{ adSketchId: string; message: string }> = [];
+    for (const adSketchId of input.adSketchIds.slice(0, DRAFT_DELETE_BATCH_LIMIT)) {
+      try {
+        await requestCreationStep(
+          "ad_sketch/delete",
+          () => creationPathRequest(sessionRequest, "/mi/api/v4/i18n/creation/ad_sketch/delete/", {
+            ad_sketch_ids: [adSketchId],
+          }),
+          credential,
+          { semantics: "mutation", dispatchState },
+        );
+        deleted.push(adSketchId);
+      } catch (cause) {
+        failed.push({
+          adSketchId,
+          message: cause instanceof Error ? cause.message : "删除草稿失败",
+        });
+      }
+    }
+    return { deleted, failed };
   }
 
   /**
@@ -5510,6 +5567,41 @@ function decodeJsonStrings(value: unknown): unknown {
 /** 草稿列表翻页上限：单页 100 条、最多 20 页。翻不到就当草稿不在，交人工。 */
 const DRAFT_SKETCH_PAGE_SIZE = 100;
 const DRAFT_SKETCH_PAGE_LIMIT = 20;
+/** 一次清理最多删这么多条。够用且不至于把一次误操作放大成灾难。 */
+const DRAFT_DELETE_BATCH_LIMIT = 200;
+
+/**
+ * 翻完草稿列表。
+ *
+ * `stopWhen` 是给「按名字找特定几条」用的提前退出：找齐就不再翻。清理与对账不传它，翻到底
+ * 为止——少翻一页就是少看见一条草稿，对账那边会直接变成误判。
+ */
+async function readDraftSketches(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  stopWhen?: (collected: readonly DraftSketchEntry[]) => boolean;
+}): Promise<DraftSketchEntry[]> {
+  const entries: DraftSketchEntry[] = [];
+  for (let page = 1; page <= DRAFT_SKETCH_PAGE_LIMIT; page += 1) {
+    const listed = await requestCreationStep(
+      "sketch/ad/list",
+      () => creationPathRequest(
+        input.sessionRequest,
+        "/api/v4/i18n/statistics/sketch/ad/list/",
+        buildDraftSketchListPayload(page, DRAFT_SKETCH_PAGE_SIZE),
+      ),
+      input.credential,
+      { semantics: "preflight-read", dispatchState: input.dispatchState },
+    );
+    const pageEntries = parseDraftSketchList(listed);
+    entries.push(...pageEntries);
+    if (input.stopWhen?.(entries)) break;
+    // 不足一页说明翻到底了，再翻也不会多出来。
+    if (pageEntries.length < DRAFT_SKETCH_PAGE_SIZE) break;
+  }
+  return entries;
+}
 
 /**
  * 把匹配到的草稿配上 snap，并解决「这条创意属于哪个广告组」。

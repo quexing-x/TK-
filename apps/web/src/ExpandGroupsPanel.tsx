@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, XCircle } from "lucide-react";
-import { withinExpandScope, type ExpandScope } from "@tk-auto/core";
+import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, Trash2, XCircle } from "lucide-react";
+import { DRAFT_CLEANUP_MIN_AGE_HOURS, withinExpandScope, type ExpandScope } from "@tk-auto/core";
 import type {
   AccountConfig,
   AccountProviderCapabilities,
@@ -165,6 +165,17 @@ export function ExpandGroupsPanel({
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [publishingTaskKey, setPublishingTaskKey] = useState<string | null>(null);
+  type DraftScanRow = {
+    accountId: string;
+    minAgeHours: number;
+    drafts: Array<{ adSketchId: string; adSketchName: string; touchedAt: string | null }>;
+    tooFresh: number;
+    reserved: number;
+    error: string | null;
+  };
+  const [draftScan, setDraftScan] = useState<DraftScanRow[] | null>(null);
+  const [draftScanning, setDraftScanning] = useState(false);
+  const [draftCleaning, setDraftCleaning] = useState(false);
 
   const accountName = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.displayName])),
@@ -303,6 +314,66 @@ export function ExpandGroupsPanel({
     }
   };
 
+  /**
+   * 去 TikTok 后台查一遍遗留草稿。
+   *
+   * 刻意做成按钮触发而不是进面板就查：一个账户一次请求，Cookie 失效的账户还会各报一次错，
+   * 没人要看的时候不该替他去敲平台。
+   */
+  const scanStaleDrafts = async () => {
+    setDraftScanning(true);
+    onError(null);
+    try {
+      setDraftScan(await Promise.all(historyAccountIds.map(async (accountId): Promise<DraftScanRow> => {
+        try {
+          const result = await api.getStaleDraftCandidates(accountId);
+          return { accountId, ...result, error: null };
+        } catch (cause) {
+          // 一个账户查不到不该把整张表打掉，把原因摆在它自己那一行。
+          return { accountId, minAgeHours: 0, drafts: [], tooFresh: 0, reserved: 0, error: messageOf(cause) };
+        }
+      })));
+    } finally {
+      setDraftScanning(false);
+    }
+  };
+
+  const cleanStaleDrafts = async () => {
+    const total = (draftScan ?? []).reduce((sum, row) => sum + row.drafts.length, 0);
+    const list = (draftScan ?? [])
+      .flatMap((row) => row.drafts.map((draft) => `${accountName.get(row.accountId) ?? row.accountId}：${draft.adSketchName}`))
+      .map((line, index) => `${index + 1}. ${line}`).join("\n");
+    const confirmed = await confirm({
+      title: `清理 ${total} 条遗留草稿`,
+      message: `下面这些草稿超过保护期没人动过，将从 TikTok 后台删除：\n\n${list}\n\n删除不可恢复。还挂着「结果未知」的组名不在其中——那些要先决定发布还是放弃。`,
+      confirmLabel: `删除 ${total} 条`,
+      danger: true,
+    });
+    if (!confirmed) return;
+    setDraftCleaning(true);
+    onError(null);
+    try {
+      let deleted = 0;
+      const failures: string[] = [];
+      for (const row of draftScan ?? []) {
+        if (row.drafts.length === 0) continue;
+        try {
+          const result = await api.deleteStaleDraftCandidates(row.accountId);
+          deleted += result.deleted;
+          failures.push(...result.failed.map((item) => `${item.adSketchName}：${item.message}`));
+        } catch (cause) {
+          failures.push(`${accountName.get(row.accountId) ?? row.accountId}：${messageOf(cause)}`);
+        }
+      }
+      toast(failures.length > 0 ? `已删除 ${deleted} 条，${failures.length} 条失败` : `已删除 ${deleted} 条`,
+        failures.length > 0 ? "error" : "success");
+      if (failures.length > 0) onError(failures.join("；"));
+      await scanStaleDrafts();
+    } finally {
+      setDraftCleaning(false);
+    }
+  };
+
   const loadHistory = async (accountIds: string[]) => {
     if (accountIds.length === 0) { setHistory([]); return; }
     setHistoryLoading(true);
@@ -320,6 +391,16 @@ export function ExpandGroupsPanel({
     void loadHistory(historyAccountIds);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyAccountIds.join(",")]);
+
+  const staleDraftTotal = useMemo(
+    () => (draftScan ?? []).reduce((sum, row) => sum + row.drafts.length, 0),
+    [draftScan],
+  );
+  // 保护期内 + 被「结果未知」占着的：用来解释名单为什么比后台看到的短。
+  const draftProtectedTotal = useMemo(
+    () => (draftScan ?? []).reduce((sum, row) => sum + row.tooFresh + row.reserved, 0),
+    [draftScan],
+  );
 
   const needsReview = useMemo(() => history.filter((task) => task.uncertain), [history]);
   // 「结果未知」永远排在最前，与时间无关：99 条成功刷屏时，它按时间排会被挤到第
@@ -696,6 +777,41 @@ export function ExpandGroupsPanel({
         {history.length > HISTORY_COLLAPSED_ROWS && <button className="expand-history-more" onClick={() => setHistoryExpanded((current) => !current)} type="button">
           {historyExpanded ? "收起" : `展开全部 ${history.length} 条`}
         </button>}</>}
+    </section>
+
+    <section className="expand-history">
+      <header className="expand-history-head">
+        <span><Trash2 size={15} /> 遗留草稿</span>
+        <div className="expand-history-actions">
+          {staleDraftTotal > 0 && <span className="expand-history-count">{staleDraftTotal} 条可清理</span>}
+          <button className="secondary-button compact-button" disabled={draftScanning || draftCleaning || historyAccountIds.length === 0}
+            onClick={() => void scanStaleDrafts()} type="button">
+            <RefreshCcw className={draftScanning ? "spin" : ""} size={13} /> {draftScanning ? "检查中" : "检查后台草稿"}
+          </button>
+          {staleDraftTotal > 0 && <button className="secondary-button compact-button" disabled={draftCleaning}
+            onClick={() => void cleanStaleDrafts()} type="button">
+            {draftCleaning ? "清理中…" : `清理 ${staleDraftTotal} 条`}
+          </button>}
+        </div>
+      </header>
+      {draftScan === null
+        ? <p className="expand-account-empty">扩组失败、人工中途放弃、断联，都会在 TikTok 后台留下草稿。点上面检查一次——超过 {DRAFT_CLEANUP_MIN_AGE_HOURS} 小时没人动过的才算遗留。</p>
+        : staleDraftTotal === 0
+          ? <p className="expand-account-empty">
+              没有够格清理的草稿。
+              {draftProtectedTotal > 0 && `${draftProtectedTotal} 条在保护期内或还挂着「结果未知」，先留着。`}
+              {draftScan.some((row) => row.error) && "（部分账户没查成，见下）"}
+            </p>
+          : <div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>账户</th><th>草稿名</th><th>最后改动</th></tr></thead><tbody>
+              {draftScan.flatMap((row) => row.drafts.map((draft) => <tr key={draft.adSketchId}>
+                <td className="expand-muted">{accountName.get(row.accountId) ?? row.accountId}</td>
+                <td className="expand-name">{draft.adSketchName}</td>
+                <td className="expand-muted">{fmtDate(draft.touchedAt)}</td>
+              </tr>))}
+            </tbody></table></div>}
+      {draftScan?.filter((row) => row.error).map((row) => <p className="expand-account-empty" key={row.accountId}>
+        <AlertTriangle size={13} /> {accountName.get(row.accountId) ?? row.accountId}：{row.error}
+      </p>)}
     </section>
 
     {presetHost ? createPortal(presetPanel, presetHost) : presetPanel}

@@ -139,6 +139,51 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("CookieAdsProvider.listDraftAdGroups / deleteDraftAdGroups", () => {
+  it("翻到底为止：少翻一页就是少看见一条草稿，对账那边会直接变成误判", async () => {
+    const calls: Call[] = [];
+    const filler = Array.from({ length: 100 }, (_unused, index) => ({
+      adSketchId: `p1-${index}`, name: `草稿-${index}`, campaignId: "camp-1",
+    }));
+    stubTikTok({
+      calls,
+      pages: [filler, [{ adSketchId: "p2-1", name: "最后一条", campaignId: "camp-1" }]],
+      creativesBySketch: {},
+    });
+
+    const drafts = await new CookieAdsProvider().listDraftAdGroups(context());
+
+    expect(drafts).toHaveLength(101);
+    expect(drafts.at(-1)?.adSketchName).toBe("最后一条");
+  });
+
+  it("逐条删，一个坏 ID 不会带走整批", async () => {
+    const calls: Call[] = [];
+    stubTikTok({ calls, pages: [[]], creativesBySketch: {} });
+    const inner = globalThis.fetch as unknown as (input: string, init?: RequestInit) => Promise<Response>;
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (String(input).includes("ad_sketch/delete")) {
+        const [id] = (body.ad_sketch_ids as string[]) ?? [];
+        calls.push({ path: "ad_sketch/delete", body });
+        return new Response(JSON.stringify(id === "bad" ? { code: 40005, msg: "草稿不存在" } : { code: 0, data: {} }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return inner(input, init);
+    }));
+
+    const result = await new CookieAdsProvider().deleteDraftAdGroups(context(), {
+      adSketchIds: ["good-1", "bad", "good-2"],
+    });
+
+    expect(result.deleted).toEqual(["good-1", "good-2"]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.adSketchId).toBe("bad");
+    // 每条一个请求，不是一次批量。
+    expect(calls.filter((call) => call.path === "ad_sketch/delete")).toHaveLength(3);
+  });
+});
+
 describe("CookieAdsProvider.publishExistingDrafts", () => {
   it("按名字找到草稿，用 save_by_sketch 的映射发布，带草稿来源标记", async () => {
     const calls: Call[] = [];

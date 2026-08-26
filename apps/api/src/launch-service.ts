@@ -10,7 +10,9 @@ import {
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
   planCampaignCopy,
+  selectStaleDrafts,
   stripAutomaticAdGroupNameSuffixes,
+  DRAFT_CLEANUP_MIN_AGE_HOURS,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
@@ -782,6 +784,100 @@ export class LaunchService {
       message: result.message,
       adGroupIds: result.adGroupIds ?? [],
     };
+  }
+
+  /**
+   * TikTok 后台遗留的草稿广告组：够格清理的，和被保护住的。
+   *
+   * 草稿会因为人工中途放弃、网络卡顿、自动化断联而留在后台，只进不出。但**扩组本身就是
+   * 先建草稿再发布**，轮询正在跑的那一刻后台必然有草稿；人在 TikTok 界面上手搓广告组时，
+   * 后台也一直躺着一个。保护期就是为这两件事留的。
+   */
+  async listStaleDraftAdGroups(accountId: string, asOf = new Date()): Promise<{
+    minAgeHours: number;
+    drafts: Array<{
+      adSketchId: string;
+      adSketchName: string;
+      campaignId: string;
+      touchedAt: string | null;
+    }>;
+    tooFresh: number;
+    reserved: number;
+  }> {
+    const { account, context } = await this.requireDraftAccess(accountId);
+    const drafts = await this.providers.listDraftAdGroups(account.providerKind, context);
+    if (!drafts) throw new Error("当前接入不支持读取草稿列表。");
+    const selection = selectStaleDrafts(drafts, {
+      now: asOf,
+      protectedNames: this.reservedDraftNames(accountId),
+    });
+    return {
+      minAgeHours: DRAFT_CLEANUP_MIN_AGE_HOURS,
+      drafts: selection.stale.map((draft) => ({
+        adSketchId: draft.adSketchId,
+        adSketchName: draft.adSketchName,
+        campaignId: draft.campaignId,
+        touchedAt: draft.touchedAt === null ? null : new Date(draft.touchedAt * 1000).toISOString(),
+      })),
+      tooFresh: selection.tooFresh,
+      reserved: selection.reserved,
+    };
+  }
+
+  /**
+   * 删掉上面那批遗留草稿。
+   *
+   * **候选在这里重新算一遍，不接受调用方传 ID。** 界面上看到列表到点下删除之间可能过了很久，
+   * 期间轮询会建新草稿——拿旧 ID 去删，删掉的就是正在用的那个。
+   */
+  async deleteStaleDraftAdGroups(accountId: string, asOf = new Date()): Promise<{
+    deleted: number;
+    failed: Array<{ adSketchName: string; message: string }>;
+    reserved: number;
+    tooFresh: number;
+  }> {
+    const { account, context } = await this.requireDraftAccess(accountId);
+    const drafts = await this.providers.listDraftAdGroups(account.providerKind, context);
+    if (!drafts) throw new Error("当前接入不支持读取草稿列表。");
+    const selection = selectStaleDrafts(drafts, {
+      now: asOf,
+      protectedNames: this.reservedDraftNames(accountId),
+    });
+    if (selection.stale.length === 0) {
+      return { deleted: 0, failed: [], reserved: selection.reserved, tooFresh: selection.tooFresh };
+    }
+    const nameById = new Map(selection.stale.map((draft) => [draft.adSketchId, draft.adSketchName]));
+    const result = await this.providers.deleteDraftAdGroups(account.providerKind, context, {
+      adSketchIds: selection.stale.map((draft) => draft.adSketchId),
+    });
+    return {
+      deleted: result.deleted.length,
+      failed: result.failed.map((item) => ({
+        adSketchName: nameById.get(item.adSketchId) ?? item.adSketchId,
+        message: item.message,
+      })),
+      reserved: selection.reserved,
+      tooFresh: selection.tooFresh,
+    };
+  }
+
+  /** 还挂着「结果未知」的组名：等人决定发布还是放弃，不能替他删掉。 */
+  private reservedDraftNames(accountId: string): string[] {
+    return this.store
+      .listUncertainAdGroupExpandTasks(accountId)
+      .flatMap((task) => task.generatedNames);
+  }
+
+  private async requireDraftAccess(accountId: string) {
+    const account = this.store.getAccount(accountId);
+    if (!account) throw new Error("账号不存在。");
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") {
+      throw new Error("账户未通过连接检测，暂不能读写草稿。");
+    }
+    // 与扩组同一道闸门：草稿是扩组的中间产物。
+    this.providers.requireAccountCapability(accountId, account.providerKind, connection, "copy-ads");
+    return { account, context: await this.loadProviderContext(accountId, account.providerKind) };
   }
 
   // 同账户广告组复制：以 templateCampaignId 冻结源系列，克隆源创意，

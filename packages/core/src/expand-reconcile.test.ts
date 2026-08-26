@@ -62,3 +62,36 @@ describe("拿快照对账「结果未知」的扩组记录", () => {
     expect(reconcileExpandTask([], [published("A-1")])).toBe("not-found");
   });
 });
+
+/**
+ * 这一组是 2026-08-26 从生产数据里挖出来的真 bug：sketch 草稿根本不出现在广告组列表里
+ * （实测 1066 个广告组里 ad_status='ad_create' 一个都没有，而后台有 9 条草稿），所以光看
+ * 快照，`draft-only` 这条结论对 sketch 类草稿永远做不出来。
+ */
+describe("sketch 草稿（不在广告组列表里的那种）", () => {
+  it("名字在草稿列表里 → draft-only，哪怕快照里一个都找不到", () => {
+    expect(reconcileExpandTask(["A-1"], [], ["A-1"])).toBe("draft-only");
+  });
+
+  // 要害：重试过的扩组会留下一个同名的正式组 + 一个同名草稿。只看快照会判 confirmed
+  // 把红条清掉，草稿则永久留在后台没人认领——生产上 9 条草稿里有 3 条正处于这个状态。
+  it("同名正式组已存在，但草稿也还在 → 仍然是 draft-only", () => {
+    expect(reconcileExpandTask(["A-1"], [published("A-1")], ["A-1"])).toBe("draft-only");
+    expect(reconcileExpandTask(["A-1"], [{ name: "A-1", adStatus: "ad_delete" }], ["A-1"]))
+      .toBe("draft-only");
+  });
+
+  it("多个组里只要有一个还是草稿，整条都不算成功", () => {
+    expect(reconcileExpandTask(["A-1", "A-2"], [published("A-1"), published("A-2")], ["A-2"]))
+      .toBe("draft-only");
+  });
+
+  it("草稿列表里没有就回到原来的判法", () => {
+    expect(reconcileExpandTask(["A-1"], [published("A-1")], ["别的草稿"])).toBe("confirmed");
+    expect(reconcileExpandTask(["A-1"], [], ["别的草稿"])).toBe("not-found");
+  });
+
+  it("组名两侧空白不影响匹配", () => {
+    expect(reconcileExpandTask([" A-1 "], [published("A-1")], [" A-1 "])).toBe("draft-only");
+  });
+});

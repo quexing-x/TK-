@@ -793,6 +793,22 @@ export const api = {
       generatedCampaignId: string | null;
       generatedAdGroupIds: string[];
     }>>(`/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks`),
+  /** 后台遗留、超过保护期没人动过的草稿广告组。 */
+  getStaleDraftCandidates: (accountId: string) =>
+    request<{
+      minAgeHours: number;
+      drafts: Array<{ adSketchId: string; adSketchName: string; campaignId: string; touchedAt: string | null }>;
+      tooFresh: number;
+      reserved: number;
+    }>(`/api/accounts/${encodeURIComponent(accountId)}/draft-candidates`),
+  /** 一键清理遗留草稿。候选由服务端重新计算，不传 ID。 */
+  deleteStaleDraftCandidates: (accountId: string) =>
+    request<{
+      deleted: number;
+      failed: Array<{ adSketchName: string; message: string }>;
+      reserved: number;
+      tooFresh: number;
+    }>(`/api/accounts/${encodeURIComponent(accountId)}/draft-candidates/delete`, { method: "POST" }),
   /** 把这条记录留在 TikTok 后台的草稿发布掉（发布后为暂停状态）。 */
   publishStuckExpandDraft: (taskKey: string) =>
     request<{ ok: true; message: string; adGroupIds: string[] }>(
