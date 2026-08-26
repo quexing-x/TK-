@@ -164,6 +164,7 @@ export function ExpandGroupsPanel({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [publishingTaskKey, setPublishingTaskKey] = useState<string | null>(null);
 
   const accountName = useMemo(
     () => new Map(accounts.map((account) => [account.id, account.displayName])),
@@ -272,6 +273,33 @@ export function ExpandGroupsPanel({
       onError(messageOf(cause));
     } finally {
       setResolving(false);
+    }
+  };
+
+  /**
+   * 发布这条记录留在 TikTok 后台的草稿。
+   *
+   * 「全部清除」只是把红条摘掉，草稿仍然烂在后台——这里才是真正的收口。发布后是暂停状态：
+   * 原始扩组是不是「立即投放」没有记录在案，悄悄开起来烧钱比让人多点一次开关严重得多。
+   */
+  const publishDraft = async (task: AdGroupExpandTask) => {
+    const names = task.generatedNames.join("、") || "（未记录组名）";
+    const confirmed = await confirm({
+      title: "发布这条记录的草稿",
+      message: `扩组失败时 TikTok 后台会留下草稿。这一步把下面这些草稿正式发布出去：\n\n${names}\n\n发布后是「已暂停」状态，需要你自己去开——原始扩组是不是「立即投放」没有记录在案。\n草稿如果已经被手动发布或删除，这里会直接报找不到，不会重复建。`,
+      confirmLabel: "发布草稿",
+    });
+    if (!confirmed) return;
+    setPublishingTaskKey(task.taskKey);
+    onError(null);
+    try {
+      const result = await api.publishStuckExpandDraft(task.taskKey);
+      toast(result.message, "success");
+      await loadHistory(historyAccountIds);
+    } catch (cause) {
+      onError(messageOf(cause));
+    } finally {
+      setPublishingTaskKey(null);
     }
   };
 
@@ -639,7 +667,7 @@ export function ExpandGroupsPanel({
       </header>
       {needsReview.length > 0 && <p className="expand-history-alert">
         <AlertTriangle size={15} />
-        <span><strong>{needsReview.length} 条结果未知，需人工核实。</strong>写请求已发出但没拿到结果，禁止自动重试——请到 TikTok 后台确认这些组到底建成没有。</span>
+        <span><strong>{needsReview.length} 条结果未知，需人工核实。</strong>写请求已发出但没拿到结果，禁止自动重试——请到 TikTok 后台确认这些组到底建成没有。只建了草稿的，用那一行的「发布草稿」把它发出去。</span>
         <button className="secondary-button compact-button" disabled={resolving}
           onClick={() => void resolveAllStuckTasks()} type="button">
           {resolving ? "清除中…" : "已核实，全部清除"}
@@ -647,7 +675,7 @@ export function ExpandGroupsPanel({
       </p>}
       {history.length === 0
         ? <p className="expand-account-empty">{historyLoading ? "读取中…" : "还没有扩组记录。"}</p>
-        : <><div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>时间</th><th>账户</th><th>新组名</th><th className="expand-num">个数</th><th>结果</th></tr></thead><tbody>
+        : <><div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>时间</th><th>账户</th><th>新组名</th><th className="expand-num">个数</th><th>结果</th><th>操作</th></tr></thead><tbody>
           {shownHistory.map((task) => {
             const tone = task.uncertain ? "danger" : task.status === "succeeded" ? "active" : "warning";
             const label = task.uncertain ? "结果未知，需人工核实" : task.status === "succeeded" ? "成功" : "进行中";
@@ -657,6 +685,11 @@ export function ExpandGroupsPanel({
               <td className="expand-name">{task.generatedNames.join("、") || "—"}</td>
               <td className="expand-num">{task.requestedCount}</td>
               <td><span className={`status ${tone}`}>{task.uncertain && <AlertTriangle size={12} />} {label}</span></td>
+              <td>{task.uncertain && <button className="secondary-button compact-button"
+                disabled={publishingTaskKey !== null}
+                onClick={() => void publishDraft(task)} type="button">
+                {publishingTaskKey === task.taskKey ? "发布中…" : "发布草稿"}
+              </button>}</td>
             </tr>;
           })}
         </tbody></table></div>

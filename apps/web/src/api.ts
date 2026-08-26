@@ -793,6 +793,12 @@ export const api = {
       generatedCampaignId: string | null;
       generatedAdGroupIds: string[];
     }>>(`/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks`),
+  /** 把这条记录留在 TikTok 后台的草稿发布掉（发布后为暂停状态）。 */
+  publishStuckExpandDraft: (taskKey: string) =>
+    request<{ ok: true; message: string; adGroupIds: string[] }>(
+      `/api/ad-group-expand-tasks/${encodeURIComponent(taskKey)}/publish-draft`,
+      { method: "POST" },
+    ),
   resolveUncertainAdGroupExpandTasks: (accountIds: string[]) =>
     request<{ cleared: number }>("/api/ad-group-expand-tasks/resolve-uncertain", {
       method: "POST",

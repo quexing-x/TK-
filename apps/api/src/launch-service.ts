@@ -726,6 +726,64 @@ export class LaunchService {
     };
   }
 
+  /**
+   * 把一条「结果未知」的扩组记录留在 TikTok 后台的草稿发布掉。
+   *
+   * 这类记录此前只有两条出路：人工去后台手动发布，或者一键清除（清除只是把红条摘掉，
+   * 草稿仍然烂在后台）。对账判成 `draft-only` 的正是这类——机器已经能确认草稿存在，只差
+   * 一个把它发出去的入口。
+   *
+   * **发布后是暂停状态**：原始扩组是「立即投放」还是「先关着」没有记录在案，而把一个组
+   * 悄悄开起来烧钱比让人多点一次开关严重得多。
+   *
+   * 成功才收口。失败一律保持 uncertain，红条留着——包括「发出去了但结果未知」，那种情况
+   * 恰恰最需要人去后台看一眼。
+   */
+  async publishStuckExpandDraft(taskKey: string): Promise<{
+    ok: boolean;
+    message: string;
+    adGroupIds: string[];
+  }> {
+    const task = this.store.getUncertainAdGroupExpandTask(taskKey);
+    if (!task) throw new Error("该扩组记录不存在，或已不处于「结果未知」状态。");
+    if (!task.sourceCampaignId) {
+      throw new Error("这条记录没有记下所属推广系列，无法定位草稿，请在 TikTok 后台手动发布。");
+    }
+    if (task.generatedNames.length === 0) {
+      throw new Error("这条记录没有记下组名，无法定位草稿，请在 TikTok 后台手动发布。");
+    }
+    const account = this.store.getAccount(task.accountId);
+    if (!account) throw new Error("账号不存在。");
+    const connection = this.store.getProviderConnection(task.accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") {
+      throw new Error("账户未通过连接检测，已阻止发布。");
+    }
+    // 与扩组同一道闸门：同一条创建会话 cURL、同一个发布接口。
+    this.providers.requireAccountCapability(
+      task.accountId,
+      account.providerKind,
+      connection,
+      "copy-ads",
+    );
+    const context = await this.loadProviderContext(task.accountId, account.providerKind);
+    const result = await this.providers.publishExistingDrafts(account.providerKind, context, {
+      campaignId: task.sourceCampaignId,
+      names: task.generatedNames,
+      initialStatus: "disabled",
+    });
+    if (!result.ok) {
+      throw new Error(result.failureKind === "unknown"
+        ? `${result.message}（发布请求已发出但结果无法确认，这条记录继续保留，请到 TikTok 后台核实）`
+        : result.message);
+    }
+    this.store.confirmAdGroupExpandTask(taskKey);
+    return {
+      ok: true,
+      message: result.message,
+      adGroupIds: result.adGroupIds ?? [],
+    };
+  }
+
   // 同账户广告组复制：以 templateCampaignId 冻结源系列，克隆源创意，
   // 在同一账户/同系列创建 count 个广告组（自动命名，预算/出价可覆盖）。
   // 不走跨账户 copy-preview 管线（那套需要源→目标素材映射，两级系列无本地视频码）。

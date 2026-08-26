@@ -362,6 +362,41 @@ export class ProviderRegistry {
     return provider.copyAdGroupToExistingCampaign(context, input);
   }
 
+  /**
+   * 发布 TikTok 后台已存在的草稿广告组。
+   *
+   * 闸门用 `copy-ads`：同一条创建会话 cURL、同一个发布接口，是把一次已经授权过的扩组
+   * 做完最后一步，不是一项新的写入权限——所以不新增能力项，也就不必升 capabilityVersion
+   * 去逼所有存量账户重新检测连接。
+   */
+  async publishExistingDrafts(
+    kind: ProviderKind,
+    context: ProviderContext,
+    input: {
+      campaignId: string;
+      names: string[];
+      initialStatus: "enabled" | "disabled";
+      onBeforeDispatch?: () => void;
+    },
+  ): Promise<{ ok: boolean; message: string; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
+    const provider = this.get(kind);
+    const publisher = provider as unknown as {
+      publishExistingDrafts?: (
+        context: ProviderContext,
+        input: {
+          campaignId: string;
+          names: string[];
+          initialStatus: "enabled" | "disabled";
+          onBeforeDispatch?: () => void;
+        },
+      ) => Promise<{ ok: boolean; message: string; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }>;
+    };
+    if (!publisher.publishExistingDrafts || !provider.capabilities.has("copy-ads")) {
+      throw new RetryableCreationError("当前接入不支持发布已存在的草稿广告组。");
+    }
+    return publisher.publishExistingDrafts(context, input);
+  }
+
   async copyCampaign(
     kind: ProviderKind,
     context: ProviderContext,

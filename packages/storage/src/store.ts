@@ -4000,6 +4000,42 @@ export class AutomationStore {
   }
 
   /**
+   * 单条「结果未知」的扩组记录，供人工发布它留在 TikTok 后台的草稿。
+   *
+   * 只认 uncertain = 1：已经收口的记录不该再被发一次，那会把同一批组建成两份。
+   */
+  getUncertainAdGroupExpandTask(taskKey: string): {
+    taskKey: string;
+    accountId: string;
+    sourceCampaignId: string | null;
+    generatedNames: string[];
+  } | null {
+    const row = this.db.prepare(
+      `SELECT task_key, account_id, source_campaign_id, generated_names_json
+         FROM ad_group_expand_tasks
+        WHERE task_key = ? AND uncertain = 1`,
+    ).get(taskKey) as SqlRow | undefined;
+    if (!row) return null;
+    let generatedNames: string[] = [];
+    try {
+      const parsed = JSON.parse(String(row.generated_names_json ?? "[]")) as unknown;
+      if (Array.isArray(parsed)) {
+        generatedNames = parsed.map((item) => String(item ?? "").trim()).filter(Boolean);
+      }
+    } catch {
+      // 损坏的行按「没有组名」处理：调用方拿不到组名就发不出去，交人工。
+    }
+    return {
+      taskKey: String(row.task_key),
+      accountId: String(row.account_id),
+      sourceCampaignId: row.source_campaign_id === null || row.source_campaign_id === undefined
+        ? null
+        : String(row.source_campaign_id),
+      generatedNames,
+    };
+  }
+
+  /**
    * 快照证实建成之后收口这一条。
    *
    * 落成 succeeded 而不是删掉：这条记录本身是有价值的历史（扩了什么、什么时候扩的），

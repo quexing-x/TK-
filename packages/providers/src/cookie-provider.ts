@@ -2,8 +2,14 @@ import {
   CookieConnectionSettingsSchema,
   CookieCredentialInputSchema,
   buildDraftPayloads,
+  buildDraftPublishPayload,
+  buildDraftSketchListPayload,
   buildProfileDraftPayloads,
   buildPublishInput,
+  matchDraftSketchesByName,
+  parseDraftCreativeOwners,
+  parseDraftSketchList,
+  parseSketchSnapMapping,
   DefaultTikTokCreativeAutomationStrategyIds,
   TikTokCreationPublishSource,
   splitVideoCodes,
@@ -12,7 +18,10 @@ import {
   mapWithConcurrency,
   normalizeProviderEntity,
   type CapturedCookieRequest,
+  type DraftSketchEntry,
+  type DraftSketchPublishItem,
   type ProviderEntity,
+  type SketchSnapMapping,
   type SyncEntityType,
   type LaunchOriginalPost,
   type LaunchProductInfo,
@@ -1431,6 +1440,195 @@ export class CookieAdsProvider implements AdsProvider {
         retrySafe: cause instanceof ConfirmedCreationFailureError
           ? cause.retrySafe && dispatchState.acceptedMutationCount === 0
           : !copyAccepted,
+      };
+    }
+  }
+
+  /**
+   * 发布 TikTok 后台已经存在的草稿广告组。
+   *
+   * 扩组失败在后台留下的草稿，此前没有任何入口能收口——发布要 snap/sketch 标识，而那是
+   * 建草稿时的临时产物，失败记录里一个都没记下。草稿能按名字反查，`snap/save_by_sketch`
+   * 能由 sketch 重新生成 snap，于是三步就能发布。契约见 docs/PUBLISH_DRAFT_CONTRACT.md。
+   *
+   * 与扩组共用 `copy-ads` 能力：同一条创建会话 cURL、同一个发布接口，本质上是把一次已经
+   * 授权过的扩组做完最后一步，不是一项新的写入权限。
+   *
+   * **这是创建类写入**：`create_by_snap` 一旦发出，失败一律判 unknown。重试可能把同一个
+   * 草稿发布成两个正式广告组。
+   */
+  async publishExistingDrafts(
+    context: ProviderContext,
+    input: {
+      campaignId: string;
+      names: string[];
+      initialStatus: "enabled" | "disabled";
+      onBeforeDispatch?: () => void;
+    },
+  ): Promise<{ ok: boolean; message: string; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest) {
+      return { ok: false, message: "缺少第 1 步 /adgroup/list/ cURL，无法建立创建会话。", failureKind: "failed", retrySafe: true };
+    }
+    const profile = credential.creationProfile;
+    const riskInfo = profile && isRecord(profile.publishPayload) && isRecord(profile.publishPayload.risk_info)
+      ? profile.publishPayload.risk_info
+      : {};
+    // 两个 dispatchState 是刻意分开的：草稿上的改动（ad_snap/save）再怎么失败都不会产生
+    // 正式广告组，只有 create_by_snap 会。把它们混在一起，一次草稿保存失败就会被误报成
+    // 「结果未知」，而那正是最该留给真正危险情形的结论。
+    const draftState: CreationDispatchState = { mutationDispatched: false, acceptedMutationCount: 0 };
+    const publishState: CreationDispatchState = {
+      mutationDispatched: false,
+      acceptedMutationCount: 0,
+      ...(input.onBeforeDispatch ? { onBeforeMutationDispatch: input.onBeforeDispatch } : {}),
+    };
+    try {
+      // 1) 按名字反查草稿。列表是全账户的，翻页翻到把要的都找齐为止。
+      const wanted = input.names.map((name) => name.trim()).filter(Boolean);
+      if (wanted.length === 0) {
+        throw new ConfirmedCreationFailureError("这条记录没有记下组名，无法定位草稿。", true);
+      }
+      const entries: DraftSketchEntry[] = [];
+      let matchResult = matchDraftSketchesByName(wanted, entries);
+      for (let page = 1; page <= DRAFT_SKETCH_PAGE_LIMIT; page += 1) {
+        const listed = await requestCreationStep(
+          "sketch/ad/list",
+          () => creationPathRequest(
+            sessionRequest,
+            "/api/v4/i18n/statistics/sketch/ad/list/",
+            buildDraftSketchListPayload(page, DRAFT_SKETCH_PAGE_SIZE),
+          ),
+          credential,
+          { semantics: "preflight-read", dispatchState: draftState },
+        );
+        const pageEntries = parseDraftSketchList(listed);
+        entries.push(...pageEntries);
+        matchResult = matchDraftSketchesByName(wanted, entries);
+        if (matchResult.missing.length === 0) break;
+        // 不足一页说明翻到底了，再翻也不会多出来。
+        if (pageEntries.length < DRAFT_SKETCH_PAGE_SIZE) break;
+      }
+      if (matchResult.missing.length > 0) {
+        throw new ConfirmedCreationFailureError(
+          `TikTok 后台没有找到唯一对应的草稿：${matchResult.missing.join("、")}。可能已经发布或已被删除，也可能同名草稿有多份，需要先去后台确认。`,
+          true,
+        );
+      }
+      const matched = matchResult.matched;
+      // 有一类草稿连推广系列本身都还没建：campaign_id 为空、只有 campaign_sketch_id
+      // （2026-08-26 生产账户里 9 条草稿中就有 2 条是这样）。发布它们要连系列一起建，
+      // 是另一条链路，这里不猜。
+      const campaignlessDrafts = matched.filter((entry) => !entry.campaignId);
+      if (campaignlessDrafts.length > 0) {
+        throw new ConfirmedCreationFailureError(
+          `这些草稿连推广系列都还没建（${campaignlessDrafts.map((entry) => entry.adSketchName).join("、")}），需要在 TikTok 后台手动发布。`,
+          true,
+        );
+      }
+      // 草稿必须都在这条记录声明的系列下。名字对上但系列不对，说明找到的是另一个系列里
+      // 的同名草稿，发下去就发错了地方。
+      const foreign = matched.filter((entry) => entry.campaignId && entry.campaignId !== input.campaignId);
+      if (foreign.length > 0) {
+        throw new ConfirmedCreationFailureError(
+          `找到的草稿不在系列 ${input.campaignId} 下（${foreign.map((entry) => entry.adSketchName).join("、")}），已停止发布。`,
+          true,
+        );
+      }
+      // 2) 由草稿生成 snap。响应直接给出 sketch → snap 的映射，不必重建表单。
+      const saved = await requestCreationStep(
+        "snap/save_by_sketch",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/save_by_sketch/", {
+          campaign_id: input.campaignId,
+          campaign_sketch_id: matched.find((entry) => entry.campaignSketchId)?.campaignSketchId ?? "",
+        }),
+        credential,
+        { semantics: "support" },
+      );
+      const mapping = parseSketchSnapMapping(saved);
+      const publishItems = await resolveDraftPublishItems({
+        sessionRequest,
+        credential,
+        matched,
+        mapping,
+      });
+      // 2.5) 把过期的开始时间顶到现在之后。
+      //
+      // 契约里说未改动的草稿可以跳过 ad_snap/save——那是对刚建出来的草稿而言。这里要发的
+      // 草稿常常已经烂了几天甚至半个月，`start_time` 早就过去了，TikTok 会以
+      // validate_start_time_before_now_error 明确拒绝（2026-08-26 真机实测，一条 8/13 的
+      // 草稿正是这么被拒的）。只动排期，预算和出价原样保留。
+      await refreshStaleDraftSchedules({
+        sessionRequest,
+        credential,
+        dispatchState: draftState,
+        campaignId: input.campaignId,
+        items: publishItems,
+        timezone: context.timezone ?? "UTC",
+        riskInfo,
+      });
+      // 3) 程序化创意要先生成 CTA。抓包里的真机草稿发布没有这一步，因为界面建的草稿自带
+      // CTA；而这里的草稿是 ad_snap/copy 克隆出来的，扩组流程正是在复制之后才补这一步，
+      // 说明克隆不带可用的 CTA。省掉它会被 TikTok 以缺少行动引导拒绝。
+      await requestCreationStep(
+        "snap/batch_create_cta_id",
+        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
+          campaign_id: input.campaignId,
+          campaign_snap_id: "",
+          ad_and_creative_snap_info_list: publishItems.map((item) => ({
+            ad_id: "",
+            ad_snap_id: item.adSnapId,
+            creative_snap_ids: item.creatives.map((creative) => creative.creativeSnapId),
+          })),
+        }),
+        credential,
+        { semantics: "support" },
+      );
+      // 4) 发布。来源标记与新建不同，见 TikTokDraftPublishSource。
+      const publishPayload = buildDraftPublishPayload({
+        campaignId: input.campaignId,
+        items: publishItems,
+        initialStatus: input.initialStatus,
+        riskInfo,
+      });
+      const published = await requestCreationStep(
+        "create_by_snap",
+        () => creationRequest(sessionRequest, "async_creation/create_by_snap", publishPayload),
+        credential,
+        { semantics: "mutation", dispatchState: publishState },
+      );
+      const completed = await awaitCreationResult(sessionRequest, credential, published, input.campaignId);
+      const completedCounts = completedCreationCounts(completed);
+      const officialAdGroupIds = completedAdGroupIds(completed);
+      if (
+        completedCounts.adGroupCount !== publishItems.length
+        || officialAdGroupIds.length !== publishItems.length
+      ) {
+        throw new UnknownCreationStateError(
+          `TikTok 创建终态不完整：广告组 ${completedCounts.adGroupCount}/${publishItems.length}，回读到 ${officialAdGroupIds.length} 个正式 ID；禁止自动重试。`,
+        );
+      }
+      return {
+        ok: true,
+        message: `已发布 ${publishItems.length} 个草稿广告组${input.initialStatus === "disabled" ? "（暂停状态）" : ""}`,
+        adGroupIds: officialAdGroupIds,
+      };
+    } catch (cause) {
+      // publishState 只被 create_by_snap 用，所以这个标志正好等于「发布请求离开过本机」。
+      // 前面几步都只在草稿上打转：没发出去就没有正式广告组，草稿原样留在后台，可以再点一次。
+      const dispatched = publishState.mutationDispatched;
+      return {
+        ok: false,
+        message: cause instanceof Error ? cause.message : "发布草稿失败",
+        failureKind: cause instanceof ConfirmedCreationFailureError
+          ? "failed"
+          : dispatched ? "unknown" : "failed",
+        retrySafe: cause instanceof ConfirmedCreationFailureError
+          ? cause.retrySafe && publishState.acceptedMutationCount === 0
+          : !dispatched,
       };
     }
   }
@@ -5306,6 +5504,173 @@ function decodeJsonStrings(value: unknown): unknown {
     return decodeJsonStrings(JSON.parse(trimmed));
   } catch {
     return value;
+  }
+}
+
+/** 草稿列表翻页上限：单页 100 条、最多 20 页。翻不到就当草稿不在，交人工。 */
+const DRAFT_SKETCH_PAGE_SIZE = 100;
+const DRAFT_SKETCH_PAGE_LIMIT = 20;
+
+/**
+ * 把匹配到的草稿配上 snap，并解决「这条创意属于哪个广告组」。
+ *
+ * `save_by_sketch` 返回的是整个系列下所有 sketch 的映射，
+ * `creative_sketch_id_to_snap_id` 不带归属信息。系列里只有一个草稿时不会出错，多于一个
+ * 时把别人的创意挂上来，发出去就是一条错的广告——所以归属拿不准时宁可不发。
+ */
+async function resolveDraftPublishItems(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  matched: readonly DraftSketchEntry[];
+  mapping: SketchSnapMapping;
+}): Promise<DraftSketchPublishItem[]> {
+  const missingSnap = input.matched.filter(
+    (entry) => !input.mapping.adSnapBySketch.has(entry.adSketchId),
+  );
+  if (missingSnap.length > 0) {
+    throw new ConfirmedCreationFailureError(
+      `save_by_sketch 没有返回这些草稿的 snap：${missingSnap.map((entry) => entry.adSketchName).join("、")}，已停止发布。`,
+      true,
+    );
+  }
+  const creativeSketchIds = [...input.mapping.creativeSnapBySketch.keys()];
+  if (creativeSketchIds.length === 0) {
+    throw new ConfirmedCreationFailureError("草稿没有可发布的创意，已停止发布。", true);
+  }
+  const owners = await readDraftCreativeOwners(input.sessionRequest, input.credential);
+  const fullyOwned = creativeSketchIds.every((id) => owners.has(id));
+  // 归属查不到时唯一还能确定的情形：整个系列只有这一个广告组草稿，那些创意除了它没有
+  // 别的归属可选。这个判据来自 save_by_sketch 自己的返回，不需要相信另一个接口。
+  const soleDraft = input.matched.length === 1 && input.mapping.adSnapBySketch.size === 1;
+  if (!fullyOwned && !soleDraft) {
+    throw new ConfirmedCreationFailureError(
+      "无法确定草稿创意归属于哪个广告组（系列下有多个草稿），已停止发布，请在 TikTok 后台手动发布。",
+      true,
+    );
+  }
+  return input.matched.map((entry) => {
+    const mine = fullyOwned
+      ? creativeSketchIds.filter((id) => owners.get(id) === entry.adSketchId)
+      : creativeSketchIds;
+    if (mine.length === 0) {
+      throw new ConfirmedCreationFailureError(
+        `草稿 ${entry.adSketchName} 没有可发布的创意，已停止发布。`,
+        true,
+      );
+    }
+    return {
+      adSketchId: entry.adSketchId,
+      adSnapId: input.mapping.adSnapBySketch.get(entry.adSketchId)!,
+      creatives: mine.map((creativeSketchId) => ({
+        creativeSketchId,
+        creativeSnapId: input.mapping.creativeSnapBySketch.get(creativeSketchId)!,
+      })),
+    };
+  });
+}
+
+/**
+ * 把开始时间已经过去的草稿顶到现在之后。
+ *
+ * 契约里说「未改动的草稿可以跳过 `ad_snap/save`」，那是对刚建出来的草稿说的。要收口的草稿
+ * 通常已经烂了几天到半个月，`start_time` 早就成了过去时，TikTok 会以
+ * `validate_start_time_before_now_error` 明确拒绝——2026-08-26 真机上一条 8/13 的草稿正是
+ * 这么被拒的，而那次拒绝没有产生任何对象，草稿原样还在。
+ *
+ * 只动排期：预算、出价、定向全部原样保留，那些是用户当初设好的。开始时间没过期就一个写请求
+ * 都不发，回到契约描述的那条最短路径。
+ */
+async function refreshStaleDraftSchedules(input: {
+  sessionRequest: CapturedCookieRequest;
+  credential: ParsedCookieCredential;
+  dispatchState: CreationDispatchState;
+  campaignId: string;
+  items: readonly DraftSketchPublishItem[];
+  timezone: string;
+  riskInfo: Record<string, unknown>;
+  now?: Date;
+}): Promise<void> {
+  const adSnapIds = input.items.map((item) => item.adSnapId);
+  const forms = await readAdSnapForms(
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    adSnapIds,
+  );
+  // TikTok 的排期字符串是账户时区下的 "YYYY-MM-DD HH:mm:ss"，补零对齐，所以同一时区里
+  // 直接按字符串比大小就是按时间比大小，不需要再解析回 Date（那反而要猜时区偏移）。
+  const now = input.now ?? new Date();
+  const nowText = formatProviderDateTime(now, input.timezone);
+  const startText = formatProviderDateTime(new Date(now.getTime() + 300_000), input.timezone);
+  const stale: string[] = [];
+  for (const adSnapId of adSnapIds) {
+    const form = forms.get(adSnapId);
+    if (!form) {
+      throw new UnknownCreationStateError(`TikTok 草稿详情缺少广告组 ${adSnapId}，已停止发布。`);
+    }
+    const currentStart = typeof form.start_time === "string" ? form.start_time.trim() : "";
+    if (!currentStart || currentStart > nowText) continue;
+    const updated = cloneRecord(form);
+    updated.start_time = startText;
+    const currentEnd = typeof updated.end_time === "string" ? updated.end_time.trim() : "";
+    if (currentEnd && currentEnd <= startText) {
+      const end = new Date(now.getTime() + 300_000);
+      end.setUTCFullYear(end.getUTCFullYear() + 10);
+      updated.end_time = formatProviderDateTime(end, input.timezone);
+    }
+    await requestCreationStep(
+      "ad_snap/save",
+      () => creationPathRequest(input.sessionRequest, "/api/v4/i18n/creation/ad_snap/save/", {
+        ad_sketch_form_data: updated,
+        spc_upgrade_mode: typeof updated.spc_upgrade_mode === "number" ? updated.spc_upgrade_mode : 1,
+        with_sketch: true,
+        is_skip_check_fields: false,
+        campaign_id: input.campaignId,
+        risk_info: input.riskInfo,
+      }),
+      input.credential,
+      { semantics: "mutation", dispatchState: input.dispatchState },
+    );
+    stale.push(adSnapId);
+  }
+  if (stale.length === 0) return;
+  // 回读确认改动真的落到了草稿上。省掉这一步，过期的排期会一路带到发布，再被拒一次。
+  const verified = await readAdSnapForms(
+    input.sessionRequest,
+    input.credential,
+    input.dispatchState,
+    stale,
+  );
+  for (const adSnapId of stale) {
+    const form = verified.get(adSnapId);
+    if (!form || form.start_time !== startText) {
+      throw new UnknownCreationStateError("TikTok 草稿开始时间未能回读确认，已停止发布。");
+    }
+  }
+}
+
+/**
+ * creative_sketch_id → ad_sketch_id。查不到就返回空表，由调用方决定还能不能安全发布——
+ * 这个接口只用来消除歧义，它本身不可用不该直接毙掉整次发布。
+ */
+async function readDraftCreativeOwners(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+): Promise<Map<string, string>> {
+  try {
+    const listed = await requestCreationStep(
+      "sketch/creative/list",
+      () => creationPathRequest(
+        sessionRequest,
+        "/api/v4/i18n/statistics/sketch/creative/list/",
+        buildDraftSketchListPayload(1, DRAFT_SKETCH_PAGE_SIZE),
+      ),
+      credential,
+      { semantics: "preflight-read" },
+    );
+    return parseDraftCreativeOwners(listed);
+  } catch {
+    return new Map<string, string>();
   }
 }
 
