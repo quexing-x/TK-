@@ -758,6 +758,24 @@ export async function createApp(
     });
   });
 
+  // 发布这条记录留在 TikTok 后台的草稿。清除只是把红条摘掉、草稿仍烂在后台；这个入口才是
+  // 真正的收口。创建类写入，成功才把记录落成 succeeded。
+  app.post("/api/ad-group-expand-tasks/:taskKey/publish-draft", async (request, reply) => {
+    const { taskKey } = z.object({ taskKey: z.string().min(1) }).parse(request.params);
+    const task = dependencies.store.getUncertainAdGroupExpandTask(taskKey);
+    if (!task) {
+      return reply.status(404).send({ message: "该扩组记录不存在，或已不处于「结果未知」状态。" });
+    }
+    if (hasMetaOfflineAccount(dependencies.store, [task.accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    try {
+      return reply.send(await launchService.publishStuckExpandDraft(taskKey));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   app.post("/api/accounts/:accountId/campaign-copy-tasks/:taskKey/reset", async (request, reply) => {
     const { accountId, taskKey } = z.object({
       accountId: z.string().min(1),

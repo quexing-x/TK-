@@ -768,6 +768,111 @@ describe("local API", () => {
     expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(1);
   });
 
+  it("publishes the draft an uncertain expansion left behind and closes the record", async () => {
+    const publishExistingDrafts = vi.fn(async () => ({
+      ok: true,
+      message: "已发布 1 个草稿广告组（暂停状态）",
+      adGroupIds: ["published-1"],
+    }));
+    const provider = {
+      kind: "cookie",
+      displayName: "draft publish provider",
+      capabilityVersion: "draft-publish-v1",
+      capabilities: new Set(["copy-ads"]),
+      publishExistingDrafts,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "draft-publish-v1", capabilities: ["copy-ads"],
+    });
+    store.claimAdGroupExpandTask("stuck-task", "demo-account", "adgroup-1", {
+      sourceCampaignId: "campaign-1",
+      requestedCount: 1,
+      generatedNames: ["新组-0826-060000-1"],
+    });
+    store.finishAdGroupExpandTask("stuck-task", "unknown");
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ad-group-expand-tasks/stuck-task/publish-draft",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ ok: true, adGroupIds: ["published-1"] });
+    expect(publishExistingDrafts).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      campaignId: "campaign-1",
+      names: ["新组-0826-060000-1"],
+      // 原始扩组是不是「立即投放」没有记录在案，只能发成暂停。
+      initialStatus: "disabled",
+    }));
+    // 收口：红条摘掉，记录保留成历史。
+    expect(store.getUncertainAdGroupExpandTask("stuck-task")).toBeNull();
+    const [task] = store.listAdGroupExpandHistory(["demo-account"], 10);
+    expect(task).toMatchObject({ taskKey: "stuck-task", uncertain: false, status: "succeeded" });
+
+    // 已经收口的记录不能再发一次，否则同一批组会被建成两份。
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/ad-group-expand-tasks/stuck-task/publish-draft",
+    });
+    expect(again.statusCode).toBe(404);
+    expect(publishExistingDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the uncertain record when the draft publish result is unknown", async () => {
+    const publishExistingDrafts = vi.fn(async () => ({
+      ok: false,
+      message: "create_by_snap：请求已发出，但响应丢失",
+      failureKind: "unknown" as const,
+      retrySafe: false,
+    }));
+    const provider = {
+      kind: "cookie",
+      displayName: "draft publish provider",
+      capabilityVersion: "draft-publish-v1",
+      capabilities: new Set(["copy-ads"]),
+      publishExistingDrafts,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "draft-publish-v1", capabilities: ["copy-ads"],
+    });
+    store.claimAdGroupExpandTask("stuck-unknown", "demo-account", "adgroup-2", {
+      sourceCampaignId: "campaign-1",
+      requestedCount: 1,
+      generatedNames: ["新组-0826-070000-1"],
+    });
+    store.finishAdGroupExpandTask("stuck-unknown", "unknown");
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ad-group-expand-tasks/stuck-unknown/publish-draft",
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().message).toContain("到 TikTok 后台核实");
+    // 结果未知的那条恰恰最需要人去看一眼，红条必须留着。
+    expect(store.getUncertainAdGroupExpandTask("stuck-unknown")).not.toBeNull();
+  });
+
   it("passes the dispatch guard through the non-same-campaign copy path", async () => {
     freezeClock();
     const copy = vi.fn(async (_context: ProviderContext, mutations: CreationMutation[]) => {
