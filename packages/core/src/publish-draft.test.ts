@@ -6,6 +6,7 @@ import {
   parseDraftCreativeOwners,
   parseDraftSketchList,
   parseSketchSnapMapping,
+  selectStaleDrafts,
   type DraftSketchEntry,
 } from "./publish-draft.js";
 
@@ -14,6 +15,7 @@ const sketch = (name: string, id: string, campaignId = "1874278019329169"): Draf
   adSketchName: name,
   campaignId,
   campaignSketchId: "",
+  touchedAt: null,
 });
 
 describe("buildDraftSketchListPayload", () => {
@@ -42,7 +44,20 @@ describe("parseDraftSketchList", () => {
       campaignId: "1874278019329169",
       // "0" 是占位，等价于没有系列草稿。
       campaignSketchId: "",
+      touchedAt: null,
     }]);
+  });
+
+  it("取最晚的那个时间戳：判「有没有人正在动它」要看最后一次改动", () => {
+    const [entry] = parseDraftSketchList({
+      data: {
+        table: [{
+          ad_sketch_id: "1", ad_sketch_name: "A",
+          ad_create_time: 1_787_000_000, ad_modify_time: 1_787_700_000,
+        }],
+      },
+    });
+    expect(entry?.touchedAt).toBe(1_787_700_000);
   });
 
   it("drops rows without a usable id or name instead of inventing one", () => {
@@ -86,6 +101,53 @@ describe("matchDraftSketchesByName", () => {
     const result = matchDraftSketchesByName([" A ", "A", ""], [sketch("A", "11")]);
     expect(result.matched).toHaveLength(1);
     expect(result.missing).toEqual([]);
+  });
+});
+
+describe("selectStaleDrafts", () => {
+  const now = new Date("2026-08-26T12:00:00Z");
+  const aged = (name: string, hoursAgo: number): DraftSketchEntry => ({
+    ...sketch(name, `id-${name}`),
+    touchedAt: (now.getTime() - hoursAgo * 3_600_000) / 1000,
+  });
+
+  it("只挑超过保护期没人动过的", () => {
+    const result = selectStaleDrafts([aged("老", 4), aged("刚碰过", 1)], { now });
+    expect(result.stale.map((entry) => entry.adSketchName)).toEqual(["老"]);
+    expect(result.tooFresh).toBe(1);
+  });
+
+  // 保护期是这个功能的全部安全性所在：扩组本身就是先建草稿再发布，轮询正在跑的那一刻
+  // 后台必然有草稿；人在界面上手搓广告组时后台也躺着一个。
+  it("正好卡在保护期边界上的不删", () => {
+    expect(selectStaleDrafts([aged("边界", 3)], { now }).stale).toHaveLength(1);
+    expect(selectStaleDrafts([aged("差一点", 2.99)], { now }).stale).toHaveLength(0);
+  });
+
+  it("保护期可以调", () => {
+    expect(selectStaleDrafts([aged("六小时", 6)], { now, minAgeHours: 12 }).stale).toHaveLength(0);
+    expect(selectStaleDrafts([aged("六小时", 6)], { now, minAgeHours: 1 }).stale).toHaveLength(1);
+  });
+
+  // 宁可漏删，不可误删。
+  it("取不到时间戳的一律保住", () => {
+    const result = selectStaleDrafts([sketch("没时间戳", "x")], { now });
+    expect(result.stale).toHaveLength(0);
+    expect(result.tooFresh).toBe(1);
+  });
+
+  it("还挂着「结果未知」的组名不替人删——那是等人决定发布还是放弃的", () => {
+    const result = selectStaleDrafts([aged("待决策", 99), aged("垃圾", 99)], {
+      now, protectedNames: ["待决策"],
+    });
+    expect(result.stale.map((entry) => entry.adSketchName)).toEqual(["垃圾"]);
+    expect(result.reserved).toBe(1);
+  });
+
+  it("待决策优先于保护期：刚建的也算保住，不重复计数", () => {
+    const result = selectStaleDrafts([aged("待决策", 0.1)], { now, protectedNames: ["待决策"] });
+    expect(result).toMatchObject({ tooFresh: 0, reserved: 1 });
+    expect(result.stale).toHaveLength(0);
   });
 });
 

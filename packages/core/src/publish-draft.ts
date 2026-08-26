@@ -31,6 +31,8 @@ export interface DraftSketchEntry {
   adSketchName: string;
   campaignId: string;
   campaignSketchId: string;
+  /** 最后一次被动过的时刻（秒级 Unix 时间戳）；取不到时为 null。 */
+  touchedAt: number | null;
 }
 
 /** 草稿列表分页请求体。排序固定按修改时间倒序，最近失败的那批排在最前。 */
@@ -58,6 +60,8 @@ export function parseDraftSketchList(payload: unknown): DraftSketchEntry[] {
       campaignId: idAt(row, "campaign_id") ?? "",
       // "0" 是「不属于任何系列草稿」的占位，等价于没有。
       campaignSketchId: idAt(row, "campaign_sketch_id") ?? "",
+      // 取最晚的那个：判「有没有人正在动它」要看最后一次改动，不是创建。
+      touchedAt: latestTimestamp(row, ["ad_modify_time", "modify_time", "ad_create_time", "create_time"]),
     });
   }
   return entries;
@@ -98,6 +102,57 @@ export function matchDraftSketchesByName(
     else missing.push(name);
   }
   return { matched, missing };
+}
+
+/** 清理遗留草稿的默认保护期。 */
+export const DRAFT_CLEANUP_MIN_AGE_HOURS = 3;
+
+export interface StaleDraftSelection {
+  /** 够格删的。 */
+  stale: DraftSketchEntry[];
+  /** 还在保护期内的条数——用来向用户解释名单为什么比后台看到的短。 */
+  tooFresh: number;
+  /** 被待决策的「结果未知」记录保住的条数。 */
+  reserved: number;
+}
+
+/**
+ * 挑出可以删掉的遗留草稿。
+ *
+ * 草稿会因为人工中途放弃、网络卡顿、自动化断联而留在后台，越攒越多。但「后台有一个草稿」
+ * 和「这个草稿是垃圾」不是一回事——**扩组本身就是先建草稿再发布**，轮询正在跑的那一刻
+ * 后台必然有草稿；人在 TikTok 界面上手搓一个广告组时，后台也一直躺着一个草稿。
+ *
+ * 所以保护期是这个功能的全部安全性所在：只删**超过 `minAgeHours` 没人动过**的。3 小时足够
+ * 覆盖一轮扩组（实测 p99 29 秒）和一次人工编辑，又不至于让垃圾攒太久。取不到时间戳的一律
+ * 当「刚碰过」保住——宁可漏删，不可误删。
+ *
+ * `protectedNames` 是还挂着「结果未知」的那些组名：它们等着人决定发布还是放弃，不能替人
+ * 删掉。
+ */
+export function selectStaleDrafts(
+  entries: readonly DraftSketchEntry[],
+  options: {
+    now: Date;
+    minAgeHours?: number;
+    protectedNames?: readonly string[];
+  },
+): StaleDraftSelection {
+  const minAgeHours = options.minAgeHours ?? DRAFT_CLEANUP_MIN_AGE_HOURS;
+  const cutoff = (options.now.getTime() - minAgeHours * 3_600_000) / 1000;
+  const reservedNames = new Set(
+    (options.protectedNames ?? []).map((name) => name.trim()).filter(Boolean),
+  );
+  const stale: DraftSketchEntry[] = [];
+  let tooFresh = 0;
+  let reserved = 0;
+  for (const entry of entries) {
+    if (reservedNames.has(entry.adSketchName.trim())) { reserved += 1; continue; }
+    // 时间戳缺失 = 不知道多久没动过 = 保住。
+    if (entry.touchedAt === null || entry.touchedAt > cutoff) { tooFresh += 1; continue; }
+    stale.push(entry);
+  }
+  return { stale, tooFresh, reserved };
 }
 
 export interface SketchSnapMapping {
@@ -213,6 +268,18 @@ function idMapAt(source: Record<string, unknown>, key: string): Map<string, stri
 
 function idAt(row: Record<string, unknown>, key: string): string | undefined {
   return normalizeId(row[key]);
+}
+
+/** 秒级 Unix 时间戳里最晚的一个。TikTok 各处字段名不统一，逐个试。 */
+function latestTimestamp(row: Record<string, unknown>, keys: readonly string[]): number | null {
+  let latest: number | null = null;
+  for (const key of keys) {
+    const value = row[key];
+    const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+    if (!Number.isFinite(numeric) || numeric <= 0) continue;
+    if (latest === null || numeric > latest) latest = numeric;
+  }
+  return latest;
 }
 
 /** TikTok 用 "0" 和 "" 表达「没有」，两者都不是可用标识。 */

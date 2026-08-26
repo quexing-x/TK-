@@ -828,6 +828,59 @@ describe("local API", () => {
     expect(publishExistingDrafts).toHaveBeenCalledTimes(1);
   });
 
+  it("only lists drafts past the protection window, and never the ones awaiting a decision", async () => {
+    const now = Date.now();
+    const hoursAgo = (hours: number) => (now - hours * 3_600_000) / 1000;
+    const listDraftAdGroups = vi.fn(async () => [
+      { adSketchId: "old", adSketchName: "遗留草稿", campaignId: "c1", campaignSketchId: "", touchedAt: hoursAgo(9) },
+      { adSketchId: "fresh", adSketchName: "刚建的", campaignId: "c1", campaignSketchId: "", touchedAt: hoursAgo(0.5) },
+      { adSketchId: "pending", adSketchName: "待决策-1", campaignId: "c1", campaignSketchId: "", touchedAt: hoursAgo(9) },
+    ]);
+    const deleteDraftAdGroups = vi.fn(async (_context: unknown, input: { adSketchIds: string[] }) => ({
+      deleted: input.adSketchIds, failed: [],
+    }));
+    const provider = {
+      kind: "cookie",
+      displayName: "draft cleanup provider",
+      capabilityVersion: "draft-cleanup-v1",
+      capabilities: new Set(["copy-ads"]),
+      listDraftAdGroups,
+      deleteDraftAdGroups,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "draft-cleanup-v1", capabilities: ["copy-ads"],
+    });
+    // 一条还挂着「结果未知」的记录，占住同名草稿。
+    store.claimAdGroupExpandTask("await-decision", "demo-account", "adgroup-9", {
+      sourceCampaignId: "c1", requestedCount: 1, generatedNames: ["待决策-1"],
+    });
+    store.finishAdGroupExpandTask("await-decision", "unknown");
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const listed = await app.inject({ method: "GET", url: "/api/accounts/demo-account/draft-candidates" });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().drafts.map((draft: { adSketchName: string }) => draft.adSketchName)).toEqual(["遗留草稿"]);
+    // 保护期内的和待决策的各一条，用来向用户解释名单为什么比后台看到的短。
+    expect(listed.json()).toMatchObject({ tooFresh: 1, reserved: 1, minAgeHours: 3 });
+
+    const deleted = await app.inject({ method: "POST", url: "/api/accounts/demo-account/draft-candidates/delete" });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toMatchObject({ deleted: 1 });
+    // 只删够格的那条；刚建的和待决策的一个都不能碰。
+    expect(deleteDraftAdGroups).toHaveBeenCalledWith(expect.anything(), { adSketchIds: ["old"] });
+    // 候选在服务端重新算，不接受调用方传 ID。
+    expect(listDraftAdGroups).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps the uncertain record when the draft publish result is unknown", async () => {
     const publishExistingDrafts = vi.fn(async () => ({
       ok: false,

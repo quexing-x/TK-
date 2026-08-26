@@ -4,6 +4,7 @@ import {
   type ProviderCapability,
   type ProviderConnection,
   type ProviderKind,
+  type DraftSketchEntry,
   type LaunchOriginalPost,
   type LaunchProductInfo,
   type ProviderEntity,
@@ -395,6 +396,43 @@ export class ProviderRegistry {
       throw new RetryableCreationError("当前接入不支持发布已存在的草稿广告组。");
     }
     return publisher.publishExistingDrafts(context, input);
+  }
+
+  /**
+   * TikTok 后台现存的草稿广告组。纯读。
+   *
+   * 不具备该能力的接入返回 null 而不是抛错：调用方（轮询对账）要靠 null 与空数组的区别
+   * 决定「查不到草稿」还是「确实没有草稿」——把两者混同，就会在看不见草稿的情况下下结论，
+   * 那正是 2026-08-26 挖出来的那个 bug。
+   */
+  async listDraftAdGroups(
+    kind: ProviderKind,
+    context: ProviderContext,
+  ): Promise<DraftSketchEntry[] | null> {
+    const provider = this.get(kind) as unknown as {
+      listDraftAdGroups?: (context: ProviderContext) => Promise<DraftSketchEntry[]>;
+    };
+    if (!provider.listDraftAdGroups) return null;
+    return provider.listDraftAdGroups(context);
+  }
+
+  async deleteDraftAdGroups(
+    kind: ProviderKind,
+    context: ProviderContext,
+    input: { adSketchIds: string[] },
+  ): Promise<{ deleted: string[]; failed: Array<{ adSketchId: string; message: string }> }> {
+    const provider = this.get(kind);
+    const cleaner = provider as unknown as {
+      deleteDraftAdGroups?: (
+        context: ProviderContext,
+        input: { adSketchIds: string[] },
+      ) => Promise<{ deleted: string[]; failed: Array<{ adSketchId: string; message: string }> }>;
+    };
+    // 与扩组同一道闸门：草稿是扩组的中间产物，清理它属于同一件事。
+    if (!cleaner.deleteDraftAdGroups || !provider.capabilities.has("copy-ads")) {
+      throw new RetryableCreationError("当前接入不支持清理草稿广告组。");
+    }
+    return cleaner.deleteDraftAdGroups(context, input);
   }
 
   async copyCampaign(

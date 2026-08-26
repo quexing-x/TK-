@@ -874,7 +874,7 @@ export class AutomationService {
         output.entities,
         output.result,
       );
-      this.reconcileUncertainExpands(accountId, account.providerKind);
+      await this.reconcileUncertainExpands(accountId, account.providerKind, account.timezone);
 
       const eligible: AutomationCandidate[] = [];
       for (const candidate of evaluation.candidates) {
@@ -1826,18 +1826,40 @@ export class AutomationService {
    * 再看那条红色横幅——真正需要处理的新记录也跟着被淹掉。但绝大多数其实是「建成了，只是
    * 我们没收到回音」，机器完全答得出来。
    *
-   * **判据不能只看名字在不在**：草稿也带名字、也出现在广告组列表里。只按名字判会把
-   * 「只建了草稿」误判成成功、把红条清掉，而那恰恰是唯一真正需要人处理的情形。判据放在
-   * core 的 reconcileExpandTask 里，三种结论分开处理。
+   * **判据不能只看名字在不在**：草稿也带名字。只按名字判会把「只建了草稿」误判成成功、
+   * 把红条清掉，而那恰恰是唯一真正需要人处理的情形。判据放在 core 的 reconcileExpandTask
+   * 里，三种结论分开处理。
+   *
+   * **草稿要单独去 TikTok 查，本地快照里没有。** 2026-08-26 实测：本地 1066 个广告组里
+   * `ad_status='ad_create'` 一个都没有，而后台躺着 9 条 sketch 草稿——它们在独立命名空间，
+   * 广告组列表根本不返回。少了这一步，重试过的扩组（后台留下一个同名正式组 + 一个同名草稿）
+   * 会被判成 confirmed，红条清掉、草稿永久没人认领。生产上 9 条草稿里有 3 条正是这个状态。
+   *
+   * **查不到草稿就整轮不下结论。** 宁可让红条多留一轮，也不能在看不见草稿的情况下收口——
+   * 那等于把上面那个 bug 原样放回来。
    *
    * 只做减法不做加法：确认建成的收口，其余一律原样留着。
    */
-  private reconcileUncertainExpands(accountId: string, providerKind: ProviderKind): void {
+  private async reconcileUncertainExpands(
+    accountId: string,
+    providerKind: ProviderKind,
+    timezone: string,
+  ): Promise<void> {
     const pending = this.store.listUncertainAdGroupExpandTasks(accountId);
     if (pending.length === 0) return;
+    let draftNames: string[];
+    try {
+      const context = await this.loadContext(accountId, providerKind, timezone);
+      const drafts = await this.providers.listDraftAdGroups(providerKind, context);
+      if (!drafts) return;
+      draftNames = drafts.map((draft) => draft.adSketchName);
+    } catch {
+      // 读草稿失败：这一轮什么都不判。
+      return;
+    }
     const snapshot = this.store.listAdGroupPlatformStatuses(accountId, providerKind);
     for (const task of pending) {
-      if (reconcileExpandTask(task.generatedNames, snapshot) !== "confirmed") continue;
+      if (reconcileExpandTask(task.generatedNames, snapshot, draftNames) !== "confirmed") continue;
       this.store.confirmAdGroupExpandTask(task.taskKey);
     }
   }
