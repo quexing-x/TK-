@@ -267,7 +267,13 @@ export function buildDraftPayloads(
           brand_catalog_toggle: 0,
           campaign_app_profile_page_type: 0,
           cbo_uniform_bid: 0,
-          dedicate_type: 0,
+          // 以下三个是系列层的 automation 自述，真机 Smart+（objective_type=3）7/7
+          // 一致取这组值。我们此前发 dedicate_type=0 / universal_type_default_on=false
+          // 且不发 promotion_scenario，系列自述与 Smart+ 结构对不上，TikTok 判
+          // uaa_campaign_automation_inconsistent_error——错误名里的 campaign 指的就是这一层。
+          // （真机 #0 的 dedicate_type=0 是 objective_type=8 的另一种目标，不适用本分支。）
+          dedicate_type: 1,
+          promotion_scenario: 0,
           ecomm_type: 0,
           has_selected_traffic_smart_plus: false,
           lead_catalog_toggle: 0,
@@ -279,7 +285,7 @@ export function buildDraftPayloads(
           skan4_campaign_structure_type: 0,
           skan_campaign_type: 0,
           universal_type: 1,
-          universal_type_default_on: false,
+          universal_type_default_on: true,
           sales_destination: 3,
           virtual_objective_type: 1,
           vertical_market_campaign_type: 0,
@@ -411,9 +417,11 @@ export function buildDraftPayloads(
         ttms_account_id: "",
         creative_material_mode: 6,
         ...(smartPlus ? {
+          // spc_upgrade_mode / spc_multi_ad_mode 只放在请求顶层（见上面 adGroup 那一层），
+          // 不进 ad_sketch_form_data：真机 11/11 的 ad_snap/save 都是顶层有、form 里没有。
+          // 与创意层同一个毛病——护栏挂在 identityType !== 5 上，而授权码这条路用的是
+          // identity_type=2，于是照发不误。spc_targeting_switch 才是真机放在 form 里的。
           spc_targeting_switch: 0,
-          ...(config.identityType !== 5 ? { spc_upgrade_mode: 1 } : {}),
-          spc_multi_ad_mode: 1,
         } : {}),
         budget_auto_adjust: budget.adGroup.budget_auto_adjust,
         week_schedule: [[], [], [], [], [], [], []],
@@ -568,7 +576,9 @@ function applyCreationConfigOverrides(
       brand_catalog_toggle: 0,
       campaign_app_profile_page_type: 0,
       cbo_uniform_bid: 0,
-      dedicate_type: 0,
+      // 与 buildDraftPayloads 同一条结论，理由见那边的注释。
+      dedicate_type: 1,
+      promotion_scenario: 0,
       ecomm_type: 0,
       has_selected_traffic_smart_plus: false,
       lead_catalog_toggle: 0,
@@ -580,7 +590,7 @@ function applyCreationConfigOverrides(
       skan4_campaign_structure_type: 0,
       skan_campaign_type: 0,
       universal_type: 1,
-      universal_type_default_on: false,
+      universal_type_default_on: true,
       sales_destination: 3,
       virtual_objective_type: 1,
       vertical_market_campaign_type: 0,
@@ -624,9 +634,8 @@ function applyCreationConfigOverrides(
       smart_age: 3,
       smart_gender: 3,
       suggestion_audience_toggle: 3,
+      // 同上：这两个只在请求顶层，不进 ad_sketch_form_data。
       spc_targeting_switch: 0,
-      spc_upgrade_mode: 1,
-      spc_multi_ad_mode: 1,
     });
   }
   if (!smartPlus) {
