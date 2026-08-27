@@ -161,9 +161,6 @@ describe("creation protocol", () => {
       creative_material_mode: 6,
       creative_automation_type: 2,
       creative_automation_list: ["100001", "100002", "7455417586723028993"],
-      is_smart_creative: false,
-      spc_upgrade_mode: 0,
-      spc_multi_ad_mode: 0,
       auto_pull_by_destination_toggle: 2,
       auto_pull_by_aigc_toggle: 2,
       aigc_approval_auto_pull_toggle: 2,
@@ -184,6 +181,19 @@ describe("creation protocol", () => {
     const smartAsset = payloads.creative.asset_group_sketch_form_data_list[0] as Record<string, unknown>;
     expect(smartAsset.creative_automation_list)
       .not.toEqual(expect.arrayContaining(["200001", "7419232909960003601", "7478954523433500688"]));
+
+    // 这三个字段一律不出现在创意层。toMatchObject 只校验列出的键，删掉断言等于没防住，
+    // 必须显式断言「不存在」。
+    //
+    // 2026-08-27 生产留证：创意层带着 spc_upgrade_mode=0 发出，顶层却是 1，TikTok 判
+    // uaa_campaign_automation_inconsistent_error。此前护栏挂在 identityType === 5 上，
+    // 而授权码这条路真正用的是 identity_type=2，护栏从未生效；同一个错反复了 20 天，
+    // 「把它归零」的补丁打过三次。同日真机抓包的 10 条 creative_snap/save
+    // （identity_type 2 与 3 都有）创意层一次都没出现过这三个字段。
+    for (const field of ["spc_upgrade_mode", "spc_multi_ad_mode", "is_smart_creative"]) {
+      expect(smartAsset, field).not.toHaveProperty(field);
+    }
+    // 顶层的 spc_upgrade_mode 是另一回事，真机恒为 1，不受本条约束。
   });
 
   it("maps spreadsheet-row gender and age ranges into the Smart+ audience form", () => {

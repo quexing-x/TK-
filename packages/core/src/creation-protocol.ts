@@ -437,12 +437,18 @@ export function buildDraftPayloads(
         ...defaultCreativeAutomationFields(),
         ...(smartPlus ? {
           creative_material_mode: 6,
-          is_smart_creative: false,
-          // Campaign/ad-group SPC is mode 1, while a finalized manual Spark
-          // creative is mode 0. Propagating the campaign mode into the creative
-          // triggers uaa_campaign_automation_inconsistent_error.
-          ...(config.identityType === 5 ? {} : { spc_upgrade_mode: 0 }),
-          ...(config.identityType === 5 ? {} : { spc_multi_ad_mode: 0 }),
+          // spc_upgrade_mode / spc_multi_ad_mode / is_smart_creative 一律不在创意层出现。
+          //
+          // 这三个字段此前按 identityType === 5 加护栏，而授权码这条路真正用的是
+          // identity_type=2（身份挂在 image_list 每一项上，不是 config.identityType），
+          // 于是护栏从未生效：创意层带着 spc_upgrade_mode=0 发出去，顶层却是 1，
+          // TikTok 判为 uaa_campaign_automation_inconsistent_error。同一个错从 08-07
+          // 反复到 08-27，期间「把它归零」的补丁打过三次——归不归零都错，它根本
+          // 不该出现在这一层。
+          //
+          // 依据是 2026-08-27 的真机抓包：一次成功创建里 10 条 creative_snap/save
+          // （identity_type 2 与 3 都有）创意层一次都没出现过这三个字段，
+          // spc_upgrade_mode 只在顶层出现且恒为 1。
           auto_pull_by_destination_toggle: 2,
           auto_pull_by_aigc_toggle: 2,
           aigc_approval_auto_pull_toggle: 2,
@@ -728,9 +734,7 @@ function applyCreationConfigOverrides(
   if (smartPlus) {
     Object.assign(asset, {
       creative_material_mode: 6,
-      is_smart_creative: false,
-      spc_upgrade_mode: config.identityType === 5 ? 1 : 0,
-      ...(config.identityType === 5 ? {} : { spc_multi_ad_mode: 0 }),
+      // 与 buildDraftPayloads 同一条结论：这三个字段不在创意层出现。理由见那边的注释。
       auto_pull_by_destination_toggle: 2,
       auto_pull_by_aigc_toggle: 2,
       aigc_approval_auto_pull_toggle: 2,
