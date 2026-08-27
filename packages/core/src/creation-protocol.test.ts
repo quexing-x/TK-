@@ -112,7 +112,9 @@ describe("creation protocol", () => {
     });
 
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({
-      dedicate_type: 0,
+      // 真机 Smart+ 7/7 取 1；此前发 0 是 uaa_campaign_automation_inconsistent_error
+      // 的成因之一，详见文件下方那条针对系列层 automation 自述的断言。
+      dedicate_type: 1,
       app_campaign_type: 0,
       rf_campaign_type: 0,
       brand_campaign_type: 0,
@@ -153,10 +155,6 @@ describe("creation protocol", () => {
         },
       },
     });
-    expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({
-      spc_upgrade_mode: 1,
-      spc_multi_ad_mode: 1,
-    });
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
       creative_material_mode: 6,
       creative_automation_type: 2,
@@ -194,6 +192,24 @@ describe("creation protocol", () => {
       expect(smartAsset, field).not.toHaveProperty(field);
     }
     // 顶层的 spc_upgrade_mode 是另一回事，真机恒为 1，不受本条约束。
+
+    // 广告组层同一个毛病：这两个只在请求顶层，不进 ad_sketch_form_data。
+    // 真机 11/11 的 ad_snap/save 都是顶层有、form 里没有；spc_targeting_switch 才在 form 里。
+    expect(payloads.adGroup).toMatchObject({ spc_upgrade_mode: 1 });
+    const adForm = payloads.adGroup.ad_sketch_form_data as Record<string, unknown>;
+    expect(adForm).toMatchObject({ spc_targeting_switch: 0 });
+    for (const field of ["spc_upgrade_mode", "spc_multi_ad_mode"]) {
+      expect(adForm, field).not.toHaveProperty(field);
+    }
+
+    // 系列层的 automation 自述：真机 Smart+（objective_type=3）7/7 取这组值。
+    // 发错这三个，系列自述与 Smart+ 结构对不上，同样是
+    // uaa_campaign_automation_inconsistent_error——错误名里的 campaign 指的就是这一层。
+    expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({
+      dedicate_type: 1,
+      universal_type_default_on: true,
+      promotion_scenario: 0,
+    });
   });
 
   it("maps spreadsheet-row gender and age ranges into the Smart+ audience form", () => {
