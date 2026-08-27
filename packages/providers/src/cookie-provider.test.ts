@@ -2169,9 +2169,9 @@ describe("CookieAdsProvider", () => {
     const publish = requested.find((item) => item.url.includes("create_by_snap"));
     const adInfo = (publish?.body.ad_and_creative_snap_info_list as Array<{ ad_snap_id: string; creative_snap_info_list: Array<{ creative_snap_id: string }> }>);
     expect(adInfo).toHaveLength(1);
-    // 发布引用的是重铸后的 snap（creative-sketch-1 → creative-snap-reminted-1），
-    // 不是建草稿时的 creative-snap-1。
-    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-reminted-1"]);
+    // 发布直接引用建草稿时的 snap，不再经 snap/save_by_sketch 重铸——真机整个创建
+    // 流程从不调那个接口。
+    expect(adInfo[0]!.creative_snap_info_list.map((c) => c.creative_snap_id)).toEqual(["creative-snap-1"]);
   });
 
   it("classifies a dispatched status request network loss as unknown", async () => {
@@ -2327,27 +2327,27 @@ describe("CookieAdsProvider", () => {
       .toMatchObject({ is_status_disabled: true, is_partial_publish: false, coming_source_type: 1 });
     expect(result[0]).toMatchObject({ campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
 
-    // 发布前必须先用 sketch 重铸 snap，且发布引用的是重铸出来的那套。
-    // 2026-08-08：拿建草稿时的旧 snap 发布，被 TikTok 判
-    // uaa_campaign_automation_inconsistent_error，从零创建 10 条全灭。
-    const remint = requested.find((item) => item.url.includes("snap/save_by_sketch"));
-    expect(remint?.body).toEqual({ campaign_id: "", campaign_sketch_id: "campaign-sketch" });
-    const pathAt = (needle: string) =>
-      requested.findIndex((item) => new URL(item.url).pathname === needle);
-    expect(pathAt("/api/v4/i18n/creation/snap/save_by_sketch/"))
-      .toBeLessThan(pathAt("/api/v4/i18n/creation/async_creation/create_by_snap/"));
+    // 创建流程不调 snap/save_by_sketch。
+    //
+    // 它是 2026-08-08 为修 uaa_campaign_automation_inconsistent_error 加的，前提是
+    // 「automation 字段在建草稿之后才被归一化」；1.4.85 起保存时就按真机取值，前提没了。
+    // 2026-08-27 真机抓包证明这一步本身就是分歧：一次完整成功创建里它一次都没出现，
+    // 而且重铸会把 sketch_publish_source 带成 2，真机恒为 1。
+    // （发布后台遗留草稿是另一条链路，那里用它是对的。）
+    expect(requested.find((item) => item.url.includes("snap/save_by_sketch"))).toBeUndefined();
+    expect(publishSource(requested)).toBe(1);
     const publish = requested.find((item) => item.url.includes("create_by_snap"))?.body as Record<string, unknown>;
+    // 发布用的是建草稿时的那套 snap，不是重铸出来的。
     expect(publish).toMatchObject({
-      campaign_snap_id: "campaign-snap-reminted",
+      campaign_snap_id: "campaign-snap",
       campaign_sketch_id: "campaign-sketch",
-      // 真机重铸后是从草稿页发布，来源标记是 2 而不是创建流程的 1。
-      sketch_publish_source: 2,
+      sketch_publish_source: 1,
     });
     expect(publish.ad_and_creative_snap_info_list).toMatchObject([{
-      ad_snap_id: "ad-snap-reminted",
+      ad_snap_id: "ad-snap",
       ad_sketch_id: "ad-sketch",
       creative_snap_info_list: [{
-        creative_snap_id: "creative-snap-reminted",
+        creative_snap_id: "creative-snap",
         creative_sketch_id: "creative-sketch",
       }],
     }]);
@@ -2415,29 +2415,6 @@ describe("CookieAdsProvider", () => {
 
     expect(result).toMatchObject({ ok: true });
     expect(requested.some((url) => url.includes("/ad/update_status"))).toBe(false);
-  });
-
-  it("重铸 snap 拿不到映射时停在发布之前，不拿旧 snap 硬发", async () => {
-    const requested: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      requested.push(new URL(url).pathname);
-      // 映射表里没有本次的 sketch——旧 snap 发出去必然被 TikTok 拒。
-      if (url.includes("snap/save_by_sketch")) {
-        return jsonResponse({ code: 0, data: { campaign_sketch_id_to_snap_id: {}, ad_sketch_id_to_snap_id: {}, creative_sketch_id_to_snap_id: {} } });
-      }
-      return jsonResponse(successfulCreationPayload(url));
-    }));
-
-    const [result] = await new CookieAdsProvider().createFromPreset!(
-      creationTestContext(false),
-      [creationTestMutation("none")],
-    );
-
-    expect(result).toMatchObject({ ok: false, failureKind: "unknown" });
-    expect(result?.message).toContain("save_by_sketch");
-    // 没有拿旧 snap 去发布。
-    expect(requested).not.toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
   });
 
   it("stops before creative save when the HAR material lookup cannot resolve a code", async () => {
@@ -4962,6 +4939,11 @@ function creationTestContext(withProfile: boolean): ProviderContext {
       } } : {}),
     },
   };
+}
+
+/** 发布请求实际用的 sketch_publish_source。真机创建流程恒为 1。 */
+function publishSource(requested: Array<{ url: string; body: Record<string, unknown> }>): unknown {
+  return requested.find((item) => item.url.includes("create_by_snap"))?.body.sketch_publish_source;
 }
 
 function creationTestMutation(mode: "none" | "copy"): CreationMutation {

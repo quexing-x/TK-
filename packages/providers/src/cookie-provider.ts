@@ -3285,20 +3285,20 @@ async function runCookieDraftBatch(
     },
   };
   try {
-    // 新建系列发布前必须从 sketch 重铸一套 snap。详见 remintSnapsFromSketches。
-    // 只作用于「从零创建」：复制路自带回读再保存，生产上一直是好的。
-    let publishCampaignSnapId = first.campaignSnapId;
-    let publishList = publishItems;
-    let remintedSnaps = false;
-    if (first.mutation.templateMode !== "copy" && !first.existingCampaignId && first.campaignSketchId) {
-      const reminted = await remintSnapsFromSketches(sessionRequest, credential, combinedDispatchState, {
-        campaignSketchId: first.campaignSketchId,
-        publishItems,
-      });
-      publishCampaignSnapId = reminted.campaignSnapId;
-      publishList = reminted.publishItems;
-      remintedSnaps = true;
-    }
+    // 直接拿建草稿时的 snap 发布，不再走 snap/save_by_sketch 重铸。
+    //
+    // 重铸是 2026-08-08 为修 uaa_campaign_automation_inconsistent_error 加的，理由是
+    // 「系列层的 automation 字段在建草稿之后才被归一化，发布时元组对不上」。而那个
+    // 前提在 1.4.85 已经不成立了：dedicate_type / universal_type_default_on /
+    // promotion_scenario 与 spc 模式的层级现在保存时就按真机取值，没有需要被归一化的
+    // 漂移。
+    //
+    // 2026-08-27 的真机抓包证明这一步本身就是分歧：一次完整的成功创建里
+    // snap/save_by_sketch 一次都没出现过，发布前调的是 snap/cbo_consistency_check、
+    // campaign_snap/check、ad_creative_snap/check、snap/batch_create_cta_id。重铸还会
+    // 连带把 sketch_publish_source 改成 2，而真机恒为 1——等于用另一套发布语义提交。
+    const publishCampaignSnapId = first.campaignSnapId;
+    const publishList = publishItems;
     await runAdvisoryDraftSequence(sessionRequest, credential, {
       ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
       campaignSnapId: publishCampaignSnapId,
@@ -3320,8 +3320,6 @@ async function runCookieDraftBatch(
           campaignSketchId: first.campaignSketchId || first.existingCampaignId!,
           adAndCreativeSnapInfoList: publishList,
         }, first.mutation.initialStatus);
-    // 真机在重铸 snap 之后发布时用的是 2（从草稿页发布），不是创建流程里的 1。
-    if (remintedSnaps) publishPayload.sketch_publish_source = 2;
     if (first.existingCampaignId) {
       publishPayload.campaign_id = first.existingCampaignId;
       publishPayload.campaign_snap_id = "";
@@ -4475,21 +4473,8 @@ async function runCookieDraftChain(
       dispatchState,
     };
   }
-  // 新建系列发布前必须从 sketch 重铸一套 snap。详见 remintSnapsFromSketches。
-  //
-  // 只作用于「从零创建」：复制路自带回读再保存，生产上 20/20 全过，没有证据说明它
-  // 需要重铸，不能顺手改一条正在正常工作的链路。
-  let publishCampaignSnapId = campaignSnapId;
-  let remintedSnaps = false;
-  if (!copyOnly && !existingCampaignId && campaignSketchId) {
-    const reminted = await remintSnapsFromSketches(sessionRequest, credential, dispatchState, {
-      campaignSketchId,
-      publishItems,
-    });
-    publishCampaignSnapId = reminted.campaignSnapId;
-    publishItems = reminted.publishItems;
-    remintedSnaps = true;
-  }
+  // 不再走 snap/save_by_sketch 重铸，理由见批量发布那一处的注释。
+  const publishCampaignSnapId = campaignSnapId;
   const publishPayload = credential.creationProfile
     ? materializePublishProfile(credential.creationProfile.publishPayload, {
         ...(existingCampaignId ? { campaignId: existingCampaignId } : {}),
@@ -4501,8 +4486,6 @@ async function runCookieDraftChain(
       campaignSketchId: campaignSketchId || existingCampaignId!,
       adAndCreativeSnapInfoList: publishItems,
     }, mutation.initialStatus);
-  // 真机在重铸 snap 之后发布时用的是 2（从草稿页发布），不是创建流程里的 1。
-  if (remintedSnaps) publishPayload.sketch_publish_source = 2;
   if (existingCampaignId) {
     publishPayload.campaign_id = existingCampaignId;
     publishPayload.campaign_snap_id = "";
@@ -6719,74 +6702,6 @@ function completedAdGroupIds(payload: Record<string, unknown>): string[] {
  * 发布载荷里只有 is_status_disabled 一个开关且只作用于广告组层，创意快照里没有
  * 状态字段，所以只能拿到这些 ID 之后再显式开一次。
  */
-/**
- * 从 sketch 重新铸一套 snap，并把发布项重映射到新 snap 上。
- *
- * TikTok 的 `sketch` 是持久草稿，`snap` 是一次编辑会话的工作副本。真机打开广告组
- * 页面时，第一批请求里就有 `snap/save_by_sketch`：它按 campaign_sketch_id 把整棵树
- * （系列 / 广告组 / 创意）重铸出一套新 snap，之后的检查与发布全部引用新 snap。
- *
- * 我们此前一直拿建草稿那一刻的旧 snap 去发布。系列层的 automation 字段在那之后才被
- * 归一化，于是发布时 campaign snap 与 ad/creative snap 的 automation 元组对不上，
- * TikTok 以 `uaa_campaign_automation_inconsistent_error` 拒绝——2026-08-08 凌晨
- * 从零创建的 10 条全部死在这里，而复制路因为本来就有「回读后再保存」而不受影响。
- *
- * 抓包为证：同一批 sketch（campaign 1872883127404066 / ad …528066 / creative
- * …881473），用建草稿时的旧 snap 发布失败，用本接口重铸的新 snap 发布成功。
- *
- * 重铸失败就停在发布之前：拿旧 snap 发出去必然被拒，早停才不会产生正式对象。
- */
-async function remintSnapsFromSketches(
-  sessionRequest: CapturedCookieRequest,
-  credential: ParsedCookieCredential,
-  dispatchState: CreationDispatchState,
-  input: { campaignSketchId: string; publishItems: DraftPublishItem[] },
-): Promise<{ campaignSnapId: string; publishItems: DraftPublishItem[] }> {
-  const response = await requestCreationStep(
-    "snap/save_by_sketch",
-    () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/save_by_sketch/", {
-      campaign_id: "",
-      campaign_sketch_id: input.campaignSketchId,
-    }),
-    credential,
-    { semantics: "mutation", dispatchState },
-  );
-  const data = isRecord(response.data) ? response.data : {};
-  const readMap = (key: string): Record<string, unknown> =>
-    isRecord(data[key]) ? data[key] : {};
-  const campaignMap = readMap("campaign_sketch_id_to_snap_id");
-  const adMap = readMap("ad_sketch_id_to_snap_id");
-  const creativeMap = readMap("creative_sketch_id_to_snap_id");
-
-  const remapped = nonEmptyId(campaignMap[input.campaignSketchId]);
-  if (!remapped) {
-    throw new UnknownCreationStateError(
-      `snap/save_by_sketch 未返回系列 ${input.campaignSketchId} 的新 snap，已停止发布且禁止自动重试。`,
-    );
-  }
-  const publishItems = input.publishItems.map((item) => {
-    const adSnapId = nonEmptyId(adMap[item.ad_sketch_id]);
-    if (!adSnapId) {
-      throw new UnknownCreationStateError(
-        `snap/save_by_sketch 未返回广告组 ${item.ad_sketch_id} 的新 snap，已停止发布且禁止自动重试。`,
-      );
-    }
-    return {
-      ...item,
-      ad_snap_id: adSnapId,
-      creative_snap_info_list: item.creative_snap_info_list.map((creative) => {
-        const creativeSnapId = nonEmptyId(creativeMap[creative.creative_sketch_id]);
-        if (!creativeSnapId) {
-          throw new UnknownCreationStateError(
-            `snap/save_by_sketch 未返回广告 ${creative.creative_sketch_id} 的新 snap，已停止发布且禁止自动重试。`,
-          );
-        }
-        return { ...creative, creative_snap_id: creativeSnapId };
-      }),
-    };
-  });
-  return { campaignSnapId: remapped, publishItems };
-}
 
 function completedCreativeIds(payload: Record<string, unknown>): string[] {
   const data = isRecord(payload.data) ? payload.data : payload;
