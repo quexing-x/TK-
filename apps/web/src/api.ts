@@ -19,6 +19,8 @@ import type {
   MetricBatchRecord,
   DailyMetricRecord,
   EntityRangeMetricRecord,
+  ExpandClassification,
+  ExpandThresholds,
   ManagedEntityRecord,
   IgnoredEntityRecord,
   ManualStatusInput,
@@ -83,6 +85,21 @@ export interface ProviderDescriptor {
   implementationStatus: "scaffolded" | "available";
   capabilityVersion: string;
   capabilities: ProviderCapability[];
+}
+
+/**
+ * 扩组页分类接口的返回。
+ *
+ * computedAt 必须展示出来：转化是延迟回传的，同一天早晚两次算出来的分桶会不一样，
+ * 用户得知道自己看的是几点的账。
+ */
+export interface ExpandClassificationResponse {
+  computedAt: string;
+  coverageSince: string;
+  thresholds: ExpandThresholds;
+  expand: ExpandClassification[];
+  recreateCampaign: ExpandClassification[];
+  excluded: ExpandClassification[];
 }
 
 /** 一次扩组的落库记录。uncertain 表示写请求已发出但结果未知，禁止自动重试。 */
@@ -897,6 +914,26 @@ export const api = {
     if (entityType) query.set("entityType", entityType);
     return request<EntityRangeMetricRecord[]>(
       `/api/accounts/${accountId}/entity-metrics?${query.toString()}`,
+    );
+  },
+  /**
+   * 扩组页的系列分类：每条系列今天该照常扩组，还是该复制新系列重跑。
+   * 判据是自系列创建以来累计，服务端算好后直接给分桶。
+   */
+  getExpandClassification: (
+    accountId: string,
+    thresholds?: { maxCostPerConversion?: number; maxSpendWithoutConversion?: number },
+  ) => {
+    const query = new URLSearchParams();
+    if (thresholds?.maxCostPerConversion !== undefined) {
+      query.set("maxCostPerConversion", String(thresholds.maxCostPerConversion));
+    }
+    if (thresholds?.maxSpendWithoutConversion !== undefined) {
+      query.set("maxSpendWithoutConversion", String(thresholds.maxSpendWithoutConversion));
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request<ExpandClassificationResponse>(
+      `/api/accounts/${accountId}/expand-classification${suffix}`,
     );
   },
   /** 按自然日汇总的业务指标；批次接口只用于排查同步。 */

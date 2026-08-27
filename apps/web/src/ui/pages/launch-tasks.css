@@ -408,6 +408,29 @@
 }
 .expand-excluded-note svg { flex: none; margin-top: 2px; color: var(--ink-faint); }
 
+/* 系列判定汇总条。放在筛选器下方、列表上方，是进页面第一眼该看到的东西。 */
+.expand-verdict-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+}
+.expand-verdict-summary svg { flex: none; color: var(--ink-faint); }
+.expand-verdict-summary strong { color: var(--ink); font-weight: 600; }
+/* 计算时刻推到最右：转化延迟回传，用户得能确认自己看的是几点的账。 */
+.expand-verdict-summary small { margin-left: auto; flex: none; color: var(--ink-faint); }
+
+/* 所属系列被判为「需重扩」的行。只是提醒，不锁勾选，所以用底色而不是置灰。 */
+.expand-table tbody tr.expand-row-warn { background: var(--amber-tint, rgba(201, 133, 46, .08)); }
+.expand-table tbody tr.expand-row-warn.selected { background: var(--amber-tint, rgba(201, 133, 46, .16)); }
+
+.status.muted { color: var(--ink-faint); background: var(--surface-strong, rgba(120, 120, 120, .12)); }
+
 .expand-excluded-list {
   display: grid;
   border: 1px solid var(--line-strong);

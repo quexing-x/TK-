@@ -42,6 +42,9 @@ import {
   StatusManualVerificationInputSchema,
   WriteTaskStatusSchema,
   AuditLogFilterSchema,
+  DEFAULT_EXPAND_THRESHOLDS,
+  METRIC_RETENTION_DAYS,
+  classifyCampaignsForExpand,
   type AppPermission,
   type ProviderKind,
   type WriteTaskActor,
@@ -2137,6 +2140,71 @@ export async function createApp(
       query.entityType,
       until,
     );
+  });
+
+  /**
+   * 扩组页的分类：每条系列今天该照常扩组，还是该停下来复制新系列重跑。
+   *
+   * 判据是**自系列创建以来累计**，所以回看整个保留期而不是最近几天——窗口取短了会把
+   * 老系列的成绩截掉。实测同一条系列按 3 天窗口看是「单转 8.0 可扩」，按累计看是
+   * 「13.1 该重扩」，口径不能含糊。
+   *
+   * 返回 computedAt：转化是延迟回传的，同一天早上和下午算出来的分桶会不一样，界面必须
+   * 能告诉用户「你看的是几点的账」。
+   */
+  app.get("/api/accounts/:accountId/expand-classification", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    const query = z.object({
+      maxCostPerConversion: z.coerce.number().positive()
+        .default(DEFAULT_EXPAND_THRESHOLDS.maxCostPerConversion),
+      maxSpendWithoutConversion: z.coerce.number().nonnegative()
+        .default(DEFAULT_EXPAND_THRESHOLDS.maxSpendWithoutConversion),
+    }).parse(request.query);
+
+    const until = new Date().toISOString();
+    const since = new Date(
+      Date.now() - METRIC_RETENTION_DAYS * 24 * 60 * 60_000,
+    ).toISOString();
+    // listEntityRangeMetrics 按账户本地日取当日最后一个健康快照再跨日累加。这一步的
+    // 时区是关键：TikTok 报表按账户时区日切（实测该户 234 条系列全部在本地 00:00 归零），
+    // 拿 UTC 日分组会取到日切后几小时的近零值，花费与转化都会被严重少算。
+    const metrics = new Map(
+      dependencies.store
+        .listEntityRangeMetrics(accountId, account.providerKind, since, "campaign", until)
+        .map((row) => [row.externalId, row]),
+    );
+    // 必须走 listCurrentManagedEntities：listManagedEntities 不筛 is_current，会把
+    // 已经下线的系列一并带出来（实测生产账户 105 行里有 1 行是陈旧的），那些系列在
+    // 账户里已经不存在，却会顶着历史累计出现在判定结果里。
+    const campaigns = dependencies.store
+      .listCurrentManagedEntities(accountId, account.providerKind)
+      .filter((entity) => entity.entityType === "campaign")
+      .map((entity) => {
+        const metric = metrics.get(entity.externalId);
+        return {
+          externalId: entity.externalId,
+          name: entity.name,
+          status: entity.status,
+          // 快照里没有这条系列时按零处理：它要么刚建、要么已超出保留期，两种都不该
+          // 凭空得到一个成绩。
+          spend: metric?.spend ?? 0,
+          conversions: metric?.conversions ?? 0,
+          days: metric?.days ?? 0,
+        };
+      });
+
+    const thresholds = {
+      maxCostPerConversion: query.maxCostPerConversion,
+      maxSpendWithoutConversion: query.maxSpendWithoutConversion,
+    };
+    return reply.send({
+      computedAt: until,
+      coverageSince: since,
+      thresholds,
+      ...classifyCampaignsForExpand(campaigns, thresholds),
+    });
   });
 
   app.post(
