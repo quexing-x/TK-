@@ -103,6 +103,15 @@ export const LaunchCreationEvidenceSchema = z.object({
    * 只存请求体，不存请求头——Cookie 与鉴权信息一律不落库。
    */
   sentRequests: z.array(LaunchSentRequestSchema).nullable().default(null),
+  /**
+   * 发布前那四步检查里失败的步骤名。
+   *
+   * 它们是「让草稿变得可发布」的一环（8/8 的记录：草稿本身是好的，手动打开广告组
+   * 页面等它加载完再点发布就能成功——打开页面做的就是这几件事）。此前它们是
+   * best-effort 且错误被 catch 吞掉，失败时发布照常发出去，再被 TikTok 以
+   * automation 自相矛盾拒掉，而现场什么都不剩。
+   */
+  advisoryFailures: z.array(z.string()).nullable().default(null),
 });
 export type LaunchCreationEvidence = z.infer<typeof LaunchCreationEvidenceSchema>;
 
