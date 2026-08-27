@@ -2054,6 +2054,7 @@ describe("CookieAdsProvider", () => {
       creativeSketchId: null,
       asyncRequestId: null,
       sentRequests: null,
+      advisoryFailures: null,
     };
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
@@ -2099,6 +2100,7 @@ describe("CookieAdsProvider", () => {
       creativeSketchId: null,
       asyncRequestId: null,
       sentRequests: null,
+      advisoryFailures: null,
     };
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
@@ -2616,6 +2618,46 @@ describe("CookieAdsProvider", () => {
     const serialized = JSON.stringify(sent);
     expect(serialized).not.toContain("Cookie");
     expect(serialized).not.toContain("sessionid");
+  });
+
+  it("发布前的检查步骤进留证；失败时不再静默消失", async () => {
+    // 这四步（cbo_consistency_check / campaign_snap/check / ad_creative_snap/check /
+    // batch_create_cta_id）是让草稿变得可发布的一环——8/8 的记录写着「草稿本身是好的，
+    // 手动打开广告组页面等它加载完再点发布就能成功」，打开页面做的就是这几件事。
+    // 此前它们不带 dispatchState（不进留证）且错误被 catch 吞掉，于是任何一步失败
+    // 都表现成发布时的 automation 自相矛盾，现场却什么都不剩。
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("ad_creative_snap/check")) {
+        return new Response(JSON.stringify({ code: 40001, message: "check rejected" }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(successfulCreationPayload(url)), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }));
+
+    const progress: LaunchCreationProgress[] = [];
+    const mutation = creationTestMutation("none");
+    mutation.onProgress = (item) => progress.push(item);
+    await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+
+    // 失败的那一步被点名报出来。
+    const failures = progress.flatMap((item) => item.evidence.advisoryFailures ?? []);
+    expect(failures).toContain("ad_creative_snap/check");
+    // 四步全部进留证，而不是只在发布报文里留个结果。
+    const steps = progress.flatMap((item) => item.evidence.sentRequests ?? []).map((s) => s.step);
+    // campaign_snap/check 只在还没拿到 fake_campaign_id 时才跑，不是每次都有，故不断言。
+    for (const step of [
+      "snap/cbo_consistency_check",
+      "ad_creative_snap/check",
+      "snap/batch_create_cta_id",
+    ]) {
+      expect(steps, `${step} 不在留证里，实际：${steps.join(", ")}`).toContain(step);
+    }
+    // 它们必须排在发布之前——发布之后再对账没有意义。
+    expect(steps.indexOf("ad_creative_snap/check")).toBeLessThan(steps.indexOf("create_by_snap"));
   });
 
   it("留证按上限截断，不让一条超长报文撑爆库", () => {

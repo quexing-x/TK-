@@ -3299,14 +3299,22 @@ async function runCookieDraftBatch(
     // 连带把 sketch_publish_source 改成 2，而真机恒为 1——等于用另一套发布语义提交。
     const publishCampaignSnapId = first.campaignSnapId;
     const publishList = publishItems;
-    await runAdvisoryDraftSequence(sessionRequest, credential, {
+    const advisoryFailures = await runAdvisoryDraftSequence(sessionRequest, credential, {
       ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
       campaignSnapId: publishCampaignSnapId,
       campaignSketchId: first.campaignSketchId,
       publishItems: publishList,
       ...(first.checkedFakeCampaignId ? { fakeCampaignId: first.checkedFakeCampaignId } : {}),
       riskInfo: first.riskInfo,
-    });
+    }, combinedDispatchState);
+    if (advisoryFailures.length > 0) {
+      for (const item of prepared) {
+        item.mutation.onProgress?.({
+          phase: "publishing",
+          evidence: { advisoryFailures },
+        });
+      }
+    }
     const publishPayload = credential.creationProfile
       ? materializePublishProfile(credential.creationProfile.publishPayload, {
           ...(first.existingCampaignId ? { campaignId: first.existingCampaignId } : {}),
@@ -4496,14 +4504,17 @@ async function runCookieDraftChain(
   // an already formal campaign; using it for a new campaign produces false
   // age, bidding, and automation inconsistency errors at publish time.
   publishPayload.is_partial_publish = Boolean(existingCampaignId);
-  await runAdvisoryDraftSequence(sessionRequest, credential, {
+  const advisoryFailures = await runAdvisoryDraftSequence(sessionRequest, credential, {
     ...(existingCampaignId ? { campaignId: existingCampaignId } : {}),
     campaignSnapId: publishCampaignSnapId, campaignSketchId, publishItems,
     ...(checkedFakeCampaignId ? { fakeCampaignId: checkedFakeCampaignId } : {}),
     riskInfo: credential.creationProfile && isRecord(credential.creationProfile.publishPayload.risk_info)
       ? credential.creationProfile.publishPayload.risk_info
       : {},
-  });
+  }, dispatchState);
+  if (advisoryFailures.length > 0) {
+    mutation.onProgress?.({ phase: "publishing", evidence: { advisoryFailures } });
+  }
   let published: Record<string, unknown>;
   mutation.onProgress?.({ phase: "publishing", evidence: {} });
   try {
@@ -4621,7 +4632,17 @@ async function runAdvisoryDraftSequence(
     publishItems: DraftPublishItem[];
     riskInfo: Record<string, unknown>;
   },
-): Promise<void> {
+  /** 带上它，这四步才会进留证；不带则沿用旧行为（不记录）。 */
+  dispatchState?: CreationDispatchState,
+): Promise<string[]> {
+  // 失败的步骤名。返回给调用方，让它跟着结果一起浮出来——这四步是「让草稿变得
+  // 可发布」的一环，静默失败会表现成发布时的 automation 自相矛盾，现场却什么都不剩。
+  const failed: string[] = [];
+  const boundary: CreationRequestBoundary = dispatchState
+    ? { semantics: "support", dispatchState }
+    : {};
+  const note = (step: string) => failed.push(step);
+
   const adSnapIds = ids.publishItems.map((item) => item.ad_snap_id);
   let fakeCampaignId = ids.fakeCampaignId ?? "";
   if (!ids.campaignId) {
@@ -4631,12 +4652,12 @@ async function runAdvisoryDraftSequence(
         adgroup_snap_ids: adSnapIds,
         ad_snap_ids: adSnapIds,
         is_budget_split_test: false,
-      }), credential);
+      }), credential, boundary, note);
     if (!fakeCampaignId) {
       const campaignCheck = await requestAdvisoryCreationStep("campaign_snap/check",
         () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
           campaign_snap_id: ids.campaignSnapId,
-        }), credential);
+        }), credential, boundary, note);
       const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
       fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
     }
@@ -4652,13 +4673,14 @@ async function runAdvisoryDraftSequence(
       fake_campaign_id: fakeCampaignId,
       ad_creative_snap_check_info: checkInfo,
       risk_info: ids.riskInfo,
-    }), credential);
+    }), credential, boundary, note);
   await requestAdvisoryCreationStep("snap/batch_create_cta_id",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
       campaign_id: ids.campaignId ?? "",
       campaign_snap_id: ids.campaignSnapId,
       ad_and_creative_snap_info_list: checkInfo,
-    }), credential);
+    }), credential, boundary, note);
+  return failed;
 }
 
 async function awaitCreationResult(
@@ -7556,10 +7578,20 @@ async function requestAdvisoryCreationStep(
   createRequest: () => CapturedCookieRequest,
   credential: ParsedCookieCredential,
   boundary: CreationRequestBoundary = {},
+  /** 步骤失败时的去处。不给就仍然静默——但发布前那四步必须给。 */
+  onFailure?: (step: string, cause: unknown) => void,
 ): Promise<Record<string, unknown> | undefined> {
   try {
     return await requestCreationStep(step, createRequest, credential, boundary);
-  } catch {
+  } catch (cause) {
+    // 「advisory」的本意是「失败也不该拦住发布」，但此前连**失败发生过**这件事都
+    // 不留痕：不带 dispatchState 所以不进留证，catch 里又直接吞掉。
+    // 发布前那四步（cbo_consistency_check / campaign_snap/check /
+    // ad_creative_snap/check / batch_create_cta_id）正是让草稿变得可发布的一环——
+    // 8/8 的记录写着「草稿本身是好的，手动打开广告组页面等它加载完再点发布就能成功」，
+    // 打开页面做的就是这几件事。它们静默失败时，发布照常发出去，然后被 TikTok 以
+    // uaa_campaign_automation_inconsistent_error 拒掉，而现场什么都不剩。
+    onFailure?.(step, cause);
     return undefined;
   }
 }
