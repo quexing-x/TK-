@@ -3300,6 +3300,49 @@ describe("AutomationStore", () => {
     ]);
   });
 
+  it("把实际发出的请求体一路留到失败的那次尝试上", () => {
+    // 创建失败时以前只留一串 snap/sketch id，报文长什么样全靠猜，于是同一个
+    // uaa_campaign_automation_inconsistent_error 反复修了一个多月都没治好。
+    // 报文必须活到「失败记录」里——只活在内存里等于没留。
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    });
+    const pending = store.listLaunchPlanItems(plan.id)[0]!;
+    store.claimLaunchPlanItem(pending.itemId, "executor-a", "pending");
+
+    const sentRequests = [
+      { step: "campaign_snap/save", body: JSON.stringify({ campaign_name: "系列" }) },
+      { step: "creative_snap/save", body: JSON.stringify({ spc_upgrade_mode: 1 }) },
+    ];
+    store.updateLaunchPlanItemProgress(pending.itemId, "executor-a", {
+      phase: "creative_draft",
+      evidence: { sentRequests },
+    });
+    // 后续阶段只带自己的字段，不能把报文冲掉——合并是整体 spread，这条断言守住它。
+    store.updateLaunchPlanItemProgress(pending.itemId, "executor-a", {
+      phase: "publishing",
+      evidence: { asyncRequestId: "async-1" },
+    });
+    store.completeLaunchPlanItemFailure(pending.itemId, "executor-a", "uaa_campaign_automation_inconsistent_error");
+
+    const item = store.listLaunchPlanItems(plan.id)[0]!;
+    expect(item.evidence).toMatchObject({ sentRequests, asyncRequestId: "async-1" });
+    const [attempt] = store.listLaunchPlanItemAttempts(pending.itemId);
+    expect(attempt).toMatchObject({
+      status: "failed",
+      evidence: expect.objectContaining({ sentRequests }),
+    });
+    // 存的是报文原文，拿出来要能直接解析出字段来比对。
+    const creative = (attempt!.evidence as { sentRequests: Array<{ step: string; body: string }> })
+      .sentRequests.find((entry) => entry.step === "creative_snap/save");
+    expect(JSON.parse(creative!.body)).toEqual({ spc_upgrade_mode: 1 });
+  });
+
   it("rolls back the item terminal state when attempt persistence fails", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",

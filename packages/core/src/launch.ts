@@ -69,6 +69,19 @@ export const LaunchCreationPhaseSchema = z.enum([
 ]);
 export type LaunchCreationPhase = z.infer<typeof LaunchCreationPhaseSchema>;
 
+/** 单条创建请求的留证：步骤名 + 实际发出的请求体。 */
+export const LaunchSentRequestSchema = z.object({
+  step: z.string().min(1),
+  /** 请求体原文（JSON 字符串）。超长会被截断，末尾标注截断量。 */
+  body: z.string(),
+});
+export type LaunchSentRequest = z.infer<typeof LaunchSentRequestSchema>;
+
+/** 单条请求体留证的上限；超出截断。够放下创意报文（真机约 110 字段）而不撑爆库。 */
+export const SENT_REQUEST_BODY_LIMIT = 24_000;
+/** 一次创建最多留几条请求。创建链路约 10 步，留 40 条足够覆盖重试。 */
+export const SENT_REQUEST_MAX_ENTRIES = 40;
+
 export const LaunchCreationEvidenceSchema = z.object({
   resolvedAdGroupName: z.string().min(1).nullable().default(null),
   providerRequestId: z.string().min(1).nullable().default(null),
@@ -79,6 +92,17 @@ export const LaunchCreationEvidenceSchema = z.object({
   creativeSnapId: z.string().min(1).nullable().default(null),
   creativeSketchId: z.string().min(1).nullable().default(null),
   asyncRequestId: z.string().min(1).nullable().default(null),
+  /**
+   * 实际发出的创建请求体。
+   *
+   * 没有它，创建失败时唯一能看的只有一串 snap/sketch ID——报文长什么样全靠猜。
+   * TikTok 的 `uaa_campaign_automation_inconsistent_error` 只说「这堆 automation
+   * 字段互相矛盾」，不说哪个字段错；从 08-07 起为它打过的补丁每次都是猜，每次没治好。
+   * 留下报文，下次就能直接和真机抓包逐字段对，而不是再猜一轮。
+   *
+   * 只存请求体，不存请求头——Cookie 与鉴权信息一律不落库。
+   */
+  sentRequests: z.array(LaunchSentRequestSchema).nullable().default(null),
 });
 export type LaunchCreationEvidence = z.infer<typeof LaunchCreationEvidenceSchema>;
 
