@@ -1,0 +1,210 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AutomationStore } from "@tk-auto/storage";
+import { InMemoryCredentialVault } from "@tk-auto/credentials";
+import type { FastifyInstance } from "fastify";
+import { createApp } from "./app.js";
+
+function syncQuality(finishedAt: string) {
+  return {
+    status: "healthy" as const,
+    paginationComplete: true,
+    requiredMetricsComplete: true,
+    contractValid: true,
+    providerContractVersion: "test-v1",
+    coverage: { startDate: "2026-08-25", endDate: "2026-08-26", timezone: "Asia/Shanghai" },
+    missingMetrics: [],
+    partialFailures: [],
+    lastHealthyAt: finishedAt,
+  };
+}
+
+interface SeedCampaign {
+  externalId: string;
+  name: string;
+  /** 省略即视为投放中。仓库开了 exactOptionalPropertyTypes，显式写出 undefined。 */
+  enabled?: boolean | undefined;
+  spend: number;
+  conversions: number;
+}
+
+describe("扩组分类接口", () => {
+  let store: AutomationStore;
+  let app: FastifyInstance;
+  let vault: InMemoryCredentialVault;
+
+  // demo-account 的时区是 Asia/Shanghai，TikTok 报表按账户本地日日切（本地 00:00 =
+  // UTC 16:00）。这两个时刻刻意落在**不同的上海日**、且都在上海日切之后，这样两轮
+  // 快照才会被算成两天分别累加；挑成同一上海日的话累计只会取到后一条。
+  const DAY_ONE = "2026-08-25T02:00:00.000Z"; // 上海 08-25 10:00
+  const DAY_TWO = "2026-08-26T02:00:00.000Z"; // 上海 08-26 10:00
+
+  function seedDay(finishedAt: string, campaigns: SeedCampaign[]) {
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      campaigns.map((campaign) => ({
+        entityType: "campaign" as const,
+        externalId: campaign.externalId,
+        payload: {
+          campaign_name: campaign.name,
+          campaign_primary_status: campaign.enabled === false ? "disable" : "enable",
+          stat_cost: String(campaign.spend),
+          time_attr_convert_cnt: String(campaign.conversions),
+        },
+      })),
+      {
+        startedAt: finishedAt,
+        finishedAt,
+        counts: { campaign: campaigns.length, "ad-group": 0, ad: 0, material: 0 },
+        warnings: [],
+        quality: syncQuality(finishedAt),
+      },
+    );
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T06:00:00.000Z"));
+    store = new AutomationStore(":memory:");
+    store.seed();
+    vault = new InMemoryCredentialVault();
+    app = await createApp({ store, vault, disableAuth: true });
+  });
+
+  afterEach(async () => {
+    await app.close();
+    vi.useRealTimers();
+  });
+
+  async function classify(query = "") {
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/accounts/demo-account/expand-classification${query}`,
+    });
+    expect(response.statusCode).toBe(200);
+    return response.json() as {
+      computedAt: string;
+      thresholds: { maxCostPerConversion: number; maxSpendWithoutConversion: number };
+      expand: Array<{ externalId: string; reason: string; spend: number; conversions: number; costPerConversion: number | null }>;
+      recreateCampaign: Array<{ externalId: string; reason: string; spend: number; conversions: number }>;
+      excluded: Array<{ externalId: string; reason: string }>;
+    };
+  }
+
+  it("按自创建以来累计判定，并分成三桶", async () => {
+    const day = (spendOne: number, convOne: number, spendTwo: number, convTwo: number) =>
+      [spendOne, convOne, spendTwo, convTwo] as const;
+    const plan: Array<[string, string, ReturnType<typeof day>, boolean?]> = [
+      // 累计 24 / 3 转 -> 单转 8，达标
+      ["camp-ok", "达标系列", day(10, 1, 14, 2)],
+      // 累计 30 / 1 转 -> 单转 30，超标
+      ["camp-high", "单转超标系列", day(10, 0, 20, 1)],
+      // 累计 5 / 0 转 -> 超过零转化上限 3
+      ["camp-zero-over", "零转化花超系列", day(2, 0, 3, 0)],
+      // 累计 2 / 0 转 -> 还在观察期
+      ["camp-zero-observe", "零转化观察系列", day(1, 0, 1, 0)],
+      // 已关停：花得再多也不判，因为没有可做的动作
+      ["camp-off", "已关停系列", day(50, 0, 50, 0), false],
+      ["camp-diagnostic", "诊断0823E-选25到34", day(9, 0, 9, 0)],
+    ];
+
+    for (const [index, finishedAt] of [DAY_ONE, DAY_TWO].entries()) {
+      seedDay(finishedAt, plan.map(([externalId, name, values, enabled]) => ({
+        externalId,
+        name,
+        enabled,
+        spend: index === 0 ? values[0] : values[2],
+        conversions: index === 0 ? values[1] : values[3],
+      })));
+    }
+
+    const body = await classify();
+
+    expect(body.expand.map((item) => item.externalId)).toEqual([
+      "camp-ok",
+      "camp-zero-observe",
+    ]);
+    expect(body.recreateCampaign.map((item) => item.externalId)).toEqual([
+      "camp-high",
+      "camp-zero-over",
+    ]);
+    expect(body.excluded.map((item) => item.externalId).sort()).toEqual([
+      "camp-diagnostic",
+      "camp-off",
+    ]);
+
+    // 累计确实是两天相加，不是只取最后一天。
+    const ok = body.expand.find((item) => item.externalId === "camp-ok");
+    expect(ok?.spend).toBeCloseTo(24, 5);
+    expect(ok?.conversions).toBe(3);
+    expect(ok?.costPerConversion).toBeCloseTo(8, 5);
+    expect(ok?.reason).toBe("cost-per-conversion-ok");
+
+    expect(body.recreateCampaign.find((item) => item.externalId === "camp-high")?.reason)
+      .toBe("cost-per-conversion-high");
+    expect(body.recreateCampaign.find((item) => item.externalId === "camp-zero-over")?.reason)
+      .toBe("no-conversion-overspent");
+    expect(body.excluded.find((item) => item.externalId === "camp-off")?.reason)
+      .toBe("not-enabled");
+    expect(body.excluded.find((item) => item.externalId === "camp-diagnostic")?.reason)
+      .toBe("non-operational");
+  });
+
+  it("默认阈值是 12 / 3，可由查询参数覆盖", async () => {
+    seedDay(DAY_TWO, [
+      { externalId: "camp-ten", name: "单转十块", spend: 10, conversions: 1 },
+      { externalId: "camp-two", name: "零转化两块", spend: 2, conversions: 0 },
+    ]);
+
+    const relaxed = await classify();
+    expect(relaxed.thresholds).toEqual({
+      maxCostPerConversion: 12,
+      maxSpendWithoutConversion: 3,
+    });
+    expect(relaxed.expand.map((item) => item.externalId).sort())
+      .toEqual(["camp-ten", "camp-two"]);
+
+    const strict = await classify("?maxCostPerConversion=8&maxSpendWithoutConversion=1");
+    expect(strict.thresholds).toEqual({
+      maxCostPerConversion: 8,
+      maxSpendWithoutConversion: 1,
+    });
+    expect(strict.expand).toHaveLength(0);
+    expect(strict.recreateCampaign.map((item) => item.externalId).sort())
+      .toEqual(["camp-ten", "camp-two"]);
+  });
+
+  // 转化是延迟回传的，同一天早晚两次算出来的分桶会不一样。界面必须能说清「你看的
+  // 是几点的账」，否则用户没法判断该不该信。
+  it("返回计算时刻", async () => {
+    seedDay(DAY_TWO, [{ externalId: "camp", name: "系列", spend: 1, conversions: 0 }]);
+    expect((await classify()).computedAt).toBe("2026-08-26T06:00:00.000Z");
+  });
+
+  // listManagedEntities 不筛 is_current，用它会把已经下线的系列顶着历史累计带进判定
+  // 结果。这类系列在账户里已经不存在，扩不扩都无从谈起，出现在名单上只会误导。
+  it("已下线的系列不出现在判定结果里", async () => {
+    seedDay(DAY_ONE, [
+      { externalId: "camp-live", name: "还在的系列", spend: 24, conversions: 3 },
+      { externalId: "camp-gone", name: "已下线的系列", spend: 40, conversions: 0 },
+    ]);
+    // 后一轮同步不再返回 camp-gone，它会被置为 is_current = 0。
+    seedDay(DAY_TWO, [
+      { externalId: "camp-live", name: "还在的系列", spend: 0, conversions: 0 },
+    ]);
+
+    const body = await classify();
+    const everyId = [...body.expand, ...body.recreateCampaign, ...body.excluded]
+      .map((item) => item.externalId);
+    expect(everyId).toContain("camp-live");
+    expect(everyId).not.toContain("camp-gone");
+  });
+
+  it("账号不存在时返回 404", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/accounts/not-there/expand-classification",
+    });
+    expect(response.statusCode).toBe(404);
+  });
+});

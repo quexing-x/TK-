@@ -17,14 +17,18 @@ import {
   formatCampaignBudgetAmount,
   mapWithConcurrency,
   normalizeProviderEntity,
+  SENT_REQUEST_BODY_LIMIT,
+  SENT_REQUEST_MAX_ENTRIES,
   type CapturedCookieRequest,
   type DraftSketchEntry,
   type DraftSketchPublishItem,
   type ProviderEntity,
   type SketchSnapMapping,
   type SyncEntityType,
+  type LaunchCreationProgress,
   type LaunchOriginalPost,
   type LaunchProductInfo,
+  type LaunchSentRequest,
 } from "@tk-auto/core";
 import type {
   AdsProvider,
@@ -2984,6 +2988,12 @@ interface CookieCreationBaseline {
   creativeSketchRows: Record<string, unknown>[];
 }
 
+/**
+ * 批量创建的外壳：只负责给整批攒请求体留证，然后无论成败都交出去。
+ *
+ * 留证放在这一层而不是逐个 return 点，是因为批量路径有七八个提前返回的分支，
+ * 逐个补必然漏掉一两个——而漏掉的那个多半就是下次要查的那个。
+ */
 async function createCookieDraftBatch(
   sessionRequest: CapturedCookieRequest,
   campaignObjectRequest: CapturedCookieRequest,
@@ -2991,6 +3001,46 @@ async function createCookieDraftBatch(
   mutations: CreationMutation[],
   timezone: string,
   batchReservation: CookieDraftReservation,
+): Promise<CreationMutationResult[]> {
+  const recorder = createSentRequestRecorder();
+  let lastPhase: LaunchCreationProgress["phase"] = "validation";
+  const tracked = mutations.map((mutation): CreationMutation => ({
+    ...mutation,
+    onProgress: (progress) => {
+      lastPhase = progress.phase;
+      mutation.onProgress?.(progress);
+    },
+  }));
+  try {
+    return await runCookieDraftBatch(
+      sessionRequest,
+      campaignObjectRequest,
+      credential,
+      tracked,
+      timezone,
+      batchReservation,
+      recorder,
+    );
+  } finally {
+    const sentRequests = recorder.drain();
+    if (sentRequests.length > 0) {
+      // 整批共用同一份报文（一个系列草稿带 N 个广告组），逐条都交一份，
+      // 这样任何一条失败记录单独拿出来都是自洽的。
+      for (const mutation of mutations) {
+        mutation.onProgress?.({ phase: lastPhase, evidence: { sentRequests } });
+      }
+    }
+  }
+}
+
+async function runCookieDraftBatch(
+  sessionRequest: CapturedCookieRequest,
+  campaignObjectRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  mutations: CreationMutation[],
+  timezone: string,
+  batchReservation: CookieDraftReservation,
+  recorder: ReturnType<typeof createSentRequestRecorder>,
 ): Promise<CreationMutationResult[]> {
   const batchState: CookieDraftBatchState = {
     ...(batchReservation.campaignId ? { campaignId: batchReservation.campaignId } : {}),
@@ -3013,6 +3063,7 @@ async function createCookieDraftBatch(
   const preflightDispatchState: CreationDispatchState = {
     mutationDispatched: false,
     acceptedMutationCount: 0,
+    recordRequest: recorder.record,
   };
   try {
     for (const mutation of mutations) assertStaticCreationMutation(credential, mutation);
@@ -3147,6 +3198,7 @@ async function createCookieDraftBatch(
     const dispatchState: CreationDispatchState = {
       mutationDispatched: false,
       acceptedMutationCount: 0,
+      recordRequest: recorder.record,
       ...(mutation.onBeforeDispatch
         ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
         : {}),
@@ -3182,6 +3234,7 @@ async function createCookieDraftBatch(
     const dispatchState: CreationDispatchState = {
       mutationDispatched: false,
       acceptedMutationCount: 0,
+      recordRequest: recorder.record,
       ...(mutation.onBeforeDispatch
         ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
         : {}),
@@ -3226,6 +3279,7 @@ async function createCookieDraftBatch(
       (total, item) => total + item.dispatchState.acceptedMutationCount,
       0,
     ),
+    recordRequest: recorder.record,
     onBeforeMutationDispatch: () => {
       for (const item of prepared) item.dispatchState.onBeforeMutationDispatch?.();
     },
@@ -3861,24 +3915,50 @@ async function createCookieDraftChain(
   timezone: string,
   batchReservation?: CookieDraftReservation,
 ): Promise<CreationMutationResult> {
+  const recorder = createSentRequestRecorder();
   const dispatchState: CreationDispatchState = {
     mutationDispatched: false,
     acceptedMutationCount: 0,
+    recordRequest: recorder.record,
     ...(mutation.onBeforeDispatch
       ? { onBeforeMutationDispatch: mutation.onBeforeDispatch }
       : {}),
   };
+  // 记住最后一次上报的阶段，交报文时沿用它——留证本身不是一个新阶段，
+  // 凭空造一个会让任务列表里多出一格看不懂的进度。
+  let lastPhase: LaunchCreationProgress["phase"] = "validation";
+  const tracked: CreationMutation = {
+    ...mutation,
+    onProgress: (progress) => {
+      lastPhase = progress.phase;
+      mutation.onProgress?.(progress);
+    },
+  };
+  /**
+   * 把攒下的请求体交出去。
+   *
+   * 成功和失败都交：失败时是为了定位，成功时是为了留一份「这样发是能过的」的样本，
+   * 下次出问题可以直接和它对，而不必再等一份真机抓包。
+   */
+  const flushSentRequests = () => {
+    const sentRequests = recorder.drain();
+    if (sentRequests.length === 0) return;
+    mutation.onProgress?.({ phase: lastPhase, evidence: { sentRequests } });
+  };
   try {
-    return await runCookieDraftChain(
+    const result = await runCookieDraftChain(
       sessionRequest,
       campaignObjectRequest,
       credential,
-      mutation,
+      tracked,
       timezone,
       dispatchState,
       batchReservation,
     );
+    flushSentRequests();
+    return result;
   } catch (cause) {
+    flushSentRequests();
     if (cause instanceof ConfirmedCreationFailureError) {
       throw dispatchState.acceptedMutationCount > 0
         ? new ConfirmedCreationFailureError(cause.message, false)
@@ -5809,6 +5889,37 @@ interface CreationDispatchState {
   mutationDispatched: boolean;
   acceptedMutationCount: number;
   onBeforeMutationDispatch?: () => void;
+  /**
+   * 记录实际发出的请求体，供失败后与真机抓包逐字段比对。
+   *
+   * 挂在 dispatchState 上而不是 boundary 上是有意的：真正需要留证的是 mutation
+   * （campaign_snap/save、ad_snap/save、creative_snap/save、create_by_snap），
+   * 而它们恰好都带 dispatchState；只读预检不带，也不需要留。
+   */
+  recordRequest?: (step: string, body: string | undefined) => void;
+}
+
+/**
+ * 攒一次创建过程中发出的请求体。
+ *
+ * 只收请求体，**不碰请求头**——Cookie 与鉴权信息一律不落库。
+ */
+export function createSentRequestRecorder(): {
+  record: (step: string, body: string | undefined) => void;
+  drain: () => LaunchSentRequest[];
+} {
+  const entries: LaunchSentRequest[] = [];
+  return {
+    record(step, body) {
+      if (body === undefined) return;
+      if (entries.length >= SENT_REQUEST_MAX_ENTRIES) return;
+      const trimmed = body.length > SENT_REQUEST_BODY_LIMIT
+        ? `${body.slice(0, SENT_REQUEST_BODY_LIMIT)}…[已截断 ${body.length - SENT_REQUEST_BODY_LIMIT} 字符]`
+        : body;
+      entries.push({ step, body: trimmed });
+    },
+    drain: () => entries.slice(),
+  };
 }
 
 interface CreationRequestBoundary {
@@ -5837,6 +5948,10 @@ async function requestCreationStep(
       step,
     );
   }
+
+  // 在发出之前记录：请求发出去之后再记，一旦 fetch 抛异常就什么都留不下，
+  // 而那恰恰是最需要看报文的时候。
+  boundary.dispatchState?.recordRequest?.(step, request.body);
 
   try {
     return await requestDispatchedCreationJson(request, credential, boundary);

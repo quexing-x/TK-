@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CookieAdsProvider, resolveTemplateCampaignId } from "./cookie-provider.js";
+import {
+  CookieAdsProvider,
+  createSentRequestRecorder,
+  resolveTemplateCampaignId,
+} from "./cookie-provider.js";
+import {
+  SENT_REQUEST_BODY_LIMIT,
+  SENT_REQUEST_MAX_ENTRIES,
+  type LaunchCreationProgress,
+} from "@tk-auto/core";
 import type { CreationMutation, ProviderContext } from "./types.js";
 import { parseMultipartFields } from "./multipart.js";
 
@@ -2044,6 +2053,7 @@ describe("CookieAdsProvider", () => {
       creativeSnapId: null,
       creativeSketchId: null,
       asyncRequestId: null,
+      sentRequests: null,
     };
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
@@ -2088,6 +2098,7 @@ describe("CookieAdsProvider", () => {
       creativeSnapId: null,
       creativeSketchId: null,
       asyncRequestId: null,
+      sentRequests: null,
     };
 
     const [result] = await new CookieAdsProvider().createFromPreset!(
@@ -2580,6 +2591,70 @@ describe("CookieAdsProvider", () => {
     expect(result?.message).toContain("自动优化设置与系列不一致，请检查后重试");
     // 定位用的上下文仍然保留，但不再把原因挤出去。
     expect(result?.message).toContain("1874228203604017");
+  });
+
+  it("创建失败时留下实际发出的请求体，供与真机抓包逐字段比对", async () => {
+    // 这条是「为什么改了无数次还是解决不掉」的解药。uaa_campaign_automation_inconsistent_error
+    // 只说「这堆 automation 字段互相矛盾」，不说哪个字段错；此前失败记录里只有一串
+    // snap/sketch id，报文长什么样全靠猜，于是每次补丁都是猜、每次都没治好。
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const payload = url.includes("async_creation/detail")
+        ? { code: 0, data: { status: 1, result: {
+            campaign_name: "campaign",
+            operation: 5,
+            ad_and_creative: { 0: {
+              ad_name: "campaign",
+              is_success: false,
+              ad_error_items: [{
+                starling_key: "uaa_campaign_automation_inconsistent_error",
+                message: "自动优化设置与系列不一致，请检查后重试",
+              }],
+            } },
+          } } }
+        : successfulCreationPayload(url);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+
+    const progress: LaunchCreationProgress[] = [];
+    const mutation = creationTestMutation("none");
+    mutation.onProgress = (item) => progress.push(item);
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false),
+      [mutation],
+    );
+    expect(result?.ok).toBe(false);
+
+    const sent = progress.flatMap((item) => item.evidence.sentRequests ?? []);
+    expect(sent.length).toBeGreaterThan(0);
+    // 创意报文是 automation 元组的争议现场，必须在留证里。
+    const creative = sent.find((item) => item.step.includes("creative_snap/save"));
+    expect(creative, `留证里没有创意报文，实际步骤：${sent.map((s) => s.step).join(", ")}`)
+      .toBeDefined();
+    // 留的是报文原文，不是摘要——能直接 JSON.parse 出字段来比对才算数。
+    const body = JSON.parse(creative!.body) as Record<string, unknown>;
+    expect(Object.keys(body).length).toBeGreaterThan(0);
+
+    // 绝不落库请求头：Cookie 与鉴权信息不能出现在留证里。
+    const serialized = JSON.stringify(sent);
+    expect(serialized).not.toContain("Cookie");
+    expect(serialized).not.toContain("sessionid");
+  });
+
+  it("留证按上限截断，不让一条超长报文撑爆库", () => {
+    const recorder = createSentRequestRecorder();
+    recorder.record("huge", "x".repeat(SENT_REQUEST_BODY_LIMIT + 5_000));
+    for (let index = 0; index < SENT_REQUEST_MAX_ENTRIES + 10; index += 1) {
+      recorder.record(`step-${index}`, "{}");
+    }
+    const entries = recorder.drain();
+    expect(entries.length).toBe(SENT_REQUEST_MAX_ENTRIES);
+    expect(entries[0]?.body.length).toBeLessThan(SENT_REQUEST_BODY_LIMIT + 100);
+    expect(entries[0]?.body).toContain("已截断 5000 字符");
+    // undefined 请求体（GET）不占额度。
+    const empty = createSentRequestRecorder();
+    empty.record("get-step", undefined);
+    expect(empty.drain()).toHaveLength(0);
   });
 
   it("授权码分批查询，不再一次性把整批码塞进一个请求", async () => {

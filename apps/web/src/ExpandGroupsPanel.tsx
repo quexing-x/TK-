@@ -5,11 +5,12 @@ import { DRAFT_CLEANUP_MIN_AGE_HOURS, withinExpandScope, type ExpandScope } from
 import type {
   AccountConfig,
   AccountProviderCapabilities,
+  ExpandClassification,
   ManagedEntityRecord,
   ProviderConnection,
   ReadOnlySyncResult,
 } from "@tk-auto/core";
-import { api, type AdGroupExpandTask } from "./api";
+import { api, type AdGroupExpandTask, type ExpandClassificationResponse } from "./api";
 import { accountAccessStatus } from "./provider-capability-view";
 import { useOverlays } from "./ui/overlays";
 
@@ -23,6 +24,37 @@ type ConnectionState = {
 
 type ConversionFilter = "all" | "has" | "none";
 type StatusFilter = "all" | "enabled" | "disabled";
+/**
+ * 按所属系列的扩组判定过滤。默认 `expand`——每天开这个页面就是来挑今天能扩的，
+ * 默认摊开全部等于让人自己在几十条里挑，判定就白做了。切到 `all` 随时能看全。
+ */
+type VerdictFilter = "all" | "expand" | "recreate";
+
+/** 判定文案集中在这里，表头、徽标、汇总条共用一套说法，避免三处各叫各的。 */
+export const VERDICT_LABELS: Record<string, { short: string; tone: string; hint: string }> = {
+  "cost-per-conversion-ok": { short: "可扩", tone: "active", hint: "单转达标" },
+  observing: { short: "观察中", tone: "active", hint: "零转化，累计花费还没到上限" },
+  "cost-per-conversion-high": { short: "重扩系列", tone: "warning", hint: "单转超标" },
+  "no-conversion-overspent": { short: "重扩系列", tone: "warning", hint: "零转化且已花超上限" },
+  "not-enabled": { short: "已关停", tone: "muted", hint: "系列已关停，不参与判定" },
+  "non-operational": { short: "非投放", tone: "muted", hint: "诊断或占位系列" },
+};
+
+/**
+ * 这个广告组该不该出现在当前的「系列判定」筛选下。
+ *
+ * 判定缺失时一律放行——分类接口挂了、或这条系列不在分类结果里（刚建、超出保留期），
+ * 都不该让列表凭空变空：空列表会被读成「今天没得扩」，而真相是「判定没算出来」，
+ * 这两件事的后果差得很远。
+ */
+export function matchesVerdictFilter(
+  filter: VerdictFilter,
+  verdict: ExpandClassification["verdict"] | null,
+): boolean {
+  if (filter === "all") return true;
+  if (!verdict) return true;
+  return filter === "expand" ? verdict === "expand" : verdict === "recreate-campaign";
+}
 
 type Feedback = { tone: "success" | "danger"; title: string; lines: string[] } | null;
 
@@ -141,6 +173,11 @@ export function ExpandGroupsPanel({
 }) {
   const { confirm, toast } = useOverlays();
   const [entitiesByAccount, setEntitiesByAccount] = useState<Record<string, ManagedEntityRecord[]>>({});
+  // null 表示该账户的分类没取到（接口失败），与「还没加载」区分开：前者要退回不带
+  // 判定的原样列表，后者只是还在转圈。
+  const [classificationByAccount, setClassificationByAccount] =
+    useState<Record<string, ExpandClassificationResponse | null>>({});
+  const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>("expand");
   const [loadingAccounts, setLoadingAccounts] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [timeFilter, setTimeFilter] = useState<ExpandScope>("polling-range");
@@ -229,8 +266,14 @@ export function ExpandGroupsPanel({
   const loadAccount = async (accountId: string) => {
     setLoadingAccounts((current) => [...new Set([...current, accountId])]);
     try {
-      const entities = await api.getManagedEntities(accountId);
+      // 分类失败不能连带广告组列表一起失败：分类只是给列表加一层判定，拿不到时
+      // 面板退回「不带判定」的原样可用，而不是整个空掉。
+      const [entities, classification] = await Promise.all([
+        api.getManagedEntities(accountId),
+        api.getExpandClassification(accountId).catch(() => null),
+      ]);
       setEntitiesByAccount((current) => ({ ...current, [accountId]: entities }));
+      setClassificationByAccount((current) => ({ ...current, [accountId]: classification }));
     } catch (cause) {
       onError(messageOf(cause));
     } finally {
@@ -416,12 +459,37 @@ export function ExpandGroupsPanel({
     [eligibleStates, visibleAccountIds],
   );
 
+  /**
+   * 系列 ID -> 该系列的扩组判定。
+   *
+   * 判定是**系列级**的，而这个面板选的是广告组，所以每个广告组的判定要顺着
+   * parentCampaignId 去查它所属的系列。同一系列下的多个组共享同一个判定——这正是
+   * 「不以组为单位」的意思：组交给自动化规则管，扩不扩看系列。
+   */
+  const verdictByCampaign = useMemo(() => {
+    const byAccount = new Map<string, Map<string, ExpandClassificationResponse["expand"][number]>>();
+    for (const [accountId, classification] of Object.entries(classificationByAccount)) {
+      if (!classification) continue;
+      const map = new Map<string, ExpandClassificationResponse["expand"][number]>();
+      for (const item of [
+        ...classification.expand,
+        ...classification.recreateCampaign,
+        ...classification.excluded,
+      ]) {
+        map.set(item.externalId, item);
+      }
+      byAccount.set(accountId, map);
+    }
+    return byAccount;
+  }, [classificationByAccount]);
+
   // 每个账户：解析系列名映射 + 过滤后的广告组列表。
   const groups = useMemo(() => {
     const now = Date.now();
     const normalizedQuery = query.trim().toLowerCase();
     return visibleStates.map((state) => {
       const entities = entitiesByAccount[state.accountId] ?? [];
+      const verdicts = verdictByCampaign.get(state.accountId);
       const campaignNames = new Map(
         entities
           .filter((entity) => entity.entityType === "campaign")
@@ -443,6 +511,12 @@ export function ExpandGroupsPanel({
           return true;
         })
         .filter((entity) => statusFilter === "all" || entity.status === statusFilter)
+        .filter((entity) => matchesVerdictFilter(
+          verdictFilter,
+          (verdicts && entity.parentCampaignId
+            ? verdicts.get(entity.parentCampaignId)?.verdict
+            : null) ?? null,
+        ))
         .filter((entity) => !normalizedQuery
           || entity.name.toLowerCase().includes(normalizedQuery)
           || entity.externalId.toLowerCase().includes(normalizedQuery))
@@ -458,9 +532,46 @@ export function ExpandGroupsPanel({
         providerKind: state.connection?.kind ?? "cookie",
         campaignNames,
         adGroups,
+        verdicts,
       };
     });
-  }, [accountName, conversionFilter, visibleStates, entitiesByAccount, query, statusFilter, timeFilter]);
+  }, [accountName, conversionFilter, visibleStates, entitiesByAccount, query, statusFilter, timeFilter, verdictFilter, verdictByCampaign]);
+
+  /** 汇总条：本次可见账户里各判定的系列条数，以及最早的一次计算时刻。 */
+  const verdictSummary = useMemo(() => {
+    let expand = 0;
+    let recreate = 0;
+    let computedAt: string | null = null;
+    let missing = 0;
+    for (const state of visibleStates) {
+      const classification = classificationByAccount[state.accountId];
+      if (!classification) {
+        if (classification === null) missing += 1;
+        continue;
+      }
+      expand += classification.expand.length;
+      recreate += classification.recreateCampaign.length;
+      // 多账户时取最早那次，汇总条上说的「算于」不能比其中任何一个账户更新。
+      if (!computedAt || classification.computedAt < computedAt) {
+        computedAt = classification.computedAt;
+      }
+    }
+    return { expand, recreate, computedAt, missing };
+  }, [visibleStates, classificationByAccount]);
+
+  /** 需要复制新系列的那批，按亏得最多排前面（服务端已排好序，这里只做跨账户拼接）。 */
+  const recreateList = useMemo(
+    () => visibleStates.flatMap((state) => {
+      const classification = classificationByAccount[state.accountId];
+      if (!classification) return [];
+      return classification.recreateCampaign.map((item) => ({
+        ...item,
+        accountId: state.accountId,
+        accountName: accountName.get(state.accountId) ?? state.accountId,
+      }));
+    }),
+    [visibleStates, classificationByAccount, accountName],
+  );
 
   // 因系列预算(CBO)被排除的广告组数量，用于向用户解释名单为何变短。
   const cboHiddenCount = useMemo(
@@ -672,8 +783,21 @@ export function ExpandGroupsPanel({
       <label className="expand-filter"><span>范围</span><select value={timeFilter} onChange={(event) => setTimeFilter(event.target.value as ExpandScope)}><option value="spending-today">今天在投（有消耗）</option><option value="created-recently">近 48 小时新建</option><option value="polling-range">轮询范围内全部</option></select></label>
       <label className="expand-filter"><span>转化</span><select value={conversionFilter} onChange={(event) => setConversionFilter(event.target.value as ConversionFilter)}><option value="all">全部</option><option value="has">有转化</option><option value="none">无转化</option></select></label>
       <label className="expand-filter"><span>状态</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}><option value="all">全部</option><option value="enabled">投放中</option><option value="disabled">已暂停</option></select></label>
+      <label className="expand-filter"><span>系列判定</span><select value={verdictFilter} onChange={(event) => setVerdictFilter(event.target.value as VerdictFilter)}><option value="expand">可扩组</option><option value="recreate">需重扩系列</option><option value="all">全部</option></select></label>
       <label className="expand-filter grow"><span>搜索</span><input placeholder="广告组名称或 ID" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     </div>
+
+    {(verdictSummary.expand > 0 || verdictSummary.recreate > 0) && <div className="expand-verdict-summary">
+      <Info size={14} />
+      <span>
+        按自系列创建以来累计判定：<strong>{verdictSummary.expand}</strong> 条系列可扩组、
+        <strong>{verdictSummary.recreate}</strong> 条建议今天别扩、改复制新系列重跑。
+      </span>
+      {/* 转化延迟回传，同一天早晚算出来的分桶会不一样，必须说清是几点的账。 */}
+      {verdictSummary.computedAt && <small>算于 {fmtDate(verdictSummary.computedAt)}</small>}
+    </div>}
+
+    {verdictSummary.missing > 0 && <p className="expand-excluded-note"><AlertTriangle size={14} /> <span>{verdictSummary.missing} 个账户的系列判定没取到，这些账户的列表未按判定过滤。</span></p>}
 
     {excludedStates.length > 0 && <div className="expand-excluded-list">
       <div className="expand-excluded-summary"><Info size={14} /><span>{excludedStates.length} 个账户当前不可扩组。以下状态与总览、账户管理和接入页使用同一份能力结果。</span></div>
@@ -715,15 +839,28 @@ export function ExpandGroupsPanel({
               <button className="secondary-button compact-button" disabled={isLoading} onClick={() => void loadAccount(group.accountId)} title="重新读取该账户已同步的广告组" type="button"><RefreshCcw size={14} /> {isLoading ? "刷新中" : "刷新"}</button>
             </div>
           </header>
-          {group.adGroups.length === 0 ? <p className="expand-account-empty">{isLoading ? "读取中…" : "该账户在当前筛选下没有广告组。"}</p> : <div className="table-wrap expand-table"><table><thead><tr><th className="expand-check-col"><input aria-label="全选本账户" checked={allSelected} disabled={groupKeys.length === 0} onChange={() => toggleAccount(group.accountId, groupKeys)} type="checkbox" /></th><th>广告组</th><th>所属系列</th><th>创建时间</th><th className="expand-num">花费</th><th className="expand-num">转化</th><th className="expand-num">CPA</th><th>状态</th></tr></thead><tbody>
+          {group.adGroups.length === 0 ? <p className="expand-account-empty">{isLoading ? "读取中…" : "该账户在当前筛选下没有广告组。"}</p> : <div className="table-wrap expand-table"><table><thead><tr><th className="expand-check-col"><input aria-label="全选本账户" checked={allSelected} disabled={groupKeys.length === 0} onChange={() => toggleAccount(group.accountId, groupKeys)} type="checkbox" /></th><th>广告组</th><th>所属系列</th><th>系列判定</th><th>创建时间</th><th className="expand-num">花费</th><th className="expand-num">转化</th><th className="expand-num">CPA</th><th>状态</th></tr></thead><tbody>
             {group.adGroups.map((entity) => {
               const key = keyOf(group.accountId, entity.externalId);
               const selectable = Boolean(entity.parentCampaignId);
               const checked = selected.includes(key);
-              return <tr key={key} className={checked ? "selected" : ""} onClick={() => selectable && toggle(key)}>
+              const verdict = entity.parentCampaignId
+                ? group.verdicts?.get(entity.parentCampaignId)
+                : undefined;
+              const label = verdict ? VERDICT_LABELS[verdict.reason] : undefined;
+              // 判定只是提醒，不锁死勾选：用户说了「提醒我当天不要扩」，最终扩不扩
+              // 由人定。行上加个底色让它在几十行里一眼能认出来就够了。
+              const rowClass = [
+                checked ? "selected" : "",
+                verdict?.verdict === "recreate-campaign" ? "expand-row-warn" : "",
+              ].filter(Boolean).join(" ");
+              return <tr key={key} className={rowClass} onClick={() => selectable && toggle(key)}>
                 <td className="expand-check-col"><input checked={checked} disabled={!selectable} onChange={() => toggle(key)} onClick={(event) => event.stopPropagation()} title={selectable ? undefined : "缺少所属系列 ID，无法扩组"} type="checkbox" /></td>
                 <td className="expand-name">{entity.name}</td>
                 <td className="expand-muted">{entity.parentCampaignId ? group.campaignNames.get(entity.parentCampaignId) ?? entity.parentCampaignId : "—"}</td>
+                <td>{label
+                  ? <span className={`status ${label.tone}`} title={`${label.hint}｜累计花费 ${fmtMoney(verdict?.spend)}、转化 ${verdict?.conversions ?? 0}${verdict?.costPerConversion !== null && verdict?.costPerConversion !== undefined ? `、单转 ${fmtMoney(verdict.costPerConversion)}` : ""}`}>{label.short}</span>
+                  : <span className="expand-muted">—</span>}</td>
                 <td className="expand-muted">{fmtDate(entity.createdAt)}</td>
                 <td className="expand-num">{fmtMoney(entity.metrics.spend)}</td>
                 <td className="expand-num">{entity.metrics.conversions ?? 0}</td>
@@ -735,6 +872,26 @@ export function ExpandGroupsPanel({
         </section>;
       })}
     </div>}
+
+    {recreateList.length > 0 && <section className="expand-history">
+      <header className="expand-history-head">
+        <span><AlertTriangle size={15} /> 建议重扩系列</span>
+        <div className="expand-history-actions">
+          <span className="expand-history-count">{recreateList.length} 条</span>
+        </div>
+      </header>
+      <p className="expand-excluded-note"><Info size={14} /> <span>这些系列今天不建议再往上扩组；到「复制系列」页各复制一条新系列重跑。</span></p>
+      <div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>账户</th><th>系列</th><th>原因</th><th className="expand-num">累计花费</th><th className="expand-num">转化</th><th className="expand-num">单转</th></tr></thead><tbody>
+        {recreateList.map((item) => <tr key={`${item.accountId}::${item.externalId}`}>
+          <td className="expand-muted">{item.accountName}</td>
+          <td className="expand-name">{item.name}</td>
+          <td className="expand-muted">{VERDICT_LABELS[item.reason]?.hint ?? item.reason}</td>
+          <td className="expand-num">{fmtMoney(item.spend)}</td>
+          <td className="expand-num">{item.conversions}</td>
+          <td className="expand-num">{item.costPerConversion === null ? "—" : fmtMoney(item.costPerConversion)}</td>
+        </tr>)}
+      </tbody></table></div>
+    </section>}
 
     <section className="expand-history">
       <header className="expand-history-head">
