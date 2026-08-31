@@ -19,6 +19,135 @@ export const TikTokCreationSteps = [
 ] as const;
 export type TikTokCreationStep = (typeof TikTokCreationSteps)[number];
 
+/**
+ * 广告组表单里真机会发、而我们此前整片缺失的结构性字段。
+ *
+ * 2026-08-31 的三层比对：广告组层真机 185 个字段，我们 96 个，缺 90 个。此前六轮
+ * 修复都是「diff 出一处不同 -> 改这一处 -> 仍然失败」，因为 automation 元组是**跨层
+ * 整体校验**的，缺一片字段时改单个值补不回来。这里按真机取值一次补齐。
+ *
+ * 绝大多数是中性默认（0 / "" / [] / false）。其中几个是元组的关键：
+ * - struct_version：系列层与创意层都有，唯独广告组层没有，结构版本对不上。
+ * - campaign_budget / campaign_budget_mode / campaign_budget_auto_adjust：
+ *   广告组要回声系列的预算状态，缺了 TikTok 无从校验两层是否一致。
+ * - omni_optimize_config_v2 / auto_keyword_state / smart_auction_roi2_type /
+ *   catalog_enable / promotion_catalog_type / promotion_target_type：
+ *   都是 automation 自述的一部分。
+ *
+ * 刻意不含的：name / custom_tz_id / custom_tz_type / by_ad_sketch_id /
+ * target_custom_conversion_id / avatar_icon —— 那些带真机会话或素材的具体取值，
+ * 照抄等于把别人的上下文塞进我们的报文。
+ */
+function adGroupStructuralDefaults(
+  config: CreationPresetConfig,
+  budget: ResolvedBudgetFields,
+): Record<string, unknown> {
+  return {
+    struct_version: 1,
+    campaign_id: "",
+    feed_type: 1,
+    // 广告组回声系列预算，供 TikTok 校验两层一致。
+    //
+    // auto_adjust 用真机的完整形状：系列层自己那份只有 is_enabled / initial_budget /
+    // strategy 三个键，而广告组这份回声真机还带 increase_percentage /
+    // max_increase_times / auto_reset_next_day。形状不齐同样算元组对不上。
+    campaign_budget: budget.campaign.budget,
+    campaign_budget_mode: budget.campaign.budget_mode,
+    campaign_budget_auto_adjust: {
+      ...budget.campaign.budget_auto_adjust,
+      initial_budget: budget.campaign.budget_auto_adjust.is_enabled === 1
+        ? budget.campaign.budget_auto_adjust.initial_budget
+        : "",
+      increase_percentage: 20,
+      max_increase_times: 10,
+      auto_reset_next_day: false,
+    },
+    // 互动开关跟随预设，与创意层同源。
+    is_comment_disable: config.commentDisabled ? 1 : 0,
+    is_share_disable: config.shareDisabled ? 1 : 0,
+    is_comment_public_disable: 0,
+    is_like_counts_hide: 0,
+    is_favorite_counts_hide: 0,
+    // 身份挂在创意的 image_list 上，广告组层恒为空。
+    identity_id: "",
+    identity_type: 0,
+    identity_bc_id: "",
+    // automation 自述
+    omni_optimize_config_v2: [],
+    auto_keyword_state: 0,
+    smart_auction_roi2_type: 0,
+    has_app_profile_auto_selectd: false,
+    spp_rebrand_targeting_switch: 0,
+    spp_rebrand_placement_switch: 0,
+    // 商品目录：本链路不迁移目录信息，全部关闭。
+    catalog_enable: 0,
+    promotion_catalog_type: 0,
+    promotion_target_type: 0,
+    product_set_id: "",
+    product_specific_type: 0,
+    product_platform_id: "0",
+    catalog_authorized_bc: "0",
+    supply_catalog_id: "0",
+    supply_bc_id: "0",
+    // 其余中性默认，按真机逐项取值。
+    ad_pacing_segments: [],
+    ad_download_status: 0,
+    sub_placement_under_tiktok: [],
+    exclude_app_package_id: "",
+    ad_ref_event_source_id: "",
+    ad_ref_message_event_set_id: "",
+    ad_ref_app_id: "",
+    deep_funnel_toggle: 0,
+    deep_funnel_external_action: 0,
+    deep_funnel_level: 0,
+    deep_external_action: 0,
+    event_source_id_type: 0,
+    download_url: "",
+    collection_id: "",
+    is_hfss: 0,
+    enable_lhf_regulation: 0,
+    internet_service_providers: [],
+    radius_locations: [],
+    app_retargeting_type: 0,
+    app_retargeting_install: false,
+    saved_audience_id: 0,
+    search_keywords: [],
+    is_brand_use_product_anchor: false,
+    dpa_retargeting_type: 0,
+    display_retargeting_tags: [],
+    display_retargeting_tags_exclude: [],
+    retargeting_audience_rule: { inclusions: null, exclusions: null },
+    brand_safety: 1,
+    brand_safety_partner: 0,
+    vertical_suitability_id: 0,
+    min_budget: "",
+    period: 0,
+    cpv_video_duration_type: 0,
+    cpa_delivery_mode: 0,
+    roas_status: false,
+    rewarding_game_attestation: 0,
+    site_flag: 0,
+    ttgo_bc_id: "",
+    target_device_version: 0,
+    payer_name: "",
+    payer_name_type: 0,
+    activity_exclusion_type: 0,
+    compensation_activity: 4,
+    ima_account_id: "",
+    phone_country_code: "",
+    phone_zip_code: "",
+    phone_number: "",
+    minis_id: "",
+    series_url: "",
+    premiere_time: 0,
+    ga_property_id: "",
+    spending_limits_toggle: false,
+    mco_attribution_type: 1,
+    template_ad_flag: 1,
+    all_available_placement: [3000, 1000, 9000],
+  };
+}
+
 /** Provider-owned source markers used by TikTok for a fresh draft publish. */
 export const TikTokCreationPublishSource = {
   coming_source_type: 1,
@@ -425,6 +554,7 @@ export function buildDraftPayloads(
         } : {}),
         budget_auto_adjust: budget.adGroup.budget_auto_adjust,
         week_schedule: [[], [], [], [], [], [], []],
+        ...adGroupStructuralDefaults(config, budget),
       },
     },
     creative: {
