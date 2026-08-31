@@ -4653,11 +4653,25 @@ async function runAdvisoryDraftSequence(
         ad_snap_ids: adSnapIds,
         is_budget_split_test: false,
       }), credential, boundary, note);
+    // campaign_snap/check 每次发布前都要跑，不能因为已经拿到 fake_campaign_id 就跳过。
+    //
+    // 此前它被当成「拿 fake_campaign_id 的手段」，缓存命中就不调了。但真机全程调它
+    // 三次，其中一次紧挨着发布：
+    //   09:14:43 cbo_consistency_check -> 09:14:44 campaign_snap/check
+    //   -> 09:14:45 ad_creative_snap/check -> 09:14:49 batch_create_cta_id
+    //   -> 09:15:36 create_by_snap
+    // 它是发布前对系列快照的服务端校验，取 id 只是顺带。跳过它，系列层的 automation
+    // 状态就没在服务端过这一遍，发布时被判 uaa_campaign_automation_inconsistent_error
+    // ——错误名里的 campaign 指的正是这一层。
+    //
+    // 2026-08-31 的留证是直接证据：四步检查一个都没失败（advisoryFailures 为空），
+    // 但序列里只有 cbo_consistency_check / ad_creative_snap/check /
+    // batch_create_cta_id 三步，campaign_snap/check 因为缓存命中被跳掉了。
+    const campaignCheck = await requestAdvisoryCreationStep("campaign_snap/check",
+      () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
+        campaign_snap_id: ids.campaignSnapId,
+      }), credential, boundary, note);
     if (!fakeCampaignId) {
-      const campaignCheck = await requestAdvisoryCreationStep("campaign_snap/check",
-        () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
-          campaign_snap_id: ids.campaignSnapId,
-        }), credential, boundary, note);
       const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
       fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
     }
