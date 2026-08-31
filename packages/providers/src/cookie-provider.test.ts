@@ -2648,15 +2648,18 @@ describe("CookieAdsProvider", () => {
     expect(failures).toContain("ad_creative_snap/check");
     // 四步全部进留证，而不是只在发布报文里留个结果。
     const steps = progress.flatMap((item) => item.evidence.sentRequests ?? []).map((s) => s.step);
-    // campaign_snap/check 只在还没拿到 fake_campaign_id 时才跑，不是每次都有，故不断言。
+    // 四步都要跑。campaign_snap/check 此前在已有 fake_campaign_id 时被跳过，
+    // 于是发布前系列快照没在服务端过一遍校验——2026-08-31 的留证抓到的正是这个缺口。
     for (const step of [
       "snap/cbo_consistency_check",
+      "campaign_snap/check",
       "ad_creative_snap/check",
       "snap/batch_create_cta_id",
     ]) {
       expect(steps, `${step} 不在留证里，实际：${steps.join(", ")}`).toContain(step);
     }
     // 它们必须排在发布之前——发布之后再对账没有意义。
+    expect(steps.indexOf("campaign_snap/check")).toBeLessThan(steps.indexOf("create_by_snap"));
     expect(steps.indexOf("ad_creative_snap/check")).toBeLessThan(steps.indexOf("create_by_snap"));
   });
 
