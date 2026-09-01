@@ -1718,6 +1718,8 @@ export class CookieAdsProvider implements AdsProvider {
       scheduledStartAt?: string | null;
       /** 覆盖系列日预算；留空表示继承源系列。 */
       campaignBudget?: number | null;
+      /** 覆盖每个新广告组的日预算；留空继承源组。仅广告组预算口径适用。 */
+      adGroupBudget?: number | null;
       bid?: number | null;
       onBeforeDispatch?: () => void;
     },
@@ -1924,6 +1926,7 @@ export class CookieAdsProvider implements AdsProvider {
         timezone: context.timezone ?? "UTC",
         riskInfo,
         ...(input.bid !== undefined ? { bid: input.bid } : {}),
+        ...(input.adGroupBudget !== undefined ? { adGroupBudget: input.adGroupBudget } : {}),
       });
 
       // 7) 系列预算一致性门禁。真机在每次结构变化后都会调；返回非 all_success
@@ -2053,6 +2056,11 @@ async function applyCopiedCampaignGroupOverrides(input: {
   timezone: string;
   riskInfo: Record<string, unknown>;
   bid?: number | null;
+  /**
+   * 覆盖每个新广告组的日预算。只在广告组预算口径下给值——系列预算(CBO)下组不持有
+   * 独立预算，写进去会触发 budget_auto_adjust_initial_budget_not_equal_campaign_budget。
+   */
+  adGroupBudget?: number | null;
 }): Promise<void> {
   const nameBySnapId = new Map(input.renames.map((item) => [item.adSnapId, item.name]));
   const adSnapIds = input.publishItems.map((item) => item.ad_snap_id);
@@ -2088,6 +2096,10 @@ async function applyCopiedCampaignGroupOverrides(input: {
     if (name) form.ad_name = name;
     if (input.bid !== undefined && input.bid !== null) {
       form.cpa_bid = String(input.bid);
+    }
+    // 组预算只在显式给值时覆盖；不给就继承源组，保持既有行为。
+    if (input.adGroupBudget !== undefined && input.adGroupBudget !== null) {
+      form.budget = formatCampaignBudgetAmount(input.adGroupBudget);
     }
     if (input.scheduledStart && startTime) {
       form.schedule_type = 1;

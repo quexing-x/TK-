@@ -51,6 +51,8 @@ export interface CopyCampaignInput {
   createNewPosts?: boolean;
   /** 覆盖系列日预算；留空表示继承源系列。 */
   campaignBudget?: number | null;
+  /** 覆盖每个新广告组的日预算；留空继承源组。仅广告组预算口径适用。 */
+  adGroupBudget?: number | null;
   bid?: number | null;
   onBeforeDispatch?: () => void;
 }

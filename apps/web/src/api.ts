@@ -786,6 +786,8 @@ export const api = {
     scheduledStartAt?: string | null;
     createNewPosts?: boolean;
     campaignBudget?: number | null;
+    /** 覆盖每个新广告组的日预算；留空继承源组。仅广告组预算口径适用。 */
+    adGroupBudget?: number | null;
     bid?: number | null;
   }) =>
     request<{

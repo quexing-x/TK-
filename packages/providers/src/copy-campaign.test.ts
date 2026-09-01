@@ -569,4 +569,57 @@ describe("CookieAdsProvider.copyCampaign", () => {
     const copyAttempts = calls.filter((call) => call.path.includes("campaign_snap/copy"));
     expect(copyAttempts).toHaveLength(1);
   });
+
+  it('广告组预算口径：把组预算写进每个新广告组，且不碰系列预算', async () => {
+    // 此前复制路只能改系列预算，广告组预算口径下新组只能继承源组——界面上那个
+    // 「系列日预算」框是灰的，等于没有设预算的入口。
+    const calls: Call[] = [];
+    stubTikTok({ calls, adGroupCount: 2 });
+    const provider = new CookieAdsProvider();
+
+    await provider.copyCampaign(context(), {
+      sourceCampaignId: '90001',
+      campaignName: '源系列-0730-1',
+      adGroups: [
+        { sourceAdGroupId: 'src-A', name: '组A-0730-1' },
+        { sourceAdGroupId: 'src-B', name: '组B-0730-1' },
+      ],
+      initialStatus: 'disabled',
+      adGroupBudget: 50,
+    });
+
+    const adSaves = calls.filter((call) => call.path.includes('ad_snap/save'));
+    expect(adSaves.length).toBeGreaterThan(0);
+    for (const call of adSaves) {
+      const form = call.body.ad_sketch_form_data as Record<string, unknown>;
+      // 金额要归一化成两位小数字符串，与系列预算同一套写法。
+      expect(form.budget).toBe('50.00');
+    }
+    // 系列层不受影响：没给 campaignBudget 就不该改系列预算。
+    const campaignSave = calls.find((call) => call.path.includes('campaign_snap/save'));
+    const campaignForm = campaignSave?.body.campaign_sketch_form_data as Record<string, unknown>;
+    expect(campaignForm.budget).not.toBe('50.00');
+  });
+
+  it('不给组预算时保持继承源组，不写 budget', async () => {
+    const calls: Call[] = [];
+    stubTikTok({ calls });
+    const provider = new CookieAdsProvider();
+    const before = JSON.stringify(calls);
+
+    await provider.copyCampaign(context(), {
+      sourceCampaignId: '90001',
+      campaignName: '源系列-0730-1',
+      adGroups: [{ sourceAdGroupId: 'src-A', name: '组A-0730-1' }],
+      initialStatus: 'disabled',
+    });
+
+    expect(before).toBe('[]');
+    const adSaves = calls.filter((call) => call.path.includes('ad_snap/save'));
+    for (const call of adSaves) {
+      const form = call.body.ad_sketch_form_data as Record<string, unknown>;
+      // 继承源组：不是被我们改成 50，也不是被清空。
+      expect(form.budget).not.toBe('50.00');
+    }
+  });
 });
