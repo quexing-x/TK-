@@ -727,6 +727,7 @@ export async function createApp(
       scheduledStartAt: z.string().datetime().nullable().default(null),
       createNewPosts: z.boolean().default(true),
       campaignBudget: z.number().positive().nullable().default(null),
+      adGroupBudget: z.number().positive().nullable().default(null),
       bid: z.number().nonnegative().nullable().default(null),
     }).parse(request.body);
     if (hasMetaOfflineAccount(dependencies.store, [input.accountId])) {

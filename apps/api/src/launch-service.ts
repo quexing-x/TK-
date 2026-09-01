@@ -1026,6 +1026,8 @@ export class LaunchService {
     createNewPosts?: boolean;
     /** 覆盖系列日预算；留空继承源系列。 */
     campaignBudget?: number | null;
+    /** 覆盖每个新广告组的日预算；留空继承源组。仅广告组预算口径适用。 */
+    adGroupBudget?: number | null;
     bid?: number | null;
   }): Promise<{
     createdCampaigns: number;
@@ -1142,6 +1144,8 @@ export class LaunchService {
         scheduledStartAt,
         createNewPosts,
         campaignBudget: input.campaignBudget ?? null,
+        // 组预算参与幂等指纹：同一批源系列换个组预算重跑，是另一次任务而不是重放。
+        adGroupBudget: input.adGroupBudget ?? null,
         bid: input.bid ?? null,
       })).digest("hex");
 
@@ -1184,6 +1188,7 @@ export class LaunchService {
             scheduledStartAt,
             createNewPosts,
             ...(input.campaignBudget !== undefined ? { campaignBudget: input.campaignBudget } : {}),
+            ...(input.adGroupBudget !== undefined ? { adGroupBudget: input.adGroupBudget } : {}),
             ...(input.bid !== undefined ? { bid: input.bid } : {}),
             onBeforeDispatch: () => this.store.markCampaignCopyTaskDispatching(taskKey),
           });

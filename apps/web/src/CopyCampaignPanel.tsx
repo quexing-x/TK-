@@ -142,12 +142,15 @@ export function CopyCampaignPanel(props: {
   // 说不清楚。改成先选口径，列表和参数都跟着口径走。
   const [budgetKind, setBudgetKind] = useState<CampaignBudgetKind>("campaign");
   const [query, setQuery] = useState("");
-  const [campaignCopies, setCampaignCopies] = useState(2);
+  // 按当前投放习惯定：一次复制 1 个系列、每个系列 1 个组，组预算 50、出价 7。
+  // 原先默认 2 个系列、预算与出价留空（继承源系列），每次都要手改四个框。
+  const [campaignCopies, setCampaignCopies] = useState(1);
   const [groupsPerCampaign, setGroupsPerCampaign] = useState(1);
+  const [adGroupBudgetText, setAdGroupBudgetText] = useState("50");
   const [launchTiming, setLaunchTiming] = useState<LaunchTiming>("disabled");
   const [scheduledAt, setScheduledAt] = useState<string>(defaultNextSixOClock);
   const [campaignBudgetText, setCampaignBudgetText] = useState("");
-  const [bidText, setBidText] = useState("");
+  const [bidText, setBidText] = useState("7");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [stuckTasks, setStuckTasks] = useState<StuckCampaignCopyTask[]>([]);
@@ -359,9 +362,18 @@ export function CopyCampaignPanel(props: {
       props.onError("系列日预算必须为正数，或留空以继承源系列。");
       return;
     }
+    // 组预算只在广告组预算口径下生效。系列预算(CBO)下组不持有独立预算，写进去会触发
+    // budget_auto_adjust_initial_budget_not_equal_campaign_budget。
+    const adGroupBudget = budgetKind !== "adgroup" || adGroupBudgetText.trim() === ""
+      ? null
+      : Number(adGroupBudgetText);
+    if (adGroupBudget !== null && (!Number.isFinite(adGroupBudget) || adGroupBudget <= 0)) {
+      props.onError("广告组日预算必须为正数，或留空以继承源组。");
+      return;
+    }
     const bid = bidText.trim() === "" ? null : Number(bidText);
     if (bid !== null && (!Number.isFinite(bid) || bid < 0)) {
-      props.onError("出价必须为非负数字，或留空继承源系列。");
+      props.onError("出价必须为非负数字，或留空继承源组。");
       return;
     }
     const totalCampaigns = previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0);
@@ -398,6 +410,7 @@ export function CopyCampaignPanel(props: {
         scheduledStartAt,
         createNewPosts: !isMeta,
         campaignBudget,
+        adGroupBudget,
         bid,
       });
       const parts = [`已创建 ${result.createdCampaigns} 个系列、${result.createdGroups} 个广告组`];
@@ -487,14 +500,20 @@ export function CopyCampaignPanel(props: {
             onChange={(event) => setGroupsPerCampaign(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
           <small>勾选的源广告组按顺序轮转填入。</small>
         </label>
-        <label className="field"><span>系列日预算（留空继承源系列）</span>
-          <input disabled={disabled || budgetKind !== "campaign"} min="0.01" step="0.01" type="number" value={campaignBudgetText}
-            onChange={(event) => setCampaignBudgetText(event.target.value)} />
-          {/* 由入口口径决定，不再看「选中的里面有没有系列预算的」：那种判定在混选时
-              会让这个框对一部分源系列生效、对另一部分静默失效。 */}
-          <small>{budgetKind === "campaign" ? "每个新系列各自持有这一份预算。" : "广告组预算口径下不适用，预算跟着广告组走。"}</small>
-        </label>
-        <label className="field"><span>出价（留空继承源系列）</span>
+        {/* 预算框跟着口径换，而不是把不适用的那个禁用掉摆在那儿——广告组预算口径下
+            用户要设的是组预算，此前这里只有一个灰掉的「系列日预算」，等于没有入口。 */}
+        {budgetKind === "campaign"
+          ? <label className="field"><span>系列日预算（留空继承源系列）</span>
+              <input disabled={disabled} min="0.01" step="0.01" type="number" value={campaignBudgetText}
+                onChange={(event) => setCampaignBudgetText(event.target.value)} />
+              <small>每个新系列各自持有这一份预算。</small>
+            </label>
+          : <label className="field"><span>广告组日预算（留空继承源组）</span>
+              <input disabled={disabled} min="0.01" step="0.01" type="number" value={adGroupBudgetText}
+                onChange={(event) => setAdGroupBudgetText(event.target.value)} />
+              <small>每个新广告组各自持有这一份预算；新系列不带系列预算。</small>
+            </label>}
+        <label className="field"><span>出价（留空继承源组）</span>
           <input disabled={disabled} min="0" step="0.01" type="number" value={bidText}
             onChange={(event) => setBidText(event.target.value)} />
         </label>
