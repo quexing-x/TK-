@@ -1630,6 +1630,10 @@ export class AutomationStore {
         ...defaultAutomationFeatureSettings.budgetBump,
         ...(stored.budgetBump as object ?? {}),
       },
+      closeStalledCampaigns: {
+        ...defaultAutomationFeatureSettings.closeStalledCampaigns,
+        ...(stored.closeStalledCampaigns as object ?? {}),
+      },
       updatedAt: row.updated_at,
     };
     return AutomationFeatureSettingsSchema.parse(merged);
