@@ -27,6 +27,7 @@ import {
   type ProviderWriteCircuit,
   CampaignCopyStuckTaskSchema,
   type CampaignCopyStuckTask,
+  type CampaignCopyHistoryRecord,
   type AutomationSwitchKey,
   type AutomationSwitches,
   type AutomationAction,
@@ -3912,6 +3913,43 @@ export class AutomationStore {
       // 明确失败且未产生正式对象：删除记录，允许用户修正后重试。
       this.db.prepare("DELETE FROM campaign_copy_tasks WHERE task_key = ?").run(taskKey);
     }
+  }
+
+  /**
+   * 系列复制记录，跨账户按时间倒序。
+   *
+   * 与 listStuckCampaignCopyTasks 的区别：那个只挑 uncertain=1 的卡死任务给人工兜底，
+   * 这个是完整流水。此前复制完只有一句「已创建 N 个系列」的即时提示，刷新就没了——
+   * 想知道昨天复制过什么、生成了哪些系列，只能去 TikTok 后台翻。
+   */
+  listCampaignCopyHistory(
+    accountIds: readonly string[],
+    limit = 100,
+  ): CampaignCopyHistoryRecord[] {
+    if (accountIds.length === 0) return [];
+    const placeholders = accountIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT task_key, account_id, source_campaign_id, campaign_name, status,
+              claimed_at, updated_at, uncertain, generated_campaign_id, generated_ids_json
+         FROM campaign_copy_tasks
+        WHERE account_id IN (${placeholders})
+        ORDER BY updated_at DESC
+        LIMIT ?`,
+    ).all(...accountIds, limit) as SqlRow[];
+    return rows.map((row) => ({
+      taskKey: String(row.task_key),
+      accountId: String(row.account_id),
+      sourceCampaignId: String(row.source_campaign_id),
+      campaignName: String(row.campaign_name),
+      status: String(row.status) === "succeeded" ? "succeeded" as const : "running" as const,
+      uncertain: Number(row.uncertain) === 1,
+      claimedAt: String(row.claimed_at),
+      updatedAt: String(row.updated_at),
+      generatedCampaignId: row.generated_campaign_id ? String(row.generated_campaign_id) : null,
+      generatedAdGroupIds: row.generated_ids_json
+        ? JSON.parse(String(row.generated_ids_json)) as string[]
+        : [],
+    }));
   }
 
   /** 列出某账户仍卡在「结果未知」的系列复制任务，供人工核实后处理。 */

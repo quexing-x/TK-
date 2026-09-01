@@ -18,6 +18,7 @@ import type {
   AdOperationRecord,
   MetricBatchRecord,
   DailyMetricRecord,
+  CampaignCopyHistoryRecord,
   EntityRangeMetricRecord,
   ExpandClassification,
   ExpandThresholds,
@@ -801,6 +802,13 @@ export const api = {
         campaigns: Array<{ campaignName: string; groups: Array<{ sourceAdGroupId: string; name: string }> }>;
       }>;
     }>("/api/campaigns/copy", { method: "POST", body: JSON.stringify(input) }),
+  /** 系列复制流水（含成功/进行中/结果未知），跨账户按时间倒序。 */
+  getCampaignCopyHistory: (accountIds: string[], limit = 100) => {
+    const query = new URLSearchParams({ accountIds: accountIds.join(","), limit: String(limit) });
+    return request<{ tasks: CampaignCopyHistoryRecord[] }>(
+      `/api/campaign-copy-history?${query.toString()}`,
+    );
+  },
   listStuckCampaignCopyTasks: (accountId: string) =>
     request<Array<{
       taskKey: string;
