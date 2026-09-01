@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, RefreshCcw } from "lucide-react";
 import { deriveCampaignBudgetModes, planCampaignCopy, type ManagedEntityRecord } from "@tk-auto/core";
 import { api } from "./api";
@@ -60,6 +60,25 @@ export function belongsToBudgetKind(
   return budgetKind === "campaign" ? optimized : !optimized;
 }
 
+/**
+ * 默认停在哪个预算口径。
+ *
+ * 恒定默认「系列预算」对这些账户是错的：实测建德 142/142、余杭 29/29、般朵 34/34
+ * 全是广告组预算，系列预算一条都没有。用户打开就是一张空列表，于是「广告组预算的
+ * 系列复制没有入口」——入口在，只是默认那一栏对他永远是空的。
+ *
+ * 只在一侧为空、另一侧有内容时才替用户选；两侧都有或都没有就别猜，保持原样。
+ * 返回 null 表示不改动。
+ */
+export function pickDefaultBudgetKind(
+  cboCount: number,
+  adgroupCount: number,
+): CampaignBudgetKind | null {
+  if (cboCount === 0 && adgroupCount > 0) return "adgroup";
+  if (adgroupCount === 0 && cboCount > 0) return "campaign";
+  return null;
+}
+
 export interface ResolvedCampaignCopyLaunchTiming {
   initialStatus: "enabled" | "disabled";
   scheduledStartAt: string | null;
@@ -89,12 +108,23 @@ export function resolveCampaignCopyLaunchTiming(
   return { ok: true, value: { initialStatus: "enabled", scheduledStartAt: when.toISOString() } };
 }
 
+/** 从别的面板跳过来时带的预选：落地即选中那条系列，不用再自己找。 */
+export interface CampaignCopyPreselection {
+  accountId: string;
+  campaignIds: string[];
+  /** 跳转来源已知的口径。给了就直接切过去，省掉「默认在空 tab」那一步。 */
+  budgetKind?: CampaignBudgetKind;
+  /** 同一次跳转的标识；变化才重新应用，避免用户改完选择又被覆盖回去。 */
+  token: string;
+}
+
 export function CopyCampaignPanel(props: {
   accounts: AccountOption[];
   busy: boolean;
   onError: (message: string | null) => void;
   platform?: "tiktok" | "meta";
   onCompleted?: () => void | Promise<void>;
+  preselection?: CampaignCopyPreselection | null;
 }) {
   const { confirm, toast } = useOverlays();
   const isMeta = props.platform === "meta";
@@ -188,6 +218,47 @@ export function CopyCampaignPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [allCampaigns, budgetModes],
   );
+  /**
+   * 默认口径跟着账户实情走，而不是恒定停在「系列预算」。
+   *
+   * 实测这些账户几乎全是广告组预算（建德 142/142、余杭 29/29、般朵 34/34，系列预算
+   * 一条都没有）。默认停在系列预算，用户打开就是一张空列表，于是「广告组预算的系列
+   * 复制没有入口」——入口在，只是默认那一栏对他永远是空的。
+   *
+   * 只在用户还没手动选过口径时自动切；一旦点过 tab 就尊重他的选择。
+   */
+  const kindTouched = useRef(false);
+  useEffect(() => {
+    if (kindTouched.current) return;
+    const next = pickDefaultBudgetKind(cboCount, adgroupCount);
+    if (next) setBudgetKind(next);
+  }, [cboCount, adgroupCount]);
+
+  /**
+   * 应用从别处跳转带来的预选。
+   *
+   * 按 token 判重而不是按内容：同一次跳转只应用一次，用户落地后自己改了勾选也不会
+   * 被这个 effect 覆盖回去。切账户要等 entities 载入完再选，否则勾中的 id 在列表里
+   * 还不存在，界面上看不出被选中。
+   */
+  const appliedPreselection = useRef<string | null>(null);
+  const preselection = props.preselection ?? null;
+  useEffect(() => {
+    if (!preselection || appliedPreselection.current === preselection.token) return;
+    if (preselection.accountId !== accountId) {
+      setAccountId(preselection.accountId);
+      return;
+    }
+    if (loading) return;
+    appliedPreselection.current = preselection.token;
+    if (preselection.budgetKind) {
+      kindTouched.current = true;
+      setBudgetKind(preselection.budgetKind);
+    }
+    setSourceCampaignIds(preselection.campaignIds);
+    setExcludedAdGroupIds([]);
+  }, [preselection, accountId, loading]);
+
   const visibleCampaigns = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return allCampaigns
@@ -445,12 +516,12 @@ export function CopyCampaignPanel(props: {
             只会让「系列日预算」作用在说不清的对象上。 */}
         <div className="campaign-copy-kind-tabs" role="group" aria-label="选择系列复制的预算口径">
           <button aria-pressed={budgetKind === "campaign"} className={budgetKind === "campaign" ? "active" : ""} disabled={disabled}
-            onClick={() => { setBudgetKind("campaign"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); }} type="button">
+            onClick={() => { kindTouched.current = true; setBudgetKind("campaign"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); }} type="button">
             <strong>系列预算的系列复制</strong>
             <span>每个新系列各自持有一份系列预算（共 {cboCount} 条）</span>
           </button>
           <button aria-pressed={budgetKind === "adgroup"} className={budgetKind === "adgroup" ? "active" : ""} disabled={disabled}
-            onClick={() => { setBudgetKind("adgroup"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); setCampaignBudgetText(""); }} type="button">
+            onClick={() => { kindTouched.current = true; setBudgetKind("adgroup"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); setCampaignBudgetText(""); }} type="button">
             <strong>广告组预算的系列复制</strong>
             <span>预算跟着广告组走，新系列不带系列预算（共 {adgroupCount} 条）</span>
           </button>

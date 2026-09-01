@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { belongsToBudgetKind, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
+import { belongsToBudgetKind, pickDefaultBudgetKind, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
 
 const now = new Date("2026-08-01T10:00:00.000Z");
 
@@ -87,5 +87,21 @@ describe("系列复制的两个入口", () => {
 
     expect(belongsToBudgetKind("campaign", "missing", m)).toBe(false);
     expect(belongsToBudgetKind("adgroup", "missing", m)).toBe(true);
+  });
+});
+
+describe("复制系列的默认预算口径", () => {
+  // 恒定默认「系列预算」对这些账户是错的：实测建德 142/142、余杭 29/29、般朵 34/34
+  // 全是广告组预算，系列预算一条都没有。默认停在空 tab，用户就会以为「广告组预算的
+  // 系列复制没有入口」。
+  it("一侧为空时替用户停到有内容的那一侧", () => {
+    expect(pickDefaultBudgetKind(0, 142)).toBe("adgroup");
+    expect(pickDefaultBudgetKind(6, 0)).toBe("campaign");
+  });
+
+  // 两侧都有内容时不猜——猜错等于把用户从他要的那一栏挪走。
+  it("两侧都有或都没有时保持原样", () => {
+    expect(pickDefaultBudgetKind(6, 24)).toBeNull();
+    expect(pickDefaultBudgetKind(0, 0)).toBeNull();
   });
 });

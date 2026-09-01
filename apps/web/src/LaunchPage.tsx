@@ -12,7 +12,7 @@ import {
 } from "./provider-capability-view";
 import { createLaunchProgressPoller } from "./launch-progress-polling";
 import { ExpandGroupsPanel } from "./ExpandGroupsPanel";
-import { CopyCampaignPanel } from "./CopyCampaignPanel";
+import { CopyCampaignPanel, type CampaignCopyPreselection } from "./CopyCampaignPanel";
 import { useOverlays } from "./ui/overlays";
 import type { ReadOnlySyncResult } from "@tk-auto/core";
 
@@ -171,6 +171,31 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const auth = useAuth();
   const { toast, confirm } = useOverlays();
   const [launchMode, setLaunchMode] = useState<LaunchMode>("single");
+  /**
+   * 从扩组分类的「需重扩系列」跳过来时带的预选。
+   *
+   * 扩组面板判出该重扩哪些系列，复制系列面板才是执行的地方，两者是同页的兄弟模式——
+   * 让用户自己记住系列名再切页去找，等于把分类结果又交回人工对照。
+   */
+  const [campaignCopyPreselection, setCampaignCopyPreselection] =
+    useState<CampaignCopyPreselection | null>(null);
+  const jumpToCampaignCopy = (target: {
+    accountId: string;
+    campaignId?: string;
+    campaignIds?: string[];
+  }) => {
+    const campaignIds = target.campaignIds ?? (target.campaignId ? [target.campaignId] : []);
+    if (campaignIds.length === 0) return;
+    setCampaignCopyPreselection({
+      accountId: target.accountId,
+      campaignIds,
+      // 这批系列全部来自扩组判定，而扩组名单本身已排除系列预算(CBO)的组，
+      // 因此口径必然是广告组预算。直接切过去，省掉落在空 tab 上那一步。
+      budgetKind: "adgroup",
+      token: `${Date.now()}:${target.accountId}:${campaignIds.join(",")}`,
+    });
+    setLaunchMode("campaign-copy");
+  };
   const [dispatchMode, setDispatchMode] = useState<LaunchDispatchMode>("queue");
   const [sourceAccountId, setSourceAccountId] = useState(accounts[0]?.id ?? "");
   const [targetIds, setTargetIds] = useState<string[]>([]);
@@ -754,7 +779,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       </aside>
 
       <main className="launch-workspace">
-        {launchMode === "campaign-copy" ? <CopyCampaignPanel accounts={accounts} busy={busy} onError={onError} /> : launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onConnectionStatesChanged={onConnectionStatesChanged} onManageConnection={onManageConnection} onError={onError} presetHost={expandPresetHost} /> : <>
+        {launchMode === "campaign-copy" ? <CopyCampaignPanel accounts={accounts} busy={busy} onError={onError} preselection={campaignCopyPreselection} /> : launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onConnectionStatesChanged={onConnectionStatesChanged} onManageConnection={onManageConnection} onError={onError} presetHost={expandPresetHost} onCopyCampaign={jumpToCampaignCopy} /> : <>
 
     <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "以源广告组为迁移载体，为每个目标账户独立配置创建数量和投放参数。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
       <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
