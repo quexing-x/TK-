@@ -163,6 +163,7 @@ export function ExpandGroupsPanel({
   onManageConnection,
   onError,
   presetHost,
+  onCopyCampaign,
 }: {
   accounts: AccountConfig[];
   connectionStates: ConnectionState[];
@@ -170,6 +171,15 @@ export function ExpandGroupsPanel({
   onManageConnection?: ((accountId: string) => void) | undefined;
   onError: (message: string | null) => void;
   presetHost?: HTMLElement | null;
+  /**
+   * 把「需重扩」的系列带到复制系列页。不给这个回调时该列只显示占位符——
+   * 面板本身不做导航，跳转由挂载它的页面决定。
+   */
+  onCopyCampaign?: ((target: {
+    accountId: string;
+    campaignId?: string;
+    campaignIds?: string[];
+  }) => void) | undefined;
 }) {
   const { confirm, toast } = useOverlays();
   const [entitiesByAccount, setEntitiesByAccount] = useState<Record<string, ManagedEntityRecord[]>>({});
@@ -880,8 +890,8 @@ export function ExpandGroupsPanel({
           <span className="expand-history-count">{recreateList.length} 条</span>
         </div>
       </header>
-      <p className="expand-excluded-note"><Info size={14} /> <span>这些系列今天不建议再往上扩组；到「复制系列」页各复制一条新系列重跑。</span></p>
-      <div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>账户</th><th>系列</th><th>原因</th><th className="expand-num">累计花费</th><th className="expand-num">转化</th><th className="expand-num">单转</th></tr></thead><tbody>
+      <p className="expand-excluded-note"><Info size={14} /> <span>这些系列今天不建议再往上扩组。点「复制系列」直接带着它跳到复制页，不用自己再找一遍。</span></p>
+      <div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>账户</th><th>系列</th><th>原因</th><th className="expand-num">累计花费</th><th className="expand-num">转化</th><th className="expand-num">单转</th><th>操作</th></tr></thead><tbody>
         {recreateList.map((item) => <tr key={`${item.accountId}::${item.externalId}`}>
           <td className="expand-muted">{item.accountName}</td>
           <td className="expand-name">{item.name}</td>
@@ -889,8 +899,26 @@ export function ExpandGroupsPanel({
           <td className="expand-num">{fmtMoney(item.spend)}</td>
           <td className="expand-num">{item.conversions}</td>
           <td className="expand-num">{item.costPerConversion === null ? "—" : fmtMoney(item.costPerConversion)}</td>
+          <td>{onCopyCampaign
+            ? <button className="secondary-button compact-button" type="button"
+                onClick={() => onCopyCampaign({ accountId: item.accountId, campaignId: item.externalId })}>
+                <CopyPlus size={13} /> 复制系列
+              </button>
+            : <span className="expand-muted">—</span>}</td>
         </tr>)}
       </tbody></table></div>
+      {recreateList.length > 1 && onCopyCampaign && <div className="expand-actions">
+        {/* 一次全带过去：几十条系列逐个点跳转，比手动对照好不了多少。 */}
+        <button className="secondary-button" type="button"
+          onClick={() => onCopyCampaign({
+            accountId: recreateList[0]!.accountId,
+            campaignIds: recreateList
+              .filter((item) => item.accountId === recreateList[0]!.accountId)
+              .map((item) => item.externalId),
+          })}>
+          <CopyPlus size={14} /> 全部带到复制页（{recreateList.filter((item) => item.accountId === recreateList[0]!.accountId).length} 条）
+        </button>
+      </div>}
     </section>}
 
     <section className="expand-history">
