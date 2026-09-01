@@ -2001,6 +2001,141 @@ describe("AutomationService", () => {
     expect(autoCopyRunner).not.toHaveBeenCalled();
   });
 
+  describe("自动关闭跑不出来又已停跑的系列", () => {
+    // 账户时区 Asia/Shanghai，scheduleHour=6 对应 UTC 前一日 22:00。
+    const atSix = new Date("2026-07-24T22:00:00.000Z");
+
+    function seedCampaigns(rows: Array<{
+      id: string;
+      name: string;
+      spend: number;
+      conversions: number;
+      groupEnabled: boolean;
+    }>) {
+      const entities = rows.flatMap((row) => ([
+        {
+          entityType: "campaign" as const,
+          externalId: row.id,
+          payload: {
+            campaign_id: row.id,
+            campaign_name: row.name,
+            campaign_status: "enable",
+            row_data: {
+              campaign_id: row.id,
+              stat_cost: String(row.spend),
+              time_attr_convert_cnt: String(row.conversions),
+            },
+          },
+        },
+        {
+          entityType: "ad-group" as const,
+          externalId: `${row.id}-g1`,
+          payload: {
+            campaign_id: row.id,
+            ad_name: `${row.name}-组1`,
+            ad_primary_status: row.groupEnabled ? "enable" : "disable",
+          },
+        },
+      ]));
+      store.saveReadOnlySync("demo-account", "cookie", entities, {
+        startedAt: atSix.toISOString(),
+        finishedAt: atSix.toISOString(),
+        counts: { campaign: rows.length, "ad-group": rows.length, ad: 0, material: 0 },
+        warnings: [],
+        quality: {
+          status: "healthy" as const,
+          paginationComplete: true,
+          requiredMetricsComplete: true,
+          contractValid: true,
+          providerContractVersion: "test-v1",
+          coverage: { startDate: "2026-07-24", endDate: "2026-07-24", timezone: "Asia/Shanghai" },
+          missingMetrics: [],
+          partialFailures: [],
+          lastHealthyAt: atSix.toISOString(),
+        },
+      });
+    }
+
+    function enable() {
+      const settings = store.getAutomationFeatureSettings();
+      settings.closeStalledCampaigns.enabled = true;
+      store.updateAutomationFeatureSettings(settings);
+    }
+
+    it("只关组已全停的系列，组还在跑的绝不碰", async () => {
+      enable();
+      vi.useFakeTimers();
+      vi.setSystemTime(atSix);
+      seedCampaigns([
+        // 零转化、花过钱、组已全停 -> 关
+        { id: "c-stalled", name: "停跑系列", spend: 5, conversions: 0, groupEnabled: false },
+        // 同样零转化花过钱，但组还在跑 -> 不碰。关掉它会连带掐掉正在投放的组。
+        { id: "c-running", name: "在跑系列", spend: 5, conversions: 0, groupEnabled: true },
+        // 从没花过钱：无在投组只是还没开始投，不是跑不出来 -> 不碰
+        { id: "c-fresh", name: "新建未投", spend: 0, conversions: 0, groupEnabled: false },
+        // 单转达标 -> 不碰
+        { id: "c-ok", name: "达标系列", spend: 8, conversions: 2, groupEnabled: false },
+      ]);
+
+      await service.runScheduledStalledCampaignClose("demo-account", atSix);
+
+      expect(provider.mutations).toEqual([
+        { entityType: "campaign", externalId: "c-stalled", action: "disable" },
+      ]);
+    });
+
+    it("关闭前提是开关打开，且落在计划小时", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(atSix);
+      seedCampaigns([
+        { id: "c-stalled", name: "停跑系列", spend: 5, conversions: 0, groupEnabled: false },
+      ]);
+
+      // 开关没开
+      await service.runScheduledStalledCampaignClose("demo-account", atSix);
+      expect(provider.mutations).toEqual([]);
+
+      // 开了但不在计划小时
+      enable();
+      await service.runScheduledStalledCampaignClose(
+        "demo-account",
+        new Date("2026-07-24T20:00:00.000Z"),
+      );
+      expect(provider.mutations).toEqual([]);
+    });
+
+    it("每账户每个本地日只跑一次", async () => {
+      enable();
+      vi.useFakeTimers();
+      vi.setSystemTime(atSix);
+      seedCampaigns([
+        { id: "c-stalled", name: "停跑系列", spend: 5, conversions: 0, groupEnabled: false },
+      ]);
+
+      await service.runScheduledStalledCampaignClose("demo-account", atSix);
+      await service.runScheduledStalledCampaignClose("demo-account", atSix);
+
+      expect(provider.mutations).toHaveLength(1);
+    });
+
+    // dailyLimit 是判据出错时的兜底：一次关光整个账户的代价比漏关几条大得多。
+    it("受每日上限约束", async () => {
+      const settings = store.getAutomationFeatureSettings();
+      settings.closeStalledCampaigns.enabled = true;
+      settings.closeStalledCampaigns.dailyLimit = 2;
+      store.updateAutomationFeatureSettings(settings);
+      vi.useFakeTimers();
+      vi.setSystemTime(atSix);
+      seedCampaigns([1, 2, 3, 4].map((n) => ({
+        id: `c-${n}`, name: `停跑${n}`, spend: 5, conversions: 0, groupEnabled: false,
+      })));
+
+      await service.runScheduledStalledCampaignClose("demo-account", atSix);
+
+      expect(provider.mutations).toHaveLength(2);
+    });
+  });
+
   it("does not enter deletion selection when healthy metrics cover an unknown or multi-day window", async () => {
     const settings = store.getAutomationFeatureSettings();
     settings.deletion.enabled = true;

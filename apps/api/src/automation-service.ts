@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   AUTOMATION_MANAGED_LOOKBACK_HOURS,
+  METRIC_RETENTION_DAYS,
   ProviderCredentialInputSchema,
   automationRuleDefinitions,
+  classifyCampaignsForExpand,
   dateKeyInTimeZone,
   dateTimeSuffix,
   buildMetaRulePredicate,
@@ -463,6 +465,102 @@ export class AutomationService {
       }
     } finally {
       this.store.finishDailyAutomationRun(accountId, "daily-enable", localDate);
+    }
+  }
+
+  /**
+   * 每早定点关掉「跑不出来又已经停跑」的系列。
+   *
+   * 判据整段复用扩组分类，不另起一套：判为需重扩（单转超标，或零转化且花超，或零转化
+   * 且组已关光）、**且系列下已经没有在投的广告组**。组还在跑的绝不碰——那说明系列还在
+   * 产生数据，关系列会连带掐掉正在投放的组。
+   *
+   * 为什么不进规则链：规则链是单实体 + 当日指标 + 单阈值，而这条要「自创建以来累计」
+   * 加「跨实体的组状态」，表达不了。按 deletion / dailyEnable 做成每日执行器，
+   * 由 claimDailyAutomationRun 保证每账户每个本地日只跑一次。
+   */
+  async runScheduledStalledCampaignClose(accountId: string, asOf = new Date()): Promise<void> {
+    const settings = this.store.getAutomationFeatureSettings().closeStalledCampaigns;
+    const account = this.store.getAccount(accountId);
+    if (
+      !settings.enabled
+      || !account?.enabled
+      || !this.store.getSystemRuntimeState().enabled
+    ) return;
+    if (timePartsInTimeZone(asOf, account.timezone).hour !== settings.scheduleHour) return;
+    const connection = this.store.getProviderConnection(accountId, account.providerKind);
+    if (connection?.status !== "ready") return;
+
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    if (
+      this.store.claimDailyAutomationRun(accountId, "close-stalled-campaigns", localDate)
+        !== "claimed"
+    ) return;
+    try {
+      const managed = this.store.listCurrentManagedEntities(accountId, account.providerKind);
+      const campaignsWithActiveAdGroups = new Set(
+        managed
+          .filter((entity) => entity.entityType === "ad-group"
+            && entity.status === "enabled"
+            && entity.parentCampaignId)
+          .map((entity) => entity.parentCampaignId as string),
+      );
+      // 与扩组分类同一口径：自系列创建以来累计，回看整个保留期。窗口取短了会把老系列
+      // 的成绩截掉，把还在跑的系列误判成跑不出来。
+      const until = asOf.toISOString();
+      const since = new Date(
+        asOf.getTime() - METRIC_RETENTION_DAYS * 24 * 60 * 60_000,
+      ).toISOString();
+      const metrics = new Map(
+        this.store
+          .listEntityRangeMetrics(accountId, account.providerKind, since, "campaign", until)
+          .map((row) => [row.externalId, row]),
+      );
+      const { recreateCampaign } = classifyCampaignsForExpand(
+        managed
+          .filter((entity) => entity.entityType === "campaign")
+          .map((entity) => {
+            const metric = metrics.get(entity.externalId);
+            return {
+              externalId: entity.externalId,
+              name: entity.name,
+              status: entity.status,
+              hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
+              spend: metric?.spend ?? 0,
+              conversions: metric?.conversions ?? 0,
+              days: metric?.days ?? 0,
+            };
+          }),
+        {
+          maxCostPerConversion: settings.maxCostPerConversion,
+          maxSpendWithoutConversion: settings.maxSpendWithoutConversion,
+        },
+      );
+      // 只关组已经全停的那批。dailyLimit 是判据出错时的兜底：一次关光整个账户的代价
+      // 比漏关几条大得多。
+      const closable = recreateCampaign
+        .filter((item) => item.hasActiveAdGroups === false)
+        .slice(0, settings.dailyLimit);
+      for (const item of closable) {
+        try {
+          await this.changeStatus(
+            accountId,
+            { entityType: "campaign", externalId: item.externalId, action: "disable" },
+            "scheduled",
+            { id: "automation-scheduler", name: "自动化调度器", kind: "system" },
+            undefined,
+            true,
+            undefined,
+            item.conversions > 0
+              ? `累计单转 ${item.costPerConversion?.toFixed(2)} 超过 ${settings.maxCostPerConversion}，且组已全部停跑，自动关闭系列。`
+              : `累计花费 ${item.spend.toFixed(2)} 零转化，且组已全部停跑，自动关闭系列。`,
+          );
+        } catch {
+          // 单条写失败不带走整轮；changeStatus 失败时写入内核已把原因落库。
+        }
+      }
+    } finally {
+      this.store.finishDailyAutomationRun(accountId, "close-stalled-campaigns", localDate);
     }
   }
 
@@ -2535,6 +2633,8 @@ export class AutomationScheduler {
           // 同理待在这里而不是 dueAccounts 循环里：它也靠「整点小时内任意一轮」触发，
           // 挂在轮询到期过滤之后会几乎永远错过计划小时。
           await this.service.runScheduledDailyEnables(account.id);
+          // 同理：靠「整点小时内任意一轮」触发，必须待在轮询到期过滤之前的全账户循环里。
+          await this.service.runScheduledStalledCampaignClose(account.id);
         }
       }
     } finally {
