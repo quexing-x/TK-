@@ -161,3 +161,59 @@ describe("扩组判定", () => {
       .toBe("recreate-campaign");
   });
 });
+
+describe("组已被规则关光的系列", () => {
+  const stalled = {
+    externalId: "c",
+    name: "零转化停跑系列",
+    status: "enabled" as const,
+    conversions: 0,
+    hasActiveAdGroups: false,
+  };
+
+  // 观察期的前提是「再花一点就能看出结果」。组全关了之后系列一分钱也花不出去，
+  // 消耗永远停在当前值，spend > 3 那条线再也跨不过去——系列会永久卡在「观察中」，
+  // 既不被扩也不被判重扩，等于从名单里静默消失。
+  it("零转化且组已关光，不看消耗直接判重扩", () => {
+    const result = classifyCampaignForExpand({ ...stalled, spend: 0.5 });
+    expect(result.verdict).toBe("recreate-campaign");
+    expect(result.reason).toBe("no-conversion-stalled");
+  });
+
+  it("组还在跑时仍按消耗阈值走观察期", () => {
+    const observing = classifyCampaignForExpand({ ...stalled, spend: 0.5, hasActiveAdGroups: true });
+    expect(observing.verdict).toBe("expand");
+    expect(observing.reason).toBe("observing");
+    const overspent = classifyCampaignForExpand({ ...stalled, spend: 9, hasActiveAdGroups: true });
+    expect(overspent.reason).toBe("no-conversion-overspent");
+  });
+
+  // 没提供该信息时不能当成「已关光」——那会把一批还在跑的系列误判成需重扩。
+  // 建好还没投的系列同样「无在投组」，但它不是跑不出来，只是还没开始。实测账户里
+  // 有 4 条这种系列（如「八寶茶」「隨身wifi」），少了这个判据会被判重扩、进而被一键关掉。
+  it("从没花过钱的系列不算停跑，仍在观察期", () => {
+    const result = classifyCampaignForExpand({ ...stalled, spend: 0 });
+    expect(result.verdict).toBe("expand");
+    expect(result.reason).toBe("observing");
+  });
+
+  it("缺少该信息时保持原有判据", () => {
+    const result = classifyCampaignForExpand({
+      externalId: "c", name: "系列", status: "enabled", spend: 0.5, conversions: 0,
+    });
+    expect(result.verdict).toBe("expand");
+    expect(result.hasActiveAdGroups).toBeNull();
+  });
+
+  // 有转化的系列不受这条影响：单转达标就该继续扩，组关光只是今天没在跑。
+  it("有转化时不受组状态影响", () => {
+    const result = classifyCampaignForExpand({ ...stalled, spend: 8, conversions: 2 });
+    expect(result.verdict).toBe("expand");
+    expect(result.reason).toBe("cost-per-conversion-ok");
+  });
+
+  it("把该信息透传出去，供界面决定哪些系列可以直接关", () => {
+    expect(classifyCampaignForExpand({ ...stalled, spend: 5 }).hasActiveAdGroups).toBe(false);
+    expect(classifyCampaignForExpand({ ...stalled, spend: 5, hasActiveAdGroups: true }).hasActiveAdGroups).toBe(true);
+  });
+});

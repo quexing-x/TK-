@@ -2179,8 +2179,17 @@ export async function createApp(
     // 必须走 listCurrentManagedEntities：listManagedEntities 不筛 is_current，会把
     // 已经下线的系列一并带出来（实测生产账户 105 行里有 1 行是陈旧的），那些系列在
     // 账户里已经不存在，却会顶着历史累计出现在判定结果里。
-    const campaigns = dependencies.store
-      .listCurrentManagedEntities(accountId, account.providerKind)
+    const managed = dependencies.store.listCurrentManagedEntities(accountId, account.providerKind);
+    // 组被自动化规则一个个关光的系列，再也花不出钱：零转化的观察期判据在它身上是死
+    // 循环（消耗永远跨不过阈值），而「关掉需重扩的系列」也只敢对这批下手。
+    const campaignsWithActiveAdGroups = new Set(
+      managed
+        .filter((entity) => entity.entityType === "ad-group"
+          && entity.status === "enabled"
+          && entity.parentCampaignId)
+        .map((entity) => entity.parentCampaignId as string),
+    );
+    const campaigns = managed
       .filter((entity) => entity.entityType === "campaign")
       .map((entity) => {
         const metric = metrics.get(entity.externalId);
@@ -2188,6 +2197,7 @@ export async function createApp(
           externalId: entity.externalId,
           name: entity.name,
           status: entity.status,
+          hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
           // 快照里没有这条系列时按零处理：它要么刚建、要么已超出保留期，两种都不该
           // 凭空得到一个成绩。
           spend: metric?.spend ?? 0,
