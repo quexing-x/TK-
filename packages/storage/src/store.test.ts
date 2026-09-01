@@ -4061,3 +4061,45 @@ describe("自动化特性开关的分节合并", () => {
     expect(readBack.closeStalledCampaigns.dailyLimit).toBe(7);
   });
 });
+
+describe("系列复制记录", () => {
+  // 此前只有 listStuckCampaignCopyTasks（只挑 uncertain=1 的卡死任务），复制成功的
+  // 记录没有任何地方能查——界面上那句「已创建 N 个系列」刷新就没了。
+  it("成功、进行中、结果未知三种都列出来，按时间倒序", () => {
+    const store = new AutomationStore(":memory:");
+    store.seed();
+    const claim = (key: string, name: string) =>
+      store.claimCampaignCopyTask(key, "demo-account", `src-${key}`, name);
+
+    claim("k-done", "已完成系列");
+    store.finishCampaignCopyTask("k-done", "succeeded", {
+      campaignId: "camp-1",
+      adGroupIds: ["g-1", "g-2"],
+    });
+    claim("k-running", "进行中系列");
+    claim("k-unknown", "结果未知系列");
+    store.finishCampaignCopyTask("k-unknown", "unknown");
+
+    const history = store.listCampaignCopyHistory(["demo-account"]);
+    expect(history).toHaveLength(3);
+    const byKey = new Map(history.map((item) => [item.taskKey, item]));
+    expect(byKey.get("k-done")).toMatchObject({
+      status: "succeeded",
+      uncertain: false,
+      campaignName: "已完成系列",
+      generatedCampaignId: "camp-1",
+      generatedAdGroupIds: ["g-1", "g-2"],
+    });
+    expect(byKey.get("k-running")).toMatchObject({ status: "running", uncertain: false });
+    expect(byKey.get("k-unknown")).toMatchObject({ uncertain: true });
+  });
+
+  it("只返回请求账户的记录，空账户列表返回空", () => {
+    const store = new AutomationStore(":memory:");
+    store.seed();
+    store.claimCampaignCopyTask("k", "demo-account", "src", "系列");
+    expect(store.listCampaignCopyHistory(["demo-account"])).toHaveLength(1);
+    expect(store.listCampaignCopyHistory(["other-account"])).toHaveLength(0);
+    expect(store.listCampaignCopyHistory([])).toHaveLength(0);
+  });
+});

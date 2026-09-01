@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, RefreshCcw } from "lucide-react";
+import { Copy, History, RefreshCcw } from "lucide-react";
 import { deriveCampaignBudgetModes, planCampaignCopy, type ManagedEntityRecord } from "@tk-auto/core";
 import { api } from "./api";
+import type { CampaignCopyHistoryRecord } from "@tk-auto/core";
 import { useOverlays } from "./ui/overlays";
 
 interface AccountOption {
@@ -118,6 +119,9 @@ export interface CampaignCopyPreselection {
   token: string;
 }
 
+/** 复制记录默认铺几行；与扩组记录保持一致，避免长表把提交按钮推到几屏之外。 */
+const HISTORY_COLLAPSED_ROWS = 8;
+
 export function CopyCampaignPanel(props: {
   accounts: AccountOption[];
   busy: boolean;
@@ -147,13 +151,19 @@ export function CopyCampaignPanel(props: {
   const [campaignCopies, setCampaignCopies] = useState(1);
   const [groupsPerCampaign, setGroupsPerCampaign] = useState(1);
   const [adGroupBudgetText, setAdGroupBudgetText] = useState("50");
-  const [launchTiming, setLaunchTiming] = useState<LaunchTiming>("disabled");
+  // 默认定时投放：复制出来的系列本来就是要投的，默认「关闭」等于每次都得多点一步，
+  // 忘了点就是一批建好却不投的系列躺在后台。定时到最近的 06:00，由 TikTok 原生排期
+  // 放行，不会在点下去的瞬间就开始花钱。
+  const [launchTiming, setLaunchTiming] = useState<LaunchTiming>("scheduled");
   const [scheduledAt, setScheduledAt] = useState<string>(defaultNextSixOClock);
   const [campaignBudgetText, setCampaignBudgetText] = useState("");
   const [bidText, setBidText] = useState("7");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [stuckTasks, setStuckTasks] = useState<StuckCampaignCopyTask[]>([]);
+  const [history, setHistory] = useState<CampaignCopyHistoryRecord[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [resettingTaskKey, setResettingTaskKey] = useState<string | null>(null);
 
   const load = (id: string) => {
@@ -170,10 +180,27 @@ export function CopyCampaignPanel(props: {
       .catch((cause: unknown) => props.onError(cause instanceof Error ? cause.message : String(cause)));
   };
 
+  /**
+   * 复制记录。读失败只置空、不弹错——它是辅助信息，不该因为一次读取失败就把
+   * 「复制成功了」这件事盖成一条报错。
+   */
+  const loadHistory = async (id: string) => {
+    setHistoryLoading(true);
+    try {
+      const result = await api.getCampaignCopyHistory([id]);
+      setHistory(result.tasks);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!accountId) return;
     setSourceCampaignIds([]);
     setExcludedAdGroupIds([]);
+    void loadHistory(accountId);
     load(accountId);
     loadStuckTasks(accountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -425,6 +452,7 @@ export function CopyCampaignPanel(props: {
       toast(result.failed.length === 0 ? "系列复制完成" : "系列复制部分失败", result.failed.length === 0 ? "success" : "error");
       load(accountId);
       loadStuckTasks(accountId);
+      void loadHistory(accountId);
       void props.onCompleted?.();
     } catch (cause) {
       props.onError(cause instanceof Error ? cause.message : String(cause));
@@ -587,7 +615,10 @@ export function CopyCampaignPanel(props: {
             <div className="campaign-copy-group-block" key={campaignId}>
               <em>{nameOf(campaignId)}</em>
               {list.length === 0
-                ? <p className="target-account-empty">该系列在当前快照中没有广告组。</p>
+                ? <p className="target-account-empty">
+                    该系列在当前快照中没有广告组。刚复制出来的系列要等下一轮同步才会带上组，
+                    点右上角「重新读取」刷新。
+                  </p>
                 : <div className="target-account-grid">
                   {list.map((entity) => (
                     <label key={entity.externalId}>
@@ -636,6 +667,51 @@ export function CopyCampaignPanel(props: {
       )}
 
       {feedback && <div className="preset-save-feedback"><strong>执行结果</strong><span>{feedback}</span></div>}
+
+      {/* 复制记录。此前复制完只有一句即时提示，刷新就没了——想知道昨天复制过什么、
+          生成了哪些系列，只能去 TikTok 后台翻。 */}
+      <section className="expand-history">
+        <header className="expand-history-head">
+          <span><History size={15} /> 复制记录</span>
+          <div className="expand-history-actions">
+            {history.length > 0 && <span className="expand-history-count">{history.length} 条</span>}
+            <button className="secondary-button compact-button" disabled={historyLoading}
+              onClick={() => void loadHistory(accountId)} type="button">
+              <RefreshCcw size={14} /> {historyLoading ? "读取中" : "刷新"}
+            </button>
+          </div>
+        </header>
+        {history.length === 0
+          ? <p className="expand-account-empty">{historyLoading ? "读取中…" : "还没有复制记录。"}</p>
+          : <>
+              <div className="table-wrap expand-table expand-history-table"><table>
+                <thead><tr><th>时间</th><th>源系列</th><th>结果</th><th className="expand-num">生成组数</th></tr></thead>
+                <tbody>
+                  {(historyExpanded ? history : history.slice(0, HISTORY_COLLAPSED_ROWS)).map((task) => (
+                    <tr key={task.taskKey}>
+                      <td className="expand-muted">{new Date(task.updatedAt).toLocaleString()}</td>
+                      <td className="expand-name">{task.campaignName}</td>
+                      <td>
+                        {/* 「结果未知」排在最前面的语义：它是唯一需要人动手的那类。 */}
+                        {task.uncertain
+                          ? <span className="status warning">结果未知</span>
+                          : task.status === "succeeded"
+                            ? <span className="status active">已完成</span>
+                            : <span className="status">进行中</span>}
+                      </td>
+                      <td className="expand-num">{task.generatedAdGroupIds.length}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table></div>
+              {history.length > HISTORY_COLLAPSED_ROWS && (
+                <button className="secondary-button compact-button"
+                  onClick={() => setHistoryExpanded((value) => !value)} type="button">
+                  {historyExpanded ? "收起" : `展开全部 ${history.length} 条`}
+                </button>
+              )}
+            </>}
+      </section>
 
       <div className="form-actions">
         <button className="primary-button" disabled={disabled || !previewPlan} onClick={() => void submit()} type="button">

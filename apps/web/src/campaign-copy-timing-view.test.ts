@@ -105,3 +105,24 @@ describe("复制系列的默认预算口径", () => {
     expect(pickDefaultBudgetKind(0, 0)).toBeNull();
   });
 });
+
+describe("默认投放时机", () => {
+  // 默认改成定时投放：复制出来的系列本来就是要投的，默认「关闭」等于每次都得多点一步，
+  // 忘了点就是一批建好却不投的系列躺在后台。定时到最近的 06:00 由 TikTok 原生排期放行，
+  // 不会在点下去的瞬间就开始花钱——这也是它比「立即投放」更适合做默认的原因。
+  it("定时投放解析成 enabled + 排期时刻，而不是立刻开跑", () => {
+    const now = new Date("2026-09-01T10:00:00.000Z");
+    const result = resolveCampaignCopyLaunchTiming("scheduled", "2026-09-02T06:00", now);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.initialStatus).toBe("enabled");
+    expect(result.value.scheduledStartAt).not.toBeNull();
+  });
+
+  // 排期时刻过期时必须拦下来：TikTok 会直接拒收过期排期。
+  it("过期的排期时刻被拒绝", () => {
+    const now = new Date("2026-09-02T10:00:00.000Z");
+    const result = resolveCampaignCopyLaunchTiming("scheduled", "2026-09-01T06:00", now);
+    expect(result.ok).toBe(false);
+  });
+});

@@ -139,3 +139,15 @@ export const CampaignCopyStuckTaskSchema = z.object({
   generatedAdGroupIds: z.array(z.string()),
 });
 export type CampaignCopyStuckTask = z.infer<typeof CampaignCopyStuckTaskSchema>;
+
+/**
+ * 一条系列复制的流水记录。
+ *
+ * 比 CampaignCopyStuckTask 多 status / uncertain：那个只用于捞卡死的任务，这个要能
+ * 把成功、进行中、结果未知三种都展示出来。
+ */
+export const CampaignCopyHistoryRecordSchema = CampaignCopyStuckTaskSchema.extend({
+  status: z.enum(["running", "succeeded"]),
+  uncertain: z.boolean(),
+});
+export type CampaignCopyHistoryRecord = z.infer<typeof CampaignCopyHistoryRecordSchema>;

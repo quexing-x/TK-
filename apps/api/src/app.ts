@@ -717,10 +717,13 @@ export async function createApp(
   app.post("/api/campaigns/copy", async (request, reply) => {
     const input = z.object({
       accountId: z.string().min(1),
+      // 源系列条数上限从 20 提到 200，与一键扩组的批量上限对齐。
+      // 保留一个上限而不是彻底放开：这条链路逐个源系列串行发写请求，无界的话
+      // 一次提交能把请求拖到几十分钟，中途任何中断都会留下一地「结果未知」。
       sources: z.array(z.object({
         sourceCampaignId: z.string().min(1),
         sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(50),
-      })).min(1).max(20),
+      })).min(1).max(200),
       campaignCopies: z.number().int().min(1).max(20),
       groupsPerCampaign: z.number().int().min(1).max(20),
       initialStatus: z.enum(["enabled", "disabled"]).default("disabled"),
@@ -746,6 +749,17 @@ export async function createApp(
   app.get("/api/accounts/:accountId/campaign-copy-tasks", async (request) => {
     const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
     return dependencies.store.listStuckCampaignCopyTasks(accountId);
+  });
+
+  // 系列复制的完整流水。上面那个只挑「结果未知」的卡死任务给人工兜底；这个是记录，
+  // 复制完刷新一下页面还能看到昨天复制过什么、生成了哪些系列。
+  app.get("/api/campaign-copy-history", async (request) => {
+    const query = z.object({
+      accountIds: z.string().min(1),
+      limit: z.coerce.number().int().min(1).max(500).default(100),
+    }).parse(request.query);
+    const accountIds = query.accountIds.split(",").map((id) => id.trim()).filter(Boolean);
+    return { tasks: dependencies.store.listCampaignCopyHistory(accountIds, query.limit) };
   });
 
   // 人工核实后一次清掉这些账户下所有「结果未知」的扩组记录。这类记录禁止自动重试，
