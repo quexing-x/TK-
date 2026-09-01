@@ -2162,6 +2162,8 @@ export async function createApp(
         .default(DEFAULT_EXPAND_THRESHOLDS.maxCostPerConversion),
       maxSpendWithoutConversion: z.coerce.number().nonnegative()
         .default(DEFAULT_EXPAND_THRESHOLDS.maxSpendWithoutConversion),
+      maxConsecutiveZeroConversionDays: z.coerce.number().int().min(1)
+        .default(DEFAULT_EXPAND_THRESHOLDS.maxConsecutiveZeroConversionDays),
     }).parse(request.query);
 
     const until = new Date().toISOString();
@@ -2189,6 +2191,13 @@ export async function createApp(
           && entity.parentCampaignId)
         .map((entity) => entity.parentCampaignId as string),
     );
+    // 连续零转化天数只数完整日（从昨天往前），今天是半天不算——早上跑判定时今天
+    // 几乎恒为零转化，算进去等于每天早上把所有系列判一遍死刑。
+    const zeroStreaks = dependencies.store.listCampaignZeroConversionStreaks(
+      accountId,
+      account.providerKind,
+      new Date(until),
+    );
     const campaigns = managed
       .filter((entity) => entity.entityType === "campaign")
       .map((entity) => {
@@ -2198,6 +2207,7 @@ export async function createApp(
           name: entity.name,
           status: entity.status,
           hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
+          consecutiveZeroConversionDays: zeroStreaks.get(entity.externalId) ?? 0,
           // 快照里没有这条系列时按零处理：它要么刚建、要么已超出保留期，两种都不该
           // 凭空得到一个成绩。
           spend: metric?.spend ?? 0,
@@ -2209,6 +2219,7 @@ export async function createApp(
     const thresholds = {
       maxCostPerConversion: query.maxCostPerConversion,
       maxSpendWithoutConversion: query.maxSpendWithoutConversion,
+      maxConsecutiveZeroConversionDays: query.maxConsecutiveZeroConversionDays,
     };
     return reply.send({
       computedAt: until,

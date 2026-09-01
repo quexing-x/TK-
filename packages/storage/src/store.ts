@@ -93,6 +93,8 @@ import {
   type MetaCreationTaskRecord,
   type MetaCreationTaskStatus,
   METRIC_RETENTION_DAYS,
+  countConsecutiveZeroConversionDays,
+  dateKeyInTimeZone,
   SystemRuntimeStateSchema,
   type SystemRuntimeState,
   type SystemRuntimeUpdate,
@@ -5908,6 +5910,43 @@ export class AutomationStore {
       carts: Number(row.carts),
       days: 1,
     }));
+  }
+
+  /**
+   * 每条系列最近连续几个**完整**自然日零转化。
+   *
+   * 放在 store 而不是各调用方各写一遍：扩组分类接口和自动关停执行器都要它，
+   * 两边算法哪怕差一天，界面上显示的和实际关掉的就对不上了。
+   *
+   * 从**昨天**往前数，不含今天：今天是半天，早上跑判定时几乎恒为零转化，
+   * 把今天算进去等于每天早上把所有系列都判一遍死刑。
+   */
+  listCampaignZeroConversionStreaks(
+    accountId: string,
+    kind: ProviderKind,
+    asOf = new Date(),
+    lookbackDays = 14,
+  ): Map<string, number> {
+    const account = this.getAccount(accountId);
+    const timezone = account?.timezone ?? "UTC";
+    // 逐日取「该日各系列的表现」，按日期从近到远排好，再交给 core 数连续天数。
+    const perCampaign = new Map<string, Array<{ spend: number; conversions: number }>>();
+    for (let back = 1; back <= lookbackDays; back += 1) {
+      const localDate = dateKeyInTimeZone(
+        new Date(asOf.getTime() - back * 24 * 60 * 60_000),
+        timezone,
+      );
+      for (const row of this.listEntityMetricsForLocalDate(accountId, kind, localDate, "campaign")) {
+        const list = perCampaign.get(row.externalId) ?? [];
+        list.push({ spend: row.spend, conversions: row.conversions });
+        perCampaign.set(row.externalId, list);
+      }
+    }
+    const streaks = new Map<string, number>();
+    for (const [externalId, days] of perCampaign) {
+      streaks.set(externalId, countConsecutiveZeroConversionDays(days));
+    }
+    return streaks;
   }
 
   listMetricBatches(

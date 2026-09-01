@@ -37,6 +37,7 @@ export const VERDICT_LABELS: Record<string, { short: string; tone: string; hint:
   "cost-per-conversion-high": { short: "重扩系列", tone: "warning", hint: "单转超标" },
   "no-conversion-overspent": { short: "重扩系列", tone: "warning", hint: "零转化且已花超上限" },
   "no-conversion-stalled": { short: "重扩系列", tone: "warning", hint: "零转化，且组已被规则关光" },
+  "no-conversion-days-exceeded": { short: "重扩系列", tone: "warning", hint: "连续多日零转化" },
   "not-enabled": { short: "已关停", tone: "muted", hint: "系列已关停，不参与判定" },
   "non-operational": { short: "非投放", tone: "muted", hint: "诊断或占位系列" },
 };

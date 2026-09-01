@@ -30,6 +30,15 @@ export interface ExpandCampaignInput {
    * 永远等不到，那条零转化的观察期判据在这种系列上是死循环。
    */
   hasActiveAdGroups?: boolean;
+  /**
+   * 最近连续几个**完整**自然日零转化（从昨天往前数，遇到有转化的那天就断）。
+   *
+   * 只数完整日：今天是半天，早上跑判定时几乎恒为零转化，把今天算进去等于每天早上
+   * 把所有系列都判一遍死刑。
+   *
+   * 只数**当天确实花过钱**的日子：没花钱的那天零转化是必然的，不构成「不出货」的证据。
+   */
+  consecutiveZeroConversionDays?: number;
 }
 
 export interface ExpandThresholds {
@@ -37,11 +46,19 @@ export interface ExpandThresholds {
   maxCostPerConversion: number;
   /** 零转化时容忍的累计花费上限，超过即判定这条系列跑不出来。 */
   maxSpendWithoutConversion: number;
+  /**
+   * 连续多少个自然日零转化就判重扩。
+   *
+   * 与累计口径互补：累计单转可能被早期的好成绩撑着，但连着几天一个转化都没有，
+   * 说明这条系列**现在**已经不出货了。
+   */
+  maxConsecutiveZeroConversionDays: number;
 }
 
 export const DEFAULT_EXPAND_THRESHOLDS: ExpandThresholds = {
   maxCostPerConversion: 12,
   maxSpendWithoutConversion: 3,
+  maxConsecutiveZeroConversionDays: 3,
 };
 
 export type ExpandVerdict =
@@ -63,6 +80,8 @@ export type ExpandReason =
   | "no-conversion-overspent"
   /** 零转化，且组已被规则关光——这条系列不会再有新数据了。 */
   | "no-conversion-stalled"
+  /** 连续若干个自然日一个转化都没有——现在已经不出货了。 */
+  | "no-conversion-days-exceeded"
   /** 已关停，不该再往上扩。 */
   | "not-enabled"
   /** 诊断/占位系列，不是投放对象。 */
@@ -88,6 +107,8 @@ export interface ExpandClassification {
    * 这时关掉系列会连带掐掉正在投放的组。
    */
   hasActiveAdGroups: boolean | null;
+  /** 最近连续零转化的完整自然日数，供界面解释「为什么判重扩」。 */
+  consecutiveZeroConversionDays: number;
 }
 
 /**
@@ -101,6 +122,36 @@ export function isNonOperationalCampaignName(name: string): boolean {
   if (!trimmed) return true;
   if (trimmed === "0") return true;
   return trimmed.startsWith("诊断");
+}
+
+/** 某个完整自然日里，一条系列的表现。按日期倒序（昨天在前）传入。 */
+export interface CampaignDailyMetric {
+  spend: number;
+  conversions: number;
+}
+
+/**
+ * 从最近的完整自然日往前数，连续几天零转化。
+ *
+ * 三条规矩，缺一条都会误判：
+ * - **只数完整日**：今天是半天，早上跑判定时几乎恒为零转化。调用方负责不要把今天传进来。
+ * - **没花钱的那天跳过、且不中断连续性**：那天零转化是必然的，不构成「不出货」的证据；
+ *   但也不该因为中间有一天没投就把连续性重置——那样只要隔天投一次就永远数不满。
+ * - **遇到有转化的那天立刻停**：连续性从那天断开。
+ *
+ * 缺数据的日子（数组里没有的天）由调用方决定传不传；传进来的都当作有效观测日。
+ */
+export function countConsecutiveZeroConversionDays(
+  daysNewestFirst: readonly CampaignDailyMetric[],
+): number {
+  let count = 0;
+  for (const day of daysNewestFirst) {
+    if (day.conversions > 0) break;
+    // 没花钱的日子不算证据，也不算中断。
+    if (day.spend <= 0) continue;
+    count += 1;
+  }
+  return count;
 }
 
 /** 单转。零转化时返回 null，调用方不要拿它做除法兜底。 */
@@ -126,6 +177,7 @@ export function classifyCampaignForExpand(
     costPerConversion,
     days,
     hasActiveAdGroups: campaign.hasActiveAdGroups ?? null,
+    consecutiveZeroConversionDays: campaign.consecutiveZeroConversionDays ?? 0,
   };
 
   if (isNonOperationalCampaignName(campaign.name)) {
@@ -135,6 +187,16 @@ export function classifyCampaignForExpand(
   // 没有动作可做。
   if (campaign.status !== "enabled") {
     return { ...base, verdict: "excluded", reason: "not-enabled" };
+  }
+
+  // 连续若干天零转化：排在累计单转之前判。
+  //
+  // 两个口径互补，而近况优先：累计单转会被早期的好成绩撑着——一条前十天出过货、
+  // 最近三天颗粒无收的系列，累计单转可能还漂亮，但它**现在**已经不出货了，
+  // 继续往上扩组是在给一条死掉的系列加预算。
+  const zeroDays = campaign.consecutiveZeroConversionDays ?? 0;
+  if (zeroDays >= thresholds.maxConsecutiveZeroConversionDays) {
+    return { ...base, verdict: "recreate-campaign", reason: "no-conversion-days-exceeded" };
   }
 
   if (costPerConversion !== null) {

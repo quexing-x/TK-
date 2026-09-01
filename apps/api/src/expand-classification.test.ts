@@ -100,7 +100,11 @@ describe("扩组分类接口", () => {
     expect(response.statusCode).toBe(200);
     return response.json() as {
       computedAt: string;
-      thresholds: { maxCostPerConversion: number; maxSpendWithoutConversion: number };
+      thresholds: {
+        maxCostPerConversion: number;
+        maxSpendWithoutConversion: number;
+        maxConsecutiveZeroConversionDays: number;
+      };
       expand: Array<{ externalId: string; reason: string; spend: number; conversions: number; costPerConversion: number | null; hasActiveAdGroups: boolean | null }>;
       recreateCampaign: Array<{ externalId: string; reason: string; spend: number; conversions: number; hasActiveAdGroups: boolean | null }>;
       excluded: Array<{ externalId: string; reason: string }>;
@@ -176,6 +180,7 @@ describe("扩组分类接口", () => {
     expect(relaxed.thresholds).toEqual({
       maxCostPerConversion: 12,
       maxSpendWithoutConversion: 3,
+      maxConsecutiveZeroConversionDays: 3,
     });
     expect(relaxed.expand.map((item) => item.externalId).sort())
       .toEqual(["camp-ten", "camp-two"]);
@@ -184,6 +189,7 @@ describe("扩组分类接口", () => {
     expect(strict.thresholds).toEqual({
       maxCostPerConversion: 8,
       maxSpendWithoutConversion: 1,
+      maxConsecutiveZeroConversionDays: 3,
     });
     expect(strict.expand).toHaveLength(0);
     expect(strict.recreateCampaign.map((item) => item.externalId).sort())
@@ -235,6 +241,74 @@ describe("扩组分类接口", () => {
     expect(body.expand.map((item) => item.externalId).sort())
       .toEqual(["camp-fresh", "camp-running"]);
     expect(body.expand.find((item) => item.externalId === "camp-running")?.hasActiveAdGroups).toBe(true);
+  });
+
+  describe("连续自然日零转化", () => {
+    // 上海日切在 UTC 16:00，这三个时刻各自落在上海 08-23 / 08-24 / 08-25。
+    // 系统时间是上海 08-26 14:00，所以这三天都是「完整日」，今天不参与计数。
+    const SH_23 = "2026-08-23T02:00:00.000Z";
+    const SH_24 = "2026-08-24T02:00:00.000Z";
+    const SH_25 = "2026-08-25T02:00:00.000Z";
+
+    it("连续三个完整自然日零转化就判重扩", async () => {
+      for (const day of [SH_23, SH_24, SH_25]) {
+        seedDay(day, [{ externalId: "camp-dry", name: "连续无转化", spend: 2, conversions: 0 }]);
+      }
+      const body = await classify();
+      const item = body.recreateCampaign.find((row) => row.externalId === "camp-dry");
+      expect(item?.reason).toBe("no-conversion-days-exceeded");
+    });
+
+    // 近况优先于累计：这条系列累计单转 8（远低于 12），按累计口径本该「可扩」，
+    // 但最近三天一个转化都没有，说明它现在已经不出货了。
+    it("盖过累计单转达标的判定", async () => {
+      seedDay("2026-08-22T02:00:00.000Z", [
+        { externalId: "camp-was-good", name: "曾经出货", spend: 24, conversions: 3 },
+      ]);
+      for (const day of [SH_23, SH_24, SH_25]) {
+        seedDay(day, [{ externalId: "camp-was-good", name: "曾经出货", spend: 2, conversions: 0 }]);
+      }
+      const body = await classify();
+      const item = body.recreateCampaign.find((row) => row.externalId === "camp-was-good");
+      expect(item?.reason).toBe("no-conversion-days-exceeded");
+      // 累计仍是 3 转化、单转 10，确实达标——判重扩靠的是近况而不是累计。
+      expect(item?.conversions).toBe(3);
+    });
+
+    it("只有两天零转化不触发", async () => {
+      for (const day of [SH_24, SH_25]) {
+        seedDay(day, [{ externalId: "camp-two-days", name: "两天无转化", spend: 1, conversions: 0 }]);
+      }
+      const body = await classify();
+      expect(body.expand.map((row) => row.externalId)).toContain("camp-two-days");
+    });
+
+    // 没花钱的那天零转化是必然的，不构成证据；但也不该重置连续性。
+    // 单日花费压在 1，累计 2 不超过零转化上限 3——否则触发的是累计花费那条规则，
+    // 测不到连续天数的行为。
+    it("中间有一天没花钱不中断连续性", async () => {
+      seedDay(SH_23, [{ externalId: "camp-gap", name: "中间停投", spend: 1, conversions: 0 }]);
+      seedDay(SH_24, [{ externalId: "camp-gap", name: "中间停投", spend: 0, conversions: 0 }]);
+      seedDay(SH_25, [{ externalId: "camp-gap", name: "中间停投", spend: 1, conversions: 0 }]);
+      const body = await classify();
+      // 只有两天真正花过钱，还差一天，不该触发。
+      expect(body.expand.map((row) => row.externalId)).toContain("camp-gap");
+
+      // 但连续性没有被那天中断：把阈值降到 2 就该命中，说明中间那天是「跳过」
+      // 而不是「重置」。
+      const strict = await classify("?maxConsecutiveZeroConversionDays=2");
+      expect(strict.recreateCampaign.find((row) => row.externalId === "camp-gap")?.reason)
+        .toBe("no-conversion-days-exceeded");
+    });
+
+    it("阈值可由查询参数覆盖", async () => {
+      for (const day of [SH_24, SH_25]) {
+        seedDay(day, [{ externalId: "camp-two-days", name: "两天无转化", spend: 1, conversions: 0 }]);
+      }
+      const body = await classify("?maxConsecutiveZeroConversionDays=2");
+      expect(body.recreateCampaign.find((row) => row.externalId === "camp-two-days")?.reason)
+        .toBe("no-conversion-days-exceeded");
+    });
   });
 
   it("账号不存在时返回 404", async () => {
