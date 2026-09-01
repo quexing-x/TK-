@@ -516,6 +516,12 @@ export class AutomationService {
           .listEntityRangeMetrics(accountId, account.providerKind, since, "campaign", until)
           .map((row) => [row.externalId, row]),
       );
+      // 连续零转化天数与分类接口走同一个 store 方法，两边算法不会漂。
+      const zeroStreaks = this.store.listCampaignZeroConversionStreaks(
+        accountId,
+        account.providerKind,
+        asOf,
+      );
       const { recreateCampaign } = classifyCampaignsForExpand(
         managed
           .filter((entity) => entity.entityType === "campaign")
@@ -526,6 +532,7 @@ export class AutomationService {
               name: entity.name,
               status: entity.status,
               hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
+              consecutiveZeroConversionDays: zeroStreaks.get(entity.externalId) ?? 0,
               spend: metric?.spend ?? 0,
               conversions: metric?.conversions ?? 0,
               days: metric?.days ?? 0,
@@ -534,6 +541,7 @@ export class AutomationService {
         {
           maxCostPerConversion: settings.maxCostPerConversion,
           maxSpendWithoutConversion: settings.maxSpendWithoutConversion,
+          maxConsecutiveZeroConversionDays: settings.maxConsecutiveZeroConversionDays,
         },
       );
       // 只关组已经全停的那批。dailyLimit 是判据出错时的兜底：一次关光整个账户的代价
@@ -551,9 +559,11 @@ export class AutomationService {
             undefined,
             true,
             undefined,
-            item.conversions > 0
-              ? `累计单转 ${item.costPerConversion?.toFixed(2)} 超过 ${settings.maxCostPerConversion}，且组已全部停跑，自动关闭系列。`
-              : `累计花费 ${item.spend.toFixed(2)} 零转化，且组已全部停跑，自动关闭系列。`,
+            item.reason === "no-conversion-days-exceeded"
+              ? `连续 ${item.consecutiveZeroConversionDays} 个自然日零转化，且组已全部停跑，自动关闭系列。`
+              : item.conversions > 0
+                ? `累计单转 ${item.costPerConversion?.toFixed(2)} 超过 ${settings.maxCostPerConversion}，且组已全部停跑，自动关闭系列。`
+                : `累计花费 ${item.spend.toFixed(2)} 零转化，且组已全部停跑，自动关闭系列。`,
           );
         } catch {
           // 单条写失败不带走整轮；changeStatus 失败时写入内核已把原因落库。

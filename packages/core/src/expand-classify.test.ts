@@ -4,6 +4,7 @@ import {
   classifyCampaignForExpand,
   classifyCampaignsForExpand,
   costPerConversionOf,
+  countConsecutiveZeroConversionDays,
   isNonOperationalCampaignName,
   type ExpandCampaignInput,
 } from "./expand-classify.js";
@@ -149,12 +150,17 @@ describe("扩组判定", () => {
     });
   });
 
-  it("阈值可改，默认是 12 / 3", () => {
+  it("阈值可改，默认是 12 / 3 / 3 天", () => {
     expect(DEFAULT_EXPAND_THRESHOLDS).toEqual({
       maxCostPerConversion: 12,
       maxSpendWithoutConversion: 3,
+      maxConsecutiveZeroConversionDays: 3,
     });
-    const strict = { maxCostPerConversion: 8, maxSpendWithoutConversion: 1 };
+    const strict = {
+      maxCostPerConversion: 8,
+      maxSpendWithoutConversion: 1,
+      maxConsecutiveZeroConversionDays: 3,
+    };
     expect(classifyCampaignForExpand(campaign({ spend: 10, conversions: 1 }), strict).verdict)
       .toBe("recreate-campaign");
     expect(classifyCampaignForExpand(campaign({ spend: 2, conversions: 0 }), strict).verdict)
@@ -215,5 +221,73 @@ describe("组已被规则关光的系列", () => {
   it("把该信息透传出去，供界面决定哪些系列可以直接关", () => {
     expect(classifyCampaignForExpand({ ...stalled, spend: 5 }).hasActiveAdGroups).toBe(false);
     expect(classifyCampaignForExpand({ ...stalled, spend: 5, hasActiveAdGroups: true }).hasActiveAdGroups).toBe(true);
+  });
+});
+
+describe("连续自然日零转化", () => {
+  it("连续天数达到阈值就判重扩", () => {
+    const result = classifyCampaignForExpand({
+      externalId: "c", name: "系列", status: "enabled",
+      spend: 30, conversions: 5, consecutiveZeroConversionDays: 3,
+    });
+    expect(result.verdict).toBe("recreate-campaign");
+    expect(result.reason).toBe("no-conversion-days-exceeded");
+  });
+
+  // 近况优先于累计：累计单转会被早期的好成绩撑着。一条前十天出过货、最近三天颗粒无收
+  // 的系列，累计单转还漂亮（30/5 = 6，远低于 12），但它现在已经不出货了。
+  it("排在累计单转之前判，不被历史好成绩盖住", () => {
+    const healthy = classifyCampaignForExpand({
+      externalId: "c", name: "系列", status: "enabled",
+      spend: 30, conversions: 5, consecutiveZeroConversionDays: 0,
+    });
+    expect(healthy.reason).toBe("cost-per-conversion-ok");
+  });
+
+  it("没到阈值不触发", () => {
+    const result = classifyCampaignForExpand({
+      externalId: "c", name: "系列", status: "enabled",
+      spend: 30, conversions: 5, consecutiveZeroConversionDays: 2,
+    });
+    expect(result.verdict).toBe("expand");
+  });
+
+  it("把天数透传出去，供界面解释判定理由", () => {
+    expect(classifyCampaignForExpand({
+      externalId: "c", name: "系列", status: "enabled",
+      spend: 1, conversions: 0, consecutiveZeroConversionDays: 2,
+    }).consecutiveZeroConversionDays).toBe(2);
+  });
+});
+
+describe("countConsecutiveZeroConversionDays", () => {
+  it("从最近的日子往前数，遇到有转化就断", () => {
+    expect(countConsecutiveZeroConversionDays([
+      { spend: 5, conversions: 0 },
+      { spend: 5, conversions: 0 },
+      { spend: 5, conversions: 1 },
+      { spend: 5, conversions: 0 },
+    ])).toBe(2);
+  });
+
+  // 没花钱的那天零转化是必然的，不构成「不出货」的证据；但也不该重置连续性——
+  // 那样只要隔天投一次就永远数不满。
+  it("没花钱的日子跳过，且不中断连续性", () => {
+    expect(countConsecutiveZeroConversionDays([
+      { spend: 5, conversions: 0 },
+      { spend: 0, conversions: 0 },
+      { spend: 5, conversions: 0 },
+    ])).toBe(2);
+  });
+
+  it("最近一天就出过货则为 0", () => {
+    expect(countConsecutiveZeroConversionDays([
+      { spend: 5, conversions: 2 },
+      { spend: 5, conversions: 0 },
+    ])).toBe(0);
+  });
+
+  it("空数组为 0", () => {
+    expect(countConsecutiveZeroConversionDays([])).toBe(0);
   });
 });

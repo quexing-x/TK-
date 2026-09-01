@@ -76,6 +76,8 @@ export const AutomationFeatureSettingsInputSchema = z.object({
     maxCostPerConversion: z.number().min(0).default(12),
     /** 零转化时容忍的累计花费上限。 */
     maxSpendWithoutConversion: z.number().min(0).default(3),
+    /** 连续多少个完整自然日零转化就判重扩。 */
+    maxConsecutiveZeroConversionDays: z.number().int().min(1).max(30).default(3),
     /** 每账户每天最多关几条，防止判据出错时一次关光整个账户。 */
     dailyLimit: z.number().int().min(1).max(500).default(50),
   }).default({
@@ -83,6 +85,7 @@ export const AutomationFeatureSettingsInputSchema = z.object({
     scheduleHour: 6,
     maxCostPerConversion: 12,
     maxSpendWithoutConversion: 3,
+    maxConsecutiveZeroConversionDays: 3,
     dailyLimit: 50,
   }),
   deletion: z.object({
@@ -148,6 +151,7 @@ export const defaultAutomationFeatureSettings: AutomationFeatureSettingsInput = 
     scheduleHour: 6,
     maxCostPerConversion: 12,
     maxSpendWithoutConversion: 3,
+    maxConsecutiveZeroConversionDays: 3,
     dailyLimit: 50,
   },
   deletion: {
