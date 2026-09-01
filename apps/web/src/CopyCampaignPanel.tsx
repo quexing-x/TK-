@@ -80,6 +80,31 @@ export function pickDefaultBudgetKind(
   return null;
 }
 
+/**
+ * 把广告组按所属系列归堆，只保留被选中的那些系列。
+ *
+ * **「人工接管」的组照样列出来。** ignored 的语义是「不让自动化规则动它」，不是
+ * 「不让我手动复制它」——用户是主动点选了这条系列要复制的。此前把 ignored 整片跳过，
+ * 一条系列的组要是全被接管过，界面就显示「该系列在当前快照中没有广告组」，而组其实
+ * 好好地在那儿（实测余杭账户两条系列各有 1 个组，都在 09-01 04:41 被标成人工接管，
+ * 于是那两条系列怎么刷新都复制不出内容）。
+ *
+ * 复制出来的是全新的组，不继承接管标记，所以复制它们不会绕过任何自动化约定。
+ */
+export function groupAdGroupsByCampaign(
+  entities: readonly ManagedEntityRecord[],
+  campaignIds: readonly string[],
+): Map<string, ManagedEntityRecord[]> {
+  const map = new Map<string, ManagedEntityRecord[]>();
+  for (const campaignId of campaignIds) map.set(campaignId, []);
+  for (const entity of entities) {
+    if (entity.entityType !== "ad-group" || !entity.parentCampaignId) continue;
+    const list = map.get(entity.parentCampaignId);
+    if (list) list.push(entity);
+  }
+  return map;
+}
+
 export interface ResolvedCampaignCopyLaunchTiming {
   initialStatus: "enabled" | "disabled";
   scheduledStartAt: string | null;
@@ -299,16 +324,10 @@ export function CopyCampaignPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allCampaigns, budgetKind, query, budgetModes]);
 
-  const adGroupsByCampaign = useMemo(() => {
-    const map = new Map<string, ManagedEntityRecord[]>();
-    for (const campaignId of sourceCampaignIds) map.set(campaignId, []);
-    for (const entity of entities) {
-      if (entity.entityType !== "ad-group" || entity.ignored || !entity.parentCampaignId) continue;
-      const list = map.get(entity.parentCampaignId);
-      if (list) list.push(entity);
-    }
-    return map;
-  }, [entities, sourceCampaignIds]);
+  const adGroupsByCampaign = useMemo(
+    () => groupAdGroupsByCampaign(entities, sourceCampaignIds),
+    [entities, sourceCampaignIds],
+  );
 
   const selectedFor = (campaignId: string) =>
     (adGroupsByCampaign.get(campaignId) ?? [])
@@ -617,7 +636,7 @@ export function CopyCampaignPanel(props: {
               {list.length === 0
                 ? <p className="target-account-empty">
                     该系列在当前快照中没有广告组。刚复制出来的系列要等下一轮同步才会带上组，
-                    点右上角「重新读取」刷新。
+                    点右上角「重新读取」刷新；组已被删除的系列则复制不出内容。
                   </p>
                 : <div className="target-account-grid">
                   {list.map((entity) => (
@@ -625,7 +644,12 @@ export function CopyCampaignPanel(props: {
                       <input checked={!excludedAdGroupIds.includes(entity.externalId)} disabled={disabled}
                         onChange={() => toggleAdGroup(entity.externalId)} type="checkbox" />
                       <span>{entity.name}</span>
-                      <small>{entity.status === "enabled" ? "投放中" : "已关闭"}</small>
+                      {/* 接管标记要显式标出来：它不再影响能不能复制，但用户得知道
+                          这个组当前不受自动化规则管。 */}
+                      <small>
+                        {entity.status === "enabled" ? "投放中" : "已关闭"}
+                        {entity.ignored ? " · 人工接管" : ""}
+                      </small>
                     </label>
                   ))}
                 </div>}

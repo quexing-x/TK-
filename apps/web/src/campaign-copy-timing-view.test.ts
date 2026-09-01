@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { belongsToBudgetKind, pickDefaultBudgetKind, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
+import { belongsToBudgetKind, groupAdGroupsByCampaign, pickDefaultBudgetKind, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
 
 const now = new Date("2026-08-01T10:00:00.000Z");
 
@@ -124,5 +124,58 @@ describe("默认投放时机", () => {
     const now = new Date("2026-09-02T10:00:00.000Z");
     const result = resolveCampaignCopyLaunchTiming("scheduled", "2026-09-01T06:00", now);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("按系列归堆广告组", () => {
+  const group = (id: string, campaignId: string, ignored = false) => ({
+    entityType: "ad-group" as const,
+    externalId: id,
+    name: id,
+    status: "enabled" as const,
+    parentCampaignId: campaignId,
+    parentAdGroupId: null,
+    campaignBudget: null,
+    campaignBudgetOptimized: false,
+    metrics: {} as never,
+    ignored,
+    syncedAt: "2026-09-01T00:00:00.000Z",
+    automationManaged: false,
+  });
+
+  // 这条是本次改动的核心：ignored 的语义是「不让自动化规则动它」，不是「不让我手动
+  // 复制它」。此前整片跳过，导致组全被接管过的系列显示「没有广告组」，怎么刷新都没用。
+  it("人工接管的组照样归堆", () => {
+    const map = groupAdGroupsByCampaign(
+      [group("g1", "c1", true), group("g2", "c1")],
+      ["c1"],
+    );
+    expect(map.get("c1")?.map((g) => g.externalId)).toEqual(["g1", "g2"]);
+  });
+
+  it("组全被接管的系列不再是空的", () => {
+    const map = groupAdGroupsByCampaign([group("g1", "c1", true)], ["c1"]);
+    expect(map.get("c1")).toHaveLength(1);
+  });
+
+  it("只归入被选中的系列，未选中的不建桶", () => {
+    const map = groupAdGroupsByCampaign(
+      [group("g1", "c1"), group("g2", "c2")],
+      ["c1"],
+    );
+    expect(map.get("c1")).toHaveLength(1);
+    expect(map.has("c2")).toBe(false);
+  });
+
+  it("缺少所属系列的组直接跳过", () => {
+    const orphan = { ...group("g1", "c1"), parentCampaignId: null };
+    const map = groupAdGroupsByCampaign([orphan], ["c1"]);
+    expect(map.get("c1")).toHaveLength(0);
+  });
+
+  it("非广告组实体不参与归堆", () => {
+    const campaign = { ...group("c1", "c1"), entityType: "campaign" as const };
+    const map = groupAdGroupsByCampaign([campaign], ["c1"]);
+    expect(map.get("c1")).toHaveLength(0);
   });
 });
