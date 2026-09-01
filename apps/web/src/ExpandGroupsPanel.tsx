@@ -36,6 +36,7 @@ export const VERDICT_LABELS: Record<string, { short: string; tone: string; hint:
   observing: { short: "观察中", tone: "active", hint: "零转化，累计花费还没到上限" },
   "cost-per-conversion-high": { short: "重扩系列", tone: "warning", hint: "单转超标" },
   "no-conversion-overspent": { short: "重扩系列", tone: "warning", hint: "零转化且已花超上限" },
+  "no-conversion-stalled": { short: "重扩系列", tone: "warning", hint: "零转化，且组已被规则关光" },
   "not-enabled": { short: "已关停", tone: "muted", hint: "系列已关停，不参与判定" },
   "non-operational": { short: "非投放", tone: "muted", hint: "诊断或占位系列" },
 };
@@ -220,6 +221,7 @@ export function ExpandGroupsPanel({
     reserved: number;
     error: string | null;
   };
+  const [closingCampaigns, setClosingCampaigns] = useState(false);
   const [draftScan, setDraftScan] = useState<DraftScanRow[] | null>(null);
   const [draftScanning, setDraftScanning] = useState(false);
   const [draftCleaning, setDraftCleaning] = useState(false);
@@ -569,6 +571,66 @@ export function ExpandGroupsPanel({
     return { expand, recreate, computedAt, missing };
   }, [visibleStates, classificationByAccount]);
 
+  /**
+   * 可以直接关掉的系列：判定为需重扩、且组已经被规则关光的。
+   *
+   * 组还在跑的不放进来——那说明系列还在产生数据，关系列会连带掐掉正在投放的组。
+   */
+  const closableCampaigns = useMemo(
+    () => visibleStates.flatMap((state) => {
+      const classification = classificationByAccount[state.accountId];
+      if (!classification) return [];
+      return classification.recreateCampaign
+        .filter((item) => item.hasActiveAdGroups === false)
+        .map((item) => ({ ...item, accountId: state.accountId }));
+    }),
+    [visibleStates, classificationByAccount],
+  );
+
+  const closeStalledCampaigns = async () => {
+    if (closableCampaigns.length === 0) return;
+    const confirmed = await confirm({
+      title: "关闭需重扩的系列",
+      message: [
+        `将关闭 ${closableCampaigns.length} 条系列：它们都已判定为需重扩，且组已被规则全部关停。`,
+        "",
+        ...closableCampaigns.slice(0, 8).map((item) => `· ${item.name}`),
+        ...(closableCampaigns.length > 8 ? [`· 另有 ${closableCampaigns.length - 8} 条`] : []),
+        "",
+        "关闭后不影响已复制出的新系列。确认？",
+      ].join("\n"),
+      confirmLabel: "确认关闭",
+      danger: true,
+    });
+    if (!confirmed) return;
+    setClosingCampaigns(true);
+    onError(null);
+    const failed: string[] = [];
+    try {
+      // 逐条发：批量接口没有系列层的入口，而一条失败不该拖垮其余条。
+      for (const item of closableCampaigns) {
+        try {
+          await api.changeEntityStatus(item.accountId, {
+            entityType: "campaign",
+            externalId: item.externalId,
+            action: "disable",
+          });
+        } catch (cause) {
+          failed.push(`${item.name}：${messageOf(cause)}`);
+        }
+      }
+      const ok = closableCampaigns.length - failed.length;
+      setFeedback({
+        tone: failed.length > 0 ? "danger" : "success",
+        title: failed.length > 0 ? `已关闭 ${ok} 条，${failed.length} 条失败` : `已关闭 ${ok} 条系列`,
+        lines: failed.slice(0, 8),
+      });
+      await Promise.all(visibleStates.map((state) => loadAccount(state.accountId)));
+    } finally {
+      setClosingCampaigns(false);
+    }
+  };
+
   /** 需要复制新系列的那批，按亏得最多排前面（服务端已排好序，这里只做跨账户拼接）。 */
   const recreateList = useMemo(
     () => visibleStates.flatMap((state) => {
@@ -907,9 +969,9 @@ export function ExpandGroupsPanel({
             : <span className="expand-muted">—</span>}</td>
         </tr>)}
       </tbody></table></div>
-      {recreateList.length > 1 && onCopyCampaign && <div className="expand-actions">
+      {(recreateList.length > 1 || closableCampaigns.length > 0) && <div className="expand-actions">
         {/* 一次全带过去：几十条系列逐个点跳转，比手动对照好不了多少。 */}
-        <button className="secondary-button" type="button"
+        {recreateList.length > 1 && onCopyCampaign && <button className="secondary-button" type="button"
           onClick={() => onCopyCampaign({
             accountId: recreateList[0]!.accountId,
             campaignIds: recreateList
@@ -917,7 +979,13 @@ export function ExpandGroupsPanel({
               .map((item) => item.externalId),
           })}>
           <CopyPlus size={14} /> 全部带到复制页（{recreateList.filter((item) => item.accountId === recreateList[0]!.accountId).length} 条）
-        </button>
+        </button>}
+        {/* 只关组已经全停的那批；组还在跑的不动，关系列会连带掐掉在投的组。 */}
+        {closableCampaigns.length > 0 && <button className="secondary-button" disabled={closingCampaigns}
+          type="button" onClick={() => void closeStalledCampaigns()}
+          title="仅关闭组已被规则全部关停的系列">
+          <XCircle size={14} /> {closingCampaigns ? "关闭中…" : `关闭已停跑的系列（${closableCampaigns.length} 条）`}
+        </button>}
       </div>}
     </section>}
 

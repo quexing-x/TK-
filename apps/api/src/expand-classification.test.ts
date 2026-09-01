@@ -25,6 +25,8 @@ interface SeedCampaign {
   enabled?: boolean | undefined;
   spend: number;
   conversions: number;
+  /** 组被规则全部关停。零转化时会走「不看消耗直接判重扩」那条。 */
+  adGroupsStopped?: boolean | undefined;
 }
 
 describe("扩组分类接口", () => {
@@ -39,10 +41,10 @@ describe("扩组分类接口", () => {
   const DAY_TWO = "2026-08-26T02:00:00.000Z"; // 上海 08-26 10:00
 
   function seedDay(finishedAt: string, campaigns: SeedCampaign[]) {
-    store.saveReadOnlySync(
-      "demo-account",
-      "cookie",
-      campaigns.map((campaign) => ({
+    // 每条系列默认配一个在投的广告组。「组已被规则关光」是另一条判据（零转化时不看
+    // 消耗直接判重扩），不给组的话所有系列都会落进那条，本文件其它用例就全失真了。
+    const entities = [
+      ...campaigns.map((campaign) => ({
         entityType: "campaign" as const,
         externalId: campaign.externalId,
         payload: {
@@ -52,10 +54,24 @@ describe("扩组分类接口", () => {
           time_attr_convert_cnt: String(campaign.conversions),
         },
       })),
+      ...campaigns.map((campaign) => ({
+        entityType: "ad-group" as const,
+        externalId: `${campaign.externalId}-g1`,
+        payload: {
+          campaign_id: campaign.externalId,
+          adgroup_name: `${campaign.name}-组1`,
+          ad_primary_status: campaign.adGroupsStopped ? "disable" : "enable",
+        },
+      })),
+    ];
+    store.saveReadOnlySync(
+      "demo-account",
+      "cookie",
+      entities,
       {
         startedAt: finishedAt,
         finishedAt,
-        counts: { campaign: campaigns.length, "ad-group": 0, ad: 0, material: 0 },
+        counts: { campaign: campaigns.length, "ad-group": campaigns.length, ad: 0, material: 0 },
         warnings: [],
         quality: syncQuality(finishedAt),
       },
@@ -85,8 +101,8 @@ describe("扩组分类接口", () => {
     return response.json() as {
       computedAt: string;
       thresholds: { maxCostPerConversion: number; maxSpendWithoutConversion: number };
-      expand: Array<{ externalId: string; reason: string; spend: number; conversions: number; costPerConversion: number | null }>;
-      recreateCampaign: Array<{ externalId: string; reason: string; spend: number; conversions: number }>;
+      expand: Array<{ externalId: string; reason: string; spend: number; conversions: number; costPerConversion: number | null; hasActiveAdGroups: boolean | null }>;
+      recreateCampaign: Array<{ externalId: string; reason: string; spend: number; conversions: number; hasActiveAdGroups: boolean | null }>;
       excluded: Array<{ externalId: string; reason: string }>;
     };
   }
@@ -198,6 +214,27 @@ describe("扩组分类接口", () => {
       .map((item) => item.externalId);
     expect(everyId).toContain("camp-live");
     expect(everyId).not.toContain("camp-gone");
+  });
+
+  it("组被规则关光的零转化系列，不看消耗直接判重扩", async () => {
+    seedDay(DAY_TWO, [
+      // 花得很少，按消耗阈值本来还在观察期；但组已被规则全部关停，系列再也花不出钱，
+      // 那条 spend > 3 的线永远跨不过去，会永久卡在「观察中」从名单里静默消失。
+      { externalId: "camp-stalled", name: "停跑系列", spend: 1, conversions: 0, adGroupsStopped: true },
+      // 组还在跑，同样的消耗仍属观察期。
+      { externalId: "camp-running", name: "在跑系列", spend: 1, conversions: 0 },
+      // 从没花过钱：无在投组只是还没开始投，不是跑不出来。
+      { externalId: "camp-fresh", name: "新建未投系列", spend: 0, conversions: 0, adGroupsStopped: true },
+    ]);
+
+    const body = await classify();
+    const stalled = body.recreateCampaign.find((item) => item.externalId === "camp-stalled");
+    expect(stalled?.reason).toBe("no-conversion-stalled");
+    expect(stalled?.hasActiveAdGroups).toBe(false);
+
+    expect(body.expand.map((item) => item.externalId).sort())
+      .toEqual(["camp-fresh", "camp-running"]);
+    expect(body.expand.find((item) => item.externalId === "camp-running")?.hasActiveAdGroups).toBe(true);
   });
 
   it("账号不存在时返回 404", async () => {
