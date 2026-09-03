@@ -637,6 +637,14 @@ export class AutomationStore {
       ).get(accountId) as SqlRow).count ?? 0) + (account.credential_ref ? 1 : 0);
 
       this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+      // 指标快照不跟着账户级联删（见建表处注释），删账户只留一个待回收标记，
+      // 几十万行由 purgeOrphanedMetricSnapshots 跟着轮询分批清。标记和删账户在
+      // 同一个事务里：账户没了、标记却没写上，那些行就再也没人认领了。
+      this.db.prepare(
+        `INSERT INTO orphaned_snapshot_accounts (account_id, marked_at)
+         VALUES (?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET marked_at = excluded.marked_at`,
+      ).run(accountId, new Date().toISOString());
       this.writeAudit("local-user", accountId, "account.deleted", {
         credentialReferenceCount,
       });
@@ -646,6 +654,42 @@ export class AutomationStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /**
+   * 回收已删账户遗留的指标快照，每次最多 limit 行。
+   *
+   * 快照不跟着账户级联删除，删账户只写一条待回收标记，几十万行留在原地由这里
+   * 慢慢清。`limit` 和降采样是同一个道理的护栏：单次删太多会长时间持写锁，把
+   * 同步卡住；跟着轮询每轮清一批，几个小时收敛完，期间界面上早就看不到这个
+   * 账户了。
+   *
+   * 返回这一轮删掉的行数，0 表示当前没有待回收的账户。
+   */
+  purgeOrphanedMetricSnapshots(limit: number): number {
+    const marked = this.db.prepare(
+      "SELECT account_id FROM orphaned_snapshot_accounts ORDER BY marked_at LIMIT 1",
+    ).get() as SqlRow | undefined;
+    if (!marked) return 0;
+    const accountId = String(marked.account_id);
+    const dropMark = (): void => {
+      this.db
+        .prepare("DELETE FROM orphaned_snapshot_accounts WHERE account_id = ?")
+        .run(accountId);
+    };
+    // 同一个 id 又被建回来了：快照重新有主，不能再当孤儿删。
+    if (this.db.prepare("SELECT 1 FROM accounts WHERE id = ?").get(accountId)) {
+      dropMark();
+      return 0;
+    }
+    const result = this.db.prepare(
+      `DELETE FROM entity_metric_snapshots WHERE rowid IN (
+         SELECT rowid FROM entity_metric_snapshots WHERE account_id = ? LIMIT ?
+       )`,
+    ).run(accountId, limit);
+    const deleted = Number(result.changes);
+    if (deleted === 0) dropMark();
+    return deleted;
   }
 
   private listCredentialReferencesUnchecked(accountId: string): string[] {
@@ -7703,9 +7747,14 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
+      -- account_id 刻意不做外键：指标快照是账户下最大的一张表（一个账户 40～66
+      -- 万行），跟着账户级联删会把这几十万行塞进删账户的同一个同步事务里，实测
+      -- 光这一步就要十几秒，整个进程停在那条 DELETE 上。账户删掉之后这些行对界面
+      -- 已经没有意义（所有查询都从 accounts 出发），改由 purgeOrphanedMetricSnapshots
+      -- 跟着轮询分批回收：删账户立刻返回，残留行慢慢清。
       CREATE TABLE IF NOT EXISTS entity_metric_snapshots (
         id TEXT PRIMARY KEY,
-        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL,
         provider_kind TEXT NOT NULL,
         entity_type TEXT NOT NULL,
         external_id TEXT NOT NULL,
@@ -7719,6 +7768,13 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS entity_metric_snapshots_lookup
       ON entity_metric_snapshots (
         account_id, provider_kind, entity_type, captured_at
+      );
+
+      -- 待回收的快照账户。删账户时记一笔，回收完再删掉这行——不持久化的话，
+      -- 客户端一重启就再也没人知道哪些 account_id 已经没有账户了。
+      CREATE TABLE IF NOT EXISTS orphaned_snapshot_accounts (
+        account_id TEXT PRIMARY KEY,
+        marked_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS sync_runs (
@@ -7780,6 +7836,13 @@ export class AutomationStore {
       ON automation_decisions (
         account_id, entity_type, external_id, action, status, executed_at
       );
+
+      -- run_id 是 CASCADE 外键，没有索引时 SQLite 每删一行 automation_runs 就要把
+      -- 整张决策表扫一遍。删账户会先删掉它名下所有 automation_runs，于是变成
+      -- 「该账户的运行数 × 决策表总行数」次扫描：实测删一个账户（1092 次运行、
+      -- 决策表 4.5 万行）光这一步就卡 67 秒，整个进程同步阻塞。建索引后是 76 毫秒。
+      CREATE INDEX IF NOT EXISTS automation_decisions_run
+      ON automation_decisions (run_id);
 
       CREATE TABLE IF NOT EXISTS notification_channels (
         channel_kind TEXT PRIMARY KEY CHECK (channel_kind IN ('email', 'wecom', 'feishu')),
@@ -8132,6 +8195,43 @@ export class AutomationStore {
     this.ensureColumn("launch_plan_items", "idempotency_key", "TEXT");
     // 历史行没有失败性质，留 NULL，listNewlyInvalidAutomationAccounts 按 persistent 读。
     this.ensureColumn("poll_cycle_accounts", "failure_kind", "TEXT");
+    // 把已经建好的快照表上的级联外键摘掉，理由见建表处的注释。SQLite 改不了
+    // 外键，只能重建整张表——这是一次性成本，之后删账户不再被几十万行拖住。
+    this.applyMigration("entity-metric-snapshots-drop-cascade", () => {
+      const foreignKeys = this.db
+        .prepare("PRAGMA foreign_key_list(entity_metric_snapshots)")
+        .all() as SqlRow[];
+      if (foreignKeys.length === 0) return;
+      this.db.exec(`
+        ALTER TABLE entity_metric_snapshots RENAME TO entity_metric_snapshots_legacy;
+        CREATE TABLE entity_metric_snapshots (
+          id TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          provider_kind TEXT NOT NULL,
+          entity_type TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          entity_name TEXT NOT NULL,
+          operational_status TEXT NOT NULL,
+          metrics_json TEXT NOT NULL,
+          captured_at TEXT NOT NULL,
+          sync_quality_status TEXT NOT NULL DEFAULT 'invalid'
+        );
+        INSERT INTO entity_metric_snapshots (
+          id, account_id, provider_kind, entity_type, external_id,
+          entity_name, operational_status, metrics_json, captured_at,
+          sync_quality_status
+        )
+        SELECT id, account_id, provider_kind, entity_type, external_id,
+               entity_name, operational_status, metrics_json, captured_at,
+               sync_quality_status
+        FROM entity_metric_snapshots_legacy;
+        DROP TABLE entity_metric_snapshots_legacy;
+        CREATE INDEX entity_metric_snapshots_lookup
+        ON entity_metric_snapshots (
+          account_id, provider_kind, entity_type, captured_at
+        );
+      `);
+    });
     this.applyMigration("launch-creation-locks-v2", () => {
       const columns = this.db.prepare("PRAGMA table_info(launch_creation_locks)").all() as SqlRow[];
       const owner = columns.find((column) => column.name === "owner_id");
