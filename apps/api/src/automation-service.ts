@@ -81,6 +81,14 @@ const METRIC_FULL_RESOLUTION_DAYS = 2;
  */
 const DOWNSAMPLE_ROW_LIMIT = 20_000;
 /**
+ * 单跳最多回收多少行「已删账户」的指标快照。
+ *
+ * 和降采样同一个护栏，取值也一样：实测删除速度约 1.5 万行/秒，2 万行约 1.4 秒。
+ * 删掉一个 66 万行的账户约 33 跳收敛完——期间界面上早就没有这个账户了，回收
+ * 快慢只影响库体积。
+ */
+const ORPHAN_SNAPSHOT_ROW_LIMIT = 20_000;
+/**
  * 「前一日转化达标自动开启」写失败后，当天最多补写几次。
  *
  * 5 次足够覆盖 TikTok 的瞬时抖动（2026-09-03 那次 `code 4 读取失败` 近 7 天只出现过
@@ -2843,6 +2851,11 @@ export class AutomationScheduler {
     if (this.maintaining) return;
     this.maintaining = true;
     try {
+      // 已删账户遗留的指标快照在这里分批回收，位置有讲究：
+      // - 不能挂在「轮询到期」过滤后面。删掉最后一个账户之后就再也没有账户会到期，
+      //   那几十万行会永远留在库里。
+      // - 也不能放在总开关判断之后。关掉自动化只是停投放，不该把数据清理一起停掉。
+      this.purgeOrphanedSnapshots();
       if (!this.store.getSystemRuntimeState().enabled) return;
       try {
         await this.notifications?.flushPending();
@@ -3031,6 +3044,14 @@ export class AutomationScheduler {
       message: run.errorMessage,
       failureKind: failed ? pollFailureKind(run.errorMessage) : null,
     });
+  }
+
+  private purgeOrphanedSnapshots(): void {
+    try {
+      this.store.purgeOrphanedMetricSnapshots(ORPHAN_SNAPSHOT_ROW_LIMIT);
+    } catch {
+      // 下一跳还会再来，不值得把整条定时执行链打掉。
+    }
   }
 
   private forgetRemovedAccounts(

@@ -1131,6 +1131,75 @@ describe("AutomationStore", () => {
 
   // 账户失效提醒只在**跳变**时发。失效会持续几小时甚至几天，而轮询最短 45 秒一轮，
   // 按「当前所有失效账户」推送等于持续 @所有人 刷群。
+  // 指标快照是账户下最大的一张表（生产上一个账户 40～66 万行）。它曾经挂着
+  // ON DELETE CASCADE，删账户要在同一个同步事务里把这几十万行一起删掉，整个
+  // 进程停在那条 DELETE 上十几秒。现在删账户只清账户本体，快照留给回收任务。
+  describe("删账户不再被指标快照拖住", () => {
+    const captureSnapshots = (count: number): void => {
+      for (let index = 0; index < count; index += 1) {
+        const at = new Date(Date.UTC(2026, 8, 1, index)).toISOString();
+        store.saveReadOnlySync("demo-account", "cookie", [
+          { entityType: "ad-group", externalId: `ag-${index}`, payload: { ad_name: `组 ${index}` } },
+        ], {
+          startedAt: at,
+          finishedAt: at,
+          counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
+          warnings: [],
+          quality: healthySyncQuality(at),
+        });
+      }
+    };
+    const deleteDemoAccount = (): boolean => store.deleteAccount(
+      "demo-account",
+      store.listAccountCredentialReferences("demo-account") ?? [],
+    );
+
+    it("账户立刻消失，快照留在原地等回收", () => {
+      captureSnapshots(5);
+
+      expect(deleteDemoAccount()).toBe(true);
+
+      expect(store.getAccount("demo-account")).toBeNull();
+      // 还在库里：回收任务能一批一批地领走。
+      expect(store.purgeOrphanedMetricSnapshots(2)).toBe(2);
+    });
+
+    it("分批回收到清空后销号，之后不再空转", () => {
+      captureSnapshots(5);
+      deleteDemoAccount();
+
+      let removed = 0;
+      for (let round = 0; round < 10; round += 1) {
+        const deleted = store.purgeOrphanedMetricSnapshots(2);
+        if (deleted === 0) break;
+        removed += deleted;
+      }
+
+      expect(removed).toBe(5);
+      expect(store.purgeOrphanedMetricSnapshots(2)).toBe(0);
+    });
+
+    it("没有待回收的账户时是空转", () => {
+      captureSnapshots(3);
+
+      expect(store.purgeOrphanedMetricSnapshots(100)).toBe(0);
+    });
+
+    // 同一个 id 又被建回来（seed 会重建 demo-account）：那些行重新有主，不能再删。
+    it("账户 id 被重新占用后，残留快照不再当孤儿删", () => {
+      captureSnapshots(3);
+      deleteDemoAccount();
+      store.seed();
+      expect(store.getAccount("demo-account")).not.toBeNull();
+
+      expect(store.purgeOrphanedMetricSnapshots(100)).toBe(0);
+      // 销号之后也不会再回头删它。
+      expect(store.purgeOrphanedMetricSnapshots(100)).toBe(0);
+      expect(store.listMetricSnapshots("demo-account", "cookie", "2026-01-01T00:00:00.000Z").length)
+        .toBeGreaterThan(0);
+    });
+  });
+
   describe("账户失效提醒的跳变判定", () => {
     const runCycle = (
       status: "no-action" | "failed" | "skipped",
