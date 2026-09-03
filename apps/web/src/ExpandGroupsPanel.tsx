@@ -43,6 +43,19 @@ export const VERDICT_LABELS: Record<string, { short: string; tone: string; hint:
 };
 
 /**
+ * 这条系列该不该出现在「建议重扩系列」名单里。
+ *
+ * 那份名单是**行动清单**，不是诊断报告：今天已经从这条系列复制出新系列了，再摆在上面只会
+ * 让人（或「全部带到复制页」那个按钮）把同一条复制第二遍。判定本身不受影响——服务端仍然
+ * 判它 recreate-campaign，每早的自动关停照样挑得中它。
+ *
+ * 跨天会重新出现，这是有意的：源系列第二天还是没起色，说明昨天复制出来的那条也没救活它。
+ */
+export function shouldSuggestRecreate(campaign: { recreatedToday?: boolean }): boolean {
+  return campaign.recreatedToday !== true;
+}
+
+/**
  * 这个广告组该不该出现在当前的「系列判定」筛选下。
  *
  * 判定缺失时一律放行——分类接口挂了、或这条系列不在分类结果里（刚建、超出保留期），
@@ -632,18 +645,34 @@ export function ExpandGroupsPanel({
     }
   };
 
-  /** 需要复制新系列的那批，按亏得最多排前面（服务端已排好序，这里只做跨账户拼接）。 */
+  /**
+   * 需要复制新系列的那批，按亏得最多排前面（服务端已排好序，这里只做跨账户拼接）。
+   *
+   * **今天已经复制过的排除掉。** 这份名单是行动清单，不是诊断报告——一条系列今天已经复制出
+   * 新系列了，再摆在这里只会让人（或下面那个「全部带到复制页」）把它复制第二遍。判定本身
+   * 没变，它在服务端仍然是 recreate-campaign，每早的自动关停照样挑得中它。
+   */
   const recreateList = useMemo(
     () => visibleStates.flatMap((state) => {
       const classification = classificationByAccount[state.accountId];
       if (!classification) return [];
-      return classification.recreateCampaign.map((item) => ({
-        ...item,
-        accountId: state.accountId,
-        accountName: accountName.get(state.accountId) ?? state.accountId,
-      }));
+      return classification.recreateCampaign
+        .filter(shouldSuggestRecreate)
+        .map((item) => ({
+          ...item,
+          accountId: state.accountId,
+          accountName: accountName.get(state.accountId) ?? state.accountId,
+        }));
     }),
     [visibleStates, classificationByAccount, accountName],
+  );
+
+  /** 被上面那条规则藏起来的条数。要显示出来，否则名单凭空变短会被当成出了 bug。 */
+  const recreatedTodayCount = useMemo(
+    () => visibleStates.reduce((total, state) => total
+      + (classificationByAccount[state.accountId]?.recreateCampaign ?? [])
+        .filter((item) => !shouldSuggestRecreate(item)).length, 0),
+    [visibleStates, classificationByAccount],
   );
 
   // 因系列预算(CBO)被排除的广告组数量，用于向用户解释名单为何变短。
@@ -946,15 +975,18 @@ export function ExpandGroupsPanel({
       })}
     </div>}
 
-    {recreateList.length > 0 && <section className="expand-history">
+    {(recreateList.length > 0 || recreatedTodayCount > 0) && <section className="expand-history">
       <header className="expand-history-head">
         <span><AlertTriangle size={15} /> 建议重扩系列</span>
         <div className="expand-history-actions">
           <span className="expand-history-count">{recreateList.length} 条</span>
         </div>
       </header>
-      <p className="expand-excluded-note"><Info size={14} /> <span>这些系列今天不建议再往上扩组。点「复制系列」直接带着它跳到复制页，不用自己再找一遍。</span></p>
-      <div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>账户</th><th>系列</th><th>原因</th><th className="expand-num">累计花费</th><th className="expand-num">转化</th><th className="expand-num">单转</th><th>操作</th></tr></thead><tbody>
+      <p className="expand-excluded-note"><Info size={14} /> <span>
+        这些系列今天不建议再往上扩组。点「复制系列」直接带着它跳到复制页，不用自己再找一遍。
+        {recreatedTodayCount > 0 && `另有 ${recreatedTodayCount} 条今天已经复制过，已从名单里排除，明天还没起色会再出现。`}
+      </span></p>
+      {recreateList.length > 0 && <div className="table-wrap expand-table expand-history-table"><table><thead><tr><th>账户</th><th>系列</th><th>原因</th><th className="expand-num">累计花费</th><th className="expand-num">转化</th><th className="expand-num">单转</th><th>操作</th></tr></thead><tbody>
         {recreateList.map((item) => <tr key={`${item.accountId}::${item.externalId}`}>
           <td className="expand-muted">{item.accountName}</td>
           <td className="expand-name">{item.name}</td>
@@ -969,7 +1001,7 @@ export function ExpandGroupsPanel({
               </button>
             : <span className="expand-muted">—</span>}</td>
         </tr>)}
-      </tbody></table></div>
+      </tbody></table></div>}
       {(recreateList.length > 1 || closableCampaigns.length > 0) && <div className="expand-actions">
         {/* 一次全带过去：几十条系列逐个点跳转，比手动对照好不了多少。 */}
         {recreateList.length > 1 && onCopyCampaign && <button className="secondary-button" type="button"

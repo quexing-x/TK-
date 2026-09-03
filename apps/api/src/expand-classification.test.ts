@@ -105,8 +105,8 @@ describe("扩组分类接口", () => {
         maxSpendWithoutConversion: number;
         maxConsecutiveZeroConversionDays: number;
       };
-      expand: Array<{ externalId: string; reason: string; spend: number; conversions: number; costPerConversion: number | null; hasActiveAdGroups: boolean | null }>;
-      recreateCampaign: Array<{ externalId: string; reason: string; spend: number; conversions: number; hasActiveAdGroups: boolean | null }>;
+      expand: Array<{ externalId: string; reason: string; spend: number; conversions: number; costPerConversion: number | null; hasActiveAdGroups: boolean | null; recreatedToday: boolean }>;
+      recreateCampaign: Array<{ externalId: string; reason: string; spend: number; conversions: number; hasActiveAdGroups: boolean | null; recreatedToday: boolean }>;
       excluded: Array<{ externalId: string; reason: string }>;
     };
   }
@@ -308,6 +308,45 @@ describe("扩组分类接口", () => {
       const body = await classify("?maxConsecutiveZeroConversionDays=2");
       expect(body.recreateCampaign.find((row) => row.externalId === "camp-two-days")?.reason)
         .toBe("no-conversion-days-exceeded");
+    });
+  });
+
+  /**
+   * 今天已经复制过的源系列要带上标记，好让界面把它从「建议重扩」名单里藏掉——那份名单是
+   * 行动清单，今天已经做过的再摆上去只会被复制第二遍。
+   */
+  describe("今天已经复制过", () => {
+    it("标记跟着系列一起返回，但不改判定", async () => {
+      seedDay(DAY_TWO, [
+        { externalId: "camp-copied", name: "已复制系列", spend: 30, conversions: 1 },
+        { externalId: "camp-not-copied", name: "未复制系列", spend: 30, conversions: 1 },
+      ]);
+      store.claimCampaignCopyTask("copy-1", "demo-account", "camp-copied", "已复制系列-0826-100000");
+
+      const body = await classify();
+
+      // 判定不变：两条都还是「单转超标 → 需重扩」。改判会顺手关掉每早的自动关停，
+      // 那条链路正是靠 recreateCampaign 桶挑关停对象的。
+      const copied = body.recreateCampaign.find((row) => row.externalId === "camp-copied");
+      const notCopied = body.recreateCampaign.find((row) => row.externalId === "camp-not-copied");
+      expect(copied?.reason).toBe("cost-per-conversion-high");
+      expect(notCopied?.reason).toBe("cost-per-conversion-high");
+      // 差别只在标记上。
+      expect(copied?.recreatedToday).toBe(true);
+      expect(notCopied?.recreatedToday).toBe(false);
+    });
+
+    it("昨天复制的不算：源系列今天还是没起色，该再提示一次", async () => {
+      seedDay(DAY_TWO, [{ externalId: "camp-copied", name: "已复制系列", spend: 30, conversions: 1 }]);
+      // 当前系统时间是 2026-08-26T06:00Z（上海 14:00），往前 26 小时落在上海 8-25。
+      vi.setSystemTime(new Date("2026-08-25T04:00:00.000Z"));
+      store.claimCampaignCopyTask("copy-1", "demo-account", "camp-copied", "已复制系列-0825-120000");
+      vi.setSystemTime(new Date("2026-08-26T06:00:00.000Z"));
+
+      const body = await classify();
+
+      expect(body.recreateCampaign.find((row) => row.externalId === "camp-copied")?.recreatedToday)
+        .toBe(false);
     });
   });
 

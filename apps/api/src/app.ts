@@ -45,6 +45,7 @@ import {
   DEFAULT_EXPAND_THRESHOLDS,
   METRIC_RETENTION_DAYS,
   classifyCampaignsForExpand,
+  dateKeyInTimeZone,
   type AppPermission,
   type ProviderKind,
   type WriteTaskActor,
@@ -2234,6 +2235,13 @@ export async function createApp(
       account.providerKind,
       new Date(until),
     );
+    // 今天已经复制过的源系列。只作标记透传，不改判定——判定归判定（这条系列确实跑不出来，
+    // 每早的自动关停仍然要能挑中它），名单归名单（今天已经做过的不该再让人做一遍）。
+    const recreatedToday = dependencies.store.listCampaignIdsCopiedOnLocalDate(
+      accountId,
+      dateKeyInTimeZone(new Date(until), account.timezone),
+      account.timezone,
+    );
     const campaigns = managed
       .filter((entity) => entity.entityType === "campaign")
       .map((entity) => {
@@ -2244,6 +2252,7 @@ export async function createApp(
           status: entity.status,
           hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
           consecutiveZeroConversionDays: zeroStreaks.get(entity.externalId) ?? 0,
+          recreatedToday: recreatedToday.has(entity.externalId),
           // 快照里没有这条系列时按零处理：它要么刚建、要么已超出保留期，两种都不该
           // 凭空得到一个成绩。
           spend: metric?.spend ?? 0,
