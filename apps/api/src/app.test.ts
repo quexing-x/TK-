@@ -829,6 +829,74 @@ describe("local API", () => {
     expect(publishExistingDrafts).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * 部分成功的收口：终态回来「广告组 2/3」，2 个成了正式组、1 个停在草稿。
+   *
+   * 这里验的是那份「已经建成」名单怎么算出来的——它决定了哪几个可以跳过不发，算错就等于
+   * 漏建一个组或者建出第二个同名组。三个条件缺一不可：同系列、状态不是 ad_create、
+   * 系列 ID 读得出来。
+   */
+  it("发布草稿时只跳过同系列下已经建成的组，草稿和别的系列的同名组都不算", async () => {
+    const publishExistingDrafts = vi.fn(async () => ({
+      ok: true,
+      message: "已发布 1 个草稿广告组；另有 1 个此前已经建成，未重复发布：新组-2",
+      adGroupIds: ["published-3"],
+    }));
+    const provider = {
+      kind: "cookie",
+      displayName: "draft publish provider",
+      capabilityVersion: "draft-publish-v1",
+      capabilities: new Set(["copy-ads"]),
+      publishExistingDrafts,
+    } as unknown as AdsProvider;
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie", advertiserId: "1001", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie", cookie: "sessionid=test-session", csrfHeaderName: "x-csrftoken", requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active", capabilityVersion: "draft-publish-v1", capabilities: ["copy-ads"],
+    });
+    const syncedAt = new Date().toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "campaign" as const, externalId: "campaign-1", payload: { campaign_id: "campaign-1", campaign_name: "夏季系列" } },
+      // 上一次部分成功建出来的：可以跳过。
+      { entityType: "ad-group" as const, externalId: "g2", payload: { campaign_id: "campaign-1", ad_name: "新组-2", ad_status: "ad_disable" } },
+      // 还停在草稿——草稿也在广告组列表里、也带名字，绝不能当成「已经建成」。
+      { entityType: "ad-group" as const, externalId: "g3", payload: { campaign_id: "campaign-1", ad_name: "新组-3", ad_status: "ad_create" } },
+      // 别的系列里的同名组：跟这条记录无关。
+      { entityType: "ad-group" as const, externalId: "g9", payload: { campaign_id: "campaign-9", ad_name: "新组-9", ad_status: "ad_disable" } },
+    ], {
+      startedAt: syncedAt, finishedAt: syncedAt,
+      counts: { campaign: 1, "ad-group": 3, ad: 0, material: 0 },
+      warnings: [], quality: testSyncQuality(syncedAt),
+    });
+    store.claimAdGroupExpandTask("partial-task", "demo-account", "adgroup-1", {
+      sourceCampaignId: "campaign-1",
+      requestedCount: 3,
+      generatedNames: ["新组-2", "新组-3", "新组-9"],
+    });
+    store.finishAdGroupExpandTask("partial-task", "unknown");
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ad-group-expand-tasks/partial-task/publish-draft",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [, publishInput] = publishExistingDrafts.mock.calls[0] as unknown as [
+      unknown,
+      { names: string[]; publishedNames: string[] },
+    ];
+    expect(publishInput.names).toEqual(["新组-2", "新组-3", "新组-9"]);
+    expect(publishInput.publishedNames).toEqual(["新组-2"]);
+  });
+
   it("only lists drafts past the protection window, and never the ones awaiting a decision", async () => {
     const now = Date.now();
     const hoursAgo = (hours: number) => (now - hours * 3_600_000) / 1000;

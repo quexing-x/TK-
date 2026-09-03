@@ -10,6 +10,7 @@ import {
   parseDraftCreativeOwners,
   parseDraftSketchList,
   parseSketchSnapMapping,
+  resolveDraftPublishTargets,
   DefaultTikTokCreativeAutomationStrategyIds,
   TikTokCreationPublishSource,
   splitVideoCodes,
@@ -1458,6 +1459,11 @@ export class CookieAdsProvider implements AdsProvider {
    * 与扩组共用 `copy-ads` 能力：同一条创建会话 cURL、同一个发布接口，本质上是把一次已经
    * 授权过的扩组做完最后一步，不是一项新的写入权限。
    *
+   * **部分成功要能收口。** 一次扩 3 个组，TikTok 终态回来「广告组 2/3」是常见结果：2 个成了
+   * 正式组、1 个停在草稿。`publishedNames` 就是给这种情况用的——调用方证明哪几个已经建成，
+   * 这里跳过它们、只发还停在草稿的那些。证不出来的一个都不能跳，判据见
+   * `resolveDraftPublishTargets`。
+   *
    * **这是创建类写入**：`create_by_snap` 一旦发出，失败一律判 unknown。重试可能把同一个
    * 草稿发布成两个正式广告组。
    */
@@ -1467,6 +1473,8 @@ export class CookieAdsProvider implements AdsProvider {
       campaignId: string;
       names: string[];
       initialStatus: "enabled" | "disabled";
+      /** 调用方已证明是正式广告组的组名（同系列下、状态不是 `ad_create`）。 */
+      publishedNames?: string[];
       onBeforeDispatch?: () => void;
     },
   ): Promise<{ ok: boolean; message: string; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {
@@ -1496,20 +1504,34 @@ export class CookieAdsProvider implements AdsProvider {
       if (wanted.length === 0) {
         throw new ConfirmedCreationFailureError("这条记录没有记下组名，无法定位草稿。", true);
       }
+      const publishedNames = input.publishedNames ?? [];
       const entries = await readDraftSketches({
         sessionRequest,
         credential,
         dispatchState: draftState,
-        stopWhen: (collected) => matchDraftSketchesByName(wanted, collected).missing.length === 0,
+        // 已经建成的那些**永远不会**出现在草稿列表里。把它们算进停止条件，部分成功的记录
+        // 就会每次都把整张草稿表翻到底才罢休。
+        stopWhen: (collected) =>
+          resolveDraftPublishTargets(wanted, collected, publishedNames).missing.length === 0,
       });
-      const matchResult = matchDraftSketchesByName(wanted, entries);
-      if (matchResult.missing.length > 0) {
+      const targets = resolveDraftPublishTargets(wanted, entries, publishedNames);
+      if (targets.missing.length > 0) {
         throw new ConfirmedCreationFailureError(
-          `TikTok 后台没有找到唯一对应的草稿：${matchResult.missing.join("、")}。可能已经发布或已被删除，也可能同名草稿有多份，需要先去后台确认。`,
+          `TikTok 后台没有找到唯一对应的草稿：${targets.missing.join("、")}。可能已经发布或已被删除，也可能同名草稿有多份，需要先去后台确认。`,
           true,
         );
       }
-      const matched = matchResult.matched;
+      // 全部都已经是正式广告组了：没什么可发的，但这一条确实已经建成，该收口。这不是失败，
+      // 报成失败会让调用方把红条继续挂着，而后台已经没有任何东西等着处理了。
+      if (targets.matched.length === 0) {
+        return {
+          ok: true,
+          message: `这批广告组已经全部建成，无需发布：${targets.alreadyPublished.join("、")}`,
+          adGroupIds: [],
+        };
+      }
+      const matched = targets.matched;
+      const skipped = targets.alreadyPublished;
       // 有一类草稿连推广系列本身都还没建：campaign_id 为空、只有 campaign_sketch_id
       // （2026-08-26 生产账户里 9 条草稿中就有 2 条是这样）。发布它们要连系列一起建，
       // 是另一条链路，这里不猜。
@@ -1609,9 +1631,15 @@ export class CookieAdsProvider implements AdsProvider {
         : [];
       return {
         ok: true,
-        message: enableFailures.length > 0
-          ? `已发布 ${publishItems.length} 个草稿广告组；${enableFailures.length} 条广告未能自动开启：${enableFailures.join("；")}`
-          : `已发布 ${publishItems.length} 个草稿广告组${input.initialStatus === "disabled" ? "（暂停状态）" : ""}`,
+        message: [
+          `已发布 ${publishItems.length} 个草稿广告组${input.initialStatus === "disabled" ? "（暂停状态）" : ""}`,
+          // 跳过了哪几个必须说出来：不然用户看到「发布了 1 个」而自己明明要的是 3 个，
+          // 只会以为又出了问题。
+          skipped.length > 0 ? `另有 ${skipped.length} 个此前已经建成，未重复发布：${skipped.join("、")}` : "",
+          enableFailures.length > 0
+            ? `${enableFailures.length} 条广告未能自动开启：${enableFailures.join("；")}`
+            : "",
+        ].filter(Boolean).join("；"),
         adGroupIds: officialAdGroupIds,
       };
     } catch (cause) {

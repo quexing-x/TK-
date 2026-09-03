@@ -72,6 +72,48 @@ export interface DraftSketchMatch {
   missing: string[];
 }
 
+export interface DraftPublishTargets {
+  /** 还停在草稿、这一次要发的。 */
+  matched: DraftSketchEntry[];
+  /** 已经是正式广告组，不必再发——上一次部分成功建出来的就是这些。 */
+  alreadyPublished: string[];
+  /** 既不是草稿、也不是正式组。不知道去哪了，不下结论。 */
+  missing: string[];
+}
+
+/**
+ * 把一批组名分成「要发的草稿」「已经建成的」「不知去向的」。
+ *
+ * 只按草稿匹配是不够的，因为**部分成功是常态**：一次扩 3 个组，TikTok 的终态回来
+ * 「广告组 2/3」，于是 2 个成了正式组、1 个停在草稿。此时若要求 3 个名字都能对上草稿，
+ * 整批就会被拒，那 1 个草稿永远发不出去——而它恰恰是唯一还需要处理的。
+ *
+ * `publishedNames` 是调用方**已经证明**为正式广告组的那些名字（同一个系列下、且状态不是
+ * `ad_create`）。「证明」这两个字是这里的全部安全性：
+ *
+ * - 名字在草稿里 → 发它。草稿优先于快照，理由同 `reconcileExpandTask`：同名的正式组只能
+ *   说明「重试过、有一次成功了」，不能说明这一条已经收口。
+ * - 名字不在草稿里、但已证明是正式组 → 跳过。它已经建成了，再发一次就是建第二个。
+ * - 两者都不是 → 进 `missing`，**调用方必须停手**。「不在草稿里」本身证明不了任何事：
+ *   可能已被人手动发布，也可能已被删除，还可能是同名草稿有多份而无从挑选。少了这一条，
+ *   一个被删掉的草稿会被当成「已经建成」而悄悄收口，那批组就永远没人认领了。
+ */
+export function resolveDraftPublishTargets(
+  names: readonly string[],
+  entries: readonly DraftSketchEntry[],
+  publishedNames: readonly string[] = [],
+): DraftPublishTargets {
+  const { matched, missing } = matchDraftSketchesByName(names, entries);
+  const published = new Set(publishedNames.map((name) => name.trim()).filter(Boolean));
+  const alreadyPublished: string[] = [];
+  const stillMissing: string[] = [];
+  for (const name of missing) {
+    if (published.has(name)) alreadyPublished.push(name);
+    else stillMissing.push(name);
+  }
+  return { matched, alreadyPublished, missing: stillMissing };
+}
+
 /**
  * 按名字把失败记录里的 generatedNames 对到草稿上。
  *
