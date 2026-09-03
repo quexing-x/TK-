@@ -45,7 +45,7 @@ import {
   type StatusMutation,
   type StatusMutationResult,
 } from "@tk-auto/providers";
-import { AutomationStore } from "@tk-auto/storage";
+import { AutomationStore, type DailyAutomationRunPendingItem } from "@tk-auto/storage";
 import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 
 const statusLeaseHeartbeatMs = 60 * 1000;
@@ -80,6 +80,13 @@ const METRIC_FULL_RESOLUTION_DAYS = 2;
  * 把同步卡住。实测删除速度约 1.5 万行/秒，2 万行约 1.4 秒，摊在几十秒的一轮同步里可以忽略。
  */
 const DOWNSAMPLE_ROW_LIMIT = 20_000;
+/**
+ * 「前一日转化达标自动开启」写失败后，当天最多补写几次。
+ *
+ * 5 次足够覆盖 TikTok 的瞬时抖动（2026-09-03 那次 `code 4 读取失败` 近 7 天只出现过
+ * 一次），又不至于在持续故障时每轮都空敲。试满仍失败的留在清单上，界面查得到原因。
+ */
+const DAILY_ENABLE_MAX_ATTEMPTS = 5;
 export class AutomationBusyError extends Error {}
 class WriteBlockedBeforeDispatchError extends Error {}
 
@@ -466,6 +473,7 @@ export class AutomationService {
         account.providerKind,
         previousDate,
       );
+      const pending: DailyAutomationRunPendingItem[] = [];
       for (const record of metrics) {
         if (record.entityType !== "ad-group" && record.entityType !== "ad") continue;
         if (record.conversions < settings.minConversions) continue;
@@ -485,24 +493,101 @@ export class AutomationService {
           && entity.parentAdGroupId
           && statusOf.get(`ad-group:${entity.parentAdGroupId}`) === "disabled"
         ) continue;
-        try {
-          await this.changeStatus(
-            accountId,
-            { entityType: record.entityType, externalId: record.externalId, action: "enable" },
-            "scheduled",
-            { id: "automation-scheduler", name: "自动化调度器", kind: "system" },
-            undefined,
-            true,
-            undefined,
-            `前一日（${previousDate}）转化 ${record.conversions} 次达到 ${settings.minConversions}，自动开启。`,
-          );
-        } catch {
-          // 单个对象写失败不该带走整轮，后面的对象照常处理。这里不另外记一笔：
-          // changeStatus 失败时写入内核已经把任务连同失败原因落了库，界面上查得到。
+        const failure = await this.enableForDailyRun(
+          accountId,
+          record.entityType,
+          record.externalId,
+          `前一日（${previousDate}）转化 ${record.conversions} 次达到 ${settings.minConversions}，自动开启。`,
+        );
+        // 写失败的排进当天的重试清单。这一步是整段的要害：这个执行器一天只跑一次，
+        // 不记下来就等于永久放弃，而放弃的代价不可逆——对象保持关闭、当天零消耗、
+        // 次日转化归零，从此再也够不着门槛。
+        if (failure) {
+          pending.push({
+            entityType: record.entityType,
+            externalId: record.externalId,
+            attempts: 1,
+            reason: failure,
+          });
         }
       }
+      this.store.setDailyAutomationRunPending(accountId, "daily-enable", localDate, pending);
     } finally {
       this.store.finishDailyAutomationRun(accountId, "daily-enable", localDate);
+    }
+  }
+
+  /**
+   * 重试当天 daily-enable 没写成功的对象。每轮轮询跑一次。
+   *
+   * **不受 06:00 那个小时门槛限制**：那个门槛是为了「每天只扫一次」，不是判据的一部分。
+   * 「前一日转化达标」在当天任何时刻都同样成立，所以补写随时可以做——真正的时间边界是
+   * 跨天，而清单挂在 `local_date` 上，跨天自动作废。
+   *
+   * 重试前重新读一次当前状态：期间人工开过、或规则链开过，就直接销账，不重复写。
+   */
+  private async retryPendingDailyEnables(accountId: string, asOf = new Date()): Promise<void> {
+    const account = this.store.getAccount(accountId);
+    if (!account?.enabled || !this.store.getSystemRuntimeState().enabled) return;
+    if (!this.store.getAutomationFeatureSettings().dailyEnable.enabled) return;
+    const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    const pending = this.store.listDailyAutomationRunPending(accountId, "daily-enable", localDate);
+    if (pending.length === 0) return;
+    if (this.store.getProviderConnection(accountId, account.providerKind)?.status !== "ready") return;
+
+    const statusOf = new Map(
+      this.store.listCurrentManagedEntities(accountId, account.providerKind)
+        .map((entity) => [`${entity.entityType}:${entity.externalId}`, entity.status]),
+    );
+    const remaining: DailyAutomationRunPendingItem[] = [];
+    for (const item of pending) {
+      const current = statusOf.get(`${item.entityType}:${item.externalId}`);
+      // 已经开着了（人工或规则链干的）：目的达到，销账。
+      if (current !== "disabled") continue;
+      if (item.attempts >= DAILY_ENABLE_MAX_ATTEMPTS) {
+        remaining.push(item);
+        continue;
+      }
+      const failure = await this.enableForDailyRun(
+        accountId,
+        item.entityType,
+        item.externalId,
+        `前一日转化达标，第 ${item.attempts + 1} 次补写（上一次失败：${item.reason}）。`,
+      );
+      if (failure) {
+        remaining.push({ ...item, attempts: item.attempts + 1, reason: failure });
+      }
+    }
+    if (remaining.length !== pending.length
+      || remaining.some((item, index) => item.attempts !== pending[index]?.attempts)) {
+      this.store.setDailyAutomationRunPending(accountId, "daily-enable", localDate, remaining);
+    }
+  }
+
+  /** 开一个对象。成功返回 null，失败返回原因——调用方据此决定要不要排进重试清单。 */
+  private async enableForDailyRun(
+    accountId: string,
+    entityType: "ad-group" | "ad",
+    externalId: string,
+    reason: string,
+  ): Promise<string | null> {
+    try {
+      const { result } = await this.changeStatus(
+        accountId,
+        { entityType, externalId, action: "enable" },
+        "scheduled",
+        { id: "automation-scheduler", name: "自动化调度器", kind: "system" },
+        undefined,
+        true,
+        undefined,
+        reason,
+      );
+      if (result.ok) return null;
+      // 不抛异常也不一定成功。「结果未知」不重试：写请求已经发出去了，很可能已经开了，
+      // 再写一次只是浪费配额；明确失败才值得再来一次。
+      return result.failureKind === "unknown" ? null : (result.message || "写入失败");
+    } catch (cause) {
+      return safeMessage(cause);
     }
   }
 
@@ -1021,6 +1106,13 @@ export class AutomationService {
         output.result,
       );
       await this.reconcileUncertainExpands(accountId, account.providerKind, account.timezone);
+      // 每日执行器一天只跑一次，写失败就没有第二次机会——补写挂在这里，不受 06:00 那个
+      // 小时门槛限制。失败只吞掉：它是补救动作，不该反过来把整轮同步打掉。
+      try {
+        await this.retryPendingDailyEnables(accountId);
+      } catch {
+        // 下一轮还会再来。
+      }
       this.downsampleMetricSnapshots(accountId, account.providerKind);
 
       const eligible: AutomationCandidate[] = [];
