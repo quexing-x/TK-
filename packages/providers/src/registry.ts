@@ -379,6 +379,8 @@ export class ProviderRegistry {
       campaignId: string;
       names: string[];
       initialStatus: "enabled" | "disabled";
+      /** 调用方已证明是正式广告组的组名；这些跳过，不重复发布。 */
+      publishedNames?: string[];
       onBeforeDispatch?: () => void;
     },
   ): Promise<{ ok: boolean; message: string; adGroupIds?: string[]; failureKind?: "failed" | "unknown"; retrySafe?: boolean }> {

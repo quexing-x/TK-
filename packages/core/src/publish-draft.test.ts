@@ -6,6 +6,7 @@ import {
   parseDraftCreativeOwners,
   parseDraftSketchList,
   parseSketchSnapMapping,
+  resolveDraftPublishTargets,
   selectStaleDrafts,
   type DraftSketchEntry,
 } from "./publish-draft.js";
@@ -100,6 +101,58 @@ describe("matchDraftSketchesByName", () => {
   it("trims and de-duplicates the wanted names", () => {
     const result = matchDraftSketchesByName([" A ", "A", ""], [sketch("A", "11")]);
     expect(result.matched).toHaveLength(1);
+    expect(result.missing).toEqual([]);
+  });
+});
+
+describe("resolveDraftPublishTargets", () => {
+  // 部分成功是常态：一次扩 3 个，终态回来「广告组 2/3」。要求 3 个名字都对上草稿，
+  // 整批就会被拒，那 1 个停在草稿的永远发不出去——而它恰恰是唯一还需要处理的。
+  it("部分成功时只发还停在草稿的那些，已经建成的跳过", () => {
+    const result = resolveDraftPublishTargets(
+      ["A", "B", "C"],
+      [sketch("C", "13")],
+      ["A", "B"],
+    );
+    expect(result.matched.map((entry) => entry.adSketchId)).toEqual(["13"]);
+    expect(result.alreadyPublished).toEqual(["A", "B"]);
+    expect(result.missing).toEqual([]);
+  });
+
+  // 「不在草稿里」本身证明不了任何事：可能已被人手动发布，也可能已被删除。把没证明过的
+  // 也当成「已经建成」，一个被删掉的草稿就会被悄悄收口，那批组永远没人认领。
+  it("证不出来是正式组的一律进 missing，调用方必须停手", () => {
+    const result = resolveDraftPublishTargets(["A", "B"], [sketch("A", "11")], []);
+    expect(result.matched.map((entry) => entry.adSketchId)).toEqual(["11"]);
+    expect(result.alreadyPublished).toEqual([]);
+    expect(result.missing).toEqual(["B"]);
+  });
+
+  // 同名草稿有多份仍然拒绝：这是「挑哪个都可能挑错」，不是「已经建成」。名字碰巧也出现在
+  // 正式组名单里（重试过就会这样）不能把它降级成可跳过。
+  it("同名草稿有多份时不因为存在同名正式组就跳过", () => {
+    const result = resolveDraftPublishTargets(
+      ["A"],
+      [sketch("A", "11"), sketch("A", "12")],
+      ["A"],
+    );
+    expect(result.matched).toEqual([]);
+    expect(result.alreadyPublished).toEqual(["A"]);
+    expect(result.missing).toEqual([]);
+  });
+
+  // 草稿优先于快照，理由同 reconcileExpandTask：同名的正式组只能说明「重试过、有一次
+  // 成功了」，不能说明这一条已经收口。
+  it("既是草稿又有同名正式组时，发草稿", () => {
+    const result = resolveDraftPublishTargets(["A"], [sketch("A", "11")], ["A"]);
+    expect(result.matched.map((entry) => entry.adSketchId)).toEqual(["11"]);
+    expect(result.alreadyPublished).toEqual([]);
+  });
+
+  it("全部都已经建成时没有可发的，也没有不知去向的", () => {
+    const result = resolveDraftPublishTargets(["A", "B"], [], ["A", "B"]);
+    expect(result.matched).toEqual([]);
+    expect(result.alreadyPublished).toEqual(["A", "B"]);
     expect(result.missing).toEqual([]);
   });
 });

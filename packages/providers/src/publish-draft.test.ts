@@ -322,6 +322,77 @@ describe("CookieAdsProvider.publishExistingDrafts", () => {
     expect(calls.filter((call) => call.path.includes("statistics/sketch/ad/list"))).toHaveLength(2);
   });
 
+  /**
+   * 部分成功：一次扩 3 个组，TikTok 终态回来「广告组 2/3」，于是 2 个成了正式组、
+   * 1 个停在草稿。这是扩组走进「结果未知」的主要方式之一。
+   */
+  it("部分成功时只发还停在草稿的那一个，已经建成的跳过且说清楚", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      pages: [[{ adSketchId: "ad-3", name: "A-3", campaignId: "camp-1" }]],
+      creativesBySketch: { "ad-3": ["cre-3"] },
+    });
+
+    const result = await new CookieAdsProvider().publishExistingDrafts(context(), {
+      campaignId: "camp-1",
+      names: ["A-1", "A-2", "A-3"],
+      initialStatus: "disabled",
+      publishedNames: ["A-1", "A-2"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("已发布 1 个草稿广告组");
+    expect(result.message).toContain("另有 2 个此前已经建成，未重复发布：A-1、A-2");
+    // 只把那一个草稿发出去：已经建成的再发一次就是第二个同名组。
+    const publish = calls.find((call) => call.path.includes("create_by_snap"));
+    expect(publish?.body.ad_and_creative_snap_info_list).toMatchObject([
+      { ad_sketch_id: "ad-3", ad_snap_id: "snap-ad-3" },
+    ]);
+  });
+
+  // 「不在草稿里」证明不了「已经建成」：也可能是被人删掉了。没有调用方的证明就一律停手，
+  // 否则一个被删掉的草稿会被悄悄当成建成、记录收口，那批组永远没人认领。
+  it("没被证明是正式组的名字仍然停手，哪怕别的名字能发", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      pages: [[{ adSketchId: "ad-3", name: "A-3", campaignId: "camp-1" }]],
+      creativesBySketch: { "ad-3": ["cre-3"] },
+    });
+
+    const result = await new CookieAdsProvider().publishExistingDrafts(context(), {
+      campaignId: "camp-1",
+      names: ["A-1", "A-3"],
+      initialStatus: "disabled",
+      publishedNames: [],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failureKind).toBe("failed");
+    expect(result.message).toContain("A-1");
+    expect(calls.some((call) => call.path.includes("create_by_snap"))).toBe(false);
+  });
+
+  // 这一条已经建成了，只是没人告诉本地。报成失败会让红条继续挂着，而后台其实已经
+  // 没有任何东西等着处理。
+  it("全部都已经建成时判成功并收口，一个写请求都不发", async () => {
+    const calls: Call[] = [];
+    stubTikTok({ calls, pages: [[]], creativesBySketch: {} });
+
+    const result = await new CookieAdsProvider().publishExistingDrafts(context(), {
+      campaignId: "camp-1",
+      names: ["A-1", "A-2"],
+      initialStatus: "disabled",
+      publishedNames: ["A-1", "A-2"],
+    });
+
+    expect(result).toMatchObject({ ok: true, adGroupIds: [] });
+    expect(result.message).toContain("已经全部建成");
+    expect(calls.some((call) => call.path.includes("create_by_snap"))).toBe(false);
+    expect(calls.some((call) => call.path.includes("save_by_sketch"))).toBe(false);
+  });
+
   it("草稿找不到就不发，且明确可以重试", async () => {
     const calls: Call[] = [];
     stubTikTok({ calls, pages: [[]], creativesBySketch: {} });

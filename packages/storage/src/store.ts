@@ -4095,12 +4095,12 @@ export class AutomationStore {
   listAdGroupPlatformStatuses(
     accountId: string,
     kind: ProviderKind,
-  ): Array<{ name: string; adStatus: string | null }> {
+  ): Array<{ name: string; adStatus: string | null; campaignId: string | null }> {
     const rows = this.db.prepare(
       `SELECT payload_json FROM provider_entities
         WHERE account_id = ? AND provider_kind = ? AND entity_type = 'ad-group'`,
     ).all(accountId, kind) as SqlRow[];
-    const result: Array<{ name: string; adStatus: string | null }> = [];
+    const result: Array<{ name: string; adStatus: string | null; campaignId: string | null }> = [];
     for (const row of rows) {
       try {
         const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
@@ -4111,7 +4111,13 @@ export class AutomationStore {
         const adStatus = source.ad_status === undefined || source.ad_status === null
           ? null
           : String(source.ad_status);
-        result.push({ name, adStatus });
+        // 所属系列：判「这个名字已经建成了」时要连系列一起对，只对名字会把别的系列里
+        // 的同名组当成自己的。取不到就留 null，调用方据此当作「证不出来」。
+        const rawCampaignId = source.campaign_id ?? source.campaignId;
+        const campaignId = rawCampaignId === undefined || rawCampaignId === null
+          ? null
+          : String(rawCampaignId).trim() || null;
+        result.push({ name, adStatus, campaignId });
       } catch {
         // 损坏的行跳过：少一条只会让对账判 not-found、红条留着，不会误清。
       }

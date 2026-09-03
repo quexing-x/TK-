@@ -12,6 +12,7 @@ import {
   planCampaignCopy,
   selectStaleDrafts,
   stripAutomaticAdGroupNameSuffixes,
+  DRAFT_AD_STATUS,
   DRAFT_CLEANUP_MIN_AGE_HOURS,
   type ProviderKind,
   type ReadOnlySyncResult,
@@ -775,6 +776,11 @@ export class LaunchService {
       campaignId: task.sourceCampaignId,
       names: task.generatedNames,
       initialStatus: "enabled",
+      publishedNames: this.publishedAdGroupNames(
+        task.accountId,
+        account.providerKind,
+        task.sourceCampaignId,
+      ),
     });
     if (!result.ok) {
       throw new Error(result.failureKind === "unknown"
@@ -839,6 +845,7 @@ export class LaunchService {
       campaignId,
       names: task.generatedNames,
       initialStatus: "enabled",
+      publishedNames: this.publishedAdGroupNames(task.accountId, account.providerKind, campaignId),
     });
     if (!result.ok) {
       throw new Error(result.failureKind === "unknown"
@@ -851,6 +858,32 @@ export class LaunchService {
       message: result.message,
       adGroupIds: result.adGroupIds ?? [],
     };
+  }
+
+  /**
+   * 这个系列下**已经建成**的广告组名，用来在发布草稿时跳过它们。
+   *
+   * 部分成功是常态：一次扩 3 个组，终态回来「广告组 2/3」，2 个成了正式组、1 个停在草稿。
+   * 没有这份名单，发布会因为那 2 个已经不是草稿而拒掉整批，剩下的 1 个永远发不出去。
+   *
+   * 三个条件缺一不可，因为这份名单的作用是**允许跳过一次创建**，判错就等于漏建一个组：
+   * 必须在同一个系列下（只对名字会把别的系列里的同名组算进来）、状态不是 `ad_create`
+   * （草稿也带名字，也在广告组列表里）、且系列 ID 读得出来（读不出就是证不出来）。
+   *
+   * 数据来自最近一次同步的快照。对账路径上它刚刚被刷新过——`saveReadOnlySync` 就在
+   * `reconcileUncertainExpands` 前一行；人工点按钮时可能旧一些，但「旧」只会让名单更短、
+   * 更保守，不会把没建成的算成建成了。
+   */
+  private publishedAdGroupNames(
+    accountId: string,
+    providerKind: ProviderKind,
+    campaignId: string,
+  ): string[] {
+    return this.store
+      .listAdGroupPlatformStatuses(accountId, providerKind)
+      .filter((entity) =>
+        entity.campaignId === campaignId && entity.adStatus !== DRAFT_AD_STATUS)
+      .map((entity) => entity.name);
   }
 
   /** 按系列名在最近一次同步的快照里反查系列 ID。同名多个时不下结论。 */
