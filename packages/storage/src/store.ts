@@ -178,6 +178,16 @@ export interface AuditContext {
   correlationId: string;
 }
 
+/** 每日执行器当天没写成功、等着后续轮询重试的一个对象。 */
+export interface DailyAutomationRunPendingItem {
+  entityType: "ad-group" | "ad";
+  externalId: string;
+  /** 已经试过几次。到上限就不再试，避免 TikTok 持续故障时空转。 */
+  attempts: number;
+  /** 最后一次失败的原因，用来解释这条为什么还挂着。 */
+  reason: string;
+}
+
 export interface StoredProviderConnection extends ProviderConnection {
   credentialRef: string | null;
 }
@@ -4464,6 +4474,68 @@ export class AutomationStore {
     ).run(new Date().toISOString(), accountId, executorKind, localDate);
   }
 
+  /**
+   * 记下当天这个执行器还没写成功的对象，交给后续轮询重试。
+   *
+   * 每日执行器一天只跑一次，此前写入失败就等于永久放弃——而失败的后果恰恰不可逆：
+   * 2026-09-03 实测，一个单转 5.5 的广告组在 06:00 被判定该开启，TikTok 回了一次
+   * `code 4 读取失败`，于是它保持关闭 → 当天零消耗 → 次日转化归零 → 再也够不着
+   * 「前一日转化 ≥ 5」的门槛，被一次网络抖动永久关死。
+   *
+   * 存在当天那一行上而不是单独建表：`local_date` 天然让清单跨天作废，正合语义——
+   * 「前一日转化达标」这个判据只在当天有效，跨天补开是在用过期的理由写入。
+   */
+  setDailyAutomationRunPending(
+    accountId: string,
+    executorKind: string,
+    localDate: string,
+    pending: readonly DailyAutomationRunPendingItem[],
+  ): void {
+    this.db.prepare(
+      `UPDATE automation_daily_runs SET pending_json = ?, updated_at = ?
+       WHERE account_id = ? AND executor_kind = ? AND local_date = ?`,
+    ).run(
+      JSON.stringify(pending),
+      new Date().toISOString(),
+      accountId,
+      executorKind,
+      localDate,
+    );
+  }
+
+  /** 当天还没写成功、等着重试的对象。损坏的清单按空处理，不会把整轮轮询带下去。 */
+  listDailyAutomationRunPending(
+    accountId: string,
+    executorKind: string,
+    localDate: string,
+  ): DailyAutomationRunPendingItem[] {
+    const row = this.db.prepare(
+      `SELECT pending_json FROM automation_daily_runs
+        WHERE account_id = ? AND executor_kind = ? AND local_date = ?`,
+    ).get(accountId, executorKind, localDate) as SqlRow | undefined;
+    if (!row) return [];
+    try {
+      const parsed = JSON.parse(String(row.pending_json ?? "[]")) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.flatMap((item) => {
+        if (typeof item !== "object" || item === null) return [];
+        const record = item as Record<string, unknown>;
+        const entityType = String(record.entityType ?? "");
+        const externalId = String(record.externalId ?? "");
+        if (entityType !== "ad-group" && entityType !== "ad") return [];
+        if (!externalId) return [];
+        return [{
+          entityType: entityType as "ad-group" | "ad",
+          externalId,
+          attempts: Number(record.attempts ?? 0),
+          reason: String(record.reason ?? ""),
+        }];
+      });
+    } catch {
+      return [];
+    }
+  }
+
   renewLaunchCreationScope(
     planId: string,
     accountId: string,
@@ -7612,6 +7684,7 @@ export class AutomationStore {
         status TEXT NOT NULL CHECK (status IN ('running', 'completed')),
         claimed_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        pending_json TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (account_id, executor_kind, local_date)
       );
 
@@ -7952,6 +8025,14 @@ export class AutomationStore {
       "INTEGER NOT NULL DEFAULT 0",
     );
     this.ensureColumn("campaign_copy_tasks", "draft_publish_error", "TEXT");
+    // 每日执行器写失败后的待重试清单。没有它，一次 TikTok 瞬时抖动就等于永久放弃——
+    // 每日执行器一天只跑一次，而失败的后果不可逆（对象保持关闭 → 次日指标归零 →
+    // 再也够不着门槛）。
+    this.ensureColumn(
+      "automation_daily_runs",
+      "pending_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
     if (expandTaskUncertainWasMissing) {
       // A legacy running row may have crossed the remote dispatch boundary
       // before an older process exited. Its outcome cannot be proven locally;
