@@ -65,6 +65,20 @@ const DRAFT_PUBLISH_MAX_ATTEMPTS = 3;
  * 见 publishDraftOnly 里为什么这道闸门是必需的。
  */
 const DRAFT_PUBLISH_MIN_TASK_AGE_MS = 30 * 60_000;
+/**
+ * 指标快照保留几天的完整（日内）粒度。
+ *
+ * 只有「最近状况」那两个诊断视图（listMetricSnapshots / listMetricBatches）需要日内数据，
+ * 而它们都带 LIMIT、只看最近一小段。2 天而不是 1 天，是给跨本地日边界留的余量。
+ */
+const METRIC_FULL_RESOLUTION_DAYS = 2;
+/**
+ * 单账户单轮最多降采样掉多少行。
+ *
+ * 稳态下每账户每轮只有几百行要删，这个上限是给积压准备的护栏：一次删太多会长时间持写锁
+ * 把同步卡住。实测删除速度约 1.5 万行/秒，2 万行约 1.4 秒，摊在几十秒的一轮同步里可以忽略。
+ */
+const DOWNSAMPLE_ROW_LIMIT = 20_000;
 export class AutomationBusyError extends Error {}
 class WriteBlockedBeforeDispatchError extends Error {}
 
@@ -1006,6 +1020,7 @@ export class AutomationService {
         output.result,
       );
       await this.reconcileUncertainExpands(accountId, account.providerKind, account.timezone);
+      this.downsampleMetricSnapshots(accountId, account.providerKind);
 
       const eligible: AutomationCandidate[] = [];
       for (const candidate of evaluation.candidates) {
@@ -2021,6 +2036,30 @@ export class AutomationService {
             this.store.recordCampaignCopyDraftPublishFailure(task.taskKey, message),
         });
       }
+    }
+  }
+
+  /**
+   * 把过了保留期的指标快照降采样成「每对象每本地日一条」。
+   *
+   * 每轮同步给每个对象存一条快照，而所有业务查询只读每本地日的最后一条——中间那几百条
+   * 纯占地方。2026-09-03 实测生产库 1394 万行里 84.5% 属于这类，7.6GB 里的绝大部分；
+   * 不收口的话 90 天保留期跑满约 1 亿行 / 60GB，磁盘会撑爆。判据在 store 那边，与
+   * `day_last` 的口径逐字对齐。
+   *
+   * 每轮跑一点而不是每天跑一次：`DOWNSAMPLE_ROW_LIMIT` 已经是护栏，摊到每轮反而比攒到
+   * 一次删更平滑，不会有某一轮突然卡住几十秒。稳态下每账户每轮只有几百行要删。
+   *
+   * 失败只吞掉：这是省磁盘的后台清理，它出问题不该让整轮同步失败。
+   */
+  private downsampleMetricSnapshots(accountId: string, providerKind: ProviderKind): void {
+    try {
+      this.store.downsampleMetricSnapshots(accountId, providerKind, {
+        keepFullDays: METRIC_FULL_RESOLUTION_DAYS,
+        limit: DOWNSAMPLE_ROW_LIMIT,
+      });
+    } catch {
+      // 下一轮还会再来，不值得把整轮同步打掉。
     }
   }
 

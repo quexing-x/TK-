@@ -1329,6 +1329,82 @@ describe("AutomationStore", () => {
       expect(days.find((day) => day.date === "2026-08-19")?.lastLocalTime).toBe("23:30");
     });
 
+    // 降采样是纯省磁盘的动作，它唯一不能碰的就是查询口径。这几条测的就是「删完之后
+    // 按自然日汇总的结果一个数都不变」——那是它有没有删错的唯一硬判据。
+    describe("降采样", () => {
+      const seedFourBatches = () => {
+        capture("2026-08-19T01:00:00.000Z", { g1: 1, g2: 0.5 });   // 当地 08-19 09:00
+        capture("2026-08-19T10:00:00.000Z", { g1: 6, g2: 2 });     // 当地 08-19 18:00
+        capture("2026-08-19T15:30:00.000Z", { g1: 9, g2: 3 });     // 当地 08-19 23:30，本地日最后一条
+        capture("2026-08-19T16:30:00.000Z", { g1: 0.4, g2: 0.1 }); // 当地 08-20 00:30，已是新一天
+      };
+      const totals = () => store.listDailyMetricTotals(
+        "demo-account", "cookie", "2026-08-18T00:00:00.000Z", "ad-group", "2026-08-21T00:00:00.000Z",
+      ).map((day) => [day.date, Number(day.spend.toFixed(2))]);
+
+      it("每对象每本地日只留最后一条，按日汇总的结果分毫不变", () => {
+        seedFourBatches();
+        const before = totals();
+        expect(before).toEqual([["2026-08-20", 0.5], ["2026-08-19", 12]]);
+
+        const removed = store.downsampleMetricSnapshots("demo-account", "cookie", {
+          keepFullDays: 2, limit: 1000, now: new Date("2026-08-25T00:00:00.000Z"),
+        });
+
+        // 08-19 两个对象各 3 条 -> 各留 1 条，删 4 条；08-20 各只有 1 条，不动。
+        expect(removed).toBe(4);
+        expect(totals()).toEqual(before);
+      });
+
+      // 保留期内的日内粒度是「最近状况」那两个诊断视图要用的，一条都不能动。
+      it("完整保留期之内的一条都不删", () => {
+        seedFourBatches();
+
+        const removed = store.downsampleMetricSnapshots("demo-account", "cookie", {
+          // 相对 08-19 那批数据来说，保留期覆盖了全部。
+          keepFullDays: 30, limit: 1000, now: new Date("2026-08-25T00:00:00.000Z"),
+        });
+
+        expect(removed).toBe(0);
+        expect(totals()).toEqual([["2026-08-20", 0.5], ["2026-08-19", 12]]);
+      });
+
+      // limit 是轮询里的护栏：一次删太多会长时间持写锁把同步卡住。
+      it("limit 封顶，剩下的留给下一轮", () => {
+        seedFourBatches();
+
+        const first = store.downsampleMetricSnapshots("demo-account", "cookie", {
+          keepFullDays: 2, limit: 3, now: new Date("2026-08-25T00:00:00.000Z"),
+        });
+        const second = store.downsampleMetricSnapshots("demo-account", "cookie", {
+          keepFullDays: 2, limit: 1000, now: new Date("2026-08-25T00:00:00.000Z"),
+        });
+
+        expect(first).toBe(3);
+        expect(second).toBe(1);
+        // 分几轮删完，结果和一次删完一样。
+        expect(totals()).toEqual([["2026-08-20", 0.5], ["2026-08-19", 12]]);
+      });
+
+      // 本地日与 UTC 日差 8 小时。按 UTC 日留最后一条，会把本地 08-19 的最后一条
+      // （UTC 15:30）删掉、只剩 UTC 16:30 那条——而那条属于本地 08-20。
+      it("按账户本地日切分，不是 UTC 日", () => {
+        seedFourBatches();
+
+        store.downsampleMetricSnapshots("demo-account", "cookie", {
+          keepFullDays: 2, limit: 1000, now: new Date("2026-08-25T00:00:00.000Z"),
+        });
+
+        const day19 = new Map(
+          store.listEntityMetricsForLocalDate("demo-account", "cookie", "2026-08-19", "ad-group")
+            .map((r) => [r.externalId, r.spend]),
+        );
+        // 留下来的必须是本地 08-19 的最后一条（9 / 3），不是 UTC 日最后那条（0.4 / 0.1）。
+        expect(day19.get("g1")).toBe(9);
+        expect(day19.get("g2")).toBe(3);
+      });
+    });
+
     // 「前一日转化达标自动开启」在早上 6 点跑，判据必须是昨天整日的累计值。拿当前
     // 快照上的 metrics 是今天的累计值，那时候今天才刚开始、几乎恒为 0，判据永远不成立。
     it("按本地自然日取每个对象当天最后一条累计值", () => {
