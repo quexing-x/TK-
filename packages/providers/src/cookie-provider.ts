@@ -1602,9 +1602,16 @@ export class CookieAdsProvider implements AdsProvider {
           `TikTok 创建终态不完整：广告组 ${completedCounts.adGroupCount}/${publishItems.length}，回读到 ${officialAdGroupIds.length} 个正式 ID；禁止自动重试。`,
         );
       }
+      // 草稿是 ad_snap/copy 克隆出来的，里面的广告继承了源广告的开关状态。组开着而广告
+      // 是关的，整组照样投不出去——扩组发布后补这一刀，草稿发布同理。
+      const enableFailures = input.initialStatus === "enabled"
+        ? await enableCreatedCreatives(credential, completedCreativeIds(completed))
+        : [];
       return {
         ok: true,
-        message: `已发布 ${publishItems.length} 个草稿广告组${input.initialStatus === "disabled" ? "（暂停状态）" : ""}`,
+        message: enableFailures.length > 0
+          ? `已发布 ${publishItems.length} 个草稿广告组；${enableFailures.length} 条广告未能自动开启：${enableFailures.join("；")}`
+          : `已发布 ${publishItems.length} 个草稿广告组${input.initialStatus === "disabled" ? "（暂停状态）" : ""}`,
         adGroupIds: officialAdGroupIds,
       };
     } catch (cause) {

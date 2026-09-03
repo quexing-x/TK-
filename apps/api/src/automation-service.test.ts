@@ -74,6 +74,8 @@ class FakeProvider implements AdsProvider {
   materialUnavailableAdIds: string[] | undefined = undefined;
   materialStatus = "enable";
   syncCount = 0;
+  draftAdGroupNames: string[] = [];
+  draftListFails = false;
 
   async checkHealth(): Promise<{
     ok: boolean;
@@ -423,6 +425,18 @@ class FakeProvider implements AdsProvider {
       ok: this.deleteFailureKind === null,
       ...(this.deleteFailureKind && { failureKind: this.deleteFailureKind }),
       message: this.deleteFailureKind ? "delete failed" : "deleted",
+    }));
+  }
+
+  /** TikTok 后台现存的草稿广告组。对账靠它才判得出「只建了草稿」。 */
+  async listDraftAdGroups() {
+    if (this.draftListFails) throw new Error("草稿列表读取失败");
+    return this.draftAdGroupNames.map((adSketchName, index) => ({
+      adSketchId: `sketch-${index}`,
+      adSketchName,
+      campaignId: "campaign-1",
+      campaignSketchId: "",
+      touchedAt: null,
     }));
   }
 }
@@ -3270,5 +3284,159 @@ describe("AutomationService", () => {
     const second = store.listAutomationDecisions("demo-account")[0]!;
 
     expect(second.suggestionKey).not.toBe(first.suggestionKey);
+  });
+
+  /**
+   * 对账判出「只建了草稿」之后自动补发布。
+   *
+   * 这类记录以前只能留着红条等人去点「发布草稿」，而 `draft-only` 这个结论本身已经证明了
+   * 那批组没有被建成正式对象——补发一次不会建出重复的组。
+   */
+  describe("draft-only 自动补发布", () => {
+    /**
+     * 把领取时刻挪到过去。`uncertain = 1` 在第一个写请求之前就打上了，正在跑的任务和卡死的
+     * 任务在对账眼里长得一模一样，只有领取时间能把两者分开。
+     */
+    function claimedMinutesAgo(minutes: number, claim: () => void) {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date(Date.now() - minutes * 60_000));
+        claim();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    /** 造一条卡在「结果未知」、且早就不在跑了的扩组记录，并让后台留着同名草稿。 */
+    function stuckExpansion(name: string, claimedAgoMinutes = 45) {
+      claimedMinutesAgo(claimedAgoMinutes, () => {
+        store.claimAdGroupExpandTask("stuck-expand", "demo-account", "adgroup-1", {
+          sourceCampaignId: "campaign-1",
+          requestedCount: 1,
+          generatedNames: [name],
+        });
+      });
+      store.finishAdGroupExpandTask("stuck-expand", "unknown");
+      provider.draftAdGroupNames = [name];
+    }
+
+    function serviceWithPublishers(publishers: {
+      expand: (taskKey: string) => Promise<unknown>;
+      campaignCopy: (taskKey: string) => Promise<unknown>;
+    }) {
+      return new AutomationService(
+        store,
+        vault,
+        new ProviderRegistry([provider]),
+        undefined,
+        publishers,
+      );
+    }
+
+    it("扩组停在草稿时自动补发布，成功即收口", async () => {
+      stuckExpansion("扩组-0903-060000-1");
+      const expand = vi.fn(async (taskKey: string) => {
+        store.confirmAdGroupExpandTask(taskKey);
+      });
+      const campaignCopy = vi.fn(async () => undefined);
+
+      await serviceWithPublishers({ expand, campaignCopy }).runAccount("demo-account", "preview");
+
+      expect(expand).toHaveBeenCalledWith("stuck-expand");
+      expect(store.getUncertainAdGroupExpandTask("stuck-expand")).toBeNull();
+      expect(campaignCopy).not.toHaveBeenCalled();
+    });
+
+    it("发布失败只记账，红条留着，不把整轮同步打掉", async () => {
+      stuckExpansion("扩组-0903-060000-1");
+      const expand = vi.fn(async () => {
+        throw new Error("草稿已被手动删除");
+      });
+
+      const run = await serviceWithPublishers({
+        expand,
+        campaignCopy: vi.fn(async () => undefined),
+      }).runAccount("demo-account", "preview");
+
+      expect(run).toBeTruthy();
+      expect(store.getUncertainAdGroupExpandTask("stuck-expand")).not.toBeNull();
+      const [task] = store.listUncertainAdGroupExpandTasks("demo-account");
+      expect(task).toMatchObject({ draftPublishAttempts: 1 });
+    });
+
+    it("试满上限就停手，不再每轮敲 TikTok", async () => {
+      stuckExpansion("扩组-0903-060000-1");
+      const expand = vi.fn(async () => {
+        throw new Error("同名草稿有多份");
+      });
+      const stuckService = serviceWithPublishers({
+        expand,
+        campaignCopy: vi.fn(async () => undefined),
+      });
+
+      for (let round = 0; round < 5; round += 1) {
+        await stuckService.runAccount("demo-account", "preview");
+      }
+
+      expect(expand).toHaveBeenCalledTimes(3);
+      expect(store.listUncertainAdGroupExpandTasks("demo-account")[0])
+        .toMatchObject({ draftPublishAttempts: 3 });
+    });
+
+    it("读不到草稿列表的那一轮什么都不判", async () => {
+      stuckExpansion("扩组-0903-060000-1");
+      provider.draftListFails = true;
+      const expand = vi.fn(async () => undefined);
+
+      await serviceWithPublishers({
+        expand,
+        campaignCopy: vi.fn(async () => undefined),
+      }).runAccount("demo-account", "preview");
+
+      expect(expand).not.toHaveBeenCalled();
+      expect(store.getUncertainAdGroupExpandTask("stuck-expand")).not.toBeNull();
+    });
+
+    /**
+     * 正在跑的扩组也是 uncertain=1，而它的草稿这一刻本来就该在后台躺着。抢先把它发掉，
+     * 它自己再发一次，同一批组就建成了两份。
+     */
+    it("刚领取的任务不碰：它可能正在跑，草稿是它自己的中间产物", async () => {
+      stuckExpansion("扩组-0903-060000-1", 2);
+      const expand = vi.fn(async () => undefined);
+
+      await serviceWithPublishers({
+        expand,
+        campaignCopy: vi.fn(async () => undefined),
+      }).runAccount("demo-account", "preview");
+
+      expect(expand).not.toHaveBeenCalled();
+      expect(store.getUncertainAdGroupExpandTask("stuck-expand")).not.toBeNull();
+    });
+
+    it("系列复制停在草稿时走同一条路", async () => {
+      claimedMinutesAgo(45, () => {
+        store.claimCampaignCopyTask(
+          "stuck-copy",
+          "demo-account",
+          "campaign-1",
+          "新系列-0903",
+          ["复制组-0903-060000-1"],
+        );
+      });
+      store.finishCampaignCopyTask("stuck-copy", "unknown");
+      provider.draftAdGroupNames = ["复制组-0903-060000-1"];
+      const campaignCopy = vi.fn(async (taskKey: string) => {
+        store.confirmCampaignCopyTask(taskKey, "campaign-new");
+      });
+
+      await serviceWithPublishers({
+        expand: vi.fn(async () => undefined),
+        campaignCopy,
+      }).runAccount("demo-account", "preview");
+
+      expect(campaignCopy).toHaveBeenCalledWith("stuck-copy");
+      expect(store.listStuckCampaignCopyTasks("demo-account")).toEqual([]);
+    });
   });
 });

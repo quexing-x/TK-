@@ -26,6 +26,9 @@ interface StuckCampaignCopyTask {
   updatedAt: string;
   generatedCampaignId: string | null;
   generatedAdGroupIds: string[];
+  generatedAdGroupNames: string[];
+  draftPublishAttempts: number;
+  draftPublishError: string | null;
 }
 
 type LaunchTiming = "disabled" | "immediate" | "scheduled";
@@ -190,6 +193,7 @@ export function CopyCampaignPanel(props: {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [resettingTaskKey, setResettingTaskKey] = useState<string | null>(null);
+  const [publishingTaskKey, setPublishingTaskKey] = useState<string | null>(null);
 
   const load = (id: string) => {
     setLoading(true);
@@ -230,6 +234,34 @@ export function CopyCampaignPanel(props: {
     loadStuckTasks(accountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
+
+  /**
+   * 发布这条记录留在后台的草稿广告组。
+   *
+   * 轮询已经会自动补这一步，这个按钮是给自动重试试满之后再点一次用的。只有系列已经建出来
+   * 的那类能走通；后台只剩一个「草稿系列」的，服务端会直接说清楚，让人去后台手动处理。
+   */
+  const publishStuckDraft = async (task: StuckCampaignCopyTask) => {
+    const names = task.generatedAdGroupNames.join("、") || "（未记录组名）";
+    const confirmed = await confirm({
+      title: "发布这条记录的草稿",
+      message: `把「${task.campaignName}」下面这些草稿广告组正式发布出去：\n\n${names}\n\n发布后直接投放（组和组里的广告都会开起来）。\n草稿如果已经被手动发布或删除，这里会直接报找不到，不会重复建。`,
+      confirmLabel: "发布草稿",
+    });
+    if (!confirmed) return;
+    setPublishingTaskKey(task.taskKey);
+    props.onError(null);
+    try {
+      const result = await api.publishStuckCampaignCopyDraft(task.taskKey);
+      toast(result.message, "success");
+      loadStuckTasks(accountId);
+      void loadHistory(accountId);
+    } catch (cause) {
+      props.onError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPublishingTaskKey(null);
+    }
+  };
 
   const resetStuckTask = async (task: StuckCampaignCopyTask) => {
     const confirmed = await confirm({
@@ -506,10 +538,10 @@ export function CopyCampaignPanel(props: {
       {stuckTasks.length > 0 && (
         <div className="sheet-issues warning campaign-copy-stuck-tasks">
           <strong>{stuckTasks.length} 个任务结果未知，已暂停自动重试</strong>
-          <span>网络中断导致系统无法确认这些任务是否已在 {platformName} 侧创建成功，为避免产生重复系列，已停止自动重试。请先到 {platformName} 广告后台核实真实状态，再逐个重置。</span>
+          <span>网络中断导致系统无法确认这些任务是否已在 {platformName} 侧创建成功，为避免产生重复系列，已停止整批自动重试。轮询查到系列已经建出来、只差组没发布的，会自动补发布（最多试 3 次）；试满或系列压根没建出来的，请先到 {platformName} 广告后台核实真实状态，再发布草稿或重置。</span>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>新系列名称</th><th>源系列 ID</th><th>最近更新</th><th>已生成的系列 ID</th><th></th></tr></thead>
+              <thead><tr><th>新系列名称</th><th>源系列 ID</th><th>最近更新</th><th>已生成的系列 ID</th><th>自动补发布</th><th></th></tr></thead>
               <tbody>
                 {stuckTasks.map((task) => (
                   <tr key={task.taskKey}>
@@ -517,7 +549,17 @@ export function CopyCampaignPanel(props: {
                     <td>{task.sourceCampaignId}</td>
                     <td>{new Date(task.updatedAt).toLocaleString()}</td>
                     <td>{task.generatedCampaignId ?? "（未生成）"}</td>
+                    <td title={task.draftPublishError ?? undefined}>
+                      {task.draftPublishAttempts === 0
+                        ? "—"
+                        : `试过 ${task.draftPublishAttempts} 次：${task.draftPublishError ?? "原因未记录"}`}
+                    </td>
                     <td>
+                      {task.generatedAdGroupNames.length > 0 && <button className="secondary-button compact-button"
+                        disabled={disabled || publishingTaskKey !== null}
+                        onClick={() => void publishStuckDraft(task)} type="button">
+                        {publishingTaskKey === task.taskKey ? "发布中…" : "发布草稿"}
+                      </button>}
                       <button className="secondary-button compact-button" disabled={disabled || resettingTaskKey === task.taskKey}
                         onClick={() => void resetStuckTask(task)} type="button">
                         {resettingTaskKey === task.taskKey ? "重置中…" : "已核实，重置"}

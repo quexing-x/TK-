@@ -50,6 +50,21 @@ import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 const statusLeaseHeartbeatMs = 60 * 1000;
 const writeLeaseTimeoutMs = 30 * 60 * 1000;
 const destructiveSyncFreshnessMs = 5 * 60 * 1000;
+/**
+ * 自动补发布最多试几次。
+ *
+ * 3 次覆盖得住会自己好的那些原因（凭据刚过期、TikTok 抖动、同步慢一拍），又不至于让一条
+ * 永远发不出去的草稿（被人删了、同名重复、连系列都没建）一直敲创建接口。试满就停手，
+ * 红条留着交人工——那才是这个上限真正要保住的东西。
+ */
+const DRAFT_PUBLISH_MAX_ATTEMPTS = 3;
+/**
+ * 任务领取多久之后才允许自动补发布。
+ *
+ * 与幂等表判「租约过期」的 30 分钟对齐——过了那个点，系统本来就认为这条任务不在跑了。
+ * 见 publishDraftOnly 里为什么这道闸门是必需的。
+ */
+const DRAFT_PUBLISH_MIN_TASK_AGE_MS = 30 * 60_000;
 export class AutomationBusyError extends Error {}
 class WriteBlockedBeforeDispatchError extends Error {}
 
@@ -91,6 +106,14 @@ export class AutomationService {
       failureKind?: "failed" | "unknown";
       retrySafe?: boolean;
     }>>,
+    /**
+     * 对账判出「只建了草稿」后，用来补发布那最后一步。注入而不是直接依赖 LaunchService：
+     * 两个 service 互相持有会绕成环，而这里要的只是一个按 taskKey 发布的动作。
+     */
+    private readonly draftPublishers?: {
+      expand: (taskKey: string) => Promise<unknown>;
+      campaignCopy: (taskKey: string) => Promise<unknown>;
+    },
   ) {
     this.statusTasks = new WriteTaskKernel({
       claim: (taskId, executorId, expectedStatus, actor) =>
@@ -1946,15 +1969,18 @@ export class AutomationService {
    * **查不到草稿就整轮不下结论。** 宁可让红条多留一轮，也不能在看不见草稿的情况下收口——
    * 那等于把上面那个 bug 原样放回来。
    *
-   * 只做减法不做加法：确认建成的收口，其余一律原样留着。
+   * 两种结论各有出路：`confirmed` 直接收口；`draft-only` 交给 publishDraftOnly 自动补最后
+   * 一步。其余（`not-found`）一律原样留着，继续等下一轮。系列复制走同一套判据——它的
+   * 「结果未知」记录同样只是缺一次发布。
    */
   private async reconcileUncertainExpands(
     accountId: string,
     providerKind: ProviderKind,
     timezone: string,
   ): Promise<void> {
-    const pending = this.store.listUncertainAdGroupExpandTasks(accountId);
-    if (pending.length === 0) return;
+    const pendingExpands = this.store.listUncertainAdGroupExpandTasks(accountId);
+    const pendingCopies = this.store.listUncertainCampaignCopyTasks(accountId);
+    if (pendingExpands.length === 0 && pendingCopies.length === 0) return;
     let draftNames: string[];
     try {
       const context = await this.loadContext(accountId, providerKind, timezone);
@@ -1966,9 +1992,78 @@ export class AutomationService {
       return;
     }
     const snapshot = this.store.listAdGroupPlatformStatuses(accountId, providerKind);
-    for (const task of pending) {
-      if (reconcileExpandTask(task.generatedNames, snapshot, draftNames) !== "confirmed") continue;
-      this.store.confirmAdGroupExpandTask(task.taskKey);
+    for (const task of pendingExpands) {
+      const verdict = reconcileExpandTask(task.generatedNames, snapshot, draftNames);
+      if (verdict === "confirmed") {
+        this.store.confirmAdGroupExpandTask(task.taskKey);
+      } else if (verdict === "draft-only") {
+        await this.publishDraftOnly({
+          taskKey: task.taskKey,
+          attempts: task.draftPublishAttempts,
+          claimedAt: task.claimedAt,
+          publish: this.draftPublishers?.expand,
+          recordFailure: (message) =>
+            this.store.recordAdGroupExpandDraftPublishFailure(task.taskKey, message),
+        });
+      }
+    }
+    for (const task of pendingCopies) {
+      const verdict = reconcileExpandTask(task.generatedNames, snapshot, draftNames);
+      if (verdict === "confirmed") {
+        this.store.confirmCampaignCopyTask(task.taskKey);
+      } else if (verdict === "draft-only") {
+        await this.publishDraftOnly({
+          taskKey: task.taskKey,
+          attempts: task.draftPublishAttempts,
+          claimedAt: task.claimedAt,
+          publish: this.draftPublishers?.campaignCopy,
+          recordFailure: (message) =>
+            this.store.recordCampaignCopyDraftPublishFailure(task.taskKey, message),
+        });
+      }
+    }
+  }
+
+  /**
+   * 对账确认「只建了草稿」之后，自动把发布这最后一步补上。
+   *
+   * 此前这里只能留着红条等人去点「发布草稿」。但 `draft-only` 这个结论本身已经把最危险的
+   * 不确定性消掉了：机器亲眼看到草稿还在后台，也就证明了那批组**没有**被建成正式对象——
+   * 这一发不会建出重复的组。剩下的就是一次已经授权过的扩组/复制没做完的最后一步。
+   *
+   * **必须先等任务真的不在跑了。** `uncertain = 1` 是在**发第一个写请求之前**就打上的，
+   * 所以一个正在跑的扩组和一个卡死的扩组在这里长得一模一样；而扩组本身就是「先建草稿再
+   * 发布」，正在跑的那一刻后台必然有草稿。不加这道闸门，一次与轮询撞上的手动扩组会被这里
+   * 抢先把它自己的草稿发掉，然后它自己再发一次——同一批组建成两份。判据用领取时间，阈值
+   * 与幂等表判「租约过期」的那个 30 分钟对齐：那个时刻之后，系统本来就认为这条任务不在跑了。
+   *
+   * **失败要计次。** 发不出去的草稿是有的：被人手动删了、同名草稿有多份、连系列都还没建。
+   * 不计次，这类记录会在每一轮轮询里重敲一次 TikTok 的创建接口。试满就停手，把最后一次的
+   * 原因留在记录上，红条继续挂着交人工。
+   *
+   * 整个过程绝不让异常冒出去：这是轮询里的收尾动作，它失败不该把整轮同步打掉。
+   */
+  private async publishDraftOnly(input: {
+    taskKey: string;
+    attempts: number;
+    claimedAt: string;
+    publish: ((taskKey: string) => Promise<unknown>) | undefined;
+    recordFailure: (message: string) => void;
+  }): Promise<void> {
+    if (!input.publish) return;
+    if (input.attempts >= DRAFT_PUBLISH_MAX_ATTEMPTS) return;
+    const claimedAt = Date.parse(input.claimedAt);
+    // 时间戳读不出来 = 不知道这条是不是还在跑 = 不碰。宁可红条多留一轮。
+    if (!Number.isFinite(claimedAt)) return;
+    if (Date.now() - claimedAt < DRAFT_PUBLISH_MIN_TASK_AGE_MS) return;
+    try {
+      await input.publish(input.taskKey);
+    } catch (cause) {
+      try {
+        input.recordFailure(safeMessage(cause));
+      } catch {
+        // 记账失败也只是少一行解释，不值得把整轮同步打掉。
+      }
     }
   }
 

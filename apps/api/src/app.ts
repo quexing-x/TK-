@@ -208,6 +208,10 @@ export async function createApp(
       dependencies.vault,
       providers,
       (input) => launchService.copyAdGroupWithinAccount(input),
+      {
+        expand: (taskKey) => launchService.publishStuckExpandDraft(taskKey),
+        campaignCopy: (taskKey) => launchService.publishStuckCampaignCopyDraft(taskKey),
+      },
     );
   const notifications =
     dependencies.notifications ??
@@ -817,6 +821,24 @@ export async function createApp(
     }
     try {
       return reply.send(await launchService.deleteStaleDraftAdGroups(accountId));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
+  // 发布这条系列复制记录留在 TikTok 后台的草稿广告组。与扩组同一条链路；轮询已经会自动
+  // 补这一步，这个入口是给「自动重试试满了」之后人工再点一次用的。
+  app.post("/api/campaign-copy-tasks/:taskKey/publish-draft", async (request, reply) => {
+    const { taskKey } = z.object({ taskKey: z.string().min(1) }).parse(request.params);
+    const task = dependencies.store.getUncertainCampaignCopyTask(taskKey);
+    if (!task) {
+      return reply.status(404).send({ message: "该系列复制记录不存在，或已不处于「结果未知」状态。" });
+    }
+    if (hasMetaOfflineAccount(dependencies.store, [task.accountId])) {
+      return reply.status(409).send(metaOfflineMessage());
+    }
+    try {
+      return reply.send(await launchService.publishStuckCampaignCopyDraft(taskKey));
     } catch (cause) {
       return reply.status(409).send({ message: getSafeProviderError(cause) });
     }

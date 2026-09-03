@@ -819,6 +819,9 @@ export const api = {
       updatedAt: string;
       generatedCampaignId: string | null;
       generatedAdGroupIds: string[];
+      generatedAdGroupNames: string[];
+      draftPublishAttempts: number;
+      draftPublishError: string | null;
     }>>(`/api/accounts/${encodeURIComponent(accountId)}/campaign-copy-tasks`),
   /** 后台遗留、超过保护期没人动过的草稿广告组。 */
   getStaleDraftCandidates: (accountId: string) =>
@@ -836,10 +839,16 @@ export const api = {
       reserved: number;
       tooFresh: number;
     }>(`/api/accounts/${encodeURIComponent(accountId)}/draft-candidates/delete`, { method: "POST" }),
-  /** 把这条记录留在 TikTok 后台的草稿发布掉（发布后为暂停状态）。 */
+  /** 把这条扩组记录留在 TikTok 后台的草稿发布掉（发布后直接投放）。 */
   publishStuckExpandDraft: (taskKey: string) =>
     request<{ ok: true; message: string; adGroupIds: string[] }>(
       `/api/ad-group-expand-tasks/${encodeURIComponent(taskKey)}/publish-draft`,
+      { method: "POST" },
+    ),
+  /** 同上，系列复制那一侧。 */
+  publishStuckCampaignCopyDraft: (taskKey: string) =>
+    request<{ ok: true; message: string; adGroupIds: string[] }>(
+      `/api/campaign-copy-tasks/${encodeURIComponent(taskKey)}/publish-draft`,
       { method: "POST" },
     ),
   resolveUncertainAdGroupExpandTasks: (accountIds: string[]) =>

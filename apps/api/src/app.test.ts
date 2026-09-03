@@ -771,7 +771,7 @@ describe("local API", () => {
   it("publishes the draft an uncertain expansion left behind and closes the record", async () => {
     const publishExistingDrafts = vi.fn(async () => ({
       ok: true,
-      message: "已发布 1 个草稿广告组（暂停状态）",
+      message: "已发布 1 个草稿广告组",
       adGroupIds: ["published-1"],
     }));
     const provider = {
@@ -811,8 +811,9 @@ describe("local API", () => {
     expect(publishExistingDrafts).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       campaignId: "campaign-1",
       names: ["新组-0826-060000-1"],
-      // 原始扩组是不是「立即投放」没有记录在案，只能发成暂停。
-      initialStatus: "disabled",
+      // 扩组本来就是为了投。发成暂停等于把最后一步换成「人必须记得去后台开一遍」，
+      // 一忘就是一批建好却不投的组躺在后台。
+      initialStatus: "enabled",
     }));
     // 收口：红条摘掉，记录保留成历史。
     expect(store.getUncertainAdGroupExpandTask("stuck-task")).toBeNull();

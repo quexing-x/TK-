@@ -735,8 +735,11 @@ export class LaunchService {
    * 草稿仍然烂在后台）。对账判成 `draft-only` 的正是这类——机器已经能确认草稿存在，只差
    * 一个把它发出去的入口。
    *
-   * **发布后是暂停状态**：原始扩组是「立即投放」还是「先关着」没有记录在案，而把一个组
-   * 悄悄开起来烧钱比让人多点一次开关严重得多。
+   * **发布后直接投放，不再发成暂停。** 早先一律发成暂停，理由是「原始扩组是不是立即投放
+   * 没有记录在案，悄悄开起来烧钱更严重」。实测下来这个取舍是反的：扩组本来就是为了投，
+   * 发成暂停等于把「机器没做完的最后一步」换成「人必须记得去后台开一遍」，而那一步一忘
+   * 就是一批建好却不投的组躺在后台——比多花一点钱更贵。发布链路里连带把克隆过来的广告
+   * 也开起来，否则组开着而广告是关的，整组照样投不出去。
    *
    * 成功才收口。失败一律保持 uncertain，红条留着——包括「发出去了但结果未知」，那种情况
    * 恰恰最需要人去后台看一眼。
@@ -771,7 +774,7 @@ export class LaunchService {
     const result = await this.providers.publishExistingDrafts(account.providerKind, context, {
       campaignId: task.sourceCampaignId,
       names: task.generatedNames,
-      initialStatus: "disabled",
+      initialStatus: "enabled",
     });
     if (!result.ok) {
       throw new Error(result.failureKind === "unknown"
@@ -784,6 +787,84 @@ export class LaunchService {
       message: result.message,
       adGroupIds: result.adGroupIds ?? [],
     };
+  }
+
+  /**
+   * 把一条「结果未知」的系列复制记录留在 TikTok 后台的草稿广告组发布掉。
+   *
+   * 与扩组共用同一条已验证的链路（`publishExistingDrafts`），但多一个前置条件：**系列本身
+   * 必须已经建出来了**。系列复制是「建系列草稿 + 建组草稿 → 一次性发布」，失败停在哪一步
+   * 决定了后台留下的是什么：
+   *
+   * - 发布被 TikTok 部分受理（终态回来 2/3 个组）：系列已是正式系列，剩下的组是挂在它下面的
+   *   草稿——这条链路能收口，正是这里做的事。
+   * - 发布压根没发出去：后台只有一个「草稿系列」（campaign_id 为空、只有 campaign_sketch_id），
+   *   发布它要连系列一起建，是另一条**没有抓包依据**的链路。这里不猜，交人工。
+   *
+   * 系列 ID 从最近一次同步的快照里按系列名反查，而不是信任本地记的 generated_campaign_id
+   * ——那个字段只在成功时才写，卡住的记录里必然是空的。
+   */
+  async publishStuckCampaignCopyDraft(taskKey: string): Promise<{
+    ok: boolean;
+    message: string;
+    adGroupIds: string[];
+  }> {
+    const task = this.store.getUncertainCampaignCopyTask(taskKey);
+    if (!task) throw new Error("该系列复制记录不存在，或已不处于「结果未知」状态。");
+    if (task.generatedNames.length === 0) {
+      throw new Error("这条记录没有记下组名，无法定位草稿，请在 TikTok 后台手动处理。");
+    }
+    const account = this.store.getAccount(task.accountId);
+    if (!account) throw new Error("账号不存在。");
+    const connection = this.store.getProviderConnection(task.accountId, account.providerKind);
+    if (!connection || connection.status !== "ready") {
+      throw new Error("账户未通过连接检测，已阻止发布。");
+    }
+    const campaignId = this.findCampaignIdByName(task.accountId, account.providerKind, task.campaignName);
+    if (!campaignId) {
+      throw new Error(
+        `系列「${task.campaignName}」还没有在 TikTok 上建出来，后台留下的是一个草稿系列。`
+        + "发布草稿系列是另一条链路，需要在 TikTok 后台手动完成。",
+      );
+    }
+    // 与扩组同一道闸门：同一条创建会话 cURL、同一个发布接口。
+    this.providers.requireAccountCapability(
+      task.accountId,
+      account.providerKind,
+      connection,
+      "copy-ads",
+    );
+    const context = await this.loadProviderContext(task.accountId, account.providerKind);
+    const result = await this.providers.publishExistingDrafts(account.providerKind, context, {
+      campaignId,
+      names: task.generatedNames,
+      initialStatus: "enabled",
+    });
+    if (!result.ok) {
+      throw new Error(result.failureKind === "unknown"
+        ? `${result.message}（发布请求已发出但结果无法确认，这条记录继续保留，请到 TikTok 后台核实）`
+        : result.message);
+    }
+    this.store.confirmCampaignCopyTask(taskKey, campaignId);
+    return {
+      ok: true,
+      message: result.message,
+      adGroupIds: result.adGroupIds ?? [],
+    };
+  }
+
+  /** 按系列名在最近一次同步的快照里反查系列 ID。同名多个时不下结论。 */
+  private findCampaignIdByName(
+    accountId: string,
+    providerKind: ProviderKind,
+    campaignName: string,
+  ): string | null {
+    const wanted = campaignName.trim();
+    if (!wanted) return null;
+    const matches = this.store
+      .listCurrentManagedEntities(accountId, providerKind)
+      .filter((entity) => entity.entityType === "campaign" && entity.name.trim() === wanted);
+    return matches.length === 1 ? matches[0]!.externalId : null;
   }
 
   /**
@@ -861,11 +942,17 @@ export class LaunchService {
     };
   }
 
-  /** 还挂着「结果未知」的组名：等人决定发布还是放弃，不能替他删掉。 */
+  /**
+   * 还挂着「结果未知」的组名：等着被自动补发布或人工决定，不能替他删掉。
+   *
+   * 系列复制那一侧同样要保住——它的记录现在也会被对账自动补发布，清理把草稿删了，补发布
+   * 就只剩「找不到草稿」这一个结局。
+   */
   private reservedDraftNames(accountId: string): string[] {
-    return this.store
-      .listUncertainAdGroupExpandTasks(accountId)
-      .flatMap((task) => task.generatedNames);
+    return [
+      ...this.store.listUncertainAdGroupExpandTasks(accountId),
+      ...this.store.listUncertainCampaignCopyTasks(accountId),
+    ].flatMap((task) => task.generatedNames);
   }
 
   private async requireDraftAccess(accountId: string) {
@@ -1154,6 +1241,9 @@ export class LaunchService {
         input.accountId,
         sourceCampaignId,
         campaign.campaignName,
+        // 组名必须在第一个写请求之前落库：任务卡成「结果未知」后，后台留下的草稿只能
+        // 按名字反查，而那时这批名字只存在于内存里。
+        campaign.groups.map((group) => group.name),
       );
       if (claim !== "claimed") {
         if (claim === "unknown") {

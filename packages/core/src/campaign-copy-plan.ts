@@ -137,6 +137,11 @@ export const CampaignCopyStuckTaskSchema = z.object({
   /** Provider 侧确认产生的系列 ID；发布前失败时为空。 */
   generatedCampaignId: z.string().nullable(),
   generatedAdGroupIds: z.array(z.string()),
+  /** 计划中的新广告组名。卡住时只能按名字去后台反查草稿。 */
+  generatedAdGroupNames: z.array(z.string()).default([]),
+  /** 自动补发布已经试过几次，以及最后一次为什么没成——用来向人解释这条为什么还挂着。 */
+  draftPublishAttempts: z.number().int().min(0).default(0),
+  draftPublishError: z.string().nullable().default(null),
 });
 export type CampaignCopyStuckTask = z.infer<typeof CampaignCopyStuckTaskSchema>;
 
