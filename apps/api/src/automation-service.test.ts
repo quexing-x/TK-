@@ -2016,6 +2016,119 @@ describe("AutomationService", () => {
     expect(autoCopyRunner).not.toHaveBeenCalled();
   });
 
+  /**
+   * 每日执行器一天只跑一次，写失败此前就等于永久放弃——而放弃的代价不可逆：
+   * 2026-09-03 生产实测，一个单转 5.5 的广告组在 06:00 被判定该开启，TikTok 回了一次
+   * `code 4 读取失败`，于是它保持关闭 → 当天零消耗 → 次日转化归零 → 再也够不着
+   * 「前一日转化 ≥ 5」的门槛，被一次网络抖动永久关死。
+   */
+  describe("前一日转化达标自动开启：写失败要补写", () => {
+    // 账户时区 Asia/Shanghai，scheduleHour=6 对应 UTC 前一日 22:00。
+    const atSix = new Date("2026-07-24T22:00:00.000Z");   // 本地 07-25 06:00
+    const previousDay = new Date("2026-07-24T02:00:00.000Z"); // 本地 07-24 10:00
+
+    /**
+     * 前一自然日转化 6 次、当前关着的广告组。
+     *
+     * 刻意用 FakeProvider 自己那套实体 ID：后续 runAccount 会再同步一次，自造 ID 的实体
+     * 会被整片下线，补写时就找不着了——那样测的是「实体消失」，不是「补写有没有发生」。
+     */
+    async function seedQualifyingGroup() {
+      provider.adGroupStatus = "disable";
+      provider.adGroupConversions = 6;
+      const sync = alignSyncTo(await provider.syncReadOnly(), previousDay);
+      store.saveReadOnlySync("demo-account", "cookie", sync.entities, sync.result);
+    }
+
+    /** 补写会在写入原因里留下「补写」二字，用它把补写和规则链的开启区分开。 */
+    const backfillOps = () => store.listAdOperations("demo-account", 200)
+      .filter((op) => op.action === "enable" && (op.message ?? "").includes("补写"));
+
+    function enableExecutor() {
+      const settings = store.getAutomationFeatureSettings();
+      settings.dailyEnable.enabled = true;
+      store.updateAutomationFeatureSettings(settings);
+    }
+
+    const pending = () => store.listDailyAutomationRunPending("demo-account", "daily-enable", "2026-07-25");
+
+    async function seedThenFailAtSix() {
+      enableExecutor();
+      vi.useFakeTimers();
+      vi.setSystemTime(previousDay);
+      await seedQualifyingGroup();
+      vi.setSystemTime(atSix);
+      provider.shouldFail = true;  // TikTok 这一下没写进去
+      await service.runScheduledDailyEnables("demo-account", atSix);
+    }
+
+    it("写失败的对象记进当天的重试清单，不再一次抖动就永久放弃", async () => {
+      await seedThenFailAtSix();
+
+      expect(pending()).toEqual([
+        { entityType: "ad-group", externalId: "adgroup-1", attempts: 1, reason: "rejected" },
+      ]);
+    });
+
+    it("成功的不进清单", async () => {
+      enableExecutor();
+      vi.useFakeTimers();
+      vi.setSystemTime(previousDay);
+      await seedQualifyingGroup();
+      vi.setSystemTime(atSix);
+
+      await service.runScheduledDailyEnables("demo-account", atSix);
+
+      expect(pending()).toEqual([]);
+      expect(provider.mutations.some((m) => m.externalId === "adgroup-1" && m.action === "enable")).toBe(true);
+    });
+
+    // 重试不受 06:00 那个小时门槛限制：那个门槛是为了「每天只扫一次」，
+    // 而「前一日转化达标」这个判据在当天任何时刻都同样成立。
+    it("后续轮询把它补写回来，成功后销账", async () => {
+      await seedThenFailAtSix();
+      expect(pending()).toHaveLength(1);
+
+      // 早上 9 点，TikTok 恢复正常。组仍是关着的，所以补写该发生。
+      provider.shouldFail = false;
+      vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+      await service.runAccount("demo-account", "scheduler");
+
+      expect(backfillOps()).toHaveLength(1);
+      expect(backfillOps()[0]).toMatchObject({ externalId: "adgroup-1", status: "succeeded" });
+      expect(pending()).toEqual([]);
+    });
+
+    // 清单挂在 local_date 上，跨天自然作废——「前一日转化达标」是当天的理由，
+    // 隔天再拿它写入就是在用过期的判据。
+    it("跨天作废，不拿昨天的理由今天补写", async () => {
+      await seedThenFailAtSix();
+
+      provider.shouldFail = false;
+      // 次日：本地 07-26。
+      vi.setSystemTime(new Date("2026-07-25T22:30:00.000Z"));
+      await service.runAccount("demo-account", "scheduler");
+
+      expect(backfillOps()).toHaveLength(0);
+      // 昨天那份清单原样留着，供人查为什么没开成。
+      expect(pending()).toHaveLength(1);
+    });
+
+    // 持续故障时不能每轮空敲。试满就停手，原因留在清单上供人查。
+    it("补写试满上限就停手", async () => {
+      await seedThenFailAtSix();
+
+      for (let round = 0; round < 8; round += 1) {
+        vi.setSystemTime(new Date(`2026-07-25T0${round}:10:00.000Z`));
+        await service.runAccount("demo-account", "scheduler");
+      }
+
+      // 首次 1 次 + 补写 4 次 = attempts 封顶 5。
+      expect(pending()[0]).toMatchObject({ externalId: "adgroup-1", attempts: 5 });
+      expect(backfillOps().every((op) => op.status !== "succeeded")).toBe(true);
+    });
+  });
+
   describe("自动关闭跑不出来又已停跑的系列", () => {
     // 账户时区 Asia/Shanghai，scheduleHour=6 对应 UTC 前一日 22:00。
     const atSix = new Date("2026-07-24T22:00:00.000Z");
