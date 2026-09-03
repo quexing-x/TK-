@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { automationRuleDefinitions, createDefaultAutomationSwitches, defaultAutomationFeatureSettings, type LaunchCopyPreviewInput, type LaunchOriginalPost } from "@tk-auto/core";
+import { automationRuleDefinitions, createDefaultAutomationSwitches, dateKeyInTimeZone as dateKeyInTimeZoneForStoreTest, defaultAutomationFeatureSettings, type LaunchCopyPreviewInput, type LaunchOriginalPost } from "@tk-auto/core";
 import { AutomationStore } from "./store.js";
 import { MigrationRunner } from "./migration-runner.js";
 import {
@@ -556,6 +556,42 @@ describe("AutomationStore", () => {
     store.recordAdGroupExpandDraftPublishFailure("stuck", "不该再试");
     expect(store.listAdGroupExpandHistory(["demo-account"], 10)[0])
       .toMatchObject({ taskKey: "stuck", uncertain: false, status: "succeeded" });
+  });
+
+  // 「建议重扩系列」是行动清单：今天已经复制过的再摆上去，只会让人把同一条复制第二遍。
+  it("今天复制过的源系列查得出来，跨天要重新出现", () => {
+    const timeZone = "Asia/Shanghai";
+    const today = dateKeyInTimeZoneForStoreTest(new Date(), timeZone);
+    store.claimCampaignCopyTask("today-copy", "demo-account", "campaign-1", "新系列-A");
+    // 昨天复制的：源系列今天还是零转化，说明昨天那条也没救活它，该再提示一次。
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(Date.now() - 26 * 60 * 60_000));
+      store.claimCampaignCopyTask("yesterday-copy", "demo-account", "campaign-2", "新系列-B");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const copied = store.listCampaignIdsCopiedOnLocalDate("demo-account", today, timeZone);
+
+    expect([...copied]).toEqual(["campaign-1"]);
+  });
+
+  // 失败的复制在 finishCampaignCopyTask 里已经被删掉了；剩下的「结果未知」最该拦住——
+  // 那正是最可能已经建出来了的情形，再复制一次就是两条。
+  it("结果未知的复制照样算已复制过", () => {
+    const timeZone = "Asia/Shanghai";
+    const today = dateKeyInTimeZoneForStoreTest(new Date(), timeZone);
+    store.claimCampaignCopyTask("unknown-copy", "demo-account", "campaign-1", "新系列-A");
+    store.finishCampaignCopyTask("unknown-copy", "unknown");
+    store.claimCampaignCopyTask("failed-copy", "demo-account", "campaign-2", "新系列-B");
+    store.finishCampaignCopyTask("failed-copy", "failed");
+
+    const copied = store.listCampaignIdsCopiedOnLocalDate("demo-account", today, timeZone);
+
+    expect(copied.has("campaign-1")).toBe(true);
+    // 明确失败、且没产生任何对象：该继续建议重扩。
+    expect(copied.has("campaign-2")).toBe(false);
   });
 
   // 组名必须在第一个写请求之前落库：卡住之后，后台留下的草稿只能按名字反查。

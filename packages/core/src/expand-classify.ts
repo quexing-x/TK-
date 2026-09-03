@@ -39,6 +39,18 @@ export interface ExpandCampaignInput {
    * 只数**当天确实花过钱**的日子：没花钱的那天零转化是必然的，不构成「不出货」的证据。
    */
   consecutiveZeroConversionDays?: number;
+  /**
+   * 今天已经从这条系列复制出新系列了。
+   *
+   * **只是一个标记，不参与任何判定。** 一条系列该不该重扩，取决于它自己跑得怎么样，
+   * 跟「今天复制过没有」无关——复制过的源系列照样是跑不出来的那条，「每早关掉跑不出来
+   * 又已经停跑的系列」仍然该关它。所以这里只把事实原样带出去，由界面决定要不要在
+   * 「建议重扩」名单里把它藏起来（藏起来是对的：名单是行动清单，今天已经做过的不该再
+   * 让人做一次）。
+   *
+   * 把它做成判据会顺手关掉自动关停：那条链路正是靠 `recreate-campaign` 挑出关停对象的。
+   */
+  recreatedToday?: boolean;
 }
 
 export interface ExpandThresholds {
@@ -109,6 +121,8 @@ export interface ExpandClassification {
   hasActiveAdGroups: boolean | null;
   /** 最近连续零转化的完整自然日数，供界面解释「为什么判重扩」。 */
   consecutiveZeroConversionDays: number;
+  /** 今天已经从这条系列复制出新系列了。原样透传，不影响 verdict。 */
+  recreatedToday: boolean;
 }
 
 /**
@@ -178,6 +192,7 @@ export function classifyCampaignForExpand(
     days,
     hasActiveAdGroups: campaign.hasActiveAdGroups ?? null,
     consecutiveZeroConversionDays: campaign.consecutiveZeroConversionDays ?? 0,
+    recreatedToday: campaign.recreatedToday ?? false,
   };
 
   if (isNonOperationalCampaignName(campaign.name)) {

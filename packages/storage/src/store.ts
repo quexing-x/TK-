@@ -4015,6 +4015,42 @@ export class AutomationStore {
   }
 
   /**
+   * 今天已经被复制过的**源系列** ID。
+   *
+   * 用途只有一个：把它们从「建议重扩系列」名单里藏掉。那份名单是行动清单，今天已经复制过
+   * 的再摆在上面，只会让人（或「全部带到复制页」那个按钮）把同一条系列复制第二遍。
+   *
+   * **今天 = 账户本地日**，与扩组的 localDate 同一口径。跨天要重新出现：源系列第二天还是
+   * 零转化，说明昨天复制出来的那条也没救活它，那时再提示一次是对的。
+   *
+   * **不按状态筛。** 失败的复制记录在 `finishCampaignCopyTask` 里已经被删掉了，所以表里
+   * 剩下的要么成功、要么正在跑、要么结果未知——这三种都不该再复制一次，尤其是结果未知：
+   * 那正是最可能已经建出来了的情形。
+   */
+  listCampaignIdsCopiedOnLocalDate(
+    accountId: string,
+    localDate: string,
+    timeZone: string,
+  ): Set<string> {
+    // 先按时间粗筛再精确比对本地日：跨时区最多差一天，48 小时窗口足够覆盖，
+    // 又不必把整张历史表拉出来。
+    const since = new Date(Date.now() - 48 * 60 * 60_000).toISOString();
+    const rows = this.db.prepare(
+      `SELECT source_campaign_id, claimed_at FROM campaign_copy_tasks
+        WHERE account_id = ? AND claimed_at >= ?`,
+    ).all(accountId, since) as SqlRow[];
+    const result = new Set<string>();
+    for (const row of rows) {
+      const claimedAt = new Date(String(row.claimed_at));
+      if (Number.isNaN(claimedAt.getTime())) continue;
+      if (dateKeyInTimeZone(claimedAt, timeZone) !== localDate) continue;
+      const campaignId = String(row.source_campaign_id ?? "").trim();
+      if (campaignId) result.add(campaignId);
+    }
+    return result;
+  }
+
+  /**
    * 单条「结果未知」的系列复制记录，供自动/人工发布它留在后台的草稿。
    *
    * 只认 uncertain = 1：已经收口的记录再发一次会把同一批组建成两份。

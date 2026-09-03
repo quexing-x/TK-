@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { VERDICT_LABELS, matchesVerdictFilter } from "./ExpandGroupsPanel.js";
+import { VERDICT_LABELS, matchesVerdictFilter, shouldSuggestRecreate } from "./ExpandGroupsPanel.js";
+
+describe("建议重扩名单", () => {
+  // 名单是行动清单：今天已经复制过的再摆上去，只会被「全部带到复制页」原样带走、复制第二遍。
+  it("今天已经复制过的不再建议", () => {
+    expect(shouldSuggestRecreate({ recreatedToday: true })).toBe(false);
+  });
+
+  it("没复制过的照常建议", () => {
+    expect(shouldSuggestRecreate({ recreatedToday: false })).toBe(true);
+  });
+
+  // 老版本服务端不返回这个字段。缺失时必须照常建议——把名单藏空的代价（当天一条都不重扩）
+  // 远大于偶尔多提示一次。
+  it("字段缺失时照常建议，不让名单凭空变空", () => {
+    expect(shouldSuggestRecreate({})).toBe(true);
+  });
+});
 
 describe("系列判定筛选", () => {
   it("「全部」放行所有判定", () => {
