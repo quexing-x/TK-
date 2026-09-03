@@ -18,6 +18,7 @@ describe("renderPollCycle", () => {
           disabledCount: 1,
           failureCount: 0,
           message: null,
+          failureKind: null,
         },
         {
           accountId: "b",
@@ -28,6 +29,7 @@ describe("renderPollCycle", () => {
           disabledCount: 0,
           failureCount: 0,
           message: null,
+          failureKind: null,
         },
       ],
     });

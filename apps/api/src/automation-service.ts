@@ -22,6 +22,7 @@ import {
   type MetaRuleConfiguration,
   type ManagedEntityRecord,
   type PollCycleRecord,
+  type PollFailureKind,
   type RuleConfiguration,
   type AdOperationRecord,
   type SyncDataQuality,
@@ -2841,15 +2842,20 @@ export class AutomationScheduler {
         } catch (cause) {
           // 一个账户失败不能带走整批：这里必须自己吞掉，否则会把其余账户的结果
           // 一起拒绝掉。失败如实记进本批次的账户结果里。
+          const message = safeMessage(cause);
+          // 撞上账户锁说明上一轮还没跑完，这一轮本来就不该跑，不是失败。记成 skipped
+          // 才不会污染「连续失败」的计数，也不会在报表里显示成执行失败。
+          const busy = cause instanceof AutomationBusyError;
           this.store.savePollAccountResult(cycle.id, {
             accountId: account.id,
             accountName: account.displayName,
             runId: null,
-            status: "failed",
+            status: busy ? "skipped" : "failed",
             enabledCount: 0,
             disabledCount: 0,
-            failureCount: 1,
-            message: safeMessage(cause),
+            failureCount: busy ? 0 : 1,
+            message,
+            failureKind: busy ? null : pollFailureKind(message),
           });
         } finally {
           this.lastPolledAt.set(account.id, Date.now());
@@ -2896,6 +2902,7 @@ export class AutomationScheduler {
       return;
     }
     if (connection?.status !== "ready") {
+      const message = connection?.lastMessage ?? "账户连接检测失败。";
       this.store.savePollAccountResult(cycleId, {
         accountId: account.id,
         accountName: account.displayName,
@@ -2904,7 +2911,8 @@ export class AutomationScheduler {
         enabledCount: 0,
         disabledCount: 0,
         failureCount: 1,
-        message: connection?.lastMessage ?? "账户连接检测失败。",
+        message,
+        failureKind: pollFailureKind(message),
       });
       return;
     }
@@ -2929,6 +2937,7 @@ export class AutomationScheduler {
       ...counts,
       failureCount: Math.max(counts.failureCount, run.failureCount),
       message: run.errorMessage,
+      failureKind: failed ? pollFailureKind(run.errorMessage) : null,
     });
   }
 
@@ -2957,18 +2966,37 @@ function safeMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "自动化任务失败。";
 }
 
+/**
+ * 「抖一下」而不是「真的坏了」——只认错误文本，这样轮询结果落库之后还能再判一次。
+ *
+ * 连接健康检查用它决定要不要保留 ready；轮询结果用它给 failure_kind 打标，账户失效
+ * 提醒再据此决定要不要 @所有人。两处必须同源：否则会出现健康检查判定「暂时的网络
+ * 问题、保留最近验证成功状态」而提醒仍然喊「连接失效、投放停摆」的矛盾。
+ */
+function isTransientFailureMessage(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes("timed out")
+    || text.includes("timeout")
+    || text.includes("operation was aborted")
+    || text.includes("fetch failed")
+    || text.includes("econnreset")
+    || text.includes("econnrefused")
+    || text.includes("socket hang up")
+    // 上一轮还没跑完，下一轮又到点了：被账户锁挡下来，跟连接本身无关。
+    || text.includes("已有检测任务正在运行")
+    || text.includes("已有任务正在执行");
+}
+
 function isTransientHealthCheckFailure(cause: unknown): boolean {
   const name = cause instanceof Error ? cause.name.toLowerCase() : "";
-  const message = safeMessage(cause).toLowerCase();
   return name === "aborterror"
     || name === "timeouterror"
-    || message.includes("timed out")
-    || message.includes("timeout")
-    || message.includes("operation was aborted")
-    || message.includes("fetch failed")
-    || message.includes("econnreset")
-    || message.includes("econnrefused")
-    || message.includes("socket hang up");
+    || isTransientFailureMessage(safeMessage(cause));
+}
+
+/** 轮询结果落库时给失败分类，供账户失效提醒判断要不要惊动所有人。 */
+function pollFailureKind(message: string | null): PollFailureKind {
+  return message && isTransientFailureMessage(message) ? "transient" : "persistent";
 }
 
 function renderAppealTemplate(

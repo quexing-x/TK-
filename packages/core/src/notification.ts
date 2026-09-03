@@ -109,6 +109,17 @@ export type PollAccountResultStatus = z.infer<
   typeof PollAccountResultStatusSchema
 >;
 
+/**
+ * 这一轮的失败是「抖一下」还是「真的坏了」。
+ *
+ * 只影响账户失效提醒要不要发，不影响 result_status 本身：网络抖动、超时、上一轮
+ * 没跑完撞上锁，这些下一轮就自己好了，不该 @所有人喊「投放停摆」。判据复用连接
+ * 健康检查那套（isTransientHealthCheckFailure），两边对「瞬时」的定义必须一致，
+ * 否则会出现连接状态判定「暂时的网络问题、保留 ready」而提醒仍然喊失效的情况。
+ */
+export const PollFailureKindSchema = z.enum(["transient", "persistent"]);
+export type PollFailureKind = z.infer<typeof PollFailureKindSchema>;
+
 export const PollAccountResultSchema = z.object({
   accountId: z.string().min(1),
   accountName: z.string().min(1),
@@ -118,8 +129,12 @@ export const PollAccountResultSchema = z.object({
   disabledCount: z.number().int().min(0),
   failureCount: z.number().int().min(0),
   message: z.string().nullable(),
+  // 非 failed 的行没有失败性质，存 null。历史行读出来也是 null，按 persistent 处理。
+  failureKind: PollFailureKindSchema.nullable().default(null),
 });
 export type PollAccountResult = z.infer<typeof PollAccountResultSchema>;
+/** 写入侧类型：failureKind 可省略，成功的轮次本来就没有失败性质。 */
+export type PollAccountResultInput = z.input<typeof PollAccountResultSchema>;
 
 export const PollCycleStatusSchema = z.enum(["running", "completed"]);
 export type PollCycleStatus = z.infer<typeof PollCycleStatusSchema>;

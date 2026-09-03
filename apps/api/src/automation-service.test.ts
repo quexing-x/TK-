@@ -12,6 +12,7 @@ import {
 } from "@tk-auto/providers";
 import { AutomationStore } from "@tk-auto/storage";
 import {
+  AutomationBusyError,
   AutomationScheduler,
   AutomationService,
   isOvernightBlackout,
@@ -2803,6 +2804,59 @@ describe("AutomationService", () => {
     releasePoll();
     await polling;
     vi.useRealTimers();
+  });
+
+  // 撞上账户锁只说明上一轮还没跑完，这一轮本来就不该跑。记成 failed 会让账户失效
+  // 提醒把它当成一次真失败，@所有人喊「投放停摆」。
+  it("轮询撞上账户锁记成 skipped，不算失败", async () => {
+    vi.spyOn(service, "runAccount").mockRejectedValue(
+      new AutomationBusyError("该账户已有检测任务正在运行。"),
+    );
+    const scheduler = new AutomationScheduler(store, service);
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+
+    await scheduler.runPollCycle();
+
+    vi.useRealTimers();
+    const cycle = store.listPollCycles()[0]!;
+    expect(cycle.accounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        accountId: "demo-account",
+        status: "skipped",
+        failureCount: 0,
+        failureKind: null,
+      }),
+    ]));
+    expect(store.listNewlyInvalidAutomationAccounts(cycle.id)).toEqual([]);
+  });
+
+  // 网络抖一下和 Cookie 真失效都会让这一轮失败，但只有后者值得惊动所有人。
+  it("轮询失败按瞬时/持久分类落库", async () => {
+    const scheduler = new AutomationScheduler(store, service);
+    vi.spyOn(service, "runAccount").mockRejectedValue(new Error("fetch failed"));
+    vi.useFakeTimers();
+    vi.setSystemTime(futureShanghaiTime(10));
+    await scheduler.runPollCycle();
+
+    vi.setSystemTime(futureShanghaiTime(20));
+    vi.spyOn(service, "runAccount").mockRejectedValue(
+      new Error("TikTok 接口失败（code 40102）：你无权操作这个"),
+    );
+    await scheduler.runPollCycle();
+    vi.useRealTimers();
+
+    const [transientCycle, persistentCycle] = store.listPollCycles()
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    expect(transientCycle?.accounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accountId: "demo-account", failureKind: "transient" }),
+    ]));
+    expect(persistentCycle?.accounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accountId: "demo-account", failureKind: "persistent" }),
+    ]));
+    // 抖动那轮不报；第二轮是真失败，连着两轮没跑通，这才该喊。
+    expect(store.listNewlyInvalidAutomationAccounts(transientCycle!.id)).toEqual([]);
+    expect(store.listNewlyInvalidAutomationAccounts(persistentCycle!.id)).toHaveLength(1);
   });
 
   // 账户之间没有任何数据依赖，串行纯粹是在排队等网络：一轮的耗时原先是所有账户

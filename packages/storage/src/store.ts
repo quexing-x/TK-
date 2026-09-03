@@ -154,6 +154,7 @@ import {
   type NotificationConnectionStatus,
   type NotificationDeliveryRecord,
   type PollAccountResult,
+  type PollAccountResultInput,
   type PollCycleRecord,
   AuditLogRecordSchema,
   type AuditLogFilter,
@@ -261,6 +262,14 @@ export class MetaCreationIdempotencyConflictError extends Error {
 
 /** 操作历史保留天数。指标快照不走这个口径，它有自己的 90 天日历。 */
 const historyRetentionDays = 30;
+
+/**
+ * 判定账户失效提醒时往前回溯的轮次上限。
+ *
+ * 只用来确认「这段连续失败是不是刚开始」，够短就行：连续失败超过这个长度的账户，
+ * 提醒在段的第二轮早就发过了，再往前翻不会改变结论。
+ */
+const newlyInvalidHistoryDepth = 50;
 
 export class AutomationStore {
   private readonly db: DatabaseSync;
@@ -920,14 +929,14 @@ export class AutomationStore {
     return this.getPollCycle(id) as PollCycleRecord;
   }
 
-  savePollAccountResult(cycleId: string, input: PollAccountResult): void {
+  savePollAccountResult(cycleId: string, input: PollAccountResultInput): void {
     const result = PollAccountResultSchema.parse(input);
     this.db
       .prepare(
         `INSERT INTO poll_cycle_accounts (
           cycle_id, account_id, account_name, run_id, result_status,
-          enabled_count, disabled_count, failure_count, message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          enabled_count, disabled_count, failure_count, message, failure_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cycle_id, account_id) DO UPDATE SET
           account_name = excluded.account_name,
           run_id = excluded.run_id,
@@ -935,7 +944,8 @@ export class AutomationStore {
           enabled_count = excluded.enabled_count,
           disabled_count = excluded.disabled_count,
           failure_count = excluded.failure_count,
-          message = excluded.message`,
+          message = excluded.message,
+          failure_kind = excluded.failure_kind`,
       )
       .run(
         cycleId,
@@ -947,50 +957,90 @@ export class AutomationStore {
         result.disabledCount,
         result.failureCount,
         result.message,
+        result.status === "failed" ? result.failureKind ?? "persistent" : null,
       );
   }
 
   /**
-   * 这一轮里「刚刚失效」的、且自动化开着的账户。
+   * 这一轮里「确认失效」的、且自动化开着的账户。
    *
-   * 只返回**跳变**的：该账户在本轮判为 failed，而它上一次出现在轮询批次里时不是
-   * failed。账户失效会持续几小时甚至几天，如果按「当前所有失效账户」推送，轮询最短
-   * 45 秒一轮，等于持续 @所有人 刷群。提醒的意义在于第一时间知道，不在于反复喊。
+   * 三条判据，缺一不可：
+   *
+   * 1. 本轮的失败不是瞬时的。网络抖一下、请求超时、上一轮没跑完撞上锁，这些下一轮
+   *    就自己好了。连接健康检查早就把它们豁免掉了（保留 ready，见 automation-service
+   *    的 isTransientHealthCheckFailure），但提醒这边原先读的是轮询结果状态，那里
+   *    只看「失败没失败」不看「什么失败」，于是连接判定「暂时的网络问题」而群里照样
+   *    喊「连接失效、投放停摆」。两边现在统一到同一套判据上。
+   * 2. 连续两轮没跑通才算数。单轮抖动不再惊动所有人；真失效（权限被收、Cookie 过期）
+   *    每轮都会稳定复现，下一轮就够门槛，最多晚一个轮询间隔。
+   * 3. 这段连续失败里还没喊过。失效会持续几小时甚至几天，轮询最短 45 秒一轮，按
+   *    「当前所有失效账户」推送等于持续刷群。提醒的意义在于第一时间知道，不在反复喊。
    *
    * 只看 account.enabled（自动化已开启）的账户：自动化没开的账户失效不影响投放，
    * 不值得把所有人叫起来。
+   *
+   * 顺序一律按写入顺序（rowid），不按 poll_cycles.started_at：started_at 是毫秒精度
+   * 的字符串，两个批次落在同一毫秒时会打平，比较大小会把打平的那一轮整个漏掉。
    */
   listNewlyInvalidAutomationAccounts(cycleId: string): Array<{
     accountId: string;
     accountName: string;
     message: string | null;
   }> {
-    // 「上一次出现」按写入顺序（rowid）判，不按 poll_cycles.started_at。
-    // started_at 是毫秒精度的字符串，两个批次落在同一毫秒时会打平，而
-    // `pc.started_at < c.started_at` 会把打平的上一轮整个排除掉，于是持续失效被
-    // 误判成「刚失效」，每轮都 @所有人。rowid 单调递增，不会打平。
-    const rows = this.db.prepare(
-      `SELECT a.account_id AS account_id, a.account_name AS account_name, a.message AS message
+    const candidates = this.db.prepare(
+      `SELECT a.rowid AS rid, a.account_id AS account_id, a.account_name AS account_name,
+              a.message AS message, a.failure_kind AS failure_kind
        FROM poll_cycle_accounts a
        JOIN accounts acc ON acc.id = a.account_id
        WHERE a.cycle_id = ?
          AND a.result_status = 'failed'
          AND acc.enabled = 1
-         AND COALESCE((
-           SELECT prev.result_status
-           FROM poll_cycle_accounts prev
-           WHERE prev.account_id = a.account_id
-             AND prev.rowid < a.rowid
-           ORDER BY prev.rowid DESC
-           LIMIT 1
-         ), 'none') <> 'failed'
        ORDER BY a.account_name`,
     ).all(cycleId) as SqlRow[];
-    return rows.map((row) => ({
-      accountId: String(row.account_id),
-      accountName: String(row.account_name),
-      message: typeof row.message === "string" ? row.message : null,
-    }));
+
+    const history = this.db.prepare(
+      `SELECT result_status, failure_kind
+       FROM poll_cycle_accounts
+       WHERE account_id = ? AND rowid < ?
+       ORDER BY rowid DESC
+       LIMIT ${newlyInvalidHistoryDepth}`,
+    );
+
+    const invalid: Array<{
+      accountId: string;
+      accountName: string;
+      message: string | null;
+    }> = [];
+    for (const row of candidates) {
+      if (row.failure_kind === "transient") continue;
+      const previous = history.all(
+        String(row.account_id),
+        Number(row.rid),
+      ) as SqlRow[];
+      // 本轮所属的这段连续失败，往前数到第一条非 failed 为止（倒序，最近的在前）。
+      const segment: SqlRow[] = [];
+      for (const entry of previous) {
+        if (entry.result_status !== "failed") break;
+        segment.push(entry);
+      }
+      // 段里只有本轮 —— 这是第一次失败，等下一轮确认。
+      if (segment.length === 0) continue;
+      // 这段比回溯窗口还长，那它早就报过了，不必再看。
+      if (segment.length >= newlyInvalidHistoryDepth) continue;
+      // 段首那次按判据 2 本来就不会报，所以它不算「喊过」；除它之外只要有过一次
+      // 非瞬时失败，就说明这段已经喊过了。中间夹着的瞬时失败同样不算喊过，否则
+      // 真失效中途抖一下就会把后面的提醒永久吞掉。
+      const alreadyAlerted = segment
+        .slice(0, -1)
+        .some((entry) => entry.failure_kind !== "transient");
+      if (alreadyAlerted) continue;
+      invalid.push({
+        accountId: String(row.account_id),
+        accountName: String(row.account_name),
+        message: typeof row.message === "string" ? row.message : null,
+      });
+    }
+    return invalid;
   }
 
   finishPollCycle(cycleId: string): PollCycleRecord {
@@ -8080,6 +8130,8 @@ export class AutomationStore {
     this.ensureColumn("launch_plan_items", "source_snapshot_json", "TEXT");
     this.ensureColumn("launch_plan_items", "target_asset_mapping_json", "TEXT");
     this.ensureColumn("launch_plan_items", "idempotency_key", "TEXT");
+    // 历史行没有失败性质，留 NULL，listNewlyInvalidAutomationAccounts 按 persistent 读。
+    this.ensureColumn("poll_cycle_accounts", "failure_kind", "TEXT");
     this.applyMigration("launch-creation-locks-v2", () => {
       const columns = this.db.prepare("PRAGMA table_info(launch_creation_locks)").all() as SqlRow[];
       const owner = columns.find((column) => column.name === "owner_id");
@@ -8575,6 +8627,7 @@ function mapPollAccountResult(row: SqlRow): PollAccountResult {
     disabledCount: Number(row.disabled_count),
     failureCount: Number(row.failure_count),
     message: row.message ?? null,
+    failureKind: row.failure_kind ?? null,
   });
 }
 
