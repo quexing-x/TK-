@@ -1132,7 +1132,12 @@ describe("AutomationStore", () => {
   // 账户失效提醒只在**跳变**时发。失效会持续几小时甚至几天，而轮询最短 45 秒一轮，
   // 按「当前所有失效账户」推送等于持续 @所有人 刷群。
   describe("账户失效提醒的跳变判定", () => {
-    const runCycle = (status: "no-action" | "failed", message: string | null = null) => {
+    const runCycle = (
+      status: "no-action" | "failed" | "skipped",
+      message: string | null = null,
+      failureKind: "transient" | "persistent" | null =
+        status === "failed" ? "persistent" : null,
+    ) => {
       const cycle = store.createPollCycle();
       store.savePollAccountResult(cycle.id, {
         accountId: "demo-account",
@@ -1143,15 +1148,23 @@ describe("AutomationStore", () => {
         disabledCount: 0,
         failureCount: status === "failed" ? 1 : 0,
         message,
+        failureKind,
       });
       store.finishPollCycle(cycle.id);
       return cycle.id;
     };
 
-    it("第一次失效会报出来", () => {
+    it("第一次失败先不报，等下一轮确认", () => {
       const id = runCycle("failed", "Cookie 已失效");
 
-      const invalid = store.listNewlyInvalidAutomationAccounts(id);
+      expect(store.listNewlyInvalidAutomationAccounts(id)).toEqual([]);
+    });
+
+    it("连续两轮失败才报", () => {
+      runCycle("failed", "Cookie 已失效");
+      const second = runCycle("failed", "Cookie 已失效");
+
+      const invalid = store.listNewlyInvalidAutomationAccounts(second);
       expect(invalid).toHaveLength(1);
       expect(invalid[0]).toMatchObject({
         accountId: "demo-account",
@@ -1159,19 +1172,57 @@ describe("AutomationStore", () => {
       });
     });
 
-    it("连续失效不再重复报", () => {
+    it("持续失效不再重复报", () => {
       runCycle("failed", "Cookie 已失效");
-      const second = runCycle("failed", "Cookie 已失效");
+      runCycle("failed", "Cookie 已失效");
+      const third = runCycle("failed", "Cookie 已失效");
 
-      expect(store.listNewlyInvalidAutomationAccounts(second)).toEqual([]);
+      expect(store.listNewlyInvalidAutomationAccounts(third)).toEqual([]);
     });
 
-    it("恢复之后再次失效，会重新报一次", () => {
+    it("恢复之后再次连续失败，会重新报一次", () => {
+      runCycle("failed", "Cookie 已失效");
       runCycle("failed", "Cookie 已失效");
       runCycle("no-action");
+      runCycle("failed", "又失效了");
       const again = runCycle("failed", "又失效了");
 
       expect(store.listNewlyInvalidAutomationAccounts(again)).toHaveLength(1);
+    });
+
+    // 网络抖动、超时这些下一轮就自己好了，不该 @所有人喊投放停摆。
+    it("瞬时失败连续多轮也不报", () => {
+      runCycle("failed", "fetch failed", "transient");
+      runCycle("failed", "fetch failed", "transient");
+      const third = runCycle("failed", "fetch failed", "transient");
+
+      expect(store.listNewlyInvalidAutomationAccounts(third)).toEqual([]);
+    });
+
+    // 连着两轮都没跑通，且这一轮是真失败，那就是真出事了。
+    it("瞬时失败之后接着真失败会报", () => {
+      runCycle("failed", "fetch failed", "transient");
+      const second = runCycle("failed", "Cookie 已失效");
+
+      expect(store.listNewlyInvalidAutomationAccounts(second)).toHaveLength(1);
+    });
+
+    // 真失效开始后中途抖一下，不能把这段的提醒永久吞掉。
+    it("真失败段的第二轮恰好是瞬时的，第三轮补报", () => {
+      runCycle("failed", "Cookie 已失效");
+      runCycle("failed", "fetch failed", "transient");
+      const third = runCycle("failed", "Cookie 已失效");
+
+      expect(store.listNewlyInvalidAutomationAccounts(third)).toHaveLength(1);
+    });
+
+    // 撞上账户锁记的是 skipped，它会像正常轮次一样把连续失败断开。
+    it("中间的 skipped 会断开连续失败", () => {
+      runCycle("failed", "Cookie 已失效");
+      runCycle("skipped", "该账户已有检测任务正在运行。");
+      const third = runCycle("failed", "Cookie 已失效");
+
+      expect(store.listNewlyInvalidAutomationAccounts(third)).toEqual([]);
     });
 
     it("正常的批次不报", () => {
@@ -1190,9 +1241,10 @@ describe("AutomationStore", () => {
         providerKind: account.providerKind,
       });
 
-      const id = runCycle("failed", "Cookie 已失效");
+      runCycle("failed", "Cookie 已失效");
+      const second = runCycle("failed", "Cookie 已失效");
 
-      expect(store.listNewlyInvalidAutomationAccounts(id)).toEqual([]);
+      expect(store.listNewlyInvalidAutomationAccounts(second)).toEqual([]);
     });
   });
 

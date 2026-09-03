@@ -27,6 +27,7 @@ const account = (
   disabledCount: 0,
   failureCount: 0,
   message: null,
+  failureKind: null,
   ...patch,
 });
 
