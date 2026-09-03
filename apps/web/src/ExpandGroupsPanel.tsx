@@ -346,14 +346,14 @@ export function ExpandGroupsPanel({
   /**
    * 发布这条记录留在 TikTok 后台的草稿。
    *
-   * 「全部清除」只是把红条摘掉，草稿仍然烂在后台——这里才是真正的收口。发布后是暂停状态：
-   * 原始扩组是不是「立即投放」没有记录在案，悄悄开起来烧钱比让人多点一次开关严重得多。
+   * 「全部清除」只是把红条摘掉，草稿仍然烂在后台——这里才是真正的收口。轮询对账确认「只
+   * 建了草稿」后会自动补这一步，这个按钮是给自动重试试满之后再点一次用的。
    */
   const publishDraft = async (task: AdGroupExpandTask) => {
     const names = task.generatedNames.join("、") || "（未记录组名）";
     const confirmed = await confirm({
       title: "发布这条记录的草稿",
-      message: `扩组失败时 TikTok 后台会留下草稿。这一步把下面这些草稿正式发布出去：\n\n${names}\n\n发布后是「已暂停」状态，需要你自己去开——原始扩组是不是「立即投放」没有记录在案。\n草稿如果已经被手动发布或删除，这里会直接报找不到，不会重复建。`,
+      message: `扩组失败时 TikTok 后台会留下草稿。这一步把下面这些草稿正式发布出去：\n\n${names}\n\n发布后直接投放（组和组里的广告都会开起来）。\n草稿如果已经被手动发布或删除，这里会直接报找不到，不会重复建。`,
       confirmLabel: "发布草稿",
     });
     if (!confirmed) return;
@@ -1002,7 +1002,7 @@ export function ExpandGroupsPanel({
       </header>
       {needsReview.length > 0 && <p className="expand-history-alert">
         <AlertTriangle size={15} />
-        <span><strong>{needsReview.length} 条结果未知，需人工核实。</strong>写请求已发出但没拿到结果，禁止自动重试——请到 TikTok 后台确认这些组到底建成没有。只建了草稿的，用那一行的「发布草稿」把它发出去。</span>
+        <span><strong>{needsReview.length} 条结果未知，需人工核实。</strong>写请求已发出但没拿到结果，禁止整批自动重试——请到 TikTok 后台确认这些组到底建成没有。轮询查到只建了草稿的会自动补发布（最多试 3 次）；试满还挂在这里的，用那一行的「发布草稿」再点一次。</span>
         <button className="secondary-button compact-button" disabled={resolving}
           onClick={() => void resolveAllStuckTasks()} type="button">
           {resolving ? "清除中…" : "已核实，全部清除"}

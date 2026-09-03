@@ -224,6 +224,67 @@ describe("CookieAdsProvider.publishExistingDrafts", () => {
     }]);
   });
 
+  /**
+   * 收口的默认口径是「直接投放」。发成暂停等于把机器没做完的最后一步换成「人必须记得去
+   * 后台开一遍」，一忘就是一批建好却不投的组躺在后台。
+   *
+   * 光把组开起来不够：草稿是 ad_snap/copy 克隆出来的，里面的广告继承了源广告的开关状态，
+   * 组开着而广告是关的，整组照样投不出去。
+   */
+  it("发成投放状态时把克隆过来的广告也一并开起来", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      pages: [[{ adSketchId: "ad-1", name: "A-0826-060000-1", campaignId: "camp-1" }]],
+      creativesBySketch: { "ad-1": ["cre-1"] },
+    });
+    const enabledContext = context();
+    if (enabledContext.credential.kind !== "cookie" || !enabledContext.credential.requestTemplates) {
+      throw new Error("test fixture must include cookie request templates");
+    }
+    enabledContext.credential.requestTemplates.push({
+      target: "ad-status",
+      action: "enable",
+      url: "https://ads.tiktok.com/api/v4/i18n/ad/update_status/?aadvid=654321",
+      method: "POST",
+      body: '{"creative_id":"captured-ad","operation":"enable"}',
+      contentType: "application/json",
+    });
+
+    const result = await new CookieAdsProvider().publishExistingDrafts(enabledContext, {
+      campaignId: "camp-1",
+      names: ["A-0826-060000-1"],
+      initialStatus: "enabled",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).not.toContain("暂停");
+    expect(result.message).not.toContain("未能自动开启");
+    const publish = calls.find((call) => call.path.includes("create_by_snap"));
+    expect(publish?.body).toMatchObject({ is_status_disabled: false });
+    const enables = calls.filter((call) => call.path.includes("ad/update_status"));
+    expect(enables).toHaveLength(1);
+    expect(enables[0]?.body).toMatchObject({ creative_id: "new-ad-1", operation: "enable" });
+  });
+
+  it("发成暂停时不去动广告的开关：组本来就不投", async () => {
+    const calls: Call[] = [];
+    stubTikTok({
+      calls,
+      pages: [[{ adSketchId: "ad-1", name: "A-0826-060000-1", campaignId: "camp-1" }]],
+      creativesBySketch: { "ad-1": ["cre-1"] },
+    });
+
+    const result = await new CookieAdsProvider().publishExistingDrafts(context(), {
+      campaignId: "camp-1",
+      names: ["A-0826-060000-1"],
+      initialStatus: "disabled",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls.filter((call) => call.path.includes("ad/update_status"))).toEqual([]);
+  });
+
   it("发布前补 CTA：克隆出来的草稿不带可用的行动引导", async () => {
     const calls: Call[] = [];
     stubTikTok({

@@ -529,6 +529,77 @@ describe("AutomationStore", () => {
     expect(store.resolveUncertainAdGroupExpandTasks([])).toBe(0);
   });
 
+  // 自动补发布的记账。不计次，一条永远发不出去的草稿会在每一轮轮询里重敲一次创建接口。
+  it("扩组的自动补发布失败会计次，收口后连同原因一起清掉", () => {
+    store.claimAdGroupExpandTask("stuck", "demo-account", "adgroup-1", {
+      sourceCampaignId: "campaign-1",
+      generatedNames: ["新组-0903-1"],
+    });
+    store.finishAdGroupExpandTask("stuck", "unknown");
+
+    store.recordAdGroupExpandDraftPublishFailure("stuck", "草稿已被手动删除");
+    store.recordAdGroupExpandDraftPublishFailure("stuck", "草稿已被手动删除");
+
+    expect(store.listUncertainAdGroupExpandTasks("demo-account")).toEqual([
+      {
+        taskKey: "stuck",
+        generatedNames: ["新组-0903-1"],
+        draftPublishAttempts: 2,
+        // 自动补发布靠它区分「卡死了」和「正在跑」。
+        claimedAt: expect.any(String),
+      },
+    ]);
+
+    expect(store.confirmAdGroupExpandTask("stuck")).toBe(true);
+    expect(store.listUncertainAdGroupExpandTasks("demo-account")).toEqual([]);
+    // 已经收口的记录不能再被计次——那意味着还在被当成待发布的。
+    store.recordAdGroupExpandDraftPublishFailure("stuck", "不该再试");
+    expect(store.listAdGroupExpandHistory(["demo-account"], 10)[0])
+      .toMatchObject({ taskKey: "stuck", uncertain: false, status: "succeeded" });
+  });
+
+  // 组名必须在第一个写请求之前落库：卡住之后，后台留下的草稿只能按名字反查。
+  it("系列复制把计划组名一起落库，卡住后仍能拿来定位草稿", () => {
+    expect(store.claimCampaignCopyTask(
+      "copy-1", "demo-account", "campaign-1", "新系列-0903", ["复制组-1", "复制组-2"],
+    )).toBe("claimed");
+    store.finishCampaignCopyTask("copy-1", "unknown");
+
+    expect(store.listUncertainCampaignCopyTasks("demo-account")).toEqual([
+      {
+        taskKey: "copy-1",
+        campaignName: "新系列-0903",
+        generatedNames: ["复制组-1", "复制组-2"],
+        draftPublishAttempts: 0,
+        claimedAt: expect.any(String),
+      },
+    ]);
+    expect(store.getUncertainCampaignCopyTask("copy-1")).toMatchObject({
+      accountId: "demo-account",
+      campaignName: "新系列-0903",
+      generatedNames: ["复制组-1", "复制组-2"],
+    });
+
+    store.recordCampaignCopyDraftPublishFailure("copy-1", "系列还没建出来");
+    expect(store.listStuckCampaignCopyTasks("demo-account")[0]).toMatchObject({
+      draftPublishAttempts: 1,
+      draftPublishError: "系列还没建出来",
+    });
+
+    expect(store.confirmCampaignCopyTask("copy-1", "campaign-new")).toBe(true);
+    expect(store.listStuckCampaignCopyTasks("demo-account")).toEqual([]);
+    expect(store.getUncertainCampaignCopyTask("copy-1")).toBeNull();
+    // 收口后幂等键仍然挡着重复复制。
+    expect(store.claimCampaignCopyTask("copy-1", "demo-account", "campaign-1", "新系列-0903"))
+      .toBe("succeeded");
+    expect(store.listCampaignCopyHistory(["demo-account"])[0]).toMatchObject({
+      status: "succeeded",
+      uncertain: false,
+      generatedCampaignId: "campaign-new",
+      draftPublishError: null,
+    });
+  });
+
   it("never reclaims an expansion task whose remote result is unknown, while confirmed failures remain retryable", () => {
     expect(store.claimAdGroupExpandTask("unknown-task", "demo-account", "adgroup-1")).toBe("claimed");
     store.finishAdGroupExpandTask("unknown-task", "unknown");

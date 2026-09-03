@@ -3849,9 +3849,13 @@ export class AutomationStore {
     accountId: string,
     sourceCampaignId: string,
     campaignName: string,
+    // 计划中的新广告组名。必须在发第一个写请求之前就落库：任务卡成「结果未知」时，
+    // 后台留下的草稿只能按名字反查，而那时这批名字已经随请求一起丢在内存里了。
+    generatedNames: readonly string[] = [],
   ): "claimed" | "running" | "succeeded" | "unknown" {
     const now = new Date().toISOString();
     const staleBefore = new Date(Date.now() - 30 * 60_000).toISOString();
+    const names = JSON.stringify(generatedNames.map((name) => String(name ?? "").trim()).filter(Boolean));
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.db.prepare(
@@ -3873,12 +3877,15 @@ export class AutomationStore {
       }
       this.db.prepare(
         `INSERT INTO campaign_copy_tasks (
-           task_key, account_id, source_campaign_id, campaign_name, status, claimed_at, updated_at, uncertain
-         ) VALUES (?, ?, ?, ?, 'running', ?, ?, 0)
+           task_key, account_id, source_campaign_id, campaign_name, status, claimed_at, updated_at,
+           uncertain, generated_names_json, draft_publish_attempts, draft_publish_error
+         ) VALUES (?, ?, ?, ?, 'running', ?, ?, 0, ?, 0, NULL)
          ON CONFLICT(task_key) DO UPDATE SET
            status = 'running', claimed_at = excluded.claimed_at,
-           updated_at = excluded.updated_at, uncertain = 0`,
-      ).run(taskKey, accountId, sourceCampaignId, campaignName, now, now);
+           updated_at = excluded.updated_at, uncertain = 0,
+           generated_names_json = excluded.generated_names_json,
+           draft_publish_attempts = 0, draft_publish_error = NULL`,
+      ).run(taskKey, accountId, sourceCampaignId, campaignName, now, now, names);
       this.db.exec("COMMIT");
       return "claimed";
     } catch (error) {
@@ -3930,7 +3937,8 @@ export class AutomationStore {
     const placeholders = accountIds.map(() => "?").join(", ");
     const rows = this.db.prepare(
       `SELECT task_key, account_id, source_campaign_id, campaign_name, status,
-              claimed_at, updated_at, uncertain, generated_campaign_id, generated_ids_json
+              claimed_at, updated_at, uncertain, generated_campaign_id, generated_ids_json,
+              generated_names_json, draft_publish_attempts, draft_publish_error
          FROM campaign_copy_tasks
         WHERE account_id IN (${placeholders})
         ORDER BY updated_at DESC
@@ -3949,6 +3957,9 @@ export class AutomationStore {
       generatedAdGroupIds: row.generated_ids_json
         ? JSON.parse(String(row.generated_ids_json)) as string[]
         : [],
+      generatedAdGroupNames: parseNameList(row.generated_names_json),
+      draftPublishAttempts: Number(row.draft_publish_attempts ?? 0),
+      draftPublishError: row.draft_publish_error ? String(row.draft_publish_error) : null,
     }));
   }
 
@@ -3956,7 +3967,8 @@ export class AutomationStore {
   listStuckCampaignCopyTasks(accountId: string): CampaignCopyStuckTask[] {
     const rows = this.db.prepare(
       `SELECT task_key, account_id, source_campaign_id, campaign_name, claimed_at,
-              updated_at, generated_campaign_id, generated_ids_json
+              updated_at, generated_campaign_id, generated_ids_json,
+              generated_names_json, draft_publish_attempts, draft_publish_error
          FROM campaign_copy_tasks
         WHERE account_id = ? AND uncertain = 1
         ORDER BY updated_at DESC`,
@@ -3970,7 +3982,92 @@ export class AutomationStore {
       updatedAt: row.updated_at,
       generatedCampaignId: row.generated_campaign_id ?? null,
       generatedAdGroupIds: row.generated_ids_json ? JSON.parse(String(row.generated_ids_json)) : [],
+      generatedAdGroupNames: parseNameList(row.generated_names_json),
+      draftPublishAttempts: Number(row.draft_publish_attempts ?? 0),
+      draftPublishError: row.draft_publish_error ?? null,
     }));
+  }
+
+  /**
+   * 「结果未知」的系列复制任务，供轮询后对账 + 自动补发布。
+   *
+   * 与 listStuckCampaignCopyTasks 的区别只在用途：那个喂给界面，这个喂给对账循环，
+   * 因此额外带上自动补发布的记账，让调用方自己判断还该不该再试。
+   */
+  listUncertainCampaignCopyTasks(accountId: string): Array<{
+    taskKey: string;
+    campaignName: string;
+    generatedNames: string[];
+    draftPublishAttempts: number;
+    claimedAt: string;
+  }> {
+    return (this.db.prepare(
+      `SELECT task_key, campaign_name, generated_names_json, draft_publish_attempts, claimed_at
+         FROM campaign_copy_tasks
+        WHERE account_id = ? AND uncertain = 1`,
+    ).all(accountId) as SqlRow[]).map((row) => ({
+      taskKey: String(row.task_key),
+      campaignName: String(row.campaign_name),
+      generatedNames: parseNameList(row.generated_names_json),
+      draftPublishAttempts: Number(row.draft_publish_attempts ?? 0),
+      claimedAt: String(row.claimed_at),
+    }));
+  }
+
+  /**
+   * 单条「结果未知」的系列复制记录，供自动/人工发布它留在后台的草稿。
+   *
+   * 只认 uncertain = 1：已经收口的记录再发一次会把同一批组建成两份。
+   */
+  getUncertainCampaignCopyTask(taskKey: string): {
+    taskKey: string;
+    accountId: string;
+    campaignName: string;
+    generatedNames: string[];
+  } | null {
+    const row = this.db.prepare(
+      `SELECT task_key, account_id, campaign_name, generated_names_json
+         FROM campaign_copy_tasks
+        WHERE task_key = ? AND uncertain = 1`,
+    ).get(taskKey) as SqlRow | undefined;
+    if (!row) return null;
+    return {
+      taskKey: String(row.task_key),
+      accountId: String(row.account_id),
+      campaignName: String(row.campaign_name),
+      generatedNames: parseNameList(row.generated_names_json),
+    };
+  }
+
+  /**
+   * 快照证实建成之后收口这一条。
+   *
+   * 与扩组同理：落成 succeeded 而不是删掉，保留幂等键继续挡住对同一批源系列的重复复制。
+   */
+  confirmCampaignCopyTask(taskKey: string, generatedCampaignId?: string | null): boolean {
+    const result = this.db.prepare(
+      `UPDATE campaign_copy_tasks
+          SET status = 'succeeded', uncertain = 0, updated_at = ?,
+              generated_campaign_id = COALESCE(?, generated_campaign_id),
+              draft_publish_error = NULL
+        WHERE task_key = ? AND uncertain = 1`,
+    ).run(new Date().toISOString(), generatedCampaignId ?? null, taskKey);
+    return Number(result.changes) > 0;
+  }
+
+  /**
+   * 自动补发布失败了，记一笔。
+   *
+   * 记账本身就是闸门：一条永远发不出去的草稿（已被人删掉、同名重复、连系列都没建）
+   * 如果不计次，就会在每一轮轮询里重敲一次 TikTok 的创建接口。
+   */
+  recordCampaignCopyDraftPublishFailure(taskKey: string, message: string): void {
+    this.db.prepare(
+      `UPDATE campaign_copy_tasks
+          SET draft_publish_attempts = draft_publish_attempts + 1,
+              draft_publish_error = ?, updated_at = ?
+        WHERE task_key = ? AND uncertain = 1`,
+    ).run(message.slice(0, 500), new Date().toISOString(), taskKey);
   }
 
   /**
@@ -4026,21 +4123,36 @@ export class AutomationStore {
   listUncertainAdGroupExpandTasks(accountId: string): Array<{
     taskKey: string;
     generatedNames: string[];
+    draftPublishAttempts: number;
+    claimedAt: string;
   }> {
     return this.db.prepare(
-      `SELECT task_key, generated_names_json FROM ad_group_expand_tasks
+      `SELECT task_key, generated_names_json, draft_publish_attempts, claimed_at
+         FROM ad_group_expand_tasks
         WHERE account_id = ? AND uncertain = 1`,
     ).all(accountId).map((row) => {
       const record = row as SqlRow;
-      let names: string[] = [];
-      try {
-        const parsed = JSON.parse(String(record.generated_names_json ?? "[]")) as unknown;
-        if (Array.isArray(parsed)) names = parsed.map((item) => String(item ?? ""));
-      } catch {
-        // 损坏的行按「没有组名」处理：对账会判 not-found，红条留着交人工，不会误清。
-      }
-      return { taskKey: String(record.task_key), generatedNames: names };
+      return {
+        taskKey: String(record.task_key),
+        // 对账只比名字，不需要过滤空串；损坏的行会得到空数组，判 not-found 保住红条。
+        generatedNames: parseNameList(record.generated_names_json, { trim: false }),
+        draftPublishAttempts: Number(record.draft_publish_attempts ?? 0),
+        claimedAt: String(record.claimed_at),
+      };
     });
+  }
+
+  /**
+   * 自动补发布失败了，记一笔。见 recordCampaignCopyDraftPublishFailure 的同款理由：
+   * 不计次，一条永远发不出去的草稿会在每一轮轮询里重敲一次 TikTok 的创建接口。
+   */
+  recordAdGroupExpandDraftPublishFailure(taskKey: string, message: string): void {
+    this.db.prepare(
+      `UPDATE ad_group_expand_tasks
+          SET draft_publish_attempts = draft_publish_attempts + 1,
+              draft_publish_error = ?, updated_at = ?
+        WHERE task_key = ? AND uncertain = 1`,
+    ).run(message.slice(0, 500), new Date().toISOString(), taskKey);
   }
 
   /**
@@ -4060,22 +4172,14 @@ export class AutomationStore {
         WHERE task_key = ? AND uncertain = 1`,
     ).get(taskKey) as SqlRow | undefined;
     if (!row) return null;
-    let generatedNames: string[] = [];
-    try {
-      const parsed = JSON.parse(String(row.generated_names_json ?? "[]")) as unknown;
-      if (Array.isArray(parsed)) {
-        generatedNames = parsed.map((item) => String(item ?? "").trim()).filter(Boolean);
-      }
-    } catch {
-      // 损坏的行按「没有组名」处理：调用方拿不到组名就发不出去，交人工。
-    }
     return {
       taskKey: String(row.task_key),
       accountId: String(row.account_id),
       sourceCampaignId: row.source_campaign_id === null || row.source_campaign_id === undefined
         ? null
         : String(row.source_campaign_id),
-      generatedNames,
+      // 损坏的行按「没有组名」处理：调用方拿不到组名就发不出去，交人工。
+      generatedNames: parseNameList(row.generated_names_json),
     };
   }
 
@@ -4088,7 +4192,7 @@ export class AutomationStore {
   confirmAdGroupExpandTask(taskKey: string): boolean {
     const result = this.db.prepare(
       `UPDATE ad_group_expand_tasks
-          SET status = 'succeeded', uncertain = 0, updated_at = ?
+          SET status = 'succeeded', uncertain = 0, updated_at = ?, draft_publish_error = NULL
         WHERE task_key = ? AND uncertain = 1`,
     ).run(new Date().toISOString(), taskKey);
     return Number(result.changes) > 0;
@@ -7388,7 +7492,10 @@ export class AutomationStore {
         updated_at TEXT NOT NULL,
         uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)),
         generated_campaign_id TEXT,
-        generated_ids_json TEXT NOT NULL DEFAULT '[]'
+        generated_ids_json TEXT NOT NULL DEFAULT '[]',
+        generated_names_json TEXT NOT NULL DEFAULT '[]',
+        draft_publish_attempts INTEGER NOT NULL DEFAULT 0,
+        draft_publish_error TEXT
       );
 
       CREATE TABLE IF NOT EXISTS ad_group_expand_tasks (
@@ -7405,7 +7512,9 @@ export class AutomationStore {
         requested_count INTEGER NOT NULL DEFAULT 0,
         generated_names_json TEXT NOT NULL DEFAULT '[]',
         generated_ids_json TEXT NOT NULL DEFAULT '[]',
-        automatic_outcome TEXT
+        automatic_outcome TEXT,
+        draft_publish_attempts INTEGER NOT NULL DEFAULT 0,
+        draft_publish_error TEXT
       );
 
       CREATE TABLE IF NOT EXISTS automation_daily_runs (
@@ -7736,6 +7845,25 @@ export class AutomationStore {
       "TEXT NOT NULL DEFAULT '[]'",
     );
     this.ensureColumn("ad_group_expand_tasks", "automatic_outcome", "TEXT");
+    // 对账判出「只建了草稿」后自动补发布：记账用。没有它，一条永远发不出去的草稿会在
+    // 每一轮轮询里重敲一次 TikTok。
+    this.ensureColumn(
+      "ad_group_expand_tasks",
+      "draft_publish_attempts",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("ad_group_expand_tasks", "draft_publish_error", "TEXT");
+    this.ensureColumn(
+      "campaign_copy_tasks",
+      "generated_names_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    this.ensureColumn(
+      "campaign_copy_tasks",
+      "draft_publish_attempts",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("campaign_copy_tasks", "draft_publish_error", "TEXT");
     if (expandTaskUncertainWasMissing) {
       // A legacy running row may have crossed the remote dispatch boundary
       // before an older process exited. Its outcome cannot be proven locally;
@@ -9022,6 +9150,21 @@ function nextIsoTimestamp(previous: string): string {
 
 function isSqliteUniqueConstraint(cause: unknown): boolean {
   return cause instanceof Error && /UNIQUE constraint failed/i.test(cause.message);
+}
+
+/**
+ * 一列组名的 JSON。损坏的行一律当「没记下名字」返回空数组——上游据此判 not-found，
+ * 红条留着交人工，绝不会因为解析失败就把一条未收口的记录当成功清掉。
+ */
+function parseNameList(value: unknown, options: { trim?: boolean } = {}): string[] {
+  try {
+    const parsed = JSON.parse(String(value ?? "[]")) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const names = parsed.map((item) => String(item ?? ""));
+    return options.trim === false ? names : names.map((name) => name.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function sameStringSet(left: string[], right: string[]): boolean {
