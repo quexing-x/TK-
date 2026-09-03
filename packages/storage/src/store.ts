@@ -6133,6 +6133,52 @@ export class AutomationStore {
     return streaks;
   }
 
+  /**
+   * 把过了完整保留期的指标快照降采样成「每个对象每个本地日一条」。
+   *
+   * 每轮同步都会给每个对象存一条快照，一天下来同一个系列能存 480 多条。而**所有业务查询
+   * 读的都是每对象每本地日的最后一条**（`listEntityRangeMetrics` /
+   * `listEntityMetricsForLocalDate` 里的 `day_last`），中间那几百条一次都不会被读到。
+   * 2026-09-03 实测：1394 万行里 1179 万条（84.5%）属于这类，占了 7.6GB 库的绝大部分；
+   * 90 天保留期真正跑满会到约 1 亿行 / 60GB，磁盘撑不住。
+   *
+   * **分组维度必须和查询口径逐字对齐**，少一个就会删掉业务实际要读的那条：
+   * 账户 + 接入 + 层级 + 对象 + `sync_quality_status` + **账户本地日**。
+   * 尤其是后两个——`day_last` 带 `sync_quality_status = 'healthy'` 过滤，而本地日与 UTC 日
+   * 差 8 小时，按 UTC 日留最后一条会把本地日的最后一条删掉。
+   *
+   * `keepFullDays` 之内的一条都不动：`listMetricSnapshots` / `listMetricBatches` 这两个
+   * 「最近状况」视图要看日内粒度。
+   *
+   * `limit` 是给轮询用的护栏：单次删太多会长时间持写锁，把同步卡住。稳态下每天只有一天的
+   * 量需要降采样，几轮就收敛；积压时也只是多花几轮。
+   */
+  downsampleMetricSnapshots(
+    accountId: string,
+    kind: ProviderKind,
+    options: { keepFullDays: number; limit: number; now?: Date },
+  ): number {
+    const now = options.now ?? new Date();
+    const cutoff = new Date(now.getTime() - options.keepFullDays * 24 * 60 * 60_000).toISOString();
+    const offsetMinutes = utcOffsetMinutes(this.getAccount(accountId)?.timezone ?? "UTC", now);
+    const dayShift = `${offsetMinutes >= 0 ? "+" : "-"}${Math.abs(offsetMinutes)} minutes`;
+    const result = this.db.prepare(
+      `DELETE FROM entity_metric_snapshots WHERE rowid IN (
+         SELECT rid FROM (
+           SELECT rowid AS rid,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY entity_type, external_id, sync_quality_status,
+                                 date(captured_at, ?)
+                    ORDER BY captured_at DESC
+                  ) AS rn
+             FROM entity_metric_snapshots
+            WHERE account_id = ? AND provider_kind = ? AND captured_at < ?
+         ) WHERE rn > 1 LIMIT ?
+       )`,
+    ).run(dayShift, accountId, kind, cutoff, options.limit);
+    return Number(result.changes);
+  }
+
   listMetricBatches(
     accountId: string,
     kind: ProviderKind,
