@@ -76,8 +76,8 @@ importers:
         specifier: ^24.10.1
         version: 24.13.3
       electron:
-        specifier: latest
-        version: 44.2.0
+        specifier: 43.1.1
+        version: 43.1.1
       electron-builder:
         specifier: latest
         version: 26.15.3(electron-builder-squirrel-windows@26.15.3)
@@ -1047,6 +1047,7 @@ packages:
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@zag-js/accordion@1.43.3':
     resolution: {integrity: sha512-J6rGbMPXhYDa2dLgp66DPpwC3OcNAJH71kuGakz7SfCvQWiR9lIyB26G/QdSjJjf0rVARM8rN90e5PxZjYdWjA==}
@@ -1646,8 +1647,8 @@ packages:
     resolution: {integrity: sha512-bO3y10YikuUwUuDUQRM4KfwNkKhnpVO7IPdbsrejwN9/AABJzzTQ4GeHwyzNSrVO+tEH3/Np255a3sVZpZDjvg==}
     engines: {node: '>=8.0.0'}
 
-  electron@44.2.0:
-    resolution: {integrity: sha512-oK1icjhapp3xsUZycO9WZaLmd3hJnA7ieobC4mpdtO1pEN+PPGWpA3m1Mgzzuc1wzSD2Wai4zcH4yfpGJqxFMA==}
+  electron@43.1.1:
+    resolution: {integrity: sha512-I5c5vfuVvaXpWx3IZdwvXgxQW44+e7OP1wXGVQkogLeSFSkUZ6sLCcWV05AdEcs65AO5tAIJJwbp7ixw+LdarA==}
     engines: {node: '>= 22.12.0'}
     hasBin: true
 
@@ -4670,7 +4671,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  electron@44.2.0:
+  electron@43.1.1:
     dependencies:
       '@electron-internal/extract-zip': 1.0.4
       '@electron/get': 5.0.0
@@ -5757,7 +5758,7 @@ snapshots:
 
   tsx@4.23.1:
     dependencies:
-      esbuild: 0.28.1
+      esbuild: 0.28.2
     optionalDependencies:
       fsevents: 2.3.3
 

@@ -23,7 +23,7 @@
     "@tk-auto/credentials": "workspace:*",
     "@tk-auto/storage": "workspace:*",
     "@types/node": "^24.10.1",
-    "electron": "latest",
+    "electron": "43.1.1",
     "electron-builder": "latest",
     "esbuild": "latest",
     "typescript": "^5.9.3",

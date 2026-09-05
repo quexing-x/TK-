@@ -812,11 +812,11 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
 
     {launchMode !== "copy" && <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
       <label className="field"><span>预设名称</span><input value={presetForm.name} onChange={(event) => setPresetForm((value) => ({ ...value, name: event.target.value }))} /></label>
-      <label className="field"><span>投放地区（实际生效）</span><input inputMode="numeric" placeholder="例如：1668284" value={(presetCreationConfig.countryCodes ?? []).join(",")} onChange={(event) => updateRegionCodes(event.target.value)} /><small>台湾为 1668284；此处直接生成创建请求的地区代码。</small></label>
+      <label className="field"><span>投放地区（实际生效）</span><input inputMode="numeric" placeholder="例如：1668284" value={(presetCreationConfig.countryCodes ?? []).join(",")} onChange={(event) => updateRegionCodes(event.target.value)} /></label>
       <div className="field budget-mode-field"><span>预算模式</span><div className="budget-mode-switch" role="group" aria-label="预算模式">
         <button aria-pressed={presetBudgetMode === "ad-group"} className={presetBudgetMode === "ad-group" ? "active" : ""} onClick={() => updateCreationConfig({ budgetMode: "ad-group" })} type="button">广告组预算</button>
         <button aria-pressed={presetBudgetMode === "campaign"} className={presetBudgetMode === "campaign" ? "active" : ""} onClick={() => updateCreationConfig({ budgetMode: "campaign" })} type="button">系列预算</button>
-      </div><small>{presetBudgetMode === "campaign" ? "预算由推广系列统一持有并在广告组之间自动分配；广告组不再单独设预算。" : "每个广告组各自持有日预算，推广系列不设预算。"}</small></div>
+      </div></div>
       {presetBudgetMode === "campaign"
         ? <label className="field"><span>系列日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.campaignBudget ?? ""} onChange={(event) => setPresetForm((value) => ({ ...value, campaignBudget: event.target.value === "" ? null : Number(event.target.value) }))} /><small>同一个推广系列下的所有广告组共用这一份预算。</small></label>
         : <label className="field"><span>广告组日预算</span><input min="0.01" step="0.01" type="number" value={presetForm.dailyBudget} onChange={(event) => setPresetForm((value) => ({ ...value, dailyBudget: Number(event.target.value) }))} /></label>}
