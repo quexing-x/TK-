@@ -754,8 +754,11 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     } catch (cause) { onError(messageOf(cause)); }
     finally { setBusy(false); }
   };
-  return <section className="page-stack launch-page">
-    <div className="panel launch-hero"><span><Rocket size={28} /></span><div><span className="eyebrow">多账户投放</span><h2>批量创建广告</h2><p>预设统一覆盖预算、出价、地区与创建时间；表格只填系列、广告组、视频与产品 URL。</p></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? "创建参数已就绪" : "创建参数待完善"}</span></div>
+  // tk-launch 打开紧凑布局：Hero 与流程条压成单行，操作栏钉在底部。
+  // 页面标题栏已经显示「创建广告」，Hero 里再写一遍标题和一段用法说明，
+  // 等于用 240px 高度复述用户已经知道的事。
+  return <section className="page-stack launch-page tk-launch">
+    <div className="panel launch-hero"><span><Rocket size={20} /></span><div><span className="eyebrow">多账户投放</span><h2>批量创建广告</h2></div><span className={selectedPresetLaunchReady ? "status active" : "status warning"}>{selectedPresetLaunchReady ? "创建参数已就绪" : "创建参数待完善"}</span></div>
 
     <nav aria-label="广告创建流程" className="launch-workflow-steps">
       <span className="active"><b>1</b><strong>选择方式</strong><small>确定创建范围</small></span>

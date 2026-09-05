@@ -1512,12 +1512,19 @@ function AdsManagementPage({
 
   return (
     <section className="page-stack ads-page">
-      <div className="ads-metric-rail" aria-label="广告管理摘要">
-        <article><small>当前对象</small><strong>{filtered.length}</strong><span>{createdWindow === "recent" ? `创建于最近 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时` : "当前筛选对象"}</span></article>
-        <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong><span>{adsManagementSpendRangeLabel(spendRange)}</span></article>
-        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
+      {/*
+        指标带。原先每格都跟一行说明（「状态为已开启」「不参与自动化」
+        「当前筛选对象合计」），那些是下面筛选条件的复述，读一次就够，
+        却每天占掉一整行高度。只有消耗的时间口径必须留下——账户时区和本地
+        时区可能差好几个小时，那是消歧，不是解释。
+      */}
+      <div className="ads-metric-rail tk-metric-strip" aria-label="广告管理摘要">
+        <article><small>当前对象</small><strong>{filtered.length}</strong></article>
+        <article><small>投放中</small><strong>{enabledCount}</strong></article>
+        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong></article>
+        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong></article>
+        <article><small>转化</small><strong>{formatMetric(currentConversions)}</strong></article>
+        <span className="tk-strip-note">{adsManagementSpendRangeLabel(spendRange)}{createdWindow === "recent" ? ` · 建于 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS}h 内` : ""}</span>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1566,9 +1573,9 @@ function AdsManagementPage({
             {latestEntitySyncAt ? ` · 最近同步 ${new Date(latestEntitySyncAt).toLocaleTimeString()}` : ""}
           </small>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPA</th><th>点击量</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
+        <div className="tk-tablewrap tk-scroll-y">
+          <table className="tk-table">
+            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th className="tk-num">消耗</th><th className="tk-num">CPA</th><th className="tk-num">点击量</th><th className="tk-num">加购</th><th className="tk-num">转化</th><th className="tk-num">CPC</th><th>自动化</th><th className="tk-sticky-end">操作</th></tr></thead>
             <tbody>
               {filtered.length === 0 ? <tr><td colSpan={11}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
@@ -1576,17 +1583,17 @@ function AdsManagementPage({
                 const breach = metricBreaches(entity.metrics, ruleValues);
                 return (
                   <tr key={key}>
-                    <td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
-                    <td>{entityTypeLabel(entity.entityType)}</td>
+                    <td className="tk-name"><b><span className="tk-tail">{entity.name}</span></b><small>{entity.externalId}</small></td>
+                    <td className="tk-muted">{entityTypeLabel(entity.entityType)}</td>
                     <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
-                    <td className={breach.spend ? "metric-breach" : undefined}>{formatMetric(entity.metrics.spend)}</td>
-                    <td className={breach.cpa ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
-                    <td>{formatMetric(entity.metrics.clicks)}</td>
-                    <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
-                    <td>{formatMetric(entity.metrics.conversions)}</td>
-                    <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
+                    <td className={metricCellClass(entity.metrics.spend, breach.spend)}>{formatMetric(entity.metrics.spend)}</td>
+                    <td className={metricCellClass(entity.metrics.cost_per_conversion, breach.cpa)}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
+                    <td className={metricCellClass(entity.metrics.clicks, false)}>{formatMetric(entity.metrics.clicks)}</td>
+                    <td className={metricCellClass(entity.metrics.carts, breach.carts)}>{formatMetric(entity.metrics.carts)}</td>
+                    <td className={metricCellClass(entity.metrics.conversions, false)}>{formatMetric(entity.metrics.conversions)}</td>
+                    <td className={metricCellClass(entity.metrics.cost_per_click, breach.cpc)}>{formatMetric(entity.metrics.cost_per_click)}</td>
                     <td>{renderAdsManagementParticipation(participationByKey.get(`${entity.entityType}:${entity.externalId}`) ?? "participating")}</td>
-                    <td><div className="row-actions">
+                    <td className="tk-sticky-end"><div className="row-actions">
                       {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}
                       {entity.status === "unknown" && <small className="inline-protection-note">状态待确认</small>}
                       {entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void toggleManualTakeover(entity)} type="button"><Ban size={14} /> {entity.ignored ? "恢复自动化" : "人工接管"}</button>}
@@ -1605,14 +1612,14 @@ function AdsManagementPage({
         <div className="panel-heading">
           <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组 <em className="heading-count">{manualTakeovers.length}</em></h2></div></div>
         </div>
-        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th>操作</th></tr></thead><tbody>
-          {manualTakeovers.length === 0 ? <tr><td colSpan={4}>暂无人工接管的广告组。</td></tr> : manualTakeovers.map((takeover) => <tr key={`${takeover.entityType}:${takeover.externalId}`}><td>{entityNameByKey.get(`${takeover.entityType}:${takeover.externalId}`) ?? takeover.externalId}<br /><small>{takeover.externalId}</small></td><td>{takeover.reason}</td><td>{new Date(takeover.createdAt).toLocaleString()}</td><td><button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void restoreManualTakeover(takeover)} type="button">恢复自动化</button></td></tr>)}
+        <div className="tk-tablewrap tk-scroll-sm"><table className="tk-table"><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th className="tk-sticky-end">操作</th></tr></thead><tbody>
+          {manualTakeovers.length === 0 ? <tr><td className="tk-empty-cell" colSpan={4}>暂无人工接管的广告组。</td></tr> : manualTakeovers.map((takeover) => <tr key={`${takeover.entityType}:${takeover.externalId}`}><td className="tk-name"><b><span className="tk-tail">{entityNameByKey.get(`${takeover.entityType}:${takeover.externalId}`) ?? takeover.externalId}</span></b><small>{takeover.externalId}</small></td><td>{takeover.reason}</td><td className="tk-muted">{new Date(takeover.createdAt).toLocaleString()}</td><td className="tk-sticky-end"><button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void restoreManualTakeover(takeover)} type="button">恢复自动化</button></td></tr>)}
         </tbody></table></div>
       </div>
 
       <div className="panel table-panel" id="schedule-section">
         <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2><p>总开关关闭时不执行；已取消和已完成任务不计入计数。</p></div></div></div>
-        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
+        <div className="tk-tablewrap tk-scroll-sm"><table className="tk-table"><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th className="tk-sticky-end">操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td className="tk-empty-cell" colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td className="tk-name"><b><span className="tk-tail">{schedule.entityName}</span></b><small>{schedule.externalId}</small></td><td className="tk-muted">{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td className="tk-muted">{new Date(schedule.nextRunAt).toLocaleString()}</td><td className="tk-muted">{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td className="tk-sticky-end">{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
 
       <details className="panel table-panel collapsible-panel">
@@ -1830,12 +1837,13 @@ function AllAccountsAdsView({
 
   return (
     <section className="page-stack all-accounts-ads-page">
-      <div className="ads-metric-rail" aria-label="全部账户广告组摘要">
-        <article><small>当前对象</small><strong>{rows.length}</strong><span>当前筛选对象</span></article>
-        <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong><span>所有账户 · {adsManagementSpendRangeLabel(spendRange)}</span></article>
-        <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
+      <div className="ads-metric-rail tk-metric-strip" aria-label="全部账户广告组摘要">
+        <article><small>当前对象</small><strong>{rows.length}</strong></article>
+        <article><small>投放中</small><strong>{enabledCount}</strong></article>
+        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong></article>
+        <article><small>人工接管</small><strong>{ignoredCount}</strong></article>
+        <article><small>转化</small><strong>{formatMetric(currentConversions)}</strong></article>
+        <span className="tk-strip-note">所有账户 · {adsManagementSpendRangeLabel(spendRange)}</span>
       </div>
       <div className="panel table-panel">
         <div className="panel-heading">
@@ -2606,6 +2614,18 @@ function formatMetric(value: number | null): string {
   return value === null || !Number.isFinite(value)
     ? "—"
     : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+}
+
+/**
+ * 指标单元格的类名。
+ *
+ * 大多数账户里绝大部分行的指标都是 0（当天还没跑出量），它们和真实数字一样黑，
+ * 扫一列时满屏的 0 在抢注意力。这里把 0 压暗，让有数据的行自己跳出来。
+ * 超阈值优先于压暗：命中规则的值必须显眼，哪怕它是 0。
+ */
+export function metricCellClass(value: number | null, breached: boolean): string {
+  if (breached) return "tk-num metric-breach";
+  return value === 0 ? "tk-num tk-zero" : "tk-num";
 }
 
 function localDateTimeInputValue(value: Date): string {
