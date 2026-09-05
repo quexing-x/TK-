@@ -682,14 +682,57 @@
 .launch-page.tk-launch .panel-heading h2 { font-size: 13.5px; font-weight: 650; }
 .launch-page.tk-launch .panel-heading p { font-size: 11.5px; color: var(--ink-faint); }
 
-/* Account readiness cards were the tallest block on the first screen while
-   carrying two lines of real information. */
+/* Account readiness owned the whole first screen while saying almost nothing:
+   five cards, each listing checks that already passed. A ready account only
+   needs to say it is ready — the checklist matters exactly when it fails.
+   So ready accounts collapse to a chip, and the ones needing action keep
+   their blockers and recovery button. */
 .launch-page.tk-launch .launch-account-readiness-grid {
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  /* Without this, flex's default `stretch` pulls every collapsed chip up to
+     the height of the tallest expanded card and the compaction is invisible. */
+  align-items: flex-start;
   gap: var(--sp-2);
 }
 
-.launch-page.tk-launch .launch-account-readiness-grid > article { padding: var(--sp-2) var(--sp-3); }
+.launch-page.tk-launch .launch-account-readiness {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 6px var(--sp-3);
+  border-radius: var(--r);
+}
+
+.launch-page.tk-launch .launch-account-readiness header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.launch-page.tk-launch .launch-account-readiness header strong { font-size: 12px; }
+.launch-page.tk-launch .launch-account-readiness header span { font-size: 10.5px; color: var(--ink-faint); }
+
+/* The unnamed div holds the passed/failed checks; header and footer are
+   semantic tags, so `> div` targets it precisely. */
+.launch-page.tk-launch .launch-account-readiness.ready > div { display: none; }
+
+/* Not-ready accounts stay expanded — that is the case the checklist is for. */
+.launch-page.tk-launch .launch-account-readiness:not(.ready) {
+  flex: 1 1 320px;
+}
+
+.launch-page.tk-launch .launch-account-readiness:not(.ready) > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  margin-top: var(--sp-1);
+  font-size: 10.5px;
+}
+
+.launch-page.tk-launch .launch-account-recovery {
+  margin-top: var(--sp-2);
+  gap: var(--sp-2);
+}
 
 /* Per-account ad-group tables in 一键扩组 stack downward, one per account. */
 .launch-page.tk-launch .table-wrap.expand-table {
