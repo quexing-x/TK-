@@ -327,7 +327,7 @@ Cookie 方案适合自有、已授权的 TikTok Ads 账户。只需复制 /adgro
 
 1. 先确认客户端已经启动过一次：接入信息由后台程序在启动时写入，没跑过就没有这个文件。
 2. 找到接入信息文件：按 Win+R 输入 %APPDATA%\TK Ads Automation 回车，里面的 mcp-endpoint.json 就是。它记录了本地服务地址和一张访问令牌，助手会自己读取，你不需要复制里面的内容。
-3. 在 Codex 里接入：编辑 %USERPROFILE%\.codex\config.toml，加入一段 [mcp_servers.tk_ads]，command 填客户端主程序 exe 的完整路径，args 填 ["<安装目录>\\resources\\mcp\\mcp-server.cjs"]，env 里设 ELECTRON_RUN_AS_NODE = "1"。默认安装目录是 C:\Program Files\TK Ads Automation。
+3. 在 Codex 里接入：编辑 %USERPROFILE%\.codex\config.toml，加入一段 [mcp_servers.tk_ads]，command 填客户端主程序 exe 的完整路径，args 填 ["<安装目录>\\resources\\mcp\\mcp-server.cjs"]，env 里设 ELECTRON_RUN_AS_NODE = "1"。默认安装目录是 %LOCALAPPDATA%\Programs\TK Ads Automation；安装时改过目录的以实际为准，在开始菜单的快捷方式上点右键「打开文件所在位置」就能确认。
 4. 在 Claude 桌面端接入：打开设置里的开发者选项，编辑 claude_desktop_config.json，在 mcpServers 下按同样的 command / args / env 三项填写，然后重启客户端。
 5. 接好后先让助手「列出广告账户」验证连通，它会返回账户 ID、时区和最近一次同步是否健康。
 6. 要分清原组和重扩组时，让助手「看某个账户的谱系」。它会按品名把每个品的原组和历次重扩链列出来，标明每条的判据是确证（有复制/扩组任务记录）还是推断（只看名字形状），并单独列出账户内的重名系列。
