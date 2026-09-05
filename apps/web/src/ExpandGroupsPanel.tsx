@@ -845,7 +845,7 @@ export function ExpandGroupsPanel({
   };
 
   const totalSelectable = selectableKeys.size;
-  const presetPanel = <div className={presetHost ? "expand-preset sidebar" : "expand-preset"}>
+  const presetPanel = <div className={presetHost ? "expand-preset is-docked" : "expand-preset"}>
     <div className="expand-preset-head"><CopyPlus size={15} /> 扩组预设</div>
     <div className="expand-preset-grid">
       <label className="field"><span>每个源组复制份数</span><input max={10} min={1} type="number" value={count} onChange={(event) => setCount(Math.max(1, Math.min(10, Number(event.target.value) || 1)))} /><small>1–10，命名为“原组名-投放日期-序号”。</small></label>

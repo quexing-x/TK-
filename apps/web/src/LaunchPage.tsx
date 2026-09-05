@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, CircleCheck, CircleX, Download, FileSpreadsheet, Pencil, RefreshCcw, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
+import { CheckCircle2, CircleX, Download, FileSpreadsheet, Pencil, Rocket, Settings2, Trash2, Upload, X } from "lucide-react";
 import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
@@ -17,6 +17,21 @@ import { useOverlays } from "./ui/overlays";
 import type { ReadOnlySyncResult } from "@tk-auto/core";
 
 type LaunchMode = "single" | "multi" | "copy" | "expand" | "campaign-copy";
+
+/**
+ * 五种创建方式。
+ *
+ * 原先这份清单内联在 JSX 里，左侧竖着排五张带说明的卡片，吃掉 264px 宽而且
+ * 只在开头点一次。改成顶部页签后五个模块共用同一副骨架——一键扩组不会再长成
+ * 另一个页面。说明留在 title 属性里，需要时 hover 可见，不占版面。
+ */
+const LAUNCH_MODES: ReadonlyArray<{ mode: LaunchMode; title: string; hint: string }> = [
+  { mode: "single", title: "单账户批量", hint: "向一个账户批量创建广告" },
+  { mode: "multi", title: "多账户发布", hint: "共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话" },
+  { mode: "copy", title: "跨账户迁移", hint: "用稳定 ID 冻结源结构，并在目标账户重新创建" },
+  { mode: "expand", title: "一键扩组", hint: "按账户勾选广告组，为每个源组各复制 N 个新组" },
+  { mode: "campaign-copy", title: "系列复制", hint: "把整个推广系列复制成多个新系列，并决定每个系列放几个广告组" },
+];
 type ConnectionState = {
   accountId: string;
   connection: ProviderConnection | null;
@@ -221,7 +236,6 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [executionFeedback, setExecutionFeedback] = useState<LaunchFeedback | null>(null);
   const [presetFeedback, setPresetFeedback] = useState<LaunchFeedback | null>(null);
   const [expandPresetHost, setExpandPresetHost] = useState<HTMLDivElement | null>(null);
-  const [recoveringAccountIds, setRecoveringAccountIds] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   // 上次提交的内容指纹与时间。提交后不再清空表格，靠它做重复提交提醒。
   const lastSubmission = useRef<{ fingerprint: string; at: number } | null>(null);
@@ -299,7 +313,24 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     )),
     [accountCapabilities, accounts, connections, connectionStates, launchMode],
   );
-  const unreadyAccountCount = accountReadiness.filter((item) => !item.ready).length;
+
+  /**
+   * 账户下拉的排列：可发布的在前，未就绪的沉底并禁用，后面缀上不能用的原因。
+   *
+   * 未就绪的账户仍然列出来而不是过滤掉——直接不显示会让人以为账户丢了，
+   * 反而要去别处查。列出来但点不了，「它在、不能用、因为什么」一次说完，
+   * 上面那整块就绪状态卡片区因此不再需要。
+   */
+  const sortedAccountOptions = useMemo(
+    () => accountReadiness
+      .map(({ account, ready, access }) => ({
+        account,
+        ready,
+        blocker: access?.blockers[0] ?? "接入或创建能力未就绪",
+      }))
+      .sort((a, b) => Number(b.ready) - Number(a.ready)),
+    [accountReadiness],
+  );
   const sourceAccounts = launchMode === "copy" ? copySources : createTargets;
   const targets = launchMode === "copy" ? copyTargets : createTargets;
   const availableTargets = useMemo(
@@ -402,40 +433,6 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     setPlanItems(nextPlanItems);
     setPresetId((current) => current && nextPresets.some((item) => item.id === current) ? current : (nextPresets[0]?.id ?? ""));
     onError(null);
-  };
-  const recoverLaunchAccount = async (
-    accountId: string,
-    access: AccountAccessStatus | null,
-  ) => {
-    if (!access || access.recovery === "connect") {
-      onManageConnection?.(accountId);
-      return;
-    }
-    const state = connectionStates.find((item) => item.accountId === accountId);
-    const connection = connections[accountId] ?? state?.connection;
-    if (!connection) {
-      onManageConnection?.(accountId);
-      return;
-    }
-    setRecoveringAccountIds((current) => [...new Set([...current, accountId])]);
-    onError(null);
-    try {
-      if (access.recovery === "recheck") {
-        const checked = await api.testConnection(accountId, connection.kind);
-        if (checked.status !== "ready") {
-          throw new Error(checked.lastMessage || "本地凭据重新检测失败，请重新接入。");
-        }
-      } else if (access.recovery === "sync") {
-        await api.syncReadOnly(accountId, connection.kind);
-      }
-      await onConnectionStatesChanged?.();
-      await load();
-      toast("账户状态已恢复，当前选择已保留", "success");
-    } catch (cause) {
-      onError(messageOf(cause));
-    } finally {
-      setRecoveringAccountIds((current) => current.filter((id) => id !== accountId));
-    }
   };
   const refreshProgress = async () => {
     const [nextPlans, queuedPlanIds] = await Promise.all([
@@ -767,48 +764,51 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <span className={canSave ? "ready" : ""}><b>4</b><strong>执行发布</strong><small>进入后台队列</small></span>
     </nav>
 
+    {/* 模式页签：五个模块的统一入口，横向一行取代原来的左侧竖列。 */}
+    <nav aria-label="创建方式" className="launch-mode-options tk-mode-tabs" role="tablist">
+      {LAUNCH_MODES.map(({ mode, title, hint }) => (
+        <button
+          aria-selected={launchMode === mode}
+          className={launchMode === mode ? "active" : ""}
+          key={mode}
+          onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === "single") setTargetIds([]); }}
+          role="tab"
+          title={hint}
+          type="button"
+        >{title}</button>
+      ))}
+    </nav>
+
     <div className="launch-workbench">
-      <aside className="launch-mode-sidebar">
-
-    <div className="panel launch-mode-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>选择创建方式</h2></div></div></div><div className="launch-mode-options">{([['single','单账户批量创建','向一个账户批量创建广告'],['multi','多账户同时发布','共享视频代码到 Post ID 映射，各账户仅使用自己的 Cookie 会话'],['copy','跨账户复制迁移','用稳定 ID 冻结源结构，并在目标账户重新创建'],['expand','一键扩组','按账户勾选广告组，为每个源组各复制 N 个新组'],['campaign-copy','系列复制','把整个推广系列复制成多个新系列，并决定每个系列放几个广告组']] as const).map(([mode,title,description]) => <button className={launchMode === mode ? 'active' : ''} key={mode} onClick={() => { setLaunchMode(mode); setCopyPreview(null); if (mode === 'single') setTargetIds([]); }} type="button"><strong>{title}</strong><span>{description}</span></button>)}</div></div>
-
-        {launchMode === "expand" && <div className="expand-preset-sidebar-host" ref={(node) => setExpandPresetHost(node)} />}
-
-        <div className="launch-sidebar-summary">
-          <span><small>已选账户</small><strong>{selectedAccountIds.length}</strong></span>
-          <span><small>导入条目</small><strong>{sheet?.rows.length ?? 0}</strong></span>
-          <span><small>待处理计划</small><strong>{activePlanIds.length}</strong></span>
-        </div>
-      </aside>
-
       <main className="launch-workspace">
         {launchMode === "campaign-copy" ? <CopyCampaignPanel accounts={accounts} busy={busy} onError={onError} preselection={campaignCopyPreselection} /> : launchMode === "expand" ? <ExpandGroupsPanel accounts={accounts} connectionStates={connectionStates} onConnectionStatesChanged={onConnectionStatesChanged} onManageConnection={onManageConnection} onError={onError} presetHost={expandPresetHost} onCopyCampaign={jumpToCampaignCopy} /> : <>
 
-    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2><p>{launchMode === "single" ? "选择一个账户，本批表格将在该账户中从零创建。" : launchMode === "copy" ? "以源广告组为迁移载体，为每个目标账户独立配置创建数量和投放参数。" : "选择多个账户；同名系列复用，广告组与广告均创建新 ID。"}</p></div></div><button className="secondary-button compact-button" disabled={busy} onClick={() => void load().catch((cause) => onError(messageOf(cause)))} title="只重新读取已保存的接入状态；如需拉取广告数据，请到用户管理执行只读同步。" type="button"><RefreshCcw size={14} /> 重新读取状态</button></div><div className="launch-account-summary">
-      <div className="launch-account-summary-head"><div><strong>账户创建就绪状态</strong><span>{accounts.length ? `${targets.length} 个可发布 · ${unreadyAccountCount} 个待完善` : "尚未添加账户"}</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button"><Settings2 size={14} /> 前往用户管理</button></div>
-      {accounts.length === 0 ? <p className="launch-account-empty">先在“用户管理”添加广告账户并完成接入，随后可回到此处选择发布账户。</p> : <div className="launch-account-readiness-grid">{accountReadiness.map(({ account, checks, ready, access }) => {
-        const recovering = recoveringAccountIds.includes(account.id);
-        return <article className={ready ? "launch-account-readiness ready" : "launch-account-readiness"} key={account.id}>
-          <header><div><strong>{account.displayName}</strong><span>{account.providerKind === "cookie" ? "Cookie 接入" : "Marketing API"}</span></div><em className={ready ? "status active" : "status warning"}>{ready ? "可发布" : "待完善"}</em></header>
-          <div>{checks.map((check) => <span className={check.passed ? "passed" : "missing"} key={check.label}>{check.passed ? <CircleCheck size={14} /> : <CircleX size={14} />}{check.label}</span>)}</div>
-          {!ready && <footer className="launch-account-recovery"><small>{access?.blockers[0] ?? "账户接入或创建能力尚未就绪。"}</small><button className="secondary-button compact-button" disabled={recovering} onClick={() => void recoverLaunchAccount(account.id, access)} type="button">{recovering ? <><RefreshCcw className="spin" size={13} />检测中</> : access?.recovery === "sync" ? "立即同步" : access?.recovery === "connect" ? "前往账户接入" : "用本地凭据重新检测"}</button></footer>}
-        </article>;
-      })}</div>}
-    </div><div className="form-grid">
+    {/*
+      这里原先顶着一整块「账户创建就绪状态」：每个账户一张卡，卡里列着已经
+      通过的检查项，占满首屏。账户就绪时那份清单没有信息量，清单只在失败时
+      才有用；而失败时该说的一句话，现在直接写在下拉选项里。
+
+      同时删掉的三个按钮——「重新读取状态」「前往用户管理」「用本地凭据重新
+      检测」：能恢复的账户轮询早就恢复了，这些按钮点下去不会产生新结果，
+      给一个不会成功的动作入口比不给更糟。账户治理属于用户管理页。
+    */}
+    <div className="panel launch-scope-panel"><div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>发布账户</h2></div></div></div><div className="form-grid">
       {targets.length === 0 ? <div className="launch-target-empty"><CircleX size={18} /><div><strong>暂时没有可发布账户</strong><span>人工真实创建只要求接入检测通过且具备创建权限；自动化开关不阻止手动发布。</span></div><button className="secondary-button compact-button" onClick={() => { window.location.hash = "#users"; }} type="button">去完善账户</button></div> : <>
-        {launchMode === "single" && <label className="field"><span>创建账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>仅显示已授权创建能力的账户。</small></label>}
+        {launchMode === "single" && <label className="field"><span>创建账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sortedAccountOptions.map(({ account, ready, blocker }) => <option disabled={!ready} key={account.id} value={account.id}>{account.displayName}{ready ? "" : ` — 未就绪（${blocker}）`}</option>)}</select></label>}
         {launchMode === "copy" && <><label className="field"><span>源广告账户</span><select value={sourceAccountId} onChange={(event) => setSourceAccountId(event.target.value)}><option value="">请选择</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select><small>源账户需要具备推广系列和广告组读取能力。</small></label><div className="field wide source-ad-group-picker"><span>源广告组（可多选，最多 20 个）</span><div className="target-account-toolbar"><input placeholder="搜索系列名、广告组名或 ID" value={sourceGroupQuery} onChange={(event) => setSourceGroupQuery(event.target.value)} /><span>已选 {sourceAdGroupIds.length} / {sourceAdGroups.length}</span><button className="secondary-button compact-button" onClick={() => visibleSourceAdGroups.forEach((group) => setSourceGroupSelected(group.adGroupId, true))} type="button">全选当前结果</button><button className="secondary-button compact-button" onClick={() => setSourceAdGroupIds([])} type="button">清空</button></div><div className="source-ad-group-options">{visibleSourceAdGroups.length === 0 ? <p className="target-account-empty">没有匹配的当前广告组。</p> : visibleSourceAdGroups.map((group) => <label key={group.adGroupId}><input checked={sourceAdGroupIds.includes(group.adGroupId)} disabled={!sourceAdGroupIds.includes(group.adGroupId) && sourceAdGroupIds.length >= 20} onChange={(event) => setSourceGroupSelected(group.adGroupId, event.target.checked)} type="checkbox" /><span>{group.campaignName} / {group.name}</span><small>ID …{group.adGroupId.slice(-6)} · {new Date(group.syncedAt).toLocaleString("zh-CN", { hour12: false })}</small></label>)}</div><small>列表右下角可拖动调整高度；每个源组都会按目标账户数量分别创建。</small></div></>}
         {launchMode !== "single" && <div className="field wide target-account-selector"><span>{launchMode === "copy" ? "目标账户（必须已绑定同一个 TikTok 身份）" : "发布账户（可多选）"}</span><div className="target-account-toolbar"><input aria-label="搜索可用发布账户" placeholder="搜索已接入账户" value={accountQuery} onChange={(event) => setAccountQuery(event.target.value)} /><span>已选 {targetIds.length} / {availableTargets.length}</span><button className="secondary-button compact-button" onClick={() => visibleTargets.forEach((account) => setTargetSelected(account.id, true))} type="button">全选当前结果</button><button className="secondary-button compact-button" onClick={() => { setTargetIds([]); setCopyTargetConfigs([]); }} type="button">清空</button></div><div className="target-account-grid">{visibleTargets.length === 0 ? <p className="target-account-empty">没有匹配的可用账户。</p> : visibleTargets.map((account) => <label key={account.id}><input checked={targetIds.includes(account.id)} onChange={(event) => setTargetSelected(account.id, event.target.checked)} type="checkbox" /><span>{account.displayName}</span><small>已接入 · {account.providerKind === "cookie" ? "Cookie" : "Marketing API"}</small></label>)}</div>{launchMode === "copy" && copyTargetConfigs.length > 0 && <div className="migration-target-configs">{copyTargetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); return <article key={config.accountId}><header><strong>{account?.displayName ?? config.accountId}</strong><small>账户时区：{account?.timezone ?? "UTC"}</small></header><div className="form-grid"><label className="field"><span>创建广告组数量</span><input min="1" max="20" type="number" value={config.quantity} onChange={(event) => updateTargetConfig(config.accountId, { quantity: Math.max(1, Math.min(20, Number(event.target.value) || 1)) })} /></label><label className="field"><span>每日预算</span><input min="0.01" step="0.01" type="number" value={config.dailyBudget} onChange={(event) => updateTargetConfig(config.accountId, { dailyBudget: Number(event.target.value) })} /></label><label className="field"><span>出价（留空为自动）</span><input min="0" step="0.01" type="number" value={config.bid ?? ""} onChange={(event) => updateTargetConfig(config.accountId, { bid: event.target.value === "" ? null : Number(event.target.value) })} /></label><label className="field"><span>创建后状态</span><select value={config.initialStatus} onChange={(event) => updateTargetConfig(config.accountId, { initialStatus: event.target.value as "enabled" | "disabled" })}><option value="enabled">开启（默认）</option><option value="disabled">关闭</option></select><small>立即或定时创建均默认投放，无需创建后手动开启。</small></label><label className="field"><span>创建时间</span><select value={config.startAtRule === "absolute" ? (config.startAt ? "custom" : "immediate") : config.startAtRule} onChange={(event) => { const value = event.target.value; updateTargetConfig(config.accountId, value === "immediate" ? { startAtRule: "absolute", startAt: null } : value === "custom" ? { startAtRule: "absolute" } : { startAtRule: value as "next-six" | "tonight", startAt: null }); }}><option value="immediate">立即投放</option><option value="next-six">最近未来 06:00</option><option value="tonight">当天 24:00</option><option value="custom">自定义定时</option></select>{config.startAtRule === "absolute" && config.startAt !== null && <input type="datetime-local" value={toLocalInput(config.startAt)} onChange={(event) => updateTargetConfig(config.accountId, { startAt: toIso(event.target.value) })} />}<small>06:00 按账户时区取下一个尚未到达的早上。</small></label></div></article>; })}</div>}</div>}
       </>}
     </div>{launchMode === "copy" && selectedSourceGroups.length > 0 && <div className="creation-template-note"><strong>已选 {selectedSourceGroups.length} 个源广告组</strong><span>{selectedSourceGroups.map((group) => `${group.campaignName} / ${group.name}`).join("；")}</span></div>}</div>
 
-    <div className="panel launch-readiness-panel"><div className="panel-heading"><div><span className="panel-icon"><CheckCircle2 size={18} /></span><div><h2>创建检查</h2><p>账户、源广告组和目标配置通过后即可发布；原帖会在发布时自动读取并核对。</p></div></div><span className={canSave ? "status active" : "status warning"}>{canSave ? "可创建" : "待完善"}</span></div><div className="sheet-rule-grid">
-      <article><strong>数据读取与启停</strong><span>{selectedAccountIds.length === 0 ? "请选择要发布的账户。" : notReadyAccountIds.length === 0 ? `已选 ${selectedAccountIds.length} 个账户均已通过连接检测。` : `有 ${notReadyAccountIds.length} 个已选账户连接异常。`}</span></article>
-      <article><strong>{launchMode === "copy" ? "原帖可用性" : "视频素材"}</strong><span>{launchMode === "copy" ? "按 TikTok item_id 核对每个目标账户；缺少任一原帖都会在发布前阻断。" : "普通创建继续使用表格视频代码及预设中的 TikTok Post 映射。"}</span></article>
-      <article><strong>广告预设</strong><span>{selectedPreset ? `当前使用“${selectedPreset.name}”` : "请选择广告预设。"}</span></article>
-      <article><strong>创建功能</strong><span>{selectedAccountIds.length === 0 ? "请选择发布账户。" : notReadyAccountIds.length > 0 ? "所选账户的连接或创建能力尚未就绪。" : selectedPresetLaunchReady ? "当前预设参数完整，日常投放无需重复填写内部字段。" : "当前预设参数不完整，不能发起创建。"}</span></article>
-      <article><strong>{launchMode === "copy" ? "迁移确认" : "导入信息"}</strong><span>{launchMode === "copy" ? previewValid ? `原帖和逐账户配置已冻结，共 ${copyPreview!.items.length} 个广告组。` : "点击迁移后自动读取并核对源广告组和目标账户原帖。" : sheet?.errors.length === 0 && sheet.rows.length ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组。` : "导入表逐行填写系列、广告组、视频、链接、年龄和性别。"}</span></article>
-    </div></div>
+    {/*
+      这里原先是「创建检查」：五张卡，四张在讲机制（「普通创建继续使用表格视频
+      代码…」「导入表逐行填写系列、广告组…」），一张复述上面已选账户的状态。
+      唯一的真信息是「当前使用某某预设」，而它应该长在预设选择器上，不是选完
+      在另一块地方再说一遍。整块占掉一屏宽 × 约 200px，删。
+
+      发布前的阻断条件不需要提前在这里挂个「待完善」——发布按钮该禁用时自己
+      禁用，鼠标悬停给出 publishBlockers[0]。
+    */}
 
     {launchMode !== "copy" && <div className="panel launch-preset-panel"><div className="panel-heading"><div><span className="panel-icon"><Pencil size={18} /></span><div><h2>广告预设模板</h2><p>预算、出价、创建时间和初始状态在此统一设置；保存后可复用。</p></div></div></div><div className="form-grid">
       <label className="field"><span>预设名称</span><input value={presetForm.name} onChange={(event) => setPresetForm((value) => ({ ...value, name: event.target.value }))} /></label>
@@ -878,6 +878,21 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
 
         </>}
       </main>
+
+      {/*
+        右栏承接各模式自己的参数：一键扩组把「扩组预设」portal 过来，其余模式
+        用统计条占位。参数统一在右边，主区永远是「选什么」——五个模块因此共用
+        同一副骨架，不会再出现某个模式把参数塞在左边、另一个塞在中间。
+      */}
+      <aside className="launch-mode-sidebar tk-launch-params">
+        {launchMode === "expand" && <div className="expand-preset-sidebar-host" ref={(node) => setExpandPresetHost(node)} />}
+
+        <div className="launch-sidebar-summary">
+          <span><small>已选账户</small><strong>{selectedAccountIds.length}</strong></span>
+          <span><small>导入条目</small><strong>{sheet?.rows.length ?? 0}</strong></span>
+          <span><small>待处理计划</small><strong>{activePlanIds.length}</strong></span>
+        </div>
+      </aside>
     </div>
 
   </section>;
