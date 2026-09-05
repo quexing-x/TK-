@@ -521,12 +521,23 @@
    imported after this file, so rules here carry `.tk-launch` to win on
    specificity rather than on order. */
 
+/* The page stack put 40px between every block and the workbench added another
+   40px of its own padding — 160px of pure gap above the first control. At a
+   40px rhythm the page reads as a marketing layout; this is an operations
+   console and the content should start near the top. */
+.launch-page.tk-launch {
+  gap: var(--sp-3);
+  padding-block: var(--sp-4) var(--sp-5);
+}
+
+.launch-page.tk-launch .launch-workbench { padding-top: 0; }
+
 .launch-page.tk-launch > .launch-hero {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   min-height: 0;
-  padding: 0 0 var(--sp-3);
+  padding: 0 0 var(--sp-2);
 }
 
 .launch-page.tk-launch > .launch-hero > span:first-child {
@@ -577,6 +588,46 @@
   background: var(--surface-raised);
   border-top: 1px solid var(--line-strong);
   box-shadow: 0 -2px 8px rgba(20, 32, 47, 0.06);
+}
+
+/* Page-level action bar: the primary, irreversible action sits here for every
+   mode, at the same place on screen, always reachable. */
+.launch-page.tk-launch .tk-launch-actionbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  box-shadow: var(--e2);
+}
+
+/* Inside the bar the two halves lay out inline; the nested .form-actions must
+   drop the sticky treatment it gets above, or it becomes a bar inside a bar. */
+.launch-page.tk-launch .tk-launch-actionbar .launch-dispatch-mode {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+}
+
+.launch-page.tk-launch .tk-launch-actionbar .form-actions {
+  position: static;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
 /* ---- Skeleton: tabs on top, work area left, parameters right ----
@@ -632,7 +683,30 @@
   grid-template-columns: minmax(0, 1fr) 300px;
   align-items: start;
   gap: var(--sp-4);
+  margin-top: 0;
 }
+
+/* Vertical budget inside the work area. Measured before: the tab strip sat
+   52px above the workbench, 发布账户 spent 182px on a single dropdown, and
+   every panel carried a 22px form padding inherited from the generic grid.
+   None of it was carrying information. */
+.launch-page.tk-launch .launch-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.launch-page.tk-launch .launch-workspace > .panel { margin: 0; }
+
+.launch-page.tk-launch .form-grid {
+  padding: var(--sp-3) var(--sp-4);
+  gap: var(--sp-3);
+}
+
+/* A panel holding one control does not need heading chrome plus grid padding
+   plus field margins stacked on top of each other. */
+.launch-page.tk-launch .launch-scope-panel .form-grid { padding-block: var(--sp-2); }
 
 .launch-page.tk-launch .tk-launch-params {
   position: sticky;
