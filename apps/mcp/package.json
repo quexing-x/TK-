@@ -1,0 +1,24 @@
+{
+  "name": "@tk-auto/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/server.ts",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0",
+    "@tk-auto/core": "workspace:*",
+    "exceljs": "4.4.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "latest",
+    "tsx": "^4.20.6"
+  }
+}

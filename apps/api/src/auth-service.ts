@@ -18,6 +18,7 @@ import {
   type InitialDeveloperInput,
   type LocalUserCreateInput,
   type LocalUserRecord,
+  type LocalUserRole,
   type LocalUserUpdateInput,
   type LoginInput,
   type PasswordChangeInput,
@@ -137,6 +138,41 @@ export class AuthService {
 
   logout(session: AuthenticatedSession | null): void {
     if (session) this.store.deleteAuthSession(session.tokenHash);
+  }
+
+  /**
+   * 确保本机存在某个服务身份，并发一张会话给它。
+   *
+   * 给 MCP 这类没有 Cookie 罐、也不该让人手工配密码的本机客户端用。密码是随机生成的、
+   * 谁也不知道——这个身份**只能**凭发出去的令牌访问，登录框那条路对它是关着的。
+   *
+   * 权限完全由 `role` 决定，与人类账户共用同一套判定：服务身份不是特权通道。
+   */
+  async ensureServiceSession(input: {
+    username: string;
+    displayName: string;
+    role: LocalUserRole;
+  }): Promise<CreatedSession> {
+    const existing = this.store.getStoredLocalUserByUsername(input.username);
+    if (existing?.enabled) {
+      return this.createSession(
+        this.store.getStoredLocalUser(existing.id) as LocalUserRecord,
+      );
+    }
+    if (existing && !existing.enabled) {
+      throw new AuthorizationError(
+        `本机账户“${input.username}”已被停用；启用后才能重新签发访问令牌。`,
+      );
+    }
+    // 32 字节随机量再拼上固定符号，保证一定过得了强密码校验，同时谁也用不了它登录。
+    const password = await hashPassword(`${randomBytes(32).toString("base64url")}Aa1!`);
+    const user = this.store.createLocalUser({
+      username: input.username,
+      displayName: input.displayName,
+      role: input.role,
+      ...password,
+    });
+    return this.createSession(user);
   }
 
   resetLocalAccess(): number {

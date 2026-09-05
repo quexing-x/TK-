@@ -27,6 +27,13 @@ const app = await createApp({
   vault,
   startScheduler: true,
   secureCookies,
+  // 开发模式的 MCP 接入点落在仓库的 data/ 下，跟开发数据库放在一起；
+  // 生产走桌面端的 %APPDATA%，两边互不干扰。
+  mcpEndpoint: {
+    origin: `http://${host}:${port}`,
+    filePath: process.env.TK_AUTO_MCP_ENDPOINT_FILE
+      ?? resolve(packageDirectory, "../../../data/mcp-endpoint.json"),
+  },
 });
 if (proxyConfig) {
   app.log.info(
