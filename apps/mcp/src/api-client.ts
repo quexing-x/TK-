@@ -77,14 +77,26 @@ async function isHealthy(origin: string): Promise<boolean> {
  * 或刚装完还没重启。让人去手工双击一个他多半找不到的 exe，等于把这个 MCP 变成
  * 「有一半时候用不了」的东西。
  */
+function desktopExecutablePath(): string | null {
+  const override = process.env.TK_AUTO_DESKTOP_EXECUTABLE;
+  if (override) return existsSync(override) ? override : null;
+  // 安装包是 perMachine: false 的，默认落在 %LOCALAPPDATA%\Programs 而不是
+  // Program Files。后者只在用户手工改过安装目录时才存在，所以放在后面兜底。
+  const roots = [
+    process.env["LOCALAPPDATA"] ? join(process.env["LOCALAPPDATA"], "Programs") : null,
+    process.env["ProgramFiles"] ?? null,
+    process.env["ProgramFiles(x86)"] ?? null,
+  ].filter((root): root is string => Boolean(root));
+  for (const root of roots) {
+    const candidate = join(root, PRODUCT_NAME, `${PRODUCT_NAME}.exe`);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function launchBackgroundProgram(): boolean {
-  const executable = process.env.TK_AUTO_DESKTOP_EXECUTABLE
-    ?? join(
-      process.env["ProgramFiles"] ?? "C:\\Program Files",
-      PRODUCT_NAME,
-      `${PRODUCT_NAME}.exe`,
-    );
-  if (!existsSync(executable)) return false;
+  const executable = desktopExecutablePath();
+  if (!executable) return false;
   try {
     const child = spawn(executable, ["--scheduler"], {
       detached: true,
