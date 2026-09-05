@@ -745,6 +745,16 @@
   padding-right: var(--sp-1);
 }
 
+/* Unready accounts stay listed but unusable: seeing "it's here, it can't be
+   used, here's why" beats having it silently vanish from the list. */
+.launch-page.tk-launch .target-account-grid label.is-unready {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.launch-page.tk-launch .target-account-grid label.is-unready input { cursor: not-allowed; }
+.launch-page.tk-launch .target-account-grid label.is-unready small { color: var(--amber); }
+
 /* ---- Controls inside 创建广告 adopt the shared specs ----
    Every panel here rolled its own input height, radius and button look. These
    rules retrofit the component specs onto the existing markup, so the page
