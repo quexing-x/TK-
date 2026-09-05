@@ -129,6 +129,17 @@ function backgroundExecutablePath(): string {
   });
 }
 
+/**
+ * MCP 接入信息的落点。
+ *
+ * `app.getPath("appData")` 不受前面那句 `setPath("userData", 文档/...)` 影响，取到的仍是
+ * 真正的漫游 AppData——这正是要的：数据库位置随版本迁移过，而 MCP server 需要一个固定
+ * 地址去发现「API 在哪、拿什么令牌」。
+ */
+function mcpEndpointFilePath(): string {
+  return join(app.getPath("appData"), PRODUCT_NAME, "mcp-endpoint.json");
+}
+
 async function startRuntime(origin: string) {
   const paths = resolveDesktopRuntimePaths({
     downloadsDirectory: app.getPath("downloads"),
@@ -174,6 +185,9 @@ async function startRuntime(origin: string) {
     authSessionLifetimeMs: DESKTOP_SESSION_MAX_AGE_SECONDS * 1_000,
     authCookieMaxAgeSeconds: DESKTOP_SESSION_MAX_AGE_SECONDS,
     maintenanceUpdates: updateRuntime,
+    // MCP 接入信息落在 %APPDATA%，不跟数据库走「文档」目录：MCP server 是独立进程，
+    // 它需要一个跨版本稳定、也不会被 OneDrive 重定向的落脚点。
+    mcpEndpoint: { origin, filePath: mcpEndpointFilePath() },
     onSystemRuntimeChanged: async (enabled) => {
       if (!isSchedulerProcess) return;
       await setBackgroundStartup(backgroundExecutablePath(), enabled);

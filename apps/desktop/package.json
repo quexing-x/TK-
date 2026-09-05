@@ -1,6 +1,6 @@
 {
   "name": "@tk-auto/desktop",
-  "version": "1.4.100",
+  "version": "1.4.101",
   "private": true,
   "description": "本地优先的 TikTok Ads 自动化管理工具",
   "author": "TK Ads Automation",
@@ -48,6 +48,13 @@
       {
         "from": "../web/dist",
         "to": "web",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../mcp/dist",
+        "to": "mcp",
         "filter": [
           "**/*"
         ]

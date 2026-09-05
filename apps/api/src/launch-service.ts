@@ -12,8 +12,17 @@ import {
   planCampaignCopy,
   selectStaleDrafts,
   stripAutomaticAdGroupNameSuffixes,
+  brandRootName,
+  buildExpandSheetPlan,
+  buildLineageReport,
+  collectReservedNames,
+  LaunchAgeRangeValues,
   DRAFT_AD_STATUS,
   DRAFT_CLEANUP_MIN_AGE_HOURS,
+  type ExpandSheetPlan,
+  type ExpandSheetSource,
+  type LaunchAgeRange,
+  type LineageInput,
   type ProviderKind,
   type ReadOnlySyncResult,
   type LaunchPlanItemRecord,
@@ -1380,6 +1389,184 @@ export class LaunchService {
    *
    * 快照可能滞后一轮轮询，所以快照命中只是「提示」的一个来源，不作为拒绝的依据。
    */
+  /**
+   * 谱系判定的输入：当前快照 + 复制/扩组任务记录。
+   *
+   * 快照必须走 `listCurrentManagedEntities`——不筛 `is_current` 会把已经下线的对象一并
+   * 带出来，它们在账户里已经不存在，却会顶着历史名字出现在谱系里、还会占住一个本可用的名字。
+   */
+  loadLineageInput(accountId: string): LineageInput {
+    const account = this.store.getAccount(accountId);
+    if (!account) throw new Error("账号不存在。");
+    return {
+      entities: this.store
+        .listCurrentManagedEntities(accountId, account.providerKind)
+        .filter((entity) => entity.entityType === "campaign" || entity.entityType === "ad-group")
+        .map((entity) => ({
+          entityType: entity.entityType as "campaign" | "ad-group",
+          externalId: entity.externalId,
+          name: entity.name,
+          status: entity.status,
+          parentCampaignId: entity.parentCampaignId,
+          createdAt: entity.createdAt ?? null,
+        })),
+      copyTasks: this.store.listCampaignCopyHistory([accountId], 500).map((task) => ({
+        taskKey: task.taskKey,
+        sourceCampaignId: task.sourceCampaignId,
+        campaignName: task.campaignName,
+        generatedCampaignId: task.generatedCampaignId,
+        generatedAdGroupIds: task.generatedAdGroupIds,
+        generatedAdGroupNames: task.generatedAdGroupNames,
+        status: task.status,
+        uncertain: task.uncertain,
+        updatedAt: task.updatedAt,
+      })),
+      expandTasks: this.store.listAdGroupExpandHistory([accountId], 500).map((task) => ({
+        taskKey: task.taskKey,
+        sourceAdGroupId: task.sourceAdGroupId,
+        sourceCampaignId: task.sourceCampaignId,
+        generatedIds: task.generatedIds,
+        generatedNames: task.generatedNames,
+        status: task.status,
+        uncertain: task.uncertain,
+        updatedAt: task.updatedAt,
+        executorKind: task.executorKind,
+      })),
+    };
+  }
+
+  /**
+   * 把「给这几个组扩量」翻译成一张能直接导入的批量创建表。
+   *
+   * 源组的名称和所属系列一律从快照里查，不让调用方传——传错一个字就是把新素材上到
+   * 别的组上，而这份信息本地已经有了，没有理由再让人抄一遍。
+   *
+   * 落地页和定向按三级回退取：历史导入行 → 源广告组现读 → 留空由人补。中间那一级要发
+   * 网络请求，默认不做（`readSourceAdGroups`）：一次要读几十个组，慢且会把源账户的
+   * 会话额度耗在一个本可以先看看历史值的地方。
+   */
+  async planExpandSheet(input: {
+    accountId: string;
+    sourceAdGroupIds: string[];
+    countPerSource: number;
+    sameCampaign: boolean;
+    scheduledStartAt?: string | null;
+    readSourceAdGroups?: boolean;
+  }): Promise<ExpandSheetPlan & {
+    accountId: string;
+    deliveryAt: string;
+    unresolvedSources: Array<{ sourceAdGroupId: string; reason: string }>;
+  }> {
+    const account = this.store.getAccount(input.accountId);
+    if (!account) throw new Error("账号不存在。");
+    const managed = this.store.listCurrentManagedEntities(input.accountId, account.providerKind);
+    const lineageInput = this.loadLineageInput(input.accountId);
+    const lineage = buildLineageReport(lineageInput);
+    const reserved = collectReservedNames(lineageInput);
+
+    // 历史导入行按品根名索引：源组自己可能是扩出来的、从没在表里出现过，但同一个品
+    // 上一次填的落地页仍然是最贴近意图的值。
+    const historyByRoot = new Map<string, { productUrl: string; ageRanges: string[] | null; gender: string | null }>();
+    for (const row of this.store.listSucceededLaunchRows(input.accountId)) {
+      if (!row.productUrl) continue;
+      const root = brandRootName(row.adGroupName);
+      // 新到旧遍历，先写的赢：最近一次填的值最可信。
+      if (!historyByRoot.has(root)) {
+        historyByRoot.set(root, {
+          productUrl: row.productUrl,
+          ageRanges: row.ageRanges,
+          gender: row.gender,
+        });
+      }
+    }
+
+    const deliveryAt = input.scheduledStartAt ? new Date(input.scheduledStartAt) : new Date();
+    const sources: ExpandSheetSource[] = [];
+    const unresolvedSources: Array<{ sourceAdGroupId: string; reason: string }> = [];
+    let context: ProviderContext | null = null;
+
+    for (const sourceAdGroupId of [...new Set(input.sourceAdGroupIds)]) {
+      const adGroup = managed.find(
+        (entity) => entity.entityType === "ad-group" && entity.externalId === sourceAdGroupId,
+      );
+      if (!adGroup) {
+        unresolvedSources.push({ sourceAdGroupId, reason: "不在当前同步快照中，请先同步账户。" });
+        continue;
+      }
+      const campaign = adGroup.parentCampaignId
+        ? managed.find(
+          (entity) => entity.entityType === "campaign"
+            && entity.externalId === adGroup.parentCampaignId,
+        )
+        : undefined;
+      if (!campaign) {
+        unresolvedSources.push({
+          sourceAdGroupId,
+          reason: `广告组“${adGroup.name}”所属推广系列不在当前同步快照中。`,
+        });
+        continue;
+      }
+
+      const history = historyByRoot.get(brandRootName(adGroup.name));
+      let productUrl = history?.productUrl ?? null;
+      let inheritedFrom: ExpandSheetSource["inheritedFrom"] = history ? "launch-history" : null;
+      if (!productUrl && input.readSourceAdGroups) {
+        try {
+          context ??= await this.loadProviderContext(input.accountId, account.providerKind);
+          const detail = await this.providers.readAdGroupOriginalPosts(
+            account.providerKind,
+            context,
+            { campaignId: campaign.externalId, adGroupId: adGroup.externalId },
+          );
+          if (detail.productUrl) {
+            productUrl = detail.productUrl;
+            inheritedFrom = "source-ad-group";
+          }
+        } catch (cause) {
+          // 读不到就留空让人补，不让一个组的读取失败拖垮整张表。
+          unresolvedSources.push({
+            sourceAdGroupId,
+            reason: `读取源广告组落地页失败：${safeError(cause)}`,
+          });
+        }
+      }
+
+      sources.push({
+        sourceAdGroupId: adGroup.externalId,
+        sourceAdGroupName: adGroup.name,
+        sourceCampaignId: campaign.externalId,
+        sourceCampaignName: campaign.name,
+        productUrl,
+        ageRanges: (history?.ageRanges?.filter(
+          (value): value is LaunchAgeRange => (LaunchAgeRangeValues as readonly string[]).includes(value),
+        )) ?? null,
+        gender: history?.gender === "male" || history?.gender === "female" || history?.gender === "all"
+          ? history.gender
+          : null,
+        inheritedFrom,
+      });
+    }
+
+    const plan = buildExpandSheetPlan({
+      sources,
+      countPerSource: input.countPerSource,
+      deliveryAt,
+      timeZone: account.timezone,
+      sameCampaign: input.sameCampaign,
+      existingCampaignNames: reserved.campaignNames,
+      existingAdGroupNames: reserved.adGroupNames,
+      duplicateCampaignNames: new Set(
+        lineage.duplicateCampaignNames.map((group) => group.name),
+      ),
+    });
+    return {
+      ...plan,
+      accountId: input.accountId,
+      deliveryAt: deliveryAt.toISOString(),
+      unresolvedSources,
+    };
+  }
+
   previewBatchExpandConflicts(input: {
     sources: Array<{
       accountId: string;

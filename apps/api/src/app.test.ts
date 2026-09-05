@@ -5323,6 +5323,129 @@ describe("local API", () => {
       },
     };
   }
+
+  describe("谱系与扩组导入表", () => {
+    /** 一条原组 + 一条从它扩出来的组，扩组记录把两者钉死。 */
+    function seedLineageAccount() {
+      const syncedAt = new Date().toISOString();
+      store.saveReadOnlySync("demo-account", "cookie", [
+        { entityType: "campaign", externalId: "c1", payload: { campaign_id: "c1", campaign_name: "八寶茶系列" } },
+        { entityType: "ad-group", externalId: "g1", payload: { campaign_id: "c1", adgroup_name: "八寶茶" } },
+        { entityType: "ad-group", externalId: "g2", payload: { campaign_id: "c1", adgroup_name: "八寶茶-0812-091530-1" } },
+      ], {
+        startedAt: syncedAt,
+        finishedAt: syncedAt,
+        counts: { campaign: 1, "ad-group": 2, ad: 0, material: 0 },
+        warnings: [],
+        quality: testSyncQuality(syncedAt),
+      });
+      store.claimAdGroupExpandTask("task-1", "demo-account", "g1", {
+        sourceCampaignId: "c1",
+        localDate: "2026-08-12",
+        requestedCount: 1,
+        generatedNames: ["八寶茶-0812-091530-1"],
+      });
+      store.finishAutomaticCopyTask("task-1", "succeeded", ["g2"]);
+      store.finishAdGroupExpandTask("task-1", "succeeded");
+    }
+
+    it("分得清原组和从它扩出来的组", async () => {
+      seedLineageAccount();
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/accounts/demo-account/lineage",
+      });
+
+      expect(response.statusCode).toBe(200);
+      const brand = response.json().brands.find(
+        (item: { rootName: string }) => item.rootName === "八寶茶",
+      );
+      expect(brand.adGroups).toHaveLength(2);
+      expect(brand.adGroups[0]).toMatchObject({
+        externalId: "g1",
+        origin: "original",
+        confidence: "inferred",
+      });
+      expect(brand.adGroups[1]).toMatchObject({
+        externalId: "g2",
+        origin: "expanded",
+        confidence: "confirmed",
+        sourceId: "g1",
+        sourceName: "八寶茶",
+        taskKey: "task-1",
+      });
+    });
+
+    it("列出账户内的同名系列", async () => {
+      const syncedAt = new Date().toISOString();
+      store.saveReadOnlySync("demo-account", "cookie", [
+        { entityType: "campaign", externalId: "c1", payload: { campaign_id: "c1", campaign_name: "同名系列" } },
+        { entityType: "campaign", externalId: "c2", payload: { campaign_id: "c2", campaign_name: "同名系列" } },
+      ], {
+        startedAt: syncedAt,
+        finishedAt: syncedAt,
+        counts: { campaign: 2, "ad-group": 0, ad: 0, material: 0 },
+        warnings: [],
+        quality: testSyncQuality(syncedAt),
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/accounts/demo-account/lineage",
+      });
+
+      expect(response.json().duplicateCampaignNames).toEqual([
+        { name: "同名系列", parentCampaignId: null, externalIds: ["c1", "c2"] },
+      ]);
+    });
+
+    it("生成的导入表带全系列名与组名，只留视频代码给人填", async () => {
+      seedLineageAccount();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/accounts/demo-account/expand-sheet/plan",
+        payload: {
+          sourceAdGroupIds: ["g1"],
+          countPerSource: 2,
+          sameCampaign: true,
+          scheduledStartAt: "2026-08-20T02:30:00.000Z",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.header).toEqual(["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"]);
+      expect(body.rows).toHaveLength(2);
+      expect(body.rows[0].campaignName).toBe("八寶茶系列");
+      expect(body.rows[0].adGroupName).toMatch(/^八寶茶-0820-\d{6}-1$/);
+      expect(body.rows[1].adGroupName).toMatch(/^八寶茶-0820-\d{6}-2$/);
+      expect(body.rows[0].videoCode).toBe("");
+      // 快照里没有落地页，也没有历史导入行可沿用——必须点名让人补，而不是编一个。
+      expect(body.rows[0].productUrl).toBe("");
+      expect(body.incomplete).toEqual([
+        expect.objectContaining({ rowNumber: 2, missing: ["产品 URL"] }),
+        expect.objectContaining({ rowNumber: 3, missing: ["产品 URL"] }),
+      ]);
+    });
+
+    it("快照里查不到的源组单独报出来，不拖垮整张表", async () => {
+      seedLineageAccount();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/accounts/demo-account/expand-sheet/plan",
+        payload: { sourceAdGroupIds: ["g1", "不存在的组"], countPerSource: 1 },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().rows).toHaveLength(1);
+      expect(response.json().unresolvedSources).toEqual([
+        { sourceAdGroupId: "不存在的组", reason: "不在当前同步快照中，请先同步账户。" },
+      ]);
+    });
+  });
 });
 
 function apiLaunchRow(rowNumber: number) {

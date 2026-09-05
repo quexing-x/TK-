@@ -44,6 +44,7 @@ import {
   AuditLogFilterSchema,
   DEFAULT_EXPAND_THRESHOLDS,
   METRIC_RETENTION_DAYS,
+  buildLineageReport,
   classifyCampaignsForExpand,
   dateKeyInTimeZone,
   type AppPermission,
@@ -88,6 +89,7 @@ import {
   unavailableMaintenanceUpdateRuntime,
   type MaintenanceUpdateRuntime,
 } from "./maintenance-runtime.js";
+import { ensureMcpEndpoint } from "./mcp-access.js";
 
 export { AuthService };
 export type { MaintenanceUpdateRuntime } from "./maintenance-runtime.js";
@@ -177,6 +179,12 @@ export interface AppDependencies {
   authCookieName?: string;
   /** Disable the destructive local-access recovery endpoint in isolated deployments. */
   allowAuthRecovery?: boolean;
+  /**
+   * 本机 MCP 接入点：给 agent 用的 origin 与令牌写到这个发现文件里。
+   *
+   * 不配就没有 MCP 接入——测试环境和 Web 部署都不该凭空多出一个带写权限的服务身份。
+   */
+  mcpEndpoint?: { origin: string; filePath: string };
 }
 
 export async function createApp(
@@ -255,7 +263,8 @@ export async function createApp(
 
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/api/")) return;
-    const token = readCookie(request.headers.cookie, sessionCookieName);
+    const token = readCookie(request.headers.cookie, sessionCookieName)
+      ?? readBearerToken(request.headers.authorization);
     request.authSession = auth.authenticate(token);
     const requestedCorrelationId = request.headers["x-correlation-id"];
     const correlationId = typeof requestedCorrelationId === "string"
@@ -2274,6 +2283,48 @@ export async function createApp(
     });
   });
 
+  /**
+   * 谱系：账户里每条系列 / 广告组是原始建的，还是从谁扩/复制出来的。
+   *
+   * 判据的可信度分两级原样带出（确证来自任务记录，推断来自名字形状），不合成一个
+   * 「看起来对」的答案——读的人要能分清哪条有证据、哪条只是名字像。
+   */
+  app.get("/api/accounts/:accountId/lineage", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    return reply.send({
+      accountId,
+      timezone: account.timezone,
+      computedAt: new Date().toISOString(),
+      ...buildLineageReport(launchService.loadLineageInput(accountId)),
+    });
+  });
+
+  /**
+   * 生成扩组导入表的行数据。只算不写：不建任何对象，也不占用名称。
+   *
+   * Excel 本身由调用方渲染——后台程序不引入 exceljs，它常驻开机自启，为一个偶尔用一次
+   * 的导出把进程做重不划算。
+   */
+  app.post("/api/accounts/:accountId/expand-sheet/plan", async (request, reply) => {
+    const { accountId } = AccountParamsSchema.parse(request.params);
+    const account = dependencies.store.getAccount(accountId);
+    if (!account) return reply.status(404).send({ message: "账号不存在。" });
+    const input = z.object({
+      sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(200),
+      countPerSource: z.number().int().min(1).max(10),
+      sameCampaign: z.boolean().default(true),
+      scheduledStartAt: z.string().datetime().nullable().default(null),
+      readSourceAdGroups: z.boolean().default(false),
+    }).parse(request.body);
+    try {
+      return reply.send(await launchService.planExpandSheet({ accountId, ...input }));
+    } catch (cause) {
+      return reply.status(409).send({ message: getSafeProviderError(cause) });
+    }
+  });
+
   app.post(
     "/api/accounts/:accountId/connections/:providerKind/test",
     async (request, reply) => {
@@ -2384,6 +2435,16 @@ export async function createApp(
       return output.result;
     },
   );
+
+  if (dependencies.mcpEndpoint) {
+    // 接入信息签发失败不该连累后台调度器起不来——MCP 是附加能力，规则引擎和轮询才是主线。
+    await ensureMcpEndpoint({
+      auth,
+      origin: dependencies.mcpEndpoint.origin,
+      endpointFilePath: dependencies.mcpEndpoint.filePath,
+      onError: (cause) => app.log.warn({ cause }, "MCP endpoint provisioning failed"),
+    });
+  }
 
   return app;
 }
@@ -2543,6 +2604,9 @@ export function requiredPermission(
     return "ads:operate";
   }
   if (path.includes("/manual-takeovers")) return "ads:operate";
+  // 生成导入表只读不写，语义上属于投放编排，不该要「改账户配置」那把钥匙。
+  // 必须排在 /api/accounts 兜底之前，否则会被判成 accounts:manage。
+  if (path.includes("/expand-sheet/")) return "launch:manage";
   if (path.startsWith("/api/ad-groups")) return "ads:operate";
   if (path.includes("/campaign-copy-tasks")) return "launch:manage";
   // 不能依赖函数末尾的兜底：那条规则对非 DELETE 返回 null，等于放行无权限校验。
@@ -2550,6 +2614,20 @@ export function requiredPermission(
   if (path.startsWith("/api/launch-plans") || path.startsWith("/api/launch-presets")) return "launch:manage";
   if (path.startsWith("/api/accounts")) return "accounts:manage";
   return method === "DELETE" ? "system:control" : null;
+}
+
+/**
+ * `Authorization: Bearer <token>` 里的会话令牌。
+ *
+ * 浏览器界面走 HttpOnly Cookie，但本机的 MCP server 是个纯 HTTP 客户端，没有 Cookie 罐。
+ * 认的是同一张 `auth_sessions` 表里的令牌，权限、审计、CSRF 一条都不放松——只是换了个
+ * 搬运方式。
+ */
+function readBearerToken(header: string | string[] | undefined): string | null {
+  if (typeof header !== "string") return null;
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  const token = match?.[1]?.trim();
+  return token ? token : null;
 }
 
 function readCookie(
