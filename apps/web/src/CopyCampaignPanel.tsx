@@ -410,7 +410,7 @@ export function CopyCampaignPanel(props: {
 
   // 分配预览：M/N 组合出来的结果必须在执行前看得见，轮转规则不能是黑盒。
   // 逐个源系列独立规划，名称预留跨源累积，避免两个源系列生成同名副本。
-  const preview = useMemo((): { sources: PlannedSource[]; totalGroups: number } | { error: string } | null => {
+  const preview = useMemo((): { sources: PlannedSource[]; totalGroups: number; skipped: string[] } | { error: string } | null => {
     if (sourceCampaignIds.length === 0) return null;
     try {
       const existingCampaignNames = allCampaigns.map((entity) => entity.name);
@@ -420,11 +420,17 @@ export function CopyCampaignPanel(props: {
       const reservedCampaignNames: string[] = [];
       const reservedAdGroupNames: string[] = [];
       const sources: PlannedSource[] = [];
+      // 取不到源组的系列会被跳过。跳过本身没问题，瞒着用户跳过才有问题：
+      // 选了 10 个只复制出 3 个，剩下 7 个去哪了必须写在脸上。
+      const skipped: string[] = [];
       let totalGroups = 0;
 
       for (const campaignId of sourceCampaignIds) {
         const selected = selectedFor(campaignId);
-        if (selected.length === 0) continue;
+        if (selected.length === 0) {
+          skipped.push(nameOf(campaignId));
+          continue;
+        }
         const groupNames = new Map(
           (adGroupsByCampaign.get(campaignId) ?? []).map((entity) => [entity.externalId, entity.name]),
         );
@@ -450,7 +456,15 @@ export function CopyCampaignPanel(props: {
           campaigns: plan.campaigns,
         });
       }
-      return sources.length === 0 ? null : { sources, totalGroups };
+      // 选了系列却一个源组都取不到时，必须说清楚为什么。此前这里直接返回 null，
+      // 「确认并复制」就静静地灰着，页面上没有任何线索——从「建议重扩系列」一键
+      // 带过来的系列尤其容易撞上：它们的组刚被规则关光或还没同步回来。
+      if (sourceCampaignIds.length > 0 && sources.length === 0) {
+        return {
+          error: "选中的系列在当前快照里都没有广告组。刚复制出来的系列要等下一轮同步才会带上组，点右上角「重新读取」刷新；组已被删除的系列复制不出内容。",
+        };
+      }
+      return sources.length === 0 ? null : { sources, totalGroups, skipped };
     } catch (cause) {
       return { error: cause instanceof Error ? cause.message : String(cause) };
     }
@@ -727,6 +741,12 @@ export function CopyCampaignPanel(props: {
             {" "}{previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0)} 个新系列 /
             共 {previewPlan.totalGroups} 个广告组
           </strong>
+          {previewPlan.skipped.length > 0 && (
+            <div className="tk-callout warn">
+              <b>{previewPlan.skipped.length} 个系列不会被复制</b>
+              <span>它们在当前快照里没有广告组：{previewPlan.skipped.join("、")}。刚复制出来的系列要等下一轮同步，点右上角「重新读取」刷新。</span>
+            </div>
+          )}
           <div className="table-wrap">
             <table>
               <thead><tr><th>源系列</th><th>新推广系列</th><th>包含的广告组</th></tr></thead>
