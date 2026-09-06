@@ -141,9 +141,18 @@ export function formatAccounts(bootstrap: BootstrapResponse): string {
   ].join("\n");
 }
 
+/**
+ * 已关停系列一次最多吐多少条。
+ *
+ * 生产账户实测已关停系列有 493 条（在投只有 16 条），全量吐出会把上下文淹掉，
+ * 而按累计花费降序之后，真正值得看的——花过钱、跑过一阵子才停的——都排在最前面。
+ * 没花过钱的那批是建了没投的废系列，翻到后面也没有分析价值。
+ */
+const STOPPED_CAMPAIGN_LIMIT = 60;
+
 export function formatCampaigns(
   data: ExpandClassificationResponse,
-  filter: "all" | "expand" | "recreate",
+  filter: "all" | "expand" | "recreate" | "stopped",
 ): string {
   const line = (item: ExpandClassification) => {
     const cpa = item.costPerConversion === null ? "—" : money(item.costPerConversion);
@@ -163,14 +172,35 @@ export function formatCampaigns(
     + `连续零转化天数上限 ${data.thresholds.maxConsecutiveZeroConversionDays}。指标为自系列创建以来累计。`,
     "",
   ];
-  if (filter !== "recreate") {
+  // 已关停与诊断系列都落在 excluded 桶里，但它们完全是两回事：诊断/占位系列不是投放
+  // 对象，已关停系列却是「这个品现在没在跑」的唯一证据。分开数、分开列。
+  const stopped = data.excluded.filter((item) => item.reason === "not-enabled");
+  const nonOperational = data.excluded.length - stopped.length;
+
+  if (filter === "expand" || filter === "all") {
     sections.push(`可扩（${data.expand.length}）：`, ...data.expand.map(line), "");
   }
-  if (filter !== "expand") {
+  if (filter === "recreate" || filter === "all") {
     sections.push(`建议重扩（${data.recreateCampaign.length}）：`, ...data.recreateCampaign.map(line), "");
   }
+  if (filter === "stopped") {
+    // 花过钱的排前面：跑过一阵子才停的才有判断价值，建了没投的排最后。
+    const ranked = [...stopped].sort((left, right) => right.spend - left.spend);
+    const shown = ranked.slice(0, STOPPED_CAMPAIGN_LIMIT);
+    sections.push(`已关停（${stopped.length}）：`, ...shown.map(line));
+    if (ranked.length > shown.length) {
+      sections.push(
+        `…另有 ${ranked.length - shown.length} 条已关停系列未列出（按累计花费降序截断，`
+        + `未列出的累计花费均不高于 ${money(shown[shown.length - 1]?.spend ?? 0)}）。`,
+      );
+    }
+    sections.push("");
+  }
   if (filter === "all") {
-    sections.push(`不参与判定（${data.excluded.length}）：已关停或诊断系列，此处省略明细。`);
+    sections.push(
+      `已关停（${stopped.length}）：不参与系列级判定，明细用 verdict="stopped" 取。`
+      + (nonOperational > 0 ? `另有 ${nonOperational} 条诊断/占位系列，不是投放对象。` : ""),
+    );
   }
   return sections.join("\n");
 }

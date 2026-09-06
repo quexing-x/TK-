@@ -74,11 +74,17 @@ server.registerTool("list_campaigns", {
   description: [
     "列出一个账户的推广系列现状：累计花费、转化、单转，以及扩组判定（可扩 / 建议重扩 / 已关停）。",
     "指标口径是自系列创建以来累计，按账户时区日切。",
+    "系列级判定只覆盖在投系列；已关停的不参与判定，要用 verdict=\"stopped\" 单独取明细。",
+    "判某个品「现在还在不在跑、要不要重建一条」时必须取它——一个品的历史系列绝大多数是已关停的，",
+    "只看在投系列会把整个品当成不存在。",
   ].join(""),
   inputSchema: {
     accountId: z.string().min(1).describe("账户 ID，来自 list_accounts"),
-    verdict: z.enum(["all", "expand", "recreate"]).default("all")
-      .describe("只看某一类判定；默认全部"),
+    verdict: z.enum(["all", "expand", "recreate", "stopped"]).default("all")
+      .describe(
+        "只看某一类：expand 可扩、recreate 建议重扩、stopped 已关停系列明细（按累计花费降序）；"
+        + "默认 all 只给可扩与建议重扩两栏，已关停仅报条数",
+      ),
   },
   annotations: { readOnlyHint: true },
 }, async ({ accountId, verdict }) => run(async () => {
