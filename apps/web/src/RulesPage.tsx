@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Clock3, Gauge, RefreshCcw, Save } from "lucide-react";
+import { ChevronDown, ChevronUp, Clock3, Gauge, RefreshCcw, Save } from "./ui/icons";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   applyGroupEnabled,

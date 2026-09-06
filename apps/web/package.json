@@ -10,12 +10,15 @@
     "build": "tsc -b && vite build"
   },
   "dependencies": {
+    "@ark-ui/react": "^5.39.1",
+    "@phosphor-icons/react": "2.1.10",
+    "@tanstack/react-table": "^9.2.4",
+    "@tanstack/react-virtual": "^3.14.10",
     "@tk-auto/core": "workspace:*",
     "@tk-auto/manual": "workspace:*",
     "@tk-auto/providers": "workspace:*",
     "@vitejs/plugin-react": "latest",
     "exceljs": "4.4.0",
-    "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "vite": "latest"

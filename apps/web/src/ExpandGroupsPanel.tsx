@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, Trash2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, Trash2, XCircle } from "./ui/icons";
 import { DRAFT_CLEANUP_MIN_AGE_HOURS, withinExpandScope, type ExpandScope } from "@tk-auto/core";
 import type {
   AccountConfig,
@@ -845,12 +845,12 @@ export function ExpandGroupsPanel({
   };
 
   const totalSelectable = selectableKeys.size;
-  const presetPanel = <div className={presetHost ? "expand-preset sidebar" : "expand-preset"}>
+  const presetPanel = <div className={presetHost ? "expand-preset is-docked" : "expand-preset"}>
     <div className="expand-preset-head"><CopyPlus size={15} /> 扩组预设</div>
     <div className="expand-preset-grid">
       <label className="field"><span>每个源组复制份数</span><input max={10} min={1} type="number" value={count} onChange={(event) => setCount(Math.max(1, Math.min(10, Number(event.target.value) || 1)))} /><small>1–10，命名为“原组名-投放日期-序号”。</small></label>
-      <label className="field"><span>日预算</span><input min={1} type="number" value={dailyBudget} onChange={(event) => setDailyBudget(Number(event.target.value))} /><small>覆盖新组的日预算。</small></label>
-      <label className="field"><span>出价</span><input placeholder="留空继承源组" value={bidText} onChange={(event) => setBidText(event.target.value)} /><small>留空则继承源组出价。</small></label>
+      <label className="field"><span>日预算</span><input min={1} type="number" value={dailyBudget} onChange={(event) => setDailyBudget(Number(event.target.value))} /></label>
+      <label className="field"><span>出价</span><input placeholder="留空继承源组" value={bidText} onChange={(event) => setBidText(event.target.value)} /></label>
     </div>
     <div className="expand-timing">
       <span className="expand-timing-label">投放时间</span>

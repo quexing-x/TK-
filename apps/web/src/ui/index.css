@@ -4,9 +4,12 @@
  * `structure.css` preserves the stable class contract used by business-heavy
  * page components. `system.css` is the authoritative visual layer and owns
  * tokens, themes, layout, components, responsive behavior and interactions.
+ * `components.css` adds the shared `tk-` component set on top of those tokens;
+ * pages migrate onto it one at a time, so both layers coexist during the move.
  */
 @import "./structure.css";
 @import "./system.css";
+@import "./components.css";
 @import "./pages/ads-analytics.css";
 @import "./pages/automation-rules.css";
 @import "./pages/connection.css";
@@ -14,3 +17,5 @@
 @import "./pages/notifications-manual.css";
 @import "./pages/system-maintenance.css";
 @import "./overlays.css";
+/* Final shared Product UI bridge for every formal route. */
+@import "./production/production.css";

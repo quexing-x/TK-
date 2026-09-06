@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { KeyRound, Pencil, Plus, ShieldCheck, UserCog, Users } from "lucide-react";
+import { KeyRound, Pencil, Plus, ShieldCheck, UserCog, Users } from "./ui/icons";
 import type {
   LocalUserCreateInput,
   LocalUserRecord,

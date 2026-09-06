@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Users,
-} from "lucide-react";
+} from "./ui/icons";
 import type { ReactNode } from "react";
 import type { AccountConfig, SystemRuntimeState } from "@tk-auto/core";
 import type { BootstrapPayload } from "./api";
@@ -118,7 +118,7 @@ export function OverviewPage({
         })}
       </div>
 
-      <section className="overview-account-section connection-account-section" id="account-management">
+      <section className="overview-account-section connection-account-section" id="account-management-overview">
         <header className="account-section-heading">
           <div><span className="section-kicker">ACCOUNT ACCESS</span><h2>账户接入与权限</h2></div>
           <p><Users size={15} /> 凭据、账户绑定和能力检测统一在这里管理；广告数据请进入对应平台模块。</p>

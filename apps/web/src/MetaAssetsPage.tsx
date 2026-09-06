@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   ShoppingCart,
   TrendingUp,
-} from "lucide-react";
+} from "./ui/icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AccountConfig,

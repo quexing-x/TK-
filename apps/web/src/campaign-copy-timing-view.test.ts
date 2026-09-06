@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { belongsToBudgetKind, groupAdGroupsByCampaign, pickDefaultBudgetKind, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
+import { belongsToBudgetKind, groupAdGroupsByCampaign, pickDefaultBudgetKind, pickLatestAdGroup, resolveCampaignCopyLaunchTiming } from "./CopyCampaignPanel";
 
 const now = new Date("2026-08-01T10:00:00.000Z");
 
@@ -177,5 +177,62 @@ describe("按系列归堆广告组", () => {
     const campaign = { ...group("c1", "c1"), entityType: "campaign" as const };
     const map = groupAdGroupsByCampaign([campaign], ["c1"]);
     expect(map.get("c1")).toHaveLength(0);
+  });
+});
+
+describe("挑选复制用的源广告组", () => {
+  const group = (id: string, createdAt?: string | null) => ({
+    entityType: "ad-group" as const,
+    externalId: id,
+    name: `组-${id}`,
+    status: "enabled" as const,
+    parentCampaignId: "c1",
+    parentAdGroupId: null,
+    campaignBudget: null,
+    campaignBudgetOptimized: false,
+    metrics: {} as never,
+    ignored: false,
+    syncedAt: "2026-09-01T00:00:00.000Z",
+    automationManaged: false,
+    ...(createdAt === undefined ? {} : { createdAt }),
+  });
+
+  it("有创建时间时取最新的那个", () => {
+    const picked = pickLatestAdGroup([
+      group("100", "2026-09-01T00:00:00.000Z"),
+      group("101", "2026-09-03T00:00:00.000Z"),
+      group("102", "2026-09-02T00:00:00.000Z"),
+    ]);
+    expect(picked?.externalId).toBe("101");
+  });
+
+  // createdAt 是上游可选字段，真机上并不总有值；ID 单调递增是唯一还能用的线索。
+  it("创建时间缺失时回退到数值更大的 externalId", () => {
+    const picked = pickLatestAdGroup([group("1875368573558913"), group("1875395711511638")]);
+    expect(picked?.externalId).toBe("1875395711511638");
+  });
+
+  it("null 的创建时间同样走回退", () => {
+    const picked = pickLatestAdGroup([group("100", null), group("300", null), group("200", null)]);
+    expect(picked?.externalId).toBe("300");
+  });
+
+  // 混合场景下不能让「ID 很大但没有创建时间」的组盖过「有确切创建时间」的组，
+  // 否则回退逻辑反而比真实数据更有话语权。
+  it("有创建时间的组优先于只有 ID 的组", () => {
+    const picked = pickLatestAdGroup([
+      group("999999999999", undefined),
+      group("100", "2026-09-01T00:00:00.000Z"),
+    ]);
+    expect(picked?.externalId).toBe("100");
+  });
+
+  it("空列表返回 null", () => {
+    expect(pickLatestAdGroup([])).toBeNull();
+  });
+
+  it("创建时间非法时不参与时间比较", () => {
+    const picked = pickLatestAdGroup([group("100", "not-a-date"), group("200", "not-a-date")]);
+    expect(picked?.externalId).toBe("200");
   });
 });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, History, RefreshCcw } from "lucide-react";
+import { Copy, History, RefreshCcw } from "./ui/icons";
 import { deriveCampaignBudgetModes, planCampaignCopy, type ManagedEntityRecord } from "@tk-auto/core";
 import { api } from "./api";
 import type { CampaignCopyHistoryRecord } from "@tk-auto/core";
@@ -108,6 +108,43 @@ export function groupAdGroupsByCampaign(
   return map;
 }
 
+/**
+ * 排序键：越大越新。
+ *
+ * `createdAt` 是上游可选字段（`string | null`），真机上并不总有值，所以分两层：
+ * 有合法创建时间的一律排在没有的前面（tier 1），彼此按时间比；都没有时回退到
+ * externalId——TikTok 的对象 ID 单调递增，数值大的建得晚。两者都拿不到就返回
+ * 最小值，让它沉底而不是随机胜出。
+ */
+function adGroupRecency(entity: ManagedEntityRecord): [number, number] {
+  const createdAt = entity.createdAt ? Date.parse(entity.createdAt) : Number.NaN;
+  if (Number.isFinite(createdAt)) return [1, createdAt];
+  const numericId = Number(entity.externalId);
+  return [0, Number.isFinite(numericId) ? numericId : Number.NEGATIVE_INFINITY];
+}
+
+/**
+ * 系列复制只取一个源广告组——最新建的那个。
+ *
+ * 复制整个系列时并不需要把源系列的每个组都搬一遍：最新的组通常就是当前在投的
+ * 那套定向和素材。原先把所有组列出来默认全选，既是噪音（一个系列十几个组），
+ * 又和 N×M 的分配规则对不上（勾了 13 个但只用得到 1 个）。
+ */
+export function pickLatestAdGroup(
+  groups: readonly ManagedEntityRecord[],
+): ManagedEntityRecord | null {
+  let best: ManagedEntityRecord | null = null;
+  let bestKey: [number, number] = [-1, Number.NEGATIVE_INFINITY];
+  for (const group of groups) {
+    const key = adGroupRecency(group);
+    if (key[0] > bestKey[0] || (key[0] === bestKey[0] && key[1] > bestKey[1])) {
+      best = group;
+      bestKey = key;
+    }
+  }
+  return best;
+}
+
 export interface ResolvedCampaignCopyLaunchTiming {
   initialStatus: "enabled" | "disabled";
   scheduledStartAt: string | null;
@@ -167,7 +204,6 @@ export function CopyCampaignPanel(props: {
   const [sourceCampaignIds, setSourceCampaignIds] = useState<string[]>([]);
   // 记录「被取消勾选的广告组」而不是「已勾选的」：新勾选的源系列天然默认全选，
   // 取消源系列后也不会残留脏状态。
-  const [excludedAdGroupIds, setExcludedAdGroupIds] = useState<string[]>([]);
   // 两个入口：系列预算的系列复制 / 广告组预算的系列复制。原本是一个「只显示系列预算」
   // 的过滤勾选，两类系列可以同时选中，而它们要填的参数根本不同——系列预算的新系列各自
   // 持有一份预算，组预算的系列则由组自己带。混选时那个「系列日预算」框到底作用在谁身上
@@ -228,7 +264,6 @@ export function CopyCampaignPanel(props: {
   useEffect(() => {
     if (!accountId) return;
     setSourceCampaignIds([]);
-    setExcludedAdGroupIds([]);
     void loadHistory(accountId);
     load(accountId);
     loadStuckTasks(accountId);
@@ -343,7 +378,6 @@ export function CopyCampaignPanel(props: {
       setBudgetKind(preselection.budgetKind);
     }
     setSourceCampaignIds(preselection.campaignIds);
-    setExcludedAdGroupIds([]);
   }, [preselection, accountId, loading]);
 
   const visibleCampaigns = useMemo(() => {
@@ -361,10 +395,14 @@ export function CopyCampaignPanel(props: {
     [entities, sourceCampaignIds],
   );
 
-  const selectedFor = (campaignId: string) =>
-    (adGroupsByCampaign.get(campaignId) ?? [])
-      .map((entity) => entity.externalId)
-      .filter((id) => !excludedAdGroupIds.includes(id));
+  // 每个源系列只出一个源组：最新建的那个。
+  const latestFor = (campaignId: string): ManagedEntityRecord | null =>
+    pickLatestAdGroup(adGroupsByCampaign.get(campaignId) ?? []);
+
+  const selectedFor = (campaignId: string) => {
+    const latest = latestFor(campaignId);
+    return latest ? [latest.externalId] : [];
+  };
 
   const account = props.accounts.find((item) => item.id === accountId);
   const nameOf = (externalId: string) =>
@@ -372,7 +410,7 @@ export function CopyCampaignPanel(props: {
 
   // 分配预览：M/N 组合出来的结果必须在执行前看得见，轮转规则不能是黑盒。
   // 逐个源系列独立规划，名称预留跨源累积，避免两个源系列生成同名副本。
-  const preview = useMemo((): { sources: PlannedSource[]; totalGroups: number } | { error: string } | null => {
+  const preview = useMemo((): { sources: PlannedSource[]; totalGroups: number; skipped: string[] } | { error: string } | null => {
     if (sourceCampaignIds.length === 0) return null;
     try {
       const existingCampaignNames = allCampaigns.map((entity) => entity.name);
@@ -382,11 +420,17 @@ export function CopyCampaignPanel(props: {
       const reservedCampaignNames: string[] = [];
       const reservedAdGroupNames: string[] = [];
       const sources: PlannedSource[] = [];
+      // 取不到源组的系列会被跳过。跳过本身没问题，瞒着用户跳过才有问题：
+      // 选了 10 个只复制出 3 个，剩下 7 个去哪了必须写在脸上。
+      const skipped: string[] = [];
       let totalGroups = 0;
 
       for (const campaignId of sourceCampaignIds) {
         const selected = selectedFor(campaignId);
-        if (selected.length === 0) continue;
+        if (selected.length === 0) {
+          skipped.push(nameOf(campaignId));
+          continue;
+        }
         const groupNames = new Map(
           (adGroupsByCampaign.get(campaignId) ?? []).map((entity) => [entity.externalId, entity.name]),
         );
@@ -412,23 +456,26 @@ export function CopyCampaignPanel(props: {
           campaigns: plan.campaigns,
         });
       }
-      return sources.length === 0 ? null : { sources, totalGroups };
+      // 选了系列却一个源组都取不到时，必须说清楚为什么。此前这里直接返回 null，
+      // 「确认并复制」就静静地灰着，页面上没有任何线索——从「建议重扩系列」一键
+      // 带过来的系列尤其容易撞上：它们的组刚被规则关光或还没同步回来。
+      if (sourceCampaignIds.length > 0 && sources.length === 0) {
+        return {
+          error: "选中的系列在当前快照里都没有广告组。刚复制出来的系列要等下一轮同步才会带上组，点右上角「重新读取」刷新；组已被删除的系列复制不出内容。",
+        };
+      }
+      return sources.length === 0 ? null : { sources, totalGroups, skipped };
     } catch (cause) {
       return { error: cause instanceof Error ? cause.message : String(cause) };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceCampaignIds, excludedAdGroupIds, adGroupsByCampaign, campaignCopies, groupsPerCampaign, account, allCampaigns, entities]);
+  }, [sourceCampaignIds, adGroupsByCampaign, campaignCopies, groupsPerCampaign, account, allCampaigns, entities]);
 
   const previewError = preview && "error" in preview ? preview.error : null;
   const previewPlan = preview && !("error" in preview) ? preview : null;
 
   const toggleCampaign = (externalId: string) => {
     setSourceCampaignIds((current) => current.includes(externalId)
-      ? current.filter((id) => id !== externalId)
-      : [...current, externalId]);
-  };
-  const toggleAdGroup = (externalId: string) => {
-    setExcludedAdGroupIds((current) => current.includes(externalId)
       ? current.filter((id) => id !== externalId)
       : [...current, externalId]);
   };
@@ -624,12 +671,12 @@ export function CopyCampaignPanel(props: {
             只会让「系列日预算」作用在说不清的对象上。 */}
         <div className="campaign-copy-kind-tabs" role="group" aria-label="选择系列复制的预算口径">
           <button aria-pressed={budgetKind === "campaign"} className={budgetKind === "campaign" ? "active" : ""} disabled={disabled}
-            onClick={() => { kindTouched.current = true; setBudgetKind("campaign"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); }} type="button">
+            onClick={() => { kindTouched.current = true; setBudgetKind("campaign"); setSourceCampaignIds([]); }} type="button">
             <strong>系列预算的系列复制</strong>
             <span>每个新系列各自持有一份系列预算（共 {cboCount} 条）</span>
           </button>
           <button aria-pressed={budgetKind === "adgroup"} className={budgetKind === "adgroup" ? "active" : ""} disabled={disabled}
-            onClick={() => { kindTouched.current = true; setBudgetKind("adgroup"); setSourceCampaignIds([]); setExcludedAdGroupIds([]); setCampaignBudgetText(""); }} type="button">
+            onClick={() => { kindTouched.current = true; setBudgetKind("adgroup"); setSourceCampaignIds([]); setCampaignBudgetText(""); }} type="button">
             <strong>广告组预算的系列复制</strong>
             <span>预算跟着广告组走，新系列不带系列预算（共 {adgroupCount} 条）</span>
           </button>
@@ -641,7 +688,7 @@ export function CopyCampaignPanel(props: {
           <button className="secondary-button compact-button" disabled={disabled} type="button"
             onClick={() => setSourceCampaignIds(visibleCampaigns.map((entity) => entity.externalId))}>全选当前结果</button>
           <button className="secondary-button compact-button" disabled={disabled} type="button"
-            onClick={() => { setSourceCampaignIds([]); setExcludedAdGroupIds([]); }}>清空</button>
+            onClick={() => setSourceCampaignIds([])}>清空</button>
         </div>
         {visibleCampaigns.length === 0
           ? <p className="target-account-empty">
@@ -654,51 +701,36 @@ export function CopyCampaignPanel(props: {
                     : `该账户没有广告组预算的推广系列${cboCount > 0 ? `（另有 ${cboCount} 条系列预算的系列，切到上方另一个入口）` : ""}。`}
             </p>
           : <div className="target-account-grid">
-            {visibleCampaigns.map((entity) => (
-              <label key={entity.externalId}>
-                <input checked={sourceCampaignIds.includes(entity.externalId)} disabled={disabled}
-                  onChange={() => toggleCampaign(entity.externalId)} type="checkbox" />
-                <span>{entity.name}</span>
-                <small>{isCbo(entity.externalId) ? "系列预算" : "广告组预算"}
-                  {budgetModes.undeterminedCampaignIds.has(entity.externalId) ? " · 预算方式未知" : ""}</small>
-              </label>
-            ))}
+            {visibleCampaigns.map((entity) => {
+              // 选中后直接告知取的是哪个组，省掉一整块广告组勾选区。
+              const picked = sourceCampaignIds.includes(entity.externalId)
+                ? pickLatestAdGroup(adGroupsByCampaign.get(entity.externalId) ?? [])
+                : null;
+              return (
+                <label key={entity.externalId}>
+                  <input checked={sourceCampaignIds.includes(entity.externalId)} disabled={disabled}
+                    onChange={() => toggleCampaign(entity.externalId)} type="checkbox" />
+                  <span>{entity.name}</span>
+                  <small>{isCbo(entity.externalId) ? "系列预算" : "广告组预算"}
+                    {budgetModes.undeterminedCampaignIds.has(entity.externalId) ? " · 预算方式未知" : ""}
+                    {picked ? ` · 源组：${picked.name}` : ""}
+                    {sourceCampaignIds.includes(entity.externalId) && !picked ? " · 快照中暂无广告组" : ""}</small>
+                </label>
+              );
+            })}
           </div>}
         {budgetKind === "campaign" && cboCount === 0 && allCampaigns.length > 0 && (
           <p className="target-account-empty">当前账户没有识别到系列预算的推广系列。若与 TikTok 后台不符，请先执行一次只读同步。</p>
         )}
       </div>
 
-      {selectedCampaignsHaveGroups(adGroupsByCampaign) && (
-        <div className="campaign-copy-sources">
-          <strong>参与分配的广告组（默认全选，可逐个取消）</strong>
-          {[...adGroupsByCampaign].map(([campaignId, list]) => (
-            <div className="campaign-copy-group-block" key={campaignId}>
-              <em>{nameOf(campaignId)}</em>
-              {list.length === 0
-                ? <p className="target-account-empty">
-                    该系列在当前快照中没有广告组。刚复制出来的系列要等下一轮同步才会带上组，
-                    点右上角「重新读取」刷新；组已被删除的系列则复制不出内容。
-                  </p>
-                : <div className="target-account-grid">
-                  {list.map((entity) => (
-                    <label key={entity.externalId}>
-                      <input checked={!excludedAdGroupIds.includes(entity.externalId)} disabled={disabled}
-                        onChange={() => toggleAdGroup(entity.externalId)} type="checkbox" />
-                      <span>{entity.name}</span>
-                      {/* 接管标记要显式标出来：它不再影响能不能复制，但用户得知道
-                          这个组当前不受自动化规则管。 */}
-                      <small>
-                        {entity.status === "enabled" ? "投放中" : "已关闭"}
-                        {entity.ignored ? " · 人工接管" : ""}
-                      </small>
-                    </label>
-                  ))}
-                </div>}
-            </div>
-          ))}
-        </div>
-      )}
+      {/*
+        这里原先是「参与分配的广告组（默认全选，可逐个取消）」：每个选中的系列
+        渲染一块勾选区，一个系列十几个组就是十几个复选框。它有两个问题——
+        选三个系列页面就长到 2400px 以上；而且勾选数和 N×M 的分配规则对不上，
+        勾了 13 个实际只用 1 个，多余的静默丢弃。既然每个系列只取最新的那个组，
+        这块区域整个删掉，源组名直接标在上面的系列行里。
+      */}
 
       {previewError && <div className="sheet-issues warning"><strong>无法生成分配方案</strong><span>{previewError}</span></div>}
 
@@ -709,6 +741,12 @@ export function CopyCampaignPanel(props: {
             {" "}{previewPlan.sources.reduce((sum, item) => sum + item.campaigns.length, 0)} 个新系列 /
             共 {previewPlan.totalGroups} 个广告组
           </strong>
+          {previewPlan.skipped.length > 0 && (
+            <div className="tk-callout warn">
+              <b>{previewPlan.skipped.length} 个系列不会被复制</b>
+              <span>它们在当前快照里没有广告组：{previewPlan.skipped.join("、")}。刚复制出来的系列要等下一轮同步，点右上角「重新读取」刷新。</span>
+            </div>
+          )}
           <div className="table-wrap">
             <table>
               <thead><tr><th>源系列</th><th>新推广系列</th><th>包含的广告组</th></tr></thead>
@@ -790,6 +828,3 @@ export function CopyCampaignPanel(props: {
   );
 }
 
-function selectedCampaignsHaveGroups(map: Map<string, ManagedEntityRecord[]>): boolean {
-  return map.size > 0;
-}

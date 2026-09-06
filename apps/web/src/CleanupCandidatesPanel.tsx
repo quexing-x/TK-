@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AccountConfig } from "@tk-auto/core";
-import { RefreshCcw, Trash2 } from "lucide-react";
+import { RefreshCcw, Trash2 } from "./ui/icons";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";
 

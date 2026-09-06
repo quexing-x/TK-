@@ -4,6 +4,7 @@ import { accountIdForPage, canAccessNavigationItem, pageFromHash, pageHash } fro
 describe("application navigation contract", () => {
   it("keeps every public hash route address stable", () => {
     expect(pageHash).toEqual({
+      accounts: "#accounts",
       overview: "#overview",
       manual: "#manual",
       users: "#users",
@@ -21,6 +22,7 @@ describe("application navigation contract", () => {
   });
 
   it("keeps the legacy account-management bookmark and unknown fallback", () => {
+    expect(pageFromHash("#accounts")).toBe("accounts");
     expect(pageFromHash("#users")).toBe("overview");
     expect(pageFromHash("#unknown")).toBe("overview");
   });

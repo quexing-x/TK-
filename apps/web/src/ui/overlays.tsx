@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
+import { Warning as AlertTriangle, CheckCircle as CheckCircle2, Info, X } from "@phosphor-icons/react";
 
 type ToastTone = "success" | "error" | "info";
 type ConfirmOptions = { title: string; message: string; confirmLabel?: string; danger?: boolean };
@@ -91,8 +91,10 @@ export function OverlayProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("tk-api-write", showApiResult);
   }, [toast]);
   return <OverlayContext.Provider value={value}><LegacyModalBridge />{children}
+    <div className="production-ui">
     <div aria-live="polite" className="toast-stack">{toasts.map((item) => <div className={`app-toast ${item.tone}`} key={item.id}>{item.tone === "success" ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}<span>{item.message}</span><button aria-label="关闭提示" onClick={() => setToasts((current) => current.filter((toastItem) => toastItem.id !== item.id))} type="button"><X size={15} /></button></div>)}</div>
     {dialog && <Dialog dialog={dialog} onClose={() => { dialog.resolve(dialog.kind === "confirm" ? false : null); setDialog(null); }} onConfirm={(value) => { dialog.resolve(value); setDialog(null); }} />}
+    </div>
   </OverlayContext.Provider>;
 }
 

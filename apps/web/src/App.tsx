@@ -4,7 +4,6 @@ import {
   BarChart3,
   Ban,
   BellRing,
-  BookOpen,
   Check,
   ChevronDown,
   CircleGauge,
@@ -28,9 +27,8 @@ import {
   Trash2,
   UserRound,
   X,
-} from "lucide-react";
+} from "./ui/icons";
 import {
-  Fragment,
   type FormEvent,
   type ReactNode,
   useCallback,
@@ -129,8 +127,12 @@ import {
   type AdsManagementSpendRange,
 } from "./ads-management-view";
 import { CommandPalette, OverlayProvider, useOverlays } from "./ui/overlays";
+import { AccountManagement } from "./AccountManagement";
+import { AccountShell } from "./ui/production/AccountShell";
+import { X as AccountCloseIcon, FloppyDisk as AccountSaveIcon } from "@phosphor-icons/react";
 
 export type PageKey =
+  | "accounts"
   | "overview"
   | "manual"
   | "users"
@@ -148,6 +150,7 @@ export type PageKey =
 const selectedAccountStorageKey = "tk-auto:selected-account-id";
 
 export const pageHash: Record<PageKey, string> = {
+  accounts: "#accounts",
   overview: "#overview",
   manual: "#manual",
   users: "#users",
@@ -167,6 +170,8 @@ export function pageFromHash(hash = window.location.hash): PageKey {
   // Account management now lives on the home page. Preserve old bookmarks by
   // redirecting them to the home page instead of keeping a duplicate route.
   if (hash === "#users") return "overview";
+  // Meta workspace is intentionally retired from the UI for the current release.
+  if (hash === "#meta-assets" || hash === "#meta-rules") return "overview";
   const found = (Object.entries(pageHash) as Array<[PageKey, string]>).find(
     ([, value]) => value === hash,
   );
@@ -205,9 +210,16 @@ const navItems: Array<{
   section: "基础" | "TikTok" | "Meta" | "系统";
 }> = [
   {
+    key: "accounts",
+    label: "账户管理",
+    description: "账户接入、同步与自动化",
+    icon: UserRound,
+    section: "基础",
+  },
+  {
     key: "overview",
     label: "总览",
-    description: "TikTok / Meta 接入状态",
+    description: "TikTok 接入状态与待办",
     icon: LayoutDashboard,
     section: "基础",
   },
@@ -238,20 +250,6 @@ const navItems: Array<{
     description: "相同广告多账户投放",
     icon: Plus,
     section: "TikTok",
-  },
-  {
-    key: "meta-assets",
-    label: "Meta 广告",
-    description: "广告系列、广告组与广告独立管理",
-    icon: Layers3,
-    section: "Meta",
-  },
-  {
-    key: "meta-rules",
-    label: "Meta 规则",
-    description: "独立三层规则与运行开关",
-    icon: SlidersHorizontal,
-    section: "Meta",
   },
   {
     key: "rules",
@@ -496,242 +494,72 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
     }
   };
 
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">
-            <Activity size={22} />
-          </div>
-          <div>
-            <strong>TK Ads</strong>
-            <span>Automation Console</span>
-          </div>
-        </div>
-
-        <button
-          aria-label={bootstrap.systemRuntime.enabled ? "自动化运行中，点击暂停" : "自动化已暂停，点击恢复"}
-          className={bootstrap.systemRuntime.enabled ? "system-master active" : "system-master paused"}
-          disabled={runtimeBusy || !auth.status.permissions.includes("system:control")}
-          onClick={() => void toggleSystemRuntime()}
-          title={bootstrap.systemRuntime.enabled ? "自动化运行中，点击暂停" : "自动化已暂停，点击恢复"}
-          type="button"
-        >
-          <span className="system-master-light" />
-          <span>
-            <strong>{bootstrap.systemRuntime.enabled ? "自动化运行中" : "自动化已暂停"}</strong>
-            <small>{bootstrap.systemRuntime.enabled ? "后台检测、定时规则与自动启停已启用" : "自动任务已暂停；广告创建与人工操作不受影响"}</small>
-          </span>
-          <span className={bootstrap.systemRuntime.enabled ? "master-switch checked" : "master-switch"}><i /></span>
+  const visibleNavigation = navItems.filter((item) => canAccessNavigationItem(item.key, auth.status.permissions));
+  const pageTitle = page === "overview" ? "总览" : page === "manual" ? "操作手册" : visibleNavigation.find((item) => item.key === page)?.label ?? "工作空间";
+  const headerActions = page === "accounts" ? undefined : (
+    <>
+      <div className="p-command-area">
+        <button className="command-trigger" type="button" onClick={() => setCommandOpen((open) => !open)} aria-expanded={commandOpen}>
+          <Search size={15} /><span>跳转账户、规则、任务…</span><kbd>Ctrl K</kbd>
         </button>
-
-        <div className="phase-card">
-          <span className="phase-dot" />
-          <div>
-            <strong>本地自动化引擎</strong>
-            <small>检测、决策、执行与审计</small>
-          </div>
-        </div>
-
-        <nav className="nav-list">
-          {navItems.filter((item) => canAccessNavigationItem(item.key, auth.status.permissions)).map((item, index, visibleItems) => {
-            const Icon = item.icon;
-            return (
-              <Fragment key={item.key}>
-                {(index === 0 || visibleItems[index - 1]?.section !== item.section) && <div className="nav-section-label">{item.section}</div>}
-                <button
-                  className={page === item.key ? "nav-item active" : "nav-item"}
-                  aria-label={item.label}
-                  onClick={() => navigateTo(item.key)}
-                  title={item.label}
-                  type="button"
-                >
-                  <Icon size={19} />
-                  <span>
-                    <strong>{item.label}</strong>
-                    <small>{item.description}</small>
-                  </span>
-                </button>
-              </Fragment>
-            );
-          })}
-        </nav>
-
-        <button aria-label="操作手册" className={page === "manual" ? "nav-item manual-launch active" : "nav-item manual-launch"} onClick={() => navigateTo("manual")} title="操作手册" type="button"><BookOpen size={19} /><span><strong>操作手册</strong><small>API 与 Cookie 详细教程</small></span></button>
-
-        <div className="sidebar-footer">
-          <ShieldCheck size={18} />
-          <span>本地模式 · 仅监听 127.0.0.1</span>
-        </div>
-      </aside>
-
-      <main className="main-content">
-        <header className="topbar">
-          <div>
-            <span className="eyebrow">核心控制台</span>
-            <h1>{page === "overview" ? "运营总览" : page === "manual" ? "操作手册" : navItems.find((item) => item.key === page)?.label}</h1>
-          </div>
-          <div className="command-area">
-            <button className="command-trigger" type="button" onClick={() => setCommandOpen((open) => !open)} aria-expanded={commandOpen}>
-              <Search size={15} /><span>跳转账户、规则、任务…</span><kbd>Ctrl K</kbd>
-            </button>
-            {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)}><CommandPaletteItems query={commandQuery} selectedIndex={commandIndex} onQueryChange={setCommandQuery} onSelectedIndexChange={setCommandIndex} items={navItems.filter((item) => item.key !== "overview" && canAccessNavigationItem(item.key, auth.status.permissions))} onSelect={(item) => { navigateTo(item.key); setCommandOpen(false); }} /></CommandPalette>}
-          </div>
-          <span className={bootstrap.systemRuntime.enabled ? "runtime-chip active" : "runtime-chip paused"}>
-            <i />{bootstrap.systemRuntime.enabled ? "自动化运行中" : "自动化已暂停"}
-          </span>
-          <button
-            aria-label={bootstrap.systemRuntime.enabled ? "关闭全局自动化" : "开启全局自动化"}
-            className={bootstrap.systemRuntime.enabled ? "global-automation-toggle active" : "global-automation-toggle"}
-            disabled={runtimeBusy || !auth.status.permissions.includes("system:control")}
-            onClick={() => void toggleSystemRuntime()}
-            title={bootstrap.systemRuntime.enabled ? "关闭全局自动化" : "开启全局自动化"}
-            type="button"
-          >
-            <span className={bootstrap.systemRuntime.enabled ? "mini-switch checked" : "mini-switch"}><i /></span>
-            <span>全局自动化</span>
-          </button>
-          <button
-            aria-label={theme === "light" ? "切换到深色模式" : "切换到浅色模式"}
-            className="theme-toggle"
-            onClick={onThemeToggle}
-            title={theme === "light" ? "切换到深色模式" : "切换到浅色模式"}
-            type="button"
-          >
-            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
-            <span>{theme === "light" ? "深色" : "浅色"}</span>
-          </button>
-          <div className="topbar-user">
-            <span><strong>{auth.status.user?.displayName}</strong><small>{auth.status.user?.role}</small></span>
-            <button type="button" onClick={() => void auth.logout()}>退出</button>
-          </div>
-        </header>
-
-        {error && (
-          <div className="alert error-alert">
-            <AlertTriangle size={18} />
-            <span>{error}</span>
-            <button type="button" onClick={() => setError(null)}>
-              <X size={16} />
-            </button>
-          </div>
-        )}
-
-        {page === "overview" ? (
-          <>
-            <OverviewPage
-              accounts={bootstrap.accounts}
-              connectionStates={bootstrap.accountConnectionStates}
-              runtime={bootstrap.systemRuntime}
-              onNavigate={navigateTo}
-            >
-              <UsersPage
-                accounts={bootstrap.accounts}
-                initialConnectionStates={Object.fromEntries(
-                  bootstrap.accountConnectionStates.map((state) => [
-                    state.accountId,
-                    {
-                      connection: state.connection,
-                      readiness: null,
-                      latestSync: state.latestSync,
-                      capabilities: state.capabilities,
-                    },
-                  ]),
-                )}
-                onChanged={loadBootstrap}
-                onError={setError}
-              />
-            </OverviewPage>
-          </>
-        ) : page === "manual" ? (
-          <ManualPage />
-        ) : page === "system-users" ? (
-          <SystemUsersPage onError={setError} />
-        ) : page === "maintenance" ? (
-          <MaintenancePage accounts={bootstrap.accounts} onError={setError} />
-        ) : page === "meta-assets" ? (
-          <MetaAssetsPage
-            accounts={metaAccounts}
-            connectionStates={metaConnectionStates}
-            onConnectionsChanged={loadBootstrap}
-            onError={setError}
-            onOpenAccounts={() => {
-              navigateTo("overview");
-              window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0);
-            }}
-          />
-        ) : page === "meta-rules" ? (
-          <MetaRulesPage accounts={metaAccounts} onError={setError} />
-        ) : page === "rules" ? (
-          <RulesPage
-            settings={bootstrap.globalAutomationSettings}
-            onSettingsSaved={loadBootstrap}
-            onError={setError}
-          />
-        ) : page === "notifications" ? (
-          <NotificationsPage onError={setError} />
-        ) : page === "launch" ? (
-          <LaunchPage
-            accounts={operationalAccounts}
-            accountCapabilities={Object.fromEntries(
-              operationalConnectionStates.map((state) => [state.accountId, state.capabilities]),
-            )}
-            connectionStates={operationalConnectionStates}
-            preferredAccountId={pageAccountId}
-            onConnectionStatesChanged={loadBootstrap}
-            onManageConnection={(accountId) => {
-              selectAccount(accountId);
-              navigateTo("overview");
-              window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0);
-            }}
-            onError={setError}
-          />
-        ) : page === "ads" ? (
-          <AccountScopedPage accounts={operationalAccounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
-            {selectedAccountId === "all" ? (
-              <AllAccountsAdsView
-                accounts={operationalAccounts}
-                accountCapabilities={Object.fromEntries(
-                  operationalConnectionStates.map((state) => [state.accountId, state.capabilities]),
-                )}
-                onError={setError}
-              />
-            ) : account ? (
-              <AdsManagementPage
-                account={account}
-                capabilities={selectedCapabilities}
-                key={account.id}
-                pollingIntervalMinutes={bootstrap.globalAutomationSettings.pollingIntervalMinutes}
-                onError={setError}
-              />
-            ) : <EmptyState text="请选择一个账户。" />}
-          </AccountScopedPage>
-        ) : !account ? (
-          <EmptyState text="请选择一个账户。" />
-        ) : page === "automation" ? (
-          <section className="page-stack"><AccountScopedPage accounts={operationalAccounts} selectedId={pageAccountId} onSelect={selectAccount}>
-            <AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={operationalAccounts} connectionStates={operationalConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} />
-          </AccountScopedPage></section>
-        ) : page === "analytics" ? (
-          <>
-            <AccountScopedPage accounts={operationalAccounts} selectedId={analyticsScope} onSelect={setAnalyticsScope} allowAll>
-              {analyticsScope === "all" ? (
-                <AllAccountsAnalyticsView accounts={operationalAccounts} onError={setError} />
-              ) : (() => {
-                const scopedAccount = operationalAccounts.find((item) => item.id === analyticsScope);
-                const scopedState = operationalConnectionStates.find((state) => state.accountId === analyticsScope);
-                return scopedAccount
-                  ? <AnalyticsPage account={scopedAccount} connection={scopedState?.connection ?? null} latestSync={scopedState?.latestSync ?? null} onError={setError} />
-                  : <EmptyState text="请选择账户。" />;
-              })()}
-            </AccountScopedPage>
-          </>
-        ) : (
-          <EmptyState text="页面不存在。" />
-        )}
-      </main>
-    </div>
+        {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)}><CommandPaletteItems query={commandQuery} selectedIndex={commandIndex} onQueryChange={setCommandQuery} onSelectedIndexChange={setCommandIndex} items={visibleNavigation.filter((item) => item.key !== "overview")} onSelect={(item) => { navigateTo(item.key); setCommandOpen(false); }} /></CommandPalette>}
+      </div>
+      <button aria-label={theme === "light" ? "切换到深色模式" : "切换到浅色模式"} className="theme-toggle" onClick={onThemeToggle} title={theme === "light" ? "切换到深色模式" : "切换到浅色模式"} type="button">
+        {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}<span>{theme === "light" ? "深色" : "浅色"}</span>
+      </button>
+    </>
   );
+  const routeContent = page === "accounts" ? (
+    <UsersPage
+      production
+      runtimeEnabled={bootstrap.systemRuntime.enabled}
+      accounts={bootstrap.accounts}
+      initialConnectionStates={Object.fromEntries(bootstrap.accountConnectionStates.map((state) => [state.accountId, { ...state, readiness: null }]))}
+      onChanged={loadBootstrap}
+      onError={setError}
+    />
+  ) : page === "overview" ? (
+    <OverviewPage accounts={bootstrap.accounts} connectionStates={bootstrap.accountConnectionStates} runtime={bootstrap.systemRuntime} onNavigate={navigateTo}>
+      <UsersPage
+        production
+        runtimeEnabled={bootstrap.systemRuntime.enabled}
+        accounts={bootstrap.accounts}
+        initialConnectionStates={Object.fromEntries(bootstrap.accountConnectionStates.map((state) => [state.accountId, { connection: state.connection, readiness: null, latestSync: state.latestSync, capabilities: state.capabilities }]))}
+        onChanged={loadBootstrap}
+        onError={setError}
+      />
+    </OverviewPage>
+  ) : page === "manual" ? (
+    <ManualPage />
+  ) : page === "system-users" ? (
+    <SystemUsersPage onError={setError} />
+  ) : page === "maintenance" ? (
+    <MaintenancePage accounts={bootstrap.accounts} onError={setError} />
+  ) : page === "meta-assets" ? (
+    <MetaAssetsPage accounts={metaAccounts} connectionStates={metaConnectionStates} onConnectionsChanged={loadBootstrap} onError={setError} onOpenAccounts={() => { navigateTo("overview"); window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0); }} />
+  ) : page === "meta-rules" ? (
+    <MetaRulesPage accounts={metaAccounts} onError={setError} />
+  ) : page === "rules" ? (
+    <RulesPage settings={bootstrap.globalAutomationSettings} onSettingsSaved={loadBootstrap} onError={setError} />
+  ) : page === "notifications" ? (
+    <NotificationsPage onError={setError} />
+  ) : page === "launch" ? (
+    <LaunchPage accounts={operationalAccounts} accountCapabilities={Object.fromEntries(operationalConnectionStates.map((state) => [state.accountId, state.capabilities]))} connectionStates={operationalConnectionStates} preferredAccountId={pageAccountId} onConnectionStatesChanged={loadBootstrap} onManageConnection={(accountId) => { selectAccount(accountId); navigateTo("overview"); window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0); }} onError={setError} />
+  ) : page === "ads" ? (
+    <AccountScopedPage accounts={operationalAccounts} selectedId={selectedAccountId} onSelect={selectAccount} allowAll>
+      {selectedAccountId === "all" ? <AllAccountsAdsView accounts={operationalAccounts} accountCapabilities={Object.fromEntries(operationalConnectionStates.map((state) => [state.accountId, state.capabilities]))} onError={setError} /> : account ? <AdsManagementPage account={account} capabilities={selectedCapabilities} key={account.id} pollingIntervalMinutes={bootstrap.globalAutomationSettings.pollingIntervalMinutes} onError={setError} /> : <EmptyState text="请选择一个账户。" />}
+    </AccountScopedPage>
+  ) : !account ? (
+    <EmptyState text="请选择一个账户。" />
+  ) : page === "automation" ? (
+    <section className="page-stack"><AccountScopedPage accounts={operationalAccounts} selectedId={pageAccountId} onSelect={selectAccount}><AutomationPage account={account} connection={selectedConnection} capabilities={selectedCapabilities} maxActionsPerRun={bootstrap.globalAutomationSettings.maxActionsPerRun} overview={automationOverview} accounts={operationalAccounts} connectionStates={operationalConnectionStates.map((state) => ({ accountId: state.accountId, connection: state.connection }))} onError={setError} /></AccountScopedPage></section>
+  ) : page === "analytics" ? (
+    <AccountScopedPage accounts={operationalAccounts} selectedId={analyticsScope} onSelect={setAnalyticsScope} allowAll>{analyticsScope === "all" ? <AllAccountsAnalyticsView accounts={operationalAccounts} onError={setError} /> : (() => { const scopedAccount = operationalAccounts.find((item) => item.id === analyticsScope); const scopedState = operationalConnectionStates.find((state) => state.accountId === analyticsScope); return scopedAccount ? <AnalyticsPage account={scopedAccount} connection={scopedState?.connection ?? null} latestSync={scopedState?.latestSync ?? null} onError={setError} /> : <EmptyState text="请选择账户。" />; })()}</AccountScopedPage>
+  ) : (
+    <EmptyState text="页面不存在。" />
+  );
+
+  return <AccountShell navigation={visibleNavigation} onNavigate={(key) => navigateTo(key as PageKey)} runtimeEnabled={bootstrap.systemRuntime.enabled} runtimeBusy={runtimeBusy} canControl={auth.status.permissions.includes("system:control")} onToggleRuntime={() => void toggleSystemRuntime()} userName={auth.status.user?.displayName ?? "当前用户"} onLogout={() => void auth.logout()} error={error} onDismissError={() => setError(null)} activeKey={page} pageTitle={pageTitle} headerActions={headerActions}>{routeContent}</AccountShell>;
 }
 
 const defaultAccountInput: AccountCreateInput = {
@@ -875,11 +703,15 @@ function canEnableConfiguredAccountAutomation(
 }
 
 function UsersPage({
+  production = false,
+  runtimeEnabled = false,
   accounts,
   initialConnectionStates,
   onChanged,
   onError,
 }: {
+  production?: boolean;
+  runtimeEnabled?: boolean;
   accounts: AccountConfig[];
   initialConnectionStates: Record<
     string,
@@ -918,9 +750,10 @@ function UsersPage({
   }, [initialConnectionStates]);
 
   useEffect(() => {
+    if (production) return;
     const timer = window.setInterval(() => void onChanged(), 30_000);
     return () => window.clearInterval(timer);
-  }, [onChanged]);
+  }, [onChanged, production]);
 
   const openNew = () => {
     if (!canManageAccounts) return;
@@ -1022,6 +855,26 @@ function UsersPage({
     }
   };
 
+  const bulkAutomation = async (selected: AccountConfig[], enabled: boolean) => {
+    if (!canManageAccounts) return;
+    const eligible = selected.filter((account) => account.enabled !== enabled && (!enabled || canEnableConfiguredAccountAutomation(account, connectionStates[account.id])));
+    if (!eligible.length) return;
+    const skipped = selected.length - eligible.length;
+    if (!await confirm({ title: enabled ? "批量开启账户自动化" : "批量关闭账户自动化", message: `将${enabled ? "开启" : "关闭"} ${eligible.length} 个账户的自动化开关。${skipped ? `另有 ${skipped} 个账户因状态相同或能力未就绪而跳过。` : ""}${enabled ? "开启后由全局自动化状态与现有规则决定是否执行。" : "此操作不会直接关闭正在投放的广告。"}`, confirmLabel: "确认修改" })) return;
+    const failures: string[] = [];
+    let succeeded = 0;
+    setSaving(true);
+    try {
+      for (const account of eligible) {
+        try { await api.updateSettings(account.id, { ...settingsFromAccount(account), enabled }); succeeded++; }
+        catch (cause) { failures.push(`${account.displayName}：${getErrorMessage(cause)}`); }
+      }
+      await onChanged();
+      toast(`已更新 ${succeeded} 个账户${skipped ? `，跳过 ${skipped} 个` : ""}`, failures.length ? "error" : "success");
+      if (failures.length) onError(`${failures.length} 个账户修改失败：${failures.join("；")}`);
+    } finally { setSaving(false); }
+  };
+
   const renderAccountRows = (platform: PlatformKind) => {
     const platformAccounts = accounts.filter((account) => account.platform === platform);
     if (platformAccounts.length === 0) {
@@ -1089,6 +942,12 @@ function UsersPage({
 
   return (
     <section className="page-stack" id="account-management">
+      {production ? <AccountManagement
+        accounts={accounts} states={connectionStates} canManage={canManageAccounts} saving={saving} runtimeEnabled={runtimeEnabled}
+        canEnable={(account) => canEnableConfiguredAccountAutomation(account, connectionStates[account.id])}
+        onNew={openNew} onEdit={openEdit} onConnect={setConnecting} onDelete={deleteAccount} onToggle={toggleAccount}
+        onRefresh={onChanged} onBulk={bulkAutomation}
+      /> : <>
       <div className="panel table-panel">
         <div className="panel-heading">
           <div>
@@ -1107,13 +966,14 @@ function UsersPage({
           {renderPlatformAccountGroup("meta", "Meta Ads 账户", "Marketing API 接入与 Meta 独立自动化")}
         </div>
       </div>
+      </>}
 
       {showForm && (
         <div className="modal-backdrop" onMouseDown={() => setShowForm(false)}>
           <form className="modal" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void save(event)}>
             <div className="modal-heading">
               <div><span className="eyebrow">用户管理</span><h2>{editing ? "编辑广告账户" : "新增广告账户"}</h2></div>
-              <button type="button" onClick={() => setShowForm(false)}><X size={20} /></button>
+              <button aria-label="关闭账户编辑" type="button" onClick={() => setShowForm(false)}>{production ? <AccountCloseIcon size={20} /> : <X size={20} />}</button>
             </div>
             <div className="form-grid">
               <Field label="账户名称">
@@ -1158,7 +1018,7 @@ function UsersPage({
             </div>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
-              <button className="primary-button" disabled={saving} type="submit"><Save size={17} /> {saving ? "保存中…" : "保存账户"}</button>
+              <button className="primary-button" disabled={saving} type="submit">{production ? <AccountSaveIcon size={17} /> : <Save size={17} />} {saving ? "保存中…" : "保存账户"}</button>
             </div>
           </form>
         </div>
@@ -1169,7 +1029,7 @@ function UsersPage({
           <div className="modal connection-modal" onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-heading">
               <div><span className="eyebrow">广告账户接入</span><h2>{connecting.displayName}</h2></div>
-              <button type="button" onClick={() => { setConnecting(null); void onChanged(); }}><X size={20} /></button>
+              <button aria-label="关闭账户接入" type="button" onClick={() => { setConnecting(null); void onChanged(); }}>{production ? <AccountCloseIcon size={20} /> : <X size={20} />}</button>
             </div>
             <ConnectionPage account={connecting} onConnectionReady={() => enableAfterConnection(connecting)} onError={onError} />
           </div>
@@ -1512,12 +1372,19 @@ function AdsManagementPage({
 
   return (
     <section className="page-stack ads-page">
-      <div className="ads-metric-rail" aria-label="广告管理摘要">
-        <article><small>当前对象</small><strong>{filtered.length}</strong><span>{createdWindow === "recent" ? `创建于最近 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS} 小时` : "当前筛选对象"}</span></article>
-        <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong><span>{adsManagementSpendRangeLabel(spendRange)}</span></article>
-        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
+      {/*
+        指标带。原先每格都跟一行说明（「状态为已开启」「不参与自动化」
+        「当前筛选对象合计」），那些是下面筛选条件的复述，读一次就够，
+        却每天占掉一整行高度。只有消耗的时间口径必须留下——账户时区和本地
+        时区可能差好几个小时，那是消歧，不是解释。
+      */}
+      <div className="ads-metric-rail tk-metric-strip" aria-label="广告管理摘要">
+        <article><small>当前对象</small><strong>{filtered.length}</strong></article>
+        <article><small>投放中</small><strong>{enabledCount}</strong></article>
+        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong></article>
+        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong></article>
+        <article><small>转化</small><strong>{formatMetric(currentConversions)}</strong></article>
+        <span className="tk-strip-note">{adsManagementSpendRangeLabel(spendRange)}{createdWindow === "recent" ? ` · 建于 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS}h 内` : ""}</span>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1566,9 +1433,9 @@ function AdsManagementPage({
             {latestEntitySyncAt ? ` · 最近同步 ${new Date(latestEntitySyncAt).toLocaleTimeString()}` : ""}
           </small>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th>消耗</th><th>CPA</th><th>点击量</th><th>加购</th><th>转化</th><th>CPC</th><th>自动化</th><th>操作</th></tr></thead>
+        <div className="tk-tablewrap tk-scroll-y">
+          <table className="tk-table">
+            <thead><tr><th>对象</th><th>层级</th><th>状态</th><th className="tk-num">消耗</th><th className="tk-num">CPA</th><th className="tk-num">点击量</th><th className="tk-num">加购</th><th className="tk-num">转化</th><th className="tk-num">CPC</th><th>自动化</th><th className="tk-sticky-end">操作</th></tr></thead>
             <tbody>
               {filtered.length === 0 ? <tr><td colSpan={11}>{entities.length === 0 ? "暂无广告数据，请先完成账户接入或等待首次同步。" : "当前筛选条件下没有对象，试试调整状态、层级或搜索条件。"}</td></tr> : pagedEntities.map((entity) => {
                 const key = `${entity.entityType}:${entity.externalId}`;
@@ -1576,17 +1443,17 @@ function AdsManagementPage({
                 const breach = metricBreaches(entity.metrics, ruleValues);
                 return (
                   <tr key={key}>
-                    <td><strong>{entity.name}</strong><br /><small>{entity.externalId}</small></td>
-                    <td>{entityTypeLabel(entity.entityType)}</td>
+                    <td className="tk-name"><b><span className="tk-tail">{entity.name}</span></b><small>{entity.externalId}</small></td>
+                    <td className="tk-muted">{entityTypeLabel(entity.entityType)}</td>
                     <td><span className={entity.status === "enabled" ? "status active" : "status"}>{operationalStatusLabel(entity.status)}</span></td>
-                    <td className={breach.spend ? "metric-breach" : undefined}>{formatMetric(entity.metrics.spend)}</td>
-                    <td className={breach.cpa ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
-                    <td>{formatMetric(entity.metrics.clicks)}</td>
-                    <td className={breach.carts ? "metric-breach" : undefined}>{formatMetric(entity.metrics.carts)}</td>
-                    <td>{formatMetric(entity.metrics.conversions)}</td>
-                    <td className={breach.cpc ? "metric-breach" : undefined}>{formatMetric(entity.metrics.cost_per_click)}</td>
+                    <td className={metricCellClass(entity.metrics.spend, breach.spend)}>{formatMetric(entity.metrics.spend)}</td>
+                    <td className={metricCellClass(entity.metrics.cost_per_conversion, breach.cpa)}>{formatMetric(entity.metrics.cost_per_conversion)}</td>
+                    <td className={metricCellClass(entity.metrics.clicks, false)}>{formatMetric(entity.metrics.clicks)}</td>
+                    <td className={metricCellClass(entity.metrics.carts, breach.carts)}>{formatMetric(entity.metrics.carts)}</td>
+                    <td className={metricCellClass(entity.metrics.conversions, false)}>{formatMetric(entity.metrics.conversions)}</td>
+                    <td className={metricCellClass(entity.metrics.cost_per_click, breach.cpc)}>{formatMetric(entity.metrics.cost_per_click)}</td>
                     <td>{renderAdsManagementParticipation(participationByKey.get(`${entity.entityType}:${entity.externalId}`) ?? "participating")}</td>
-                    <td><div className="row-actions">
+                    <td className="tk-sticky-end"><div className="row-actions">
                       {canChangeStatus && entity.status !== "unknown" && <button disabled={statusPending || !canOperateAds} title={!canOperateAds ? "需要 ads:operate 权限" : undefined} onClick={() => setStatusConfirming(entity)} type="button">{statusPending ? "处理中…" : entity.status === "disabled" ? "开启" : "关闭"}</button>}
                       {entity.status === "unknown" && <small className="inline-protection-note">状态待确认</small>}
                       {entity.entityType === "ad-group" && <button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void toggleManualTakeover(entity)} type="button"><Ban size={14} /> {entity.ignored ? "恢复自动化" : "人工接管"}</button>}
@@ -1605,14 +1472,14 @@ function AdsManagementPage({
         <div className="panel-heading">
           <div><span className="panel-icon"><UserRound size={18} /></span><div><h2>人工接管广告组 <em className="heading-count">{manualTakeovers.length}</em></h2></div></div>
         </div>
-        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th>操作</th></tr></thead><tbody>
-          {manualTakeovers.length === 0 ? <tr><td colSpan={4}>暂无人工接管的广告组。</td></tr> : manualTakeovers.map((takeover) => <tr key={`${takeover.entityType}:${takeover.externalId}`}><td>{entityNameByKey.get(`${takeover.entityType}:${takeover.externalId}`) ?? takeover.externalId}<br /><small>{takeover.externalId}</small></td><td>{takeover.reason}</td><td>{new Date(takeover.createdAt).toLocaleString()}</td><td><button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void restoreManualTakeover(takeover)} type="button">恢复自动化</button></td></tr>)}
+        <div className="tk-tablewrap tk-scroll-sm"><table className="tk-table"><thead><tr><th>广告组</th><th>接管原因</th><th>接管时间</th><th className="tk-sticky-end">操作</th></tr></thead><tbody>
+          {manualTakeovers.length === 0 ? <tr><td className="tk-empty-cell" colSpan={4}>暂无人工接管的广告组。</td></tr> : manualTakeovers.map((takeover) => <tr key={`${takeover.entityType}:${takeover.externalId}`}><td className="tk-name"><b><span className="tk-tail">{entityNameByKey.get(`${takeover.entityType}:${takeover.externalId}`) ?? takeover.externalId}</span></b><small>{takeover.externalId}</small></td><td>{takeover.reason}</td><td className="tk-muted">{new Date(takeover.createdAt).toLocaleString()}</td><td className="tk-sticky-end"><button disabled={busy !== null || !canOperateAds} title={canOperateAds ? undefined : "需要 ads:operate 权限"} onClick={() => void restoreManualTakeover(takeover)} type="button">恢复自动化</button></td></tr>)}
         </tbody></table></div>
       </div>
 
       <div className="panel table-panel" id="schedule-section">
         <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2><p>总开关关闭时不执行；已取消和已完成任务不计入计数。</p></div></div></div>
-        <div className="table-wrap"><table><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td>{schedule.entityName}<br /><small>{schedule.externalId}</small></td><td>{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td>{new Date(schedule.nextRunAt).toLocaleString()}</td><td>{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td>{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
+        <div className="tk-tablewrap tk-scroll-sm"><table className="tk-table"><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th className="tk-sticky-end">操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td className="tk-empty-cell" colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td className="tk-name"><b><span className="tk-tail">{schedule.entityName}</span></b><small>{schedule.externalId}</small></td><td className="tk-muted">{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td className="tk-muted">{new Date(schedule.nextRunAt).toLocaleString()}</td><td className="tk-muted">{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td className="tk-sticky-end">{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
 
       <details className="panel table-panel collapsible-panel">
@@ -1830,12 +1697,13 @@ function AllAccountsAdsView({
 
   return (
     <section className="page-stack all-accounts-ads-page">
-      <div className="ads-metric-rail" aria-label="全部账户广告组摘要">
-        <article><small>当前对象</small><strong>{rows.length}</strong><span>当前筛选对象</span></article>
-        <article><small>投放中</small><strong>{enabledCount}</strong><span>状态为已开启</span></article>
-        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong><span>所有账户 · {adsManagementSpendRangeLabel(spendRange)}</span></article>
-        <article><small>人工接管</small><strong>{ignoredCount}</strong><span>不参与自动化</span></article>
-        <article><small>转化数量</small><strong>{formatMetric(currentConversions)}</strong><span>当前筛选对象合计</span></article>
+      <div className="ads-metric-rail tk-metric-strip" aria-label="全部账户广告组摘要">
+        <article><small>当前对象</small><strong>{rows.length}</strong></article>
+        <article><small>投放中</small><strong>{enabledCount}</strong></article>
+        <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong></article>
+        <article><small>人工接管</small><strong>{ignoredCount}</strong></article>
+        <article><small>转化</small><strong>{formatMetric(currentConversions)}</strong></article>
+        <span className="tk-strip-note">所有账户 · {adsManagementSpendRangeLabel(spendRange)}</span>
       </div>
       <div className="panel table-panel">
         <div className="panel-heading">
@@ -2606,6 +2474,18 @@ function formatMetric(value: number | null): string {
   return value === null || !Number.isFinite(value)
     ? "—"
     : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+}
+
+/**
+ * 指标单元格的类名。
+ *
+ * 大多数账户里绝大部分行的指标都是 0（当天还没跑出量），它们和真实数字一样黑，
+ * 扫一列时满屏的 0 在抢注意力。这里把 0 压暗，让有数据的行自己跳出来。
+ * 超阈值优先于压暗：命中规则的值必须显眼，哪怕它是 0。
+ */
+export function metricCellClass(value: number | null, breached: boolean): string {
+  if (breached) return "tk-num metric-breach";
+  return value === 0 ? "tk-num tk-zero" : "tk-num";
 }
 
 function localDateTimeInputValue(value: Date): string {

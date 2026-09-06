@@ -1,16 +1,16 @@
 import {
-  Activity,
-  CheckCircle2,
-  KeyRound,
-  Link2,
-  LockKeyhole,
+  Pulse as Activity,
+  CheckCircle as CheckCircle2,
+  Key as KeyRound,
+  Link as Link2,
+  LockKey as LockKeyhole,
   Plus,
-  RefreshCcw,
-  Save,
-  Search,
+  ArrowClockwise as RefreshCcw,
+  FloppyDisk as Save,
+  MagnifyingGlass as Search,
   ShieldCheck,
-  Trash2,
-} from "lucide-react";
+  Trash as Trash2,
+} from "@phosphor-icons/react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AccountConfig,

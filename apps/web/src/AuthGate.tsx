@@ -7,7 +7,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import { Activity, KeyRound, LogIn, ShieldCheck } from "lucide-react";
+import { Activity, KeyRound, LogIn, ShieldCheck } from "./ui/icons";
 import type { AuthStatus } from "@tk-auto/core";
 import { api, onUnauthorized } from "./api";
 
