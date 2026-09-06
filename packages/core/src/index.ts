@@ -31,3 +31,5 @@ export * from "./maintenance.js";
 
 export * from "./copy-naming.js";
 export * from "./campaign-copy-plan.js";
+export * from "./lineage.js";
+export * from "./expand-sheet.js";

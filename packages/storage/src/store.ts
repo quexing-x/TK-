@@ -5024,6 +5024,65 @@ export class AutomationStore {
     return rows.map(mapLaunchPlanItem);
   }
 
+  /**
+   * 这个账户历史上用批量创建表建过的行，新到旧。
+   *
+   * 用途只有一个：给「生成扩组导入表」沿用落地页和定向。快照里没有这三个字段
+   * （`ManagedEntitySnapshot` 只有名称、状态、预算和指标），而人上一次给这个品填的值
+   * 就在这里，比去 TikTok 上现读一次源组要快得多，也更贴近他本来的意图。
+   *
+   * 只取成功建出来的行：失败的那次填的值多半就是失败的原因（URL 写错之类）。
+   */
+  listSucceededLaunchRows(
+    accountId: string,
+    limit = 500,
+  ): Array<{
+    campaignName: string;
+    adGroupName: string;
+    productUrl: string;
+    ageRanges: string[] | null;
+    gender: string | null;
+    createdAt: string;
+  }> {
+    const rows = this.db.prepare(
+      `SELECT launch_row_json, created_at FROM launch_plan_items
+        WHERE account_id = ? AND status = 'succeeded'
+        ORDER BY created_at DESC
+        LIMIT ?`,
+    ).all(accountId, Math.max(1, Math.min(2000, limit))) as SqlRow[];
+    const parsed: Array<{
+      campaignName: string;
+      adGroupName: string;
+      productUrl: string;
+      ageRanges: string[] | null;
+      gender: string | null;
+      createdAt: string;
+    }> = [];
+    for (const row of rows) {
+      let launchRow: Record<string, unknown>;
+      try {
+        launchRow = JSON.parse(String(row.launch_row_json)) as Record<string, unknown>;
+      } catch {
+        // 单条脏 JSON 不该让整份沿用数据取不出来。
+        continue;
+      }
+      const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+      const adGroupName = text(launchRow.adGroupName);
+      if (!adGroupName) continue;
+      parsed.push({
+        campaignName: text(launchRow.campaignName),
+        adGroupName,
+        productUrl: text(launchRow.productUrl),
+        ageRanges: Array.isArray(launchRow.ageRanges)
+          ? launchRow.ageRanges.map(String)
+          : null,
+        gender: typeof launchRow.gender === "string" ? launchRow.gender : null,
+        createdAt: String(row.created_at),
+      });
+    }
+    return parsed;
+  }
+
   getLaunchPlanItem(itemId: string): LaunchPlanItemRecord {
     const row = this.db.prepare(
       "SELECT * FROM launch_plan_items WHERE item_id = ?",

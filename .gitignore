@@ -11,6 +11,8 @@ apps/desktop/release*/
 data/*.db
 data/*.db-*
 data/*.bak
+# 开发模式的 MCP 接入点：里面是一张真实会话令牌，绝不能进仓库。
+data/mcp-endpoint.json
 data/logs/
 data/performance/
 data/performance-smoke*/

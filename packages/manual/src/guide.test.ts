@@ -3,7 +3,7 @@ import { userGuide } from "./index.js";
 
 describe("user guide", () => {
   it("contains both provider tutorials and the update policy", () => {
-    expect(userGuide.version).toBe("1.4.43");
+    expect(userGuide.version).toBe("1.4.101");
     const ids = userGuide.sections.map((section) => section.id);
     expect(ids).toContain("cookie-provider");
     expect(ids).toContain("official-api-provider");
@@ -11,7 +11,14 @@ describe("user guide", () => {
     expect(ids).toContain("ad-management");
     expect(ids).toContain("analytics");
     expect(ids).toContain("notifications");
+    expect(ids).toContain("agent-mcp");
     expect(ids).toContain("development-policy");
+
+    const mcpGuide = userGuide.sections.find((section) => section.id === "agent-mcp");
+    expect(mcpGuide?.steps.join(" ")).toContain("mcp-endpoint.json");
+    expect(mcpGuide?.steps.join(" ")).toContain("ELECTRON_RUN_AS_NODE");
+    // 令牌等同于一个能操作广告账户的登录态，「不要外发」这句必须在手册里说死。
+    expect(mcpGuide?.notes.join(" ")).toContain("不要发到群里");
 
     const notificationGuide = userGuide.sections.find(
       (section) => section.id === "notifications",

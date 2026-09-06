@@ -305,6 +305,98 @@ describe("local authentication and authorization", () => {
     expect(blocked.json().error).toBe("PERMISSION_DENIED");
   });
 
+  describe("Bearer 令牌（本机 MCP 用）", () => {
+    it("认同一张会话表里的令牌，不需要 Cookie 罐", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/auth/setup",
+        payload: { username: "developer", displayName: "本机开发者", password: developerPassword },
+      });
+      const token = tokenFrom(response);
+
+      const authorized = await app.inject({
+        method: "GET",
+        url: "/api/bootstrap",
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(authorized.statusCode).toBe(200);
+    });
+
+    it("写操作照旧要 CSRF——换个搬运方式不等于放松校验", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/auth/setup",
+        payload: { username: "developer", displayName: "本机开发者", password: developerPassword },
+      });
+      const token = tokenFrom(response);
+      const csrf = response.json().csrfToken as string;
+
+      const withoutCsrf = await app.inject({
+        method: "POST",
+        url: "/api/accounts/demo-account/expand-sheet/plan",
+        headers: { authorization: `Bearer ${token}` },
+        payload: { sourceAdGroupIds: ["g1"], countPerSource: 1 },
+      });
+      expect(withoutCsrf.statusCode).toBe(403);
+      expect(withoutCsrf.json().error).toBe("CSRF_INVALID");
+
+      const withCsrf = await app.inject({
+        method: "POST",
+        url: "/api/accounts/demo-account/expand-sheet/plan",
+        headers: { authorization: `Bearer ${token}`, "x-csrf-token": csrf },
+        payload: { sourceAdGroupIds: ["g1"], countPerSource: 1 },
+      });
+      expect(withCsrf.statusCode).toBe(200);
+    });
+
+    it("伪造的令牌一律当未登录", async () => {
+      await setupDeveloper(app);
+
+      const forged = await app.inject({
+        method: "GET",
+        url: "/api/bootstrap",
+        headers: { authorization: "Bearer 随便编一个" },
+      });
+
+      expect(forged.statusCode).toBe(401);
+    });
+
+    it("只读身份拿到的令牌照样越不了权", async () => {
+      // 权限、审计、CSRF 全部沿用同一套判定，Bearer 只是换了个搬运方式。
+      const developer = await setupDeveloper(app);
+      await app.inject({
+        method: "POST",
+        url: "/api/local-users",
+        headers: developer.headers,
+        payload: {
+          username: "mcp-viewer",
+          displayName: "只读 MCP",
+          role: "viewer",
+          password: viewerPassword,
+        },
+      });
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        payload: { username: "mcp-viewer", password: viewerPassword },
+      });
+
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/api/accounts/demo-account/expand-sheet/plan",
+        headers: {
+          authorization: `Bearer ${tokenFrom(login)}`,
+          "x-csrf-token": login.json().csrfToken as string,
+        },
+        payload: { sourceAdGroupIds: ["g1"], countPerSource: 1 },
+      });
+
+      expect(blocked.statusCode).toBe(403);
+      expect(blocked.json().error).toBe("PERMISSION_DENIED");
+    });
+  });
+
   it("maps every maintenance read or mutation to system control", () => {
     expect(requiredPermission("GET", "/api/maintenance/status")).toBe("system:control");
     expect(requiredPermission("GET", "/api/maintenance/audit")).toBe("system:control");
@@ -332,6 +424,12 @@ async function setupDeveloper(app: FastifyInstance): Promise<{
     cookie,
     headers: { cookie, "x-csrf-token": csrf },
   };
+}
+
+/** 从 Set-Cookie 里取出会话令牌本身，用来模拟 MCP 的 Bearer 请求。 */
+function tokenFrom(response: { headers: Record<string, unknown> }): string {
+  const pair = cookieFrom(response);
+  return decodeURIComponent(pair.slice(pair.indexOf("=") + 1));
 }
 
 function cookieFrom(response: { headers: Record<string, unknown> }): string {
