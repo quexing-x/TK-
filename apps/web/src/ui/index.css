@@ -17,3 +17,5 @@
 @import "./pages/notifications-manual.css";
 @import "./pages/system-maintenance.css";
 @import "./overlays.css";
+/* Final shared Product UI bridge for every formal route. */
+@import "./production/production.css";

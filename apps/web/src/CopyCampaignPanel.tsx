@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, History, RefreshCcw } from "lucide-react";
+import { Copy, History, RefreshCcw } from "./ui/icons";
 import { deriveCampaignBudgetModes, planCampaignCopy, type ManagedEntityRecord } from "@tk-auto/core";
 import { api } from "./api";
 import type { CampaignCopyHistoryRecord } from "@tk-auto/core";

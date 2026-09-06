@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, ArchiveRestore, DatabaseBackup, FileClock, RefreshCw, ShieldCheck } from "lucide-react";
+import { Activity, ArchiveRestore, DatabaseBackup, FileClock, RefreshCw, ShieldCheck } from "./ui/icons";
 import { CleanupCandidatesPanel } from "./CleanupCandidatesPanel";
 import type {
   AccountConfig,

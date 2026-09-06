@@ -1,0 +1,28 @@
+.production-ui {
+  color-scheme: light;
+  --p-canvas: #eef2f5; --p-surface: #fff; --p-subtle: #f7f9fb; --p-strong: #e8edf2;
+  --p-ink: #17202a; --p-soft: #344255; --p-muted: #5f6f80;
+  --p-line: #d9e1e8; --p-line-strong: #bdcad6;
+  --p-blue: #2856d8; --p-blue-hover: #1e43b6; --p-blue-tint: #e9efff;
+  --p-green: #168a57; --p-green-tint: #e7f6ee; --p-amber: #a86400; --p-amber-tint: #fff3df; --p-red: #b93630; --p-red-tint: #fdebea;
+  --p-sidebar: #111827; --p-sidebar-ink: #c0ccda; --p-sidebar-muted: #8b9aae; --p-sidebar-active: #243b78;
+  --p-shadow-sm: 0 2px 8px rgb(23 32 42 / 5%); --p-shadow-md: 0 14px 34px rgb(23 32 42 / 14%);
+  --p-radius-panel: 10px; --p-radius-control: 6px; --p-radius-badge: 4px;
+  --p-space-1: 4px; --p-space-2: 8px; --p-space-3: 12px; --p-space-4: 16px; --p-space-5: 20px; --p-space-6: 24px; --p-space-8: 32px;
+  --p-text-page: 28px; --p-text-section: 16px; --p-text-body: 13px; --p-text-table: 12px; --p-text-secondary: 11px;
+  --p-font: "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  --p-mono: Consolas, "SFMono-Regular", monospace;
+  color: var(--p-ink); font: var(--p-text-body)/1.5 var(--p-font);
+}
+
+/* Legacy page selectors resolve through the same frozen Product tokens. */
+.production-ui {
+  --canvas: var(--p-canvas); --surface: var(--p-surface); --surface-raised: var(--p-surface);
+  --surface-active: var(--p-blue-tint); --surface-muted: var(--p-subtle);
+  --ink: var(--p-ink); --ink-soft: var(--p-soft); --ink-faint: var(--p-muted); --ink-muted: var(--p-muted);
+  --line: var(--p-line); --line-strong: var(--p-line-strong);
+  --primary: var(--p-blue); --primary-hover: var(--p-blue-hover); --primary-tint: var(--p-blue-tint);
+  --success: var(--p-green); --success-tint: var(--p-green-tint); --amber: var(--p-amber); --amber-tint: var(--p-amber-tint);
+  --danger: var(--p-red); --danger-tint: var(--p-red-tint); --border: var(--p-line);
+  --ambient-shadow: var(--p-shadow-sm); --ambient-shadow-hover: var(--p-shadow-sm);
+}

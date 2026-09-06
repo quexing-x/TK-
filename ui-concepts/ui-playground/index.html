@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-version="1.1">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="TK Automation 组件设计系统 Playground">
+  <title>TK Automation · UI Playground</title>
+  <link rel="stylesheet" href="./vendor/phosphor/regular.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar" aria-label="产品导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">TK</div>
+        <div>
+          <strong>TK Automation</strong>
+          <small>UI Playground</small>
+        </div>
+      </div>
+
+      <div class="nav-label">工作区</div>
+      <nav class="nav-list" aria-label="工作区导航">
+        <button class="nav-item active" type="button" aria-current="page">
+          <i class="ph ph-squares-four" aria-hidden="true"></i>
+          <span>工作台</span>
+        </button>
+        <button class="nav-item" type="button">
+          <i class="ph ph-users-three" aria-hidden="true"></i>
+          <span>账户</span>
+        </button>
+        <button class="nav-item" type="button">
+          <i class="ph ph-megaphone" aria-hidden="true"></i>
+          <span>广告</span>
+        </button>
+        <button class="nav-item" type="button">
+          <i class="ph ph-flow-arrow" aria-hidden="true"></i>
+          <span>自动化</span>
+        </button>
+      </nav>
+
+      <div class="nav-label">系统</div>
+      <nav class="nav-list" aria-label="系统导航">
+        <button class="nav-item" type="button">
+          <i class="ph ph-sliders-horizontal" aria-hidden="true"></i>
+          <span>规则配置</span>
+        </button>
+        <button class="nav-item" type="button">
+          <i class="ph ph-bell" aria-hidden="true"></i>
+          <span>消息推送</span>
+        </button>
+        <button class="nav-item" type="button">
+          <i class="ph ph-gear-six" aria-hidden="true"></i>
+          <span>运维中心</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span>
+          <i class="ph ph-shield-check" aria-hidden="true"></i>
+          <span>组件状态仅用于校准</span>
+        </span>
+      </div>
+    </aside>
+
+    <main class="main" id="main-content" aria-labelledby="page-title">
+      <header class="topbar">
+        <div>
+          <span class="eyebrow">TK AUTOMATION / UI PLAYGROUND</span>
+          <h1 id="page-title">UI Playground</h1>
+          <p>先把组件做对，再进入业务页面。</p>
+        </div>
+        <div class="top-actions">
+          <button class="btn" id="themeToggle" type="button" aria-pressed="false" aria-label="切换主题">
+            <i class="ph ph-moon" data-theme-icon aria-hidden="true"></i>
+            <span>深色模式</span>
+          </button>
+          <button class="btn primary" type="button" id="saveSpec">
+            <i class="ph ph-check" aria-hidden="true"></i>
+            <span>保存规范</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="design-read" role="note">
+        <strong>设计基线</strong>
+        <span>现代桌面产品，冷静、精确、专业，面向高频运营操作。</span>
+        <code>radius: 10 / 6 / 4</code>
+      </div>
+
+      <nav class="playground-index" aria-label="组件索引">
+        <a class="index-link" href="#buttons">按钮</a>
+        <a class="index-link" href="#forms">表单</a>
+        <a class="index-link" href="#badges">状态</a>
+        <a class="index-link" href="#tabs">标签页</a>
+        <a class="index-link" href="#table">表格</a>
+        <a class="index-link" href="#feedback">反馈状态</a>
+        <a class="index-link" href="#rail">状态轨道</a>
+        <a class="index-link" href="#overlays">浮层</a>
+      </nav>
+
+      <section class="specimen-section" id="buttons" aria-labelledby="buttons-title">
+        <div class="section-heading">
+          <h2 id="buttons-title">按钮</h2>
+          <small>Button · Primary / Secondary / Danger / Disabled</small>
+        </div>
+        <div class="sample demo-row">
+          <button class="btn primary" type="button" id="primaryDemo">
+            <i class="ph ph-play" aria-hidden="true"></i>
+            <span>开始执行</span>
+          </button>
+          <button class="btn secondary" type="button" id="secondaryDemo">
+            <i class="ph ph-floppy-disk" aria-hidden="true"></i>
+            <span>保存草稿</span>
+          </button>
+          <button class="btn danger" type="button" id="dangerDemo">
+            <i class="ph ph-trash" aria-hidden="true"></i>
+            <span>删除任务</span>
+          </button>
+          <button class="btn" type="button" disabled>
+            <i class="ph ph-circle-notch" aria-hidden="true"></i>
+            <span>暂不可用</span>
+          </button>
+          <button class="btn icon-only" type="button" id="refreshDemo" aria-label="刷新数据" title="刷新数据">
+            <i class="ph ph-arrows-clockwise" aria-hidden="true"></i>
+          </button>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="forms" aria-labelledby="forms-title">
+        <div class="section-heading">
+          <h2 id="forms-title">表单控件</h2>
+          <small>Input · Select · Search · Checkbox · Dropdown</small>
+        </div>
+        <div class="sample-grid">
+          <div class="sample demo-stack">
+            <div class="field">
+              <label for="accountInput">账户名称</label>
+              <input class="control" id="accountInput" type="text" placeholder="例如：SG-11-湖哆">
+            </div>
+            <div class="field">
+              <label for="platformSelect">账户范围</label>
+              <select class="control" id="platformSelect">
+                <option>TikTok Ads</option>
+                <option>全部账户</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="sample demo-stack">
+            <div class="field">
+              <label for="searchInput">搜索广告</label>
+              <div class="search-wrap">
+                <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
+                <input class="control" id="searchInput" type="search" placeholder="搜索账户、广告组或 ID">
+              </div>
+            </div>
+            <label class="check-line" for="runningOnly">
+              <input id="runningOnly" type="checkbox" checked>
+              <span>仅显示运行中</span>
+            </label>
+          </div>
+
+          <div class="sample">
+            <p class="sample-title">下拉菜单 Dropdown</p>
+            <div class="dropdown" id="statusDropdown">
+              <button class="btn dropdown-trigger" id="dropdownTrigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="dropdownMenu">
+                <span>状态：全部</span>
+                <i class="ph ph-caret-down" aria-hidden="true"></i>
+              </button>
+              <div class="dropdown-menu" id="dropdownMenu" role="listbox" aria-label="广告状态" hidden>
+                <button type="button" role="option" id="option-all" aria-selected="true" data-value="全部" data-label="状态：全部">
+                  <span>状态：全部</span>
+                  <span class="option-check" aria-hidden="true"><i class="ph ph-check"></i></span>
+                </button>
+                <button type="button" role="option" id="option-running" aria-selected="false" data-value="投放中" data-label="状态：投放中">
+                  <span>状态：投放中</span>
+                  <span class="option-check" aria-hidden="true"></span>
+                </button>
+                <button type="button" role="option" id="option-paused" aria-selected="false" data-value="已暂停" data-label="状态：已暂停">
+                  <span>状态：已暂停</span>
+                  <span class="option-check" aria-hidden="true"></span>
+                </button>
+                <button type="button" role="option" id="option-error" aria-selected="false" data-value="异常" data-label="状态：异常">
+                  <span>状态：异常</span>
+                  <span class="option-check" aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+            <p class="help dropdown-help">支持上下键选择，回车确认，Esc 关闭。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="badges" aria-labelledby="badges-title">
+        <div class="section-heading">
+          <h2 id="badges-title">状态标签</h2>
+          <small>Status Badge · 语义颜色不只代表成功</small>
+        </div>
+        <div class="sample demo-row">
+          <span class="badge ok">正常</span>
+          <span class="badge ok pulse">运行中</span>
+          <span class="badge info">排队中</span>
+          <span class="badge warn">需要确认</span>
+          <span class="badge bad">异常</span>
+          <span class="badge warn">部分成功</span>
+          <span class="badge neutral">已跳过</span>
+          <span class="badge neutral">已暂停</span>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="tabs" aria-labelledby="tabs-title">
+        <div class="section-heading">
+          <h2 id="tabs-title">标签页与筛选栏</h2>
+          <small>Tabs · Filter Bar</small>
+        </div>
+        <div class="sample">
+          <div class="tabs" role="tablist" aria-label="广告状态筛选">
+            <button class="tab" id="tab-all" type="button" role="tab" aria-selected="true" aria-controls="tab-panel" tabindex="0">全部广告</button>
+            <button class="tab" id="tab-running" type="button" role="tab" aria-selected="false" aria-controls="tab-panel" tabindex="-1">投放中</button>
+            <button class="tab" id="tab-paused" type="button" role="tab" aria-selected="false" aria-controls="tab-panel" tabindex="-1">已暂停</button>
+            <button class="tab" id="tab-error" type="button" role="tab" aria-selected="false" aria-controls="tab-panel" tabindex="-1">异常</button>
+          </div>
+          <div class="tab-panel" id="tab-panel" role="tabpanel" aria-labelledby="tab-all" tabindex="0">当前显示全部广告，状态变化会在这里实时反馈。</div>
+          <div class="filter-bar">
+            <div class="field">
+              <label for="filterAccount">账户</label>
+              <input class="control" id="filterAccount" placeholder="搜索账户">
+            </div>
+            <div class="field">
+              <label for="filterStatus">状态</label>
+              <select class="control" id="filterStatus">
+                <option>全部状态</option>
+                <option>投放中</option>
+                <option>异常</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterDate">时间范围</label>
+              <select class="control" id="filterDate">
+                <option>过去 7 天</option>
+                <option>今天</option>
+                <option>过去 30 天</option>
+              </select>
+            </div>
+            <button class="btn primary" id="applyFilter" type="button">
+              <i class="ph ph-funnel" aria-hidden="true"></i>
+              <span>应用筛选</span>
+            </button>
+            <button class="btn secondary" id="resetFilter" type="button"><span>重置</span></button>
+          </div>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="table" aria-labelledby="table-title">
+        <div class="section-heading">
+          <h2 id="table-title">数据表格与分页</h2>
+          <small>Table · Selection Action Bar · Pagination</small>
+        </div>
+        <div class="sample table-workspace">
+          <div class="table-shell">
+            <div class="selection-bar" id="selectionBar" role="status" aria-live="polite" hidden>
+              <strong id="selectionCount">已选择 0 项</strong>
+              <span class="spacer"></span>
+              <button class="btn secondary" type="button" id="bulkPause">
+                <i class="ph ph-pause" aria-hidden="true"></i>
+                <span>暂停</span>
+              </button>
+              <button class="btn secondary" type="button" id="bulkExport">
+                <i class="ph ph-download-simple" aria-hidden="true"></i>
+                <span>导出</span>
+              </button>
+            </div>
+            <table class="table" id="accountTable">
+              <caption>TikTok 账户状态示例</caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="check-cell"><input class="table-check" id="selectAll" type="checkbox" aria-label="选择全部账户"></th>
+                  <th scope="col">账户</th>
+                  <th scope="col">状态</th>
+                  <th scope="col" class="num">今日消耗</th>
+                  <th scope="col" class="num">ROAS</th>
+                  <th scope="col" class="action-cell">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr aria-selected="false">
+                  <td class="check-cell"><input class="table-check row-check" type="checkbox" aria-label="选择双科 SG 11"></td>
+                  <td><strong>双科-TTN-SG-11</strong><div class="muted">最近同步 4 分钟前</div></td>
+                  <td><span class="badge ok">正常</span></td>
+                  <td class="num">¥24,560.80</td>
+                  <td class="num">3.21</td>
+                  <td class="action-cell"><button class="btn secondary" type="button" data-drawer><i class="ph ph-sidebar-simple" aria-hidden="true"></i><span>查看</span></button></td>
+                </tr>
+                <tr aria-selected="false">
+                  <td class="check-cell"><input class="table-check row-check" type="checkbox" aria-label="选择双科 SG 08"></td>
+                  <td><strong>双科-TTN-SG-08</strong><div class="muted">最近同步 12 分钟前</div></td>
+                  <td><span class="badge warn">预算不足</span></td>
+                  <td class="num">¥8,426.00</td>
+                  <td class="num">1.48</td>
+                  <td class="action-cell"><button class="btn secondary" type="button" data-drawer><span>处理</span></button></td>
+                </tr>
+                <tr aria-selected="false">
+                  <td class="check-cell"><input class="table-check row-check" type="checkbox" aria-label="选择双科 SG 15"></td>
+                  <td><strong>双科-TTN-SG-15</strong><div class="muted">最近同步 19 分钟前</div></td>
+                  <td><span class="badge bad">连接异常</span></td>
+                  <td class="num">¥0.00</td>
+                  <td class="num">未计算</td>
+                  <td class="action-cell"><button class="btn secondary" type="button" data-drawer><span>诊断</span></button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <nav class="pagination" id="pagination" aria-label="分页">
+            <span class="page-count" id="pageCount" aria-live="polite">共 12 个账户 · 第 1 页</span>
+            <button class="page-btn" id="pagePrev" type="button" aria-label="上一页" disabled><i class="ph ph-caret-left" aria-hidden="true"></i></button>
+            <button class="page-btn active" type="button" data-page="1" aria-current="page" aria-label="第 1 页">1</button>
+            <button class="page-btn" type="button" data-page="2" aria-label="第 2 页">2</button>
+            <button class="page-btn" type="button" data-page="3" aria-label="第 3 页">3</button>
+            <button class="page-btn" id="pageNext" type="button" aria-label="下一页"><i class="ph ph-caret-right" aria-hidden="true"></i></button>
+          </nav>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="feedback" aria-labelledby="feedback-title">
+        <div class="section-heading">
+          <h2 id="feedback-title">反馈与数据展示</h2>
+          <small>Statistic · Empty State · Loading State</small>
+        </div>
+        <div class="sample-grid">
+          <article class="sample stat-card">
+            <header><span>今日消耗</span><i class="ph ph-trend-up" aria-hidden="true"></i></header>
+            <strong>¥24,560.80</strong>
+            <footer><i class="ph ph-arrow-up-right" aria-hidden="true"></i><span>较昨日 +12.4%</span></footer>
+          </article>
+          <article class="sample empty-state" aria-live="polite">
+            <i class="ph ph-tray" aria-hidden="true"></i>
+            <strong>暂无匹配广告</strong>
+            <span>调整筛选条件，或从一个新账户开始。</span>
+            <button class="btn primary" type="button" id="emptyAction"><span>创建第一条广告</span></button>
+          </article>
+          <article class="sample loading-sample" aria-busy="true">
+            <p class="sample-title">加载状态 Loading</p>
+            <div class="skeleton-list" role="status" aria-label="账户列表加载中">
+              <div class="skeleton-row"><i class="skeleton square"></i><i class="skeleton"></i><i class="skeleton"></i></div>
+              <div class="skeleton-row"><i class="skeleton square"></i><i class="skeleton"></i><i class="skeleton"></i></div>
+              <div class="skeleton-row"><i class="skeleton square"></i><i class="skeleton"></i><i class="skeleton"></i></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="rail" aria-labelledby="rail-title">
+        <div class="section-heading">
+          <h2 id="rail-title">Control Rail</h2>
+          <small>TK Automation Signature Motif · 流程与恢复状态</small>
+        </div>
+        <div class="sample">
+          <ol class="status-rail" aria-label="账户能力状态">
+            <li><div class="rail-node ok"><span class="node-dot"><i class="ph ph-check" aria-hidden="true"></i></span><strong>凭据</strong><small>有效</small></div></li>
+            <li><div class="rail-node ok"><span class="node-dot"><i class="ph ph-check" aria-hidden="true"></i></span><strong>连接</strong><small>正常</small></div></li>
+            <li><div class="rail-node ok"><span class="node-dot"><i class="ph ph-check" aria-hidden="true"></i></span><strong>同步</strong><small>4 分钟前</small></div></li>
+            <li><div class="rail-node warn"><span class="node-dot"><i class="ph ph-warning" aria-hidden="true"></i></span><strong>创建</strong><small>需恢复</small></div></li>
+            <li><div class="rail-node"><span class="node-dot"><i class="ph ph-lock" aria-hidden="true"></i></span><strong>执行</strong><small>等待中</small></div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="specimen-section" id="overlays" aria-labelledby="overlays-title">
+        <div class="section-heading">
+          <h2 id="overlays-title">浮层反馈</h2>
+          <small>Modal · Drawer · Toast</small>
+        </div>
+        <div class="sample demo-row">
+          <button class="btn secondary" type="button" id="openModal"><i class="ph ph-shield-warning" aria-hidden="true"></i><span>打开确认弹窗</span></button>
+          <button class="btn secondary" type="button" id="openDrawer"><i class="ph ph-sidebar-simple" aria-hidden="true"></i><span>打开详情抽屉</span></button>
+          <button class="btn secondary" type="button" id="showToast"><i class="ph ph-check-circle" aria-hidden="true"></i><span>触发成功 Toast</span></button>
+          <button class="btn danger" type="button" id="showErrorToast"><i class="ph ph-x-circle" aria-hidden="true"></i><span>触发错误 Toast</span></button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="overlay" id="overlay" hidden aria-hidden="true">
+    <section class="dialog" id="modalDialog" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalDescription" tabindex="-1" hidden aria-hidden="true">
+      <header>
+        <div><h3 id="modalTitle">确认批量执行</h3></div>
+        <button class="btn icon-only" type="button" data-close aria-label="关闭弹窗"><i class="ph ph-x" aria-hidden="true"></i></button>
+      </header>
+      <div class="dialog-body">
+        <p id="modalDescription">将对 12 个广告执行暂停操作。执行前请确认影响范围。</p>
+        <span class="badge warn">预计影响日预算 ¥1,240</span>
+      </div>
+      <footer class="dialog-foot">
+        <button class="btn secondary" type="button" data-close><span>返回修改</span></button>
+        <button class="btn primary" type="button" id="confirmModal"><span>确认执行</span></button>
+      </footer>
+    </section>
+
+    <aside class="drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-describedby="drawerDescription" tabindex="-1" hidden aria-hidden="true">
+      <header>
+        <div>
+          <h3 id="drawerTitle">账户详情</h3>
+          <p class="help" id="drawerDescription">双科-TTN-SG-11</p>
+        </div>
+        <button class="btn icon-only" type="button" data-close aria-label="关闭详情抽屉"><i class="ph ph-x" aria-hidden="true"></i></button>
+      </header>
+      <div class="drawer-body">
+        <div class="detail-line"><span>连接状态</span><strong><span class="badge ok" id="drawerStatus">正常</span></strong></div>
+        <div class="detail-line"><span>最近同步</span><strong id="drawerSync">4 分钟前</strong></div>
+        <div class="detail-line"><span>创建能力</span><strong id="drawerCreate">可用</strong></div>
+        <div class="detail-line"><span>今日消耗</span><strong id="drawerSpend">¥24,560.80</strong></div>
+        <button class="btn primary" type="button" data-close><span>完成</span></button>
+      </div>
+    </aside>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-label="操作通知"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>

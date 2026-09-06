@@ -1,0 +1,263 @@
+{
+  "dataSource": "isolated in-page API fixtures; no real account writes",
+  "routes": [
+    "overview",
+    "accounts",
+    "automation",
+    "ads",
+    "analytics",
+    "launch",
+    "rules",
+    "notifications",
+    "system-users",
+    "maintenance",
+    "manual"
+  ],
+  "checks": [
+    "overview",
+    "accounts",
+    "automation",
+    "ads",
+    "analytics",
+    "launch",
+    "rules",
+    "notifications",
+    "system-users",
+    "maintenance",
+    "manual"
+  ],
+  "failures": [],
+  "results": [
+    {
+      "route": "overview",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "accounts",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "automation",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "ads",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "analytics",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "launch",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "rules",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "notifications",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "system-users",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "maintenance",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "route": "manual",
+      "shell": true,
+      "sidebar": "rgb(17, 24, 39)",
+      "canvas": "rgb(238, 242, 245)",
+      "active": 1,
+      "internalCopy": false,
+      "noGlass": true,
+      "errors": [],
+      "overflow": false,
+      "routeChecks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    }
+  ]
+}

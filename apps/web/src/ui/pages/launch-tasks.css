@@ -301,8 +301,7 @@
   top: 0;
   z-index: 2;
   min-height: 76px;
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
-  backdrop-filter: blur(12px);
+  background: var(--surface);
 }
 
 .task-detail-panel .panel-heading > div:first-child { min-width: 0; }

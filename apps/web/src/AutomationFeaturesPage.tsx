@@ -1,5 +1,5 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { Copy, FileWarning, Save, Settings2, Sunrise, Trash2, TrendingUp } from "lucide-react";
+import { Copy, FileWarning, Save, Settings2, Sunrise, Trash2, TrendingUp } from "./ui/icons";
 import type { AutomationFeatureSettingsInput } from "@tk-auto/core";
 import { api } from "./api";
 import { useAuth } from "./AuthGate";

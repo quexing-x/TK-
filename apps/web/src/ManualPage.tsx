@@ -4,7 +4,7 @@ import {
   ExternalLink,
   Info,
   ShieldAlert,
-} from "lucide-react";
+} from "./ui/icons";
 import { userGuide } from "@tk-auto/manual";
 import "./ui/pages/notifications-manual.css";
 

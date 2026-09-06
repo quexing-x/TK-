@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, Trash2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CopyPlus, History, Inbox, Info, RefreshCcw, Trash2, XCircle } from "./ui/icons";
 import { DRAFT_CLEANUP_MIN_AGE_HOURS, withinExpandScope, type ExpandScope } from "@tk-auto/core";
 import type {
   AccountConfig,

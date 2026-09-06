@@ -1,19 +1,19 @@
 import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
+  Pulse as Activity,
+  Warning as AlertTriangle,
+  CheckCircle as CheckCircle2,
   Copy,
   Database,
-  KeyRound,
-  Link2,
-  LockKeyhole,
-  Save,
+  Key as KeyRound,
+  Link as Link2,
+  LockKey as LockKeyhole,
+  FloppyDisk as Save,
   ShieldCheck,
-  Sparkles,
-  Trash2,
-  RefreshCcw,
-  UserRound,
-} from "lucide-react";
+  Sparkle as Sparkles,
+  Trash as Trash2,
+  ArrowClockwise as RefreshCcw,
+  User as UserRound,
+} from "@phosphor-icons/react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type {
   AccountConfig,

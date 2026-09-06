@@ -6,7 +6,7 @@ import {
   Play,
   Save,
   ShieldCheck,
-} from "lucide-react";
+} from "./ui/icons";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   metaAutomationRuleDefinitions,

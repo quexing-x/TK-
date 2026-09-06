@@ -10,7 +10,7 @@ import {
   Send,
   ShieldCheck,
   Trash2,
-} from "lucide-react";
+} from "./ui/icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   NotificationChannelKind,
