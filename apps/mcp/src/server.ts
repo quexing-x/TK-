@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { checkNames, type LineageReport } from "@tk-auto/core";
 import { LocalApiClient, LocalApiError } from "./api-client.js";
+import { nullableNumber } from "./schema.js";
 import {
   defaultExportDirectory,
   markdownPreview,
@@ -256,9 +257,9 @@ server.registerTool("expand_ad_groups", {
     accountId: z.string().min(1).describe("账户 ID"),
     sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(200)
       .describe("源广告组 ID"),
-    count: z.number().int().min(1).max(10).describe("每个源组扩几份"),
-    dailyBudget: z.number().positive().describe("新广告组的日预算"),
-    bid: z.number().nonnegative().nullable().default(null).describe("出价；不填按 null"),
+    count: z.coerce.number().int().min(1).max(10).describe("每个源组扩几份"),
+    dailyBudget: z.coerce.number().positive().describe("新广告组的日预算"),
+    bid: nullableNumber().describe("出价；不填按 null"),
     launchImmediately: z.boolean().default(false).describe("是否立即投放"),
     sameCampaign: z.boolean().default(true).describe("true=挂回源系列；false=新建系列"),
     scheduledStartAt: z.string().datetime().nullable().default(null).describe("定时投放时刻"),
@@ -317,13 +318,13 @@ server.registerTool("copy_campaign", {
       sourceAdGroupIds: z.array(z.string().min(1)).min(1).max(50)
         .describe("这条系列里作为模板的广告组"),
     })).min(1).max(200),
-    campaignCopies: z.number().int().min(1).max(20).describe("每个源系列复制成几条"),
-    groupsPerCampaign: z.number().int().min(1).max(20).describe("每条新系列放几个广告组"),
+    campaignCopies: z.coerce.number().int().min(1).max(20).describe("每个源系列复制成几条"),
+    groupsPerCampaign: z.coerce.number().int().min(1).max(20).describe("每条新系列放几个广告组"),
     initialStatus: z.enum(["enabled", "disabled"]).default("disabled"),
     scheduledStartAt: z.string().datetime().nullable().default(null),
-    campaignBudget: z.number().positive().nullable().default(null).describe("系列日预算(CBO)"),
-    adGroupBudget: z.number().positive().nullable().default(null).describe("广告组日预算"),
-    bid: z.number().nonnegative().nullable().default(null),
+    campaignBudget: nullableNumber({ positive: true }).describe("系列日预算(CBO)"),
+    adGroupBudget: nullableNumber({ positive: true }).describe("广告组日预算"),
+    bid: nullableNumber(),
     confirm: z.boolean().default(false)
       .describe("true 才真正创建。必须由用户明确同意后才可传 true"),
   },
