@@ -198,7 +198,23 @@
 .launch-workspace > .table-panel thead { position: sticky; top: 0; z-index: 1; }
 .launch-workspace .sheet-dropzone { min-height: 176px; border-radius: var(--module-radius); }
 .launch-workspace .launch-dispatch-mode { border-block: 1px solid var(--line); }
-.launch-workspace .plan-item-progress { max-width: 300px; }
+/*
+ * 逐项状态列：一个计划下几十条广告组的状态全堆在这一格里。
+ *
+ * 这里**不能用 max-width 掐宽度**。表格是 auto 布局，浏览器按各列的内容需求分配宽度；
+ * 给这一格设 max-width 等于告诉它"我最多只要 300px"，剩下的宽度就被平分给了另外几个
+ * 基本是空的列——结果内容最多的一列反而最窄。实测（视口 1180）：这一列本来分到 460px，
+ * 内容却被压在 300px 里，白白浪费 160px；窗口再窄一点，中文标签就会挤成一团。
+ *
+ * 改用 grid 逐行排：每条状态独占一行、有明确间距，扫一眼就能找到失败的那几条。
+ * justify-items: start 让标签只占自身宽度，不被拉成整行的色块。
+ */
+.launch-workspace .plan-item-progress {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  min-width: 240px;
+}
 
 /* Task center workspace */
 .task-center-page {
