@@ -5043,6 +5043,88 @@ export class AutomationStore {
   }
 
   /**
+   * Adopt publications accepted by releases that still waited inside the
+   * creation worker. Unknown items are already detached; running items are
+   * adopted only after two missed lease heartbeats so an overlapping live
+   * process cannot lose ownership.
+   */
+  recoverAcceptedLaunchReadbacks(staleBefore: string): {
+    recoveredItemCount: number;
+    planIds: string[];
+  } {
+    const rows = this.db.prepare(
+      `SELECT * FROM launch_plan_items
+       WHERE phase = 'readback'
+         AND (status = 'unknown' OR (status = 'running' AND claimed_at <= ?))`,
+    ).all(staleBefore) as SqlRow[];
+    const candidates = rows.flatMap((row) => {
+      try {
+        const evidence = JSON.parse(String(row.evidence_json ?? "{}")) as Record<string, unknown>;
+        if (!evidence.asyncRequestId) return [];
+        if (String(row.status) !== "running" && evidence.publishAcceptedAt) return [];
+        return [{ row, evidence: {
+          ...evidence,
+          publishAcceptedAt: evidence.publishAcceptedAt
+            ?? String(row.updated_at ?? row.claimed_at ?? new Date().toISOString()),
+        } }];
+      } catch {
+        return [];
+      }
+    });
+    if (candidates.length === 0) return { recoveredItemCount: 0, planIds: [] };
+
+    const now = new Date().toISOString();
+    const message = "TikTok 已受理发布请求，正式对象将由账户轮询确认。";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const updateItem = this.db.prepare(
+        `UPDATE launch_plan_items
+         SET status = 'unknown', evidence_json = ?, error_message = ?,
+             claimed_by = NULL, claimed_at = NULL,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE item_id = ? AND phase = 'readback'
+           AND (status = 'unknown' OR (status = 'running' AND claimed_at <= ?))`,
+      );
+      const updateAttempt = this.db.prepare(
+        `UPDATE launch_plan_item_attempts
+         SET status = 'unknown', phase = 'readback', evidence_json = ?, error_message = ?,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE attempt_id = ? AND status IN ('running', 'unknown')`,
+      );
+      const planIds = new Set<string>();
+      let recoveredItemCount = 0;
+      for (const candidate of candidates) {
+        const evidenceJson = JSON.stringify(candidate.evidence);
+        const result = updateItem.run(
+          evidenceJson,
+          message,
+          now,
+          now,
+          String(candidate.row.item_id),
+          staleBefore,
+        );
+        if (Number(result.changes) === 0) continue;
+        recoveredItemCount += Number(result.changes);
+        planIds.add(String(candidate.row.plan_id));
+        if (candidate.row.attempt_id) {
+          updateAttempt.run(
+            evidenceJson,
+            message,
+            now,
+            now,
+            String(candidate.row.attempt_id),
+          );
+        }
+      }
+      this.db.exec("COMMIT");
+      return { recoveredItemCount, planIds: [...planIds] };
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  /**
    * 这个账户历史上用批量创建表建过的行，新到旧。
    *
    * 用途只有一个：给「生成扩组导入表」沿用落地页和定向。快照里没有这三个字段

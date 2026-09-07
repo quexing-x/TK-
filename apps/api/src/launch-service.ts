@@ -634,6 +634,12 @@ export class LaunchService {
   }
 
   private recoverExpiredLeases(): void {
+    const accepted = this.launchStore.recoverAcceptedReadbacks(
+      new Date(Date.now() - launchLeaseHeartbeatMs * 2).toISOString(),
+    );
+    for (const planId of new Set(accepted.planIds)) {
+      this.launchStore.refresh(planId);
+    }
     this.launchStore.recover(
       new Date(Date.now() - launchLeaseTimeoutMs).toISOString(),
     );

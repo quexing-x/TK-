@@ -3665,6 +3665,60 @@ describe("AutomationStore", () => {
       .toEqual([]);
   });
 
+  it("adopts legacy accepted readbacks after the worker is detached", () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2), launchItemRow(3)],
+    });
+    const [unknownItem, runningItem] = store.listLaunchPlanItems(plan.id);
+    store.claimLaunchPlanItem(unknownItem!.itemId, "legacy-a", "pending");
+    store.updateLaunchPlanItemProgress(unknownItem!.itemId, "legacy-a", {
+      phase: "readback",
+      evidence: { asyncRequestId: "legacy-async-a" },
+    });
+    store.completeLaunchPlanItemUnknown(unknownItem!.itemId, "legacy-a", "旧版回读超时");
+    store.claimLaunchPlanItem(runningItem!.itemId, "legacy-b", "pending");
+    store.updateLaunchPlanItemProgress(runningItem!.itemId, "legacy-b", {
+      phase: "readback",
+      evidence: {
+        asyncRequestId: "legacy-async-b",
+        publishAcceptedAt: new Date().toISOString(),
+      },
+    });
+
+    expect(store.recoverAcceptedLaunchReadbacks("2000-01-01T00:00:00.000Z"))
+      .toEqual({ recoveredItemCount: 1, planIds: [plan.id] });
+    expect(store.getLaunchPlanItem(unknownItem!.itemId)).toMatchObject({
+      status: "unknown",
+      errorMessage: expect.stringContaining("账户轮询"),
+      evidence: { asyncRequestId: "legacy-async-a", publishAcceptedAt: expect.any(String) },
+    });
+    expect(store.getLaunchPlanItem(runningItem!.itemId)).toMatchObject({
+      status: "running",
+      evidence: { asyncRequestId: "legacy-async-b", publishAcceptedAt: expect.any(String) },
+    });
+
+    expect(store.recoverAcceptedLaunchReadbacks(new Date().toISOString()))
+      .toEqual({ recoveredItemCount: 1, planIds: [plan.id] });
+    expect(store.getLaunchPlanItem(runningItem!.itemId)).toMatchObject({
+      status: "unknown",
+      claimedBy: null,
+      errorMessage: expect.stringContaining("账户轮询"),
+      evidence: { asyncRequestId: "legacy-async-b", publishAcceptedAt: expect.any(String) },
+    });
+    expect(store.listLaunchPlanItemAttempts(runningItem!.itemId)[0]).toMatchObject({
+      status: "unknown",
+      phase: "readback",
+      evidence: { asyncRequestId: "legacy-async-b", publishAcceptedAt: expect.any(String) },
+    });
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toHaveLength(2);
+  });
+
   it("把实际发出的请求体一路留到失败的那次尝试上", () => {
     // 创建失败时以前只留一串 snap/sketch id，报文长什么样全靠猜，于是同一个
     // uaa_campaign_automation_inconsistent_error 反复修了一个多月都没治好。
