@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, stripRetiredAgeRanges, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
+import { automaticName, stripRetiredAgeRanges, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, MAX_LAUNCH_ROWS_PER_IMPORT, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
 
 describe("resolveLaunchStartAt", () => {
   const now = new Date("2026-07-23T09:15:00.000Z");
@@ -93,36 +93,73 @@ const preset = {
 
 describe("parseLaunchSheetTable", () => {
   it("上限按广告条数算：一行多代码顶多条，报错要说清现在多少、超多少、谁占大头", () => {
-    // 每行 50 个代码 = 50 条广告，41 行刚好越过 2000。
+    // 每行 50 个代码 = 50 条广告，101 行刚好越过 5000。
     const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];
     const codes = Array.from({ length: 50 }, (_unused, index) => `#code-${index + 1}`).join(";");
     const table: unknown[][] = [header];
-    for (let row = 1; row <= 41; row += 1) {
+    for (let row = 1; row <= 101; row += 1) {
       table.push([`系列${row}`, `组${row}`, codes, "https://example.com/product"]);
     }
 
     const result = parseLaunchSheetTable(table, preset, new Date("2026-07-16T09:00:00.000Z"));
 
     const overflow = result.errors.find((error) => error.field === "文件");
-    expect(overflow?.message).toContain("本次共 2050 条广告");
-    expect(overflow?.message).toContain("超出单次上限 2000 条 50 条");
+    expect(overflow?.message).toContain("本次共 5050 条广告");
+    expect(overflow?.message).toContain("超出单次上限 5000 条 50 条");
     // 只说「超了」等于让用户拿计算器自己找，必须点名占比最大的行。
     expect(overflow?.message).toContain("一行有几个视频代码就算几条广告");
     expect(overflow?.message).toMatch(/第 \d+ 行 50 条/);
   });
 
-  it("刚好到上限不拦：2000 条整必须放行", () => {
+  it("刚好到上限不拦：5000 条整必须放行", () => {
     const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];
     const codes = Array.from({ length: 50 }, (_unused, index) => `#code-${index + 1}`).join(";");
     const table: unknown[][] = [header];
-    for (let row = 1; row <= 40; row += 1) {
+    for (let row = 1; row <= 100; row += 1) {
       table.push([`系列${row}`, `组${row}`, codes, "https://example.com/product"]);
     }
 
     const result = parseLaunchSheetTable(table, preset, new Date("2026-07-16T09:00:00.000Z"));
 
     expect(result.errors.filter((error) => error.field === "文件")).toEqual([]);
-    expect(result.rows).toHaveLength(40);
+    expect(result.rows).toHaveLength(100);
+  });
+
+  // 投手实际撞上的那张表：2141 条广告，旧上限 2000 拦下了。
+  it("2141 条广告在新上限下放行", () => {
+    const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];
+    const fifty = Array.from({ length: 50 }, (_unused, index) => `#code-${index + 1}`).join(";");
+    const table: unknown[][] = [header];
+    for (let row = 1; row <= 42; row += 1) {
+      table.push([`系列${row}`, `组${row}`, fifty, "https://example.com/product"]);
+    }
+    // 42×50 = 2100，再加一行 41 条凑够 2141。
+    table.push(["系列43", "组43", Array.from({ length: 41 }, (_u, i) => `#tail-${i}`).join(";"), "https://example.com/product"]);
+
+    const result = parseLaunchSheetTable(table, preset, new Date("2026-07-16T09:00:00.000Z"));
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows).toHaveLength(43);
+  });
+
+  // 行数与广告条数是两个独立闸门。600 行每行 1 个代码只有 600 条广告（远不到 5000），
+  // 但超了 500 行——必须给出说人话的提示，而不是让 zod 抛「Array must contain at most 500」。
+  it("行数超限单独拦，报的是行数不是广告条数", () => {
+    const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];
+    const table: unknown[][] = [header];
+    for (let row = 1; row <= 600; row += 1) {
+      table.push([`系列${row}`, `组${row}`, "#one-code", "https://example.com/product"]);
+    }
+
+    const result = parseLaunchSheetTable(table, preset, new Date("2026-07-16T09:00:00.000Z"));
+
+    const overflow = result.errors.find((error) => error.field === "文件");
+    expect(overflow?.message).toContain("本次共 600 行");
+    expect(overflow?.message).toContain("超出单次上限 500 行 100 行");
+    // 没有触发广告条数那条：600 条广告远不到 5000。
+    expect(overflow?.message).not.toContain("条广告");
+    // 且没有崩在 schema 上——结果被截到 500 行正常返回。
+    expect(result.rows).toHaveLength(MAX_LAUNCH_ROWS_PER_IMPORT);
   });
 
   it("keeps old four-column sheets compatible and defaults targeting to unrestricted", () => {

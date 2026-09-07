@@ -633,8 +633,24 @@ function dateTimePartsInZone(value: Date, timeZone: string): {
  *
  * 这是自定义的防误操作闸门（防止误传一个大表格就铺出去几千条广告），**不是**
  * TikTok 的接口限制。按广告条数计：一行有几个视频代码就算几条广告。
+ *
+ * 2026-09-07 从 2000 放宽到 5000：一个品的素材铺满就是一行 50 条，2000 条只够 40 个
+ * 广告组，一张正常的扩组表就顶到头了。5000 条 ÷ 每行 50 = 100 行，仍然远在
+ * `MAX_LAUNCH_ROWS_PER_IMPORT` 之内。
  */
-export const MAX_LAUNCH_ADS_PER_IMPORT = 2000;
+export const MAX_LAUNCH_ADS_PER_IMPORT = 5000;
+
+/**
+ * 单次导入允许的**行数**上限，一行 = 一个广告组。
+ *
+ * 与广告条数是两个独立的闸门，别混用：一行 50 个代码时 100 行就顶满 5000 条广告，
+ * 而 600 行每行 1 个代码只有 600 条广告、却超了行数。
+ *
+ * 这个值必须与 `LaunchSheetImportResultSchema` 里 `rows` 的 `.max()` 一致——超了那里
+ * 会直接抛 zod 校验错，用户看到的是「Array must contain at most 500 element(s)」这种
+ * 指不到具体行的话，而不是能照着改的提示。
+ */
+export const MAX_LAUNCH_ROWS_PER_IMPORT = 500;
 
 export function parseLaunchSheetTable(
   table: unknown[][],
@@ -730,6 +746,16 @@ export function parseLaunchSheetTable(
   if (rows.length === 0 && errors.length === 0) {
     errors.push({ rowNumber: 2, field: "数据", message: "没有可导入的任务行。" });
   }
+  // 行数超限要在这里拦住并说人话。不拦的话下面 schema 的 .max() 会抛 zod 原始错误
+  // （「Array must contain at most 500 element(s)」），既指不到行、也不说该怎么办。
+  if (rows.length > MAX_LAUNCH_ROWS_PER_IMPORT) {
+    errors.push({
+      rowNumber: 1,
+      field: "文件",
+      message: `本次共 ${rows.length} 行（一行 = 一个广告组），超出单次上限 `
+        + `${MAX_LAUNCH_ROWS_PER_IMPORT} 行 ${rows.length - MAX_LAUNCH_ROWS_PER_IMPORT} 行。请拆成多次导入。`,
+    });
+  }
   // 上限按广告条数算，不是按行数：一行多代码 = 组内多条广告，一行 50 个代码就顶
   // 50 条。这是自定义的防误操作闸门，不是 TikTok 的限制。
   //
@@ -749,7 +775,9 @@ export function parseLaunchSheetTable(
     });
   }
   return LaunchSheetImportResultSchema.parse({
-    rows: rows.slice(0, MAX_LAUNCH_ADS_PER_IMPORT),
+    // 用行数上限截行数组。此前这里误用了广告条数上限（MAX_LAUNCH_ADS_PER_IMPORT），
+    // 单位对不上：那是「几条广告」，而这里数的是「几行」。
+    rows: rows.slice(0, MAX_LAUNCH_ROWS_PER_IMPORT),
     errors,
     warnings,
   });
