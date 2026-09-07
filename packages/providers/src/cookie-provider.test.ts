@@ -3259,11 +3259,6 @@ describe("CookieAdsProvider", () => {
       pathname: "/api/v4/i18n/creation/ad_creative_snap/check/",
       response: { code: 0, data: { creative_success: true, ad_snap_check_report_map: {} } },
     },
-    {
-      label: "CTA helper",
-      pathname: "/api/v4/i18n/creation/snap/batch_create_cta_id/",
-      response: { code: 40001, msg: "advisory rejected" },
-    },
   ])("continues when the HAR $label response is red or incomplete", async ({ pathname, response }) => {
     const requestedPaths: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
@@ -3281,6 +3276,187 @@ describe("CookieAdsProvider", () => {
     expect(result).toMatchObject({ ok: true, campaignId: "campaign", adGroupId: "adgroup", adId: "creative" });
     expect(requestedPaths).toContain(pathname);
     expect(requestedPaths).toContain("/api/v4/i18n/creation/async_creation/create_by_snap/");
+  });
+
+  it("does not publish when TikTok explicitly rejects required CTA generation", async () => {
+    const paths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      paths.push(url);
+      return jsonResponse(url.includes("batch_create_cta_id")
+        ? { code: 40001, msg: "CTA generation rejected" }
+        : successfulCreationPayload(url));
+    }));
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false), [creationTestMutation("none")],
+    );
+    expect(result?.ok).toBe(false);
+    expect(result?.message).toContain("CTA generation rejected");
+    expect(paths.some((url) => url.includes("create_by_snap"))).toBe(false);
+  });
+
+  it("uses the final campaign check reference for the final creative check", async () => {
+    let checks = 0;
+    const references: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("campaign_snap/check")) {
+        return jsonResponse({ code: 0, data: { success: true, fake_campaign_id: ++checks === 1 ? "early" : "final" } });
+      }
+      if (url.includes("ad_creative_snap/check")) references.push(JSON.parse(String(init?.body)).fake_campaign_id);
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const [result] = await new CookieAdsProvider().createFromPreset!(
+      creationTestContext(false), [creationTestMutation("none")],
+    );
+    expect(result?.ok).toBe(true);
+    expect(references.at(-1)).toBe("final");
+  });
+
+  it("continues the accepted expansion job after a transient result-query failure without republishing", async () => {
+    vi.useFakeTimers();
+    const { requests } = stubExpandCopyFetch();
+    const originalFetch = fetch;
+    let queries = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes("async_creation/detail") && ++queries === 1) throw new TypeError("temporary read reset");
+      return originalFetch(input, init);
+    }));
+    const pending = new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup", existingCampaignId: "campaign",
+      names: ["copied group"], initialStatus: "disabled",
+    });
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(queries).toBe(2);
+    expect(requests.filter((r) => r.path.includes("create_by_snap"))).toHaveLength(1);
+  });
+
+  it("waits for a slow accepted expansion instead of abandoning it after twelve polls", async () => {
+    vi.useFakeTimers();
+    const { requests } = stubExpandCopyFetch();
+    const originalFetch = fetch;
+    let queries = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes("async_creation/detail") && ++queries <= 15) {
+        return jsonResponse({ code: 0, data: { status: 0 } });
+      }
+      return originalFetch(input, init);
+    }));
+    const pending = new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source-adgroup", existingCampaignId: "campaign",
+      names: ["copied group"], initialStatus: "disabled",
+    });
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(queries).toBe(16);
+    expect(requests.filter((r) => r.path.includes("create_by_snap"))).toHaveLength(1);
+  });
+
+  it("allocates a fresh timeout signal when retrying a definitely unsent creation request", async () => {
+    vi.useFakeTimers();
+    const signals: Array<AbortSignal | null | undefined> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("campaign_snap/save")) {
+        signals.push(init?.signal);
+        if (signals.length === 1) throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }) });
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const pending = new CookieAdsProvider().createFromPreset!(creationTestContext(false), [creationTestMutation("none")]);
+    await vi.runAllTimersAsync();
+    expect((await pending)[0]?.ok).toBe(true);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).not.toBe(signals[1]);
+  });
+
+  it.each([true, false])("serializes draft sessions only for the same account (same=%s)", async (sameAccount) => {
+    stubExpandCopyFetch();
+    const originalFetch = fetch;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    let copies = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes("ad_snap/copy") && ++copies === 1) {
+        started();
+        await gate;
+      }
+      return originalFetch(input, init);
+    }));
+    const provider = new CookieAdsProvider();
+    const context = creationTestContext(false);
+    const input = { sourceAdGroupId: "source", existingCampaignId: "campaign", names: ["group"], initialStatus: "disabled" as const };
+    const first = provider.copyAdGroupToExistingCampaign(context, input);
+    await entered;
+    const second = provider.copyAdGroupToExistingCampaign(
+      { ...context, accountId: sameAccount ? context.accountId : "another-account" }, input,
+    );
+    let observedCopies = 0;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      observedCopies = copies;
+    } finally {
+      release();
+    }
+    expect((await Promise.all([first, second])).every((result) => result.ok)).toBe(true);
+    expect(observedCopies).toBe(sameAccount ? 1 : 2);
+  });
+
+  it("new creation shares the expansion lock and proceeds after expansion rejects", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    let creationReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("ad_snap/copy")) {
+        started();
+        await gate;
+        return jsonResponse({ code: 40001, msg: "source rejected" });
+      }
+      creationReads++;
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const provider = new CookieAdsProvider();
+    const context = creationTestContext(false);
+    const expansion = provider.copyAdGroupToExistingCampaign(context, {
+      sourceAdGroupId: "source", existingCampaignId: "campaign", names: ["group"], initialStatus: "disabled",
+    });
+    await entered;
+    const creation = provider.createFromPreset(context, [creationTestMutation("none")]);
+    let readsBeforeRelease = 0;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      readsBeforeRelease = creationReads;
+    } finally {
+      release();
+    }
+    expect((await expansion).ok).toBe(false);
+    expect((await creation)[0]?.ok).toBe(true);
+    expect(readsBeforeRelease).toBe(0);
+  });
+
+  it("finishes first-pass expansion after a transient draft read failure without recopying", async () => {
+    vi.useFakeTimers();
+    const { requests } = stubExpandCopyFetch();
+    const originalFetch = fetch;
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes("/snap/detail/") && ++reads === 1) throw new TypeError("temporary draft read reset");
+      return originalFetch(input, init);
+    }));
+    const pending = new CookieAdsProvider().copyAdGroupToExistingCampaign(creationTestContext(false), {
+      sourceAdGroupId: "source", existingCampaignId: "campaign", names: ["group"], initialStatus: "disabled",
+    });
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(reads).toBe(3); // Failed initial read, successful initial read, then readback.
+    expect(requests.filter((r) => r.path.includes("ad_snap/copy"))).toHaveLength(1);
+    expect(requests.filter((r) => r.path.includes("create_by_snap"))).toHaveLength(1);
   });
 
   it("rejects an exact-name ad-group collision without silently adding a suffix", async () => {
