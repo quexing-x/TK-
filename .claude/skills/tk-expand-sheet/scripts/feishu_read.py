@@ -119,6 +119,20 @@ def fetch_records(token: str, base_token: str, table_id: str, fields: list[str])
     return records
 
 
+def fetch_flat(token: str, base_token: str, table_id: str, fields: list[str]) -> list[dict]:
+    """读一张表，字段值已压平成朴素文本。**任何要比较字段值的代码都必须用这个。**
+
+    `fetch_records` 返回飞书原样的记录，文本列在里面长这样：
+        [{"text": "DM002451", "type": "text"}]
+    直接 `str()` 它会得到 `"[{'text': 'DM002451', ...}]"`，拿去跟 `"DM002451"` 比永远不相等——
+    表现是「一条都匹配不上」或者「幂等判重失效、重复写入」，而且不报错。踩过一次。
+    """
+    return [
+        {name: flatten(value) for name, value in (record.get("fields") or {}).items()}
+        for record in fetch_records(token, base_token, table_id, fields)
+    ]
+
+
 def flatten(value):
     """把飞书的富字段压成朴素文本。
 
