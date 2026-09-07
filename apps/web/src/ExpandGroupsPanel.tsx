@@ -33,7 +33,10 @@ type VerdictFilter = "all" | "expand" | "recreate";
 /** 判定文案集中在这里，表头、徽标、汇总条共用一套说法，避免三处各叫各的。 */
 export const VERDICT_LABELS: Record<string, { short: string; tone: string; hint: string }> = {
   "cost-per-conversion-ok": { short: "可扩", tone: "active", hint: "单转达标" },
-  observing: { short: "观察中", tone: "active", hint: "零转化，累计花费还没到上限" },
+  // 「观察中」自 2026-09-07 起归入重扩：零转化就不在这条上继续加组。hint 保留原因，
+  // 让人看得出它跟「已花超上限」那条的区别。
+  observing: { short: "重扩系列", tone: "warning", hint: "零转化，累计花费还没到上限" },
+  "not-started": { short: "可扩", tone: "active", hint: "还没开始投，一分钱没花" },
   "cost-per-conversion-high": { short: "重扩系列", tone: "warning", hint: "单转超标" },
   "no-conversion-overspent": { short: "重扩系列", tone: "warning", hint: "零转化且已花超上限" },
   "no-conversion-stalled": { short: "重扩系列", tone: "warning", hint: "零转化，且组已被规则关光" },

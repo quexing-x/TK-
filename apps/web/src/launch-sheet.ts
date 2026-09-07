@@ -66,7 +66,8 @@ export async function createLaunchTemplateBuffer(
   const input = workbook.addWorksheet("批量创建", { views: [{ state: "frozen", ySplit: 1 }] });
   input.addRow(launchSheetColumns.map((column) => column.label));
   for (let rowNumber = 2; rowNumber <= TEMPLATE_DATA_ROW_COUNT + 1; rowNumber += 1) {
-    input.addRow([null, null, null, null, DEFAULT_AGE_RANGES, "不限"]);
+    // 编码列（G）不预填：预填会让 500 行空白占位行看起来像有数据的行。
+    input.addRow([null, null, null, null, DEFAULT_AGE_RANGES, "不限", null]);
     input.getCell(`F${rowNumber}`).dataValidation = {
       type: "list",
       allowBlank: true,
@@ -77,10 +78,10 @@ export async function createLaunchTemplateBuffer(
     };
   }
   input.columns = [
-    { width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }, { width: 48 }, { width: 12 },
+    { width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }, { width: 48 }, { width: 12 }, { width: 16 },
   ];
   styleHeader(input.getRow(1));
-  input.autoFilter = { from: "A1", to: "F1" };
+  input.autoFilter = { from: "A1", to: "G1" };
   input.getColumn(5).alignment = { vertical: "middle", wrapText: true };
   input.getColumn(6).alignment = { vertical: "middle", horizontal: "center" };
 
@@ -93,9 +94,10 @@ export async function createLaunchTemplateBuffer(
     "https://example.com/product",
     DEFAULT_AGE_RANGES,
     "不限",
+    "DM002451",
   ]);
   example.columns = [
-    { width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }, { width: 48 }, { width: 12 },
+    { width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }, { width: 48 }, { width: 12 }, { width: 16 },
   ];
   styleHeader(example.getRow(1));
   example.getRow(2).alignment = { vertical: "middle", wrapText: true };
@@ -112,6 +114,7 @@ export async function createLaunchTemplateBuffer(
     ["产品 URL", "必填。必须以 http:// 或 https:// 开头；同一行拆分出的多个广告共用此 URL。"],
     ["年龄", `每个广告组可单独设置。默认全选：${DEFAULT_AGE_RANGES}。多个年龄段用分号分隔；也可填“全部”或“不限”。`],
     ["性别", "每个广告组可单独设置。默认“不限”，可改为“男”或“女”。"],
+    ["编码", "选填，不影响创建。只用于按品去重、跟品库对账、以及反查这一行属于哪个品。推广系列名称和广告组名称一律以表里填的为准，不会用编码去拼名字。"],
     ["广告预设", "普通创建的预算、出价、创建/结束时间和初始状态从所选广告预设读取；原帖迁移以目标账户配置为准。"],
     ["自动命名", "广告名称由软件自动生成：YYMMDD:XXX，例如 260716:001。"],
     ["安全限制", "单次最多 2000 条广告（一行有几个视频代码就算几条）；创建结果以推广系列和广告组为主体，素材未生成时会跳过并在完成结果中提示。"],

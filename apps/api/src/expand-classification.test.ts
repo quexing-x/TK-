@@ -140,13 +140,12 @@ describe("扩组分类接口", () => {
 
     const body = await classify();
 
-    expect(body.expand.map((item) => item.externalId)).toEqual([
-      "camp-ok",
-      "camp-zero-observe",
-    ]);
+    expect(body.expand.map((item) => item.externalId)).toEqual(["camp-ok"]);
+    // 零转化的一律重扩（2026-09-07 口径），观察期不再留在可扩桶。重扩桶按亏得最多排前面。
     expect(body.recreateCampaign.map((item) => item.externalId)).toEqual([
       "camp-high",
       "camp-zero-over",
+      "camp-zero-observe",
     ]);
     expect(body.excluded.map((item) => item.externalId).sort()).toEqual([
       "camp-diagnostic",
@@ -182,8 +181,10 @@ describe("扩组分类接口", () => {
       maxSpendWithoutConversion: 3,
       maxConsecutiveZeroConversionDays: 3,
     });
-    expect(relaxed.expand.map((item) => item.externalId).sort())
-      .toEqual(["camp-ten", "camp-two"]);
+    // camp-two 零转化，宽松阈值下也判重扩；maxSpendWithoutConversion 只决定 reason。
+    expect(relaxed.expand.map((item) => item.externalId).sort()).toEqual(["camp-ten"]);
+    expect(relaxed.recreateCampaign.find((item) => item.externalId === "camp-two")?.reason)
+      .toBe("observing");
 
     const strict = await classify("?maxCostPerConversion=8&maxSpendWithoutConversion=1");
     expect(strict.thresholds).toEqual({
@@ -227,7 +228,7 @@ describe("扩组分类接口", () => {
       // 花得很少，按消耗阈值本来还在观察期；但组已被规则全部关停，系列再也花不出钱，
       // 那条 spend > 3 的线永远跨不过去，会永久卡在「观察中」从名单里静默消失。
       { externalId: "camp-stalled", name: "停跑系列", spend: 1, conversions: 0, adGroupsStopped: true },
-      // 组还在跑，同样的消耗仍属观察期。
+      // 组还在跑：同样零转化，也判重扩，但 reason 是 observing 而不是 stalled。
       { externalId: "camp-running", name: "在跑系列", spend: 1, conversions: 0 },
       // 从没花过钱：无在投组只是还没开始投，不是跑不出来。
       { externalId: "camp-fresh", name: "新建未投系列", spend: 0, conversions: 0, adGroupsStopped: true },
@@ -238,9 +239,14 @@ describe("扩组分类接口", () => {
     expect(stalled?.reason).toBe("no-conversion-stalled");
     expect(stalled?.hasActiveAdGroups).toBe(false);
 
-    expect(body.expand.map((item) => item.externalId).sort())
-      .toEqual(["camp-fresh", "camp-running"]);
-    expect(body.expand.find((item) => item.externalId === "camp-running")?.hasActiveAdGroups).toBe(true);
+    // 只有「一分钱没花」的留在可扩桶：它不是跑不出来，是还没开始。判进重扩会被每早的
+    // 自动关停顺手关掉——那条链路正是挑 recreate + 无在投组的那批。
+    expect(body.expand.map((item) => item.externalId)).toEqual(["camp-fresh"]);
+    expect(body.expand[0]?.reason).toBe("not-started");
+
+    const running = body.recreateCampaign.find((item) => item.externalId === "camp-running");
+    expect(running?.reason).toBe("observing");
+    expect(running?.hasActiveAdGroups).toBe(true);
   });
 
   describe("连续自然日零转化", () => {
@@ -280,7 +286,10 @@ describe("扩组分类接口", () => {
         seedDay(day, [{ externalId: "camp-two-days", name: "两天无转化", spend: 1, conversions: 0 }]);
       }
       const body = await classify();
-      expect(body.expand.map((row) => row.externalId)).toContain("camp-two-days");
+      // 零转化本身已经让它进重扩桶，所以这里查的是 reason：两天还没到 3 天那条线，
+      // 判据必须是 observing 而不是 no-conversion-days-exceeded。
+      expect(body.recreateCampaign.find((row) => row.externalId === "camp-two-days")?.reason)
+        .toBe("observing");
     });
 
     // 没花钱的那天零转化是必然的，不构成证据；但也不该重置连续性。
@@ -291,8 +300,10 @@ describe("扩组分类接口", () => {
       seedDay(SH_24, [{ externalId: "camp-gap", name: "中间停投", spend: 0, conversions: 0 }]);
       seedDay(SH_25, [{ externalId: "camp-gap", name: "中间停投", spend: 1, conversions: 0 }]);
       const body = await classify();
-      // 只有两天真正花过钱，还差一天，不该触发。
-      expect(body.expand.map((row) => row.externalId)).toContain("camp-gap");
+      // 只有两天真正花过钱，还差一天，连续天数判据不该触发——零转化让它进了重扩桶，
+      // 但 reason 必须是 observing。
+      expect(body.recreateCampaign.find((row) => row.externalId === "camp-gap")?.reason)
+        .toBe("observing");
 
       // 但连续性没有被那天中断：把阈值降到 2 就该命中，说明中间那天是「跳过」
       // 而不是「重置」。

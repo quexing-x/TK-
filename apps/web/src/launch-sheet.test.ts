@@ -57,8 +57,11 @@ describe("launch spreadsheet", () => {
       "产品 URL",
       "年龄",
       "性别",
+      "编码",
     ]);
     expect(worksheet.rowCount).toBe(501);
+    // 编码列不预填：500 行占位行只有年龄和性别有默认值。
+    expect(worksheet.getCell("G2").value).toBe(null);
     expect(worksheet.getCell("E2").value).toBe("18-24;25-34;35-44;45-54;55-100");
     expect(worksheet.getCell("F2").value).toBe("不限");
     expect(worksheet.getCell("E501").value).toBe("18-24;25-34;35-44;45-54;55-100");
@@ -72,6 +75,7 @@ describe("launch spreadsheet", () => {
       "https://example.com/product",
       "18-24;25-34;35-44;45-54;55-100",
       "不限",
+      "DM002451",
     ]);
   });
   it("downloads a populated workbook template", async () => {

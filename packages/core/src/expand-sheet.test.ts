@@ -183,7 +183,27 @@ describe("扩组导入表内容", () => {
       sameCampaign: true,
     });
     expect(plan.header).toEqual([
-      "推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别",
+      "推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别", "编码",
+    ]);
+  });
+
+  it("编码原样写进表，取不到时留空", () => {
+    const plan = buildExpandSheetPlan({
+      sources: [
+        source({ sourceAdGroupId: "g1", productCode: "DM002451" }),
+        source({ sourceAdGroupId: "g2", sourceAdGroupName: "隨身wifi" }),
+      ],
+      countPerSource: 1,
+      deliveryAt,
+      timeZone: "UTC",
+      sameCampaign: true,
+    });
+    expect(plan.rows.map((row) => row.productCode)).toEqual(["DM002451", ""]);
+    // 编码只是识别列：填了编码的那行和没填的那行，名字按同一套规则算出来，
+    // 编码既不进名字、也不改变名字。
+    expect(plan.rows.map((row) => row.adGroupName)).toEqual([
+      "八寶茶-0812-091530-1",
+      "隨身wifi-0812-091530-1",
     ]);
   });
 });

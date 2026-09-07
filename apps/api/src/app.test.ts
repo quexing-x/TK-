@@ -5416,7 +5416,7 @@ describe("local API", () => {
 
       expect(response.statusCode).toBe(200);
       const body = response.json();
-      expect(body.header).toEqual(["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"]);
+      expect(body.header).toEqual(["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别", "编码"]);
       expect(body.rows).toHaveLength(2);
       expect(body.rows[0].campaignName).toBe("八寶茶系列");
       expect(body.rows[0].adGroupName).toMatch(/^八寶茶-0820-\d{6}-1$/);
