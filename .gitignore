@@ -21,3 +21,7 @@ data/credentials/
 /private/
 /apps/api/data/
 /apps/desktop/data/
+# 客户端在开发模式下落的扩组计划，是运行时产物。
+data/扩组计划-*.json
+# 飞书授权二维码：扫一次就作废的临时图。
+feishu-auth-qrcode*.png
