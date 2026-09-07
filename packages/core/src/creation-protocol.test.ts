@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { TikTokCreationSteps, buildDraftPayloads, buildProfileDraftPayloads, buildPublishInput, CreationPresetIncompleteError, deriveTikTokCreationRequest, getCreationTemplateReadiness } from "./creation-protocol.js";
+import { LANDING_PAGE_TRACKING_PARAMS } from "./tracking-url.js";
+
+// 落地页在创建时会被补上归因参数（表里只填域名）。这里验的是「走了归因加工」，
+// 参数串本身的内容由 tracking-url.test.ts 逐字守。
+const tracked = (url: string) => `${url}?${LANDING_PAGE_TRACKING_PARAMS}`;
 
 describe("creation protocol", () => {
   it("reports template readiness without exposing internal field names", () => {
@@ -51,7 +56,7 @@ describe("creation protocol", () => {
     expect(payloads.adGroup.ad_sketch_form_data.start_time).toBe("2026-07-16 16:00:00");
     expect(payloads.adGroup.ad_sketch_form_data.end_time).toBe("2036-07-16 16:00:00");
     expect(payloads.creative.asset_group_sketch_form_data_list[0]).toMatchObject({
-      creative_name: "260716:001", external_url: "https://example.com/product",
+      creative_name: "260716:001", external_url: tracked("https://example.com/product"),
       image_list: [{ aweme_item_id: "video-001" }],
       creative_automation_type: 2,
       creative_automation_list: ["100001", "100002", "7455417586723028993"],
@@ -318,7 +323,7 @@ describe("creation protocol", () => {
     }, { rowNumber: 2, campaignName: "new campaign", adGroupName: "new group", adName: "260716:001", videoCode: "new-video", productUrl: "https://example.com/product", region: "US", dailyBudget: 25, bid: 2.5, startAt: null, endAt: null, initialStatus: "disabled" });
     expect(payloads.campaign.campaign_sketch_form_data).toMatchObject({ campaign_name: "new campaign", campaign_id: "", objective_type: 9, industry_types: [] });
     expect(payloads.adGroup.ad_sketch_form_data).toMatchObject({ ad_name: "new group", budget: "25", cpa_bid: "2.5", identity_only: "kept", origin_ad_id: 0, ad_snap_id: "", ad_sketch_id: "", by_ad_sketch_id: "" });
-    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: "https://example.com/product", creative_snap_id: "", creative_sketch_id: "", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
+    expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({ creative_name: "260716:001", external_url: tracked("https://example.com/product"), creative_snap_id: "", creative_sketch_id: "", image_list: [{ aweme_item_id: "new-video", identity_id: "kept" }] });
   });
 
   it("applies a complete advanced preset as an explicit override of the account snapshot", () => {
@@ -407,7 +412,9 @@ describe("creation protocol", () => {
     });
 
     expect((payloads.creative.asset_group_sketch_form_data_list as Array<unknown>)[0]).toMatchObject({
-      external_url: "https://example.com/product",
+      external_url: tracked("https://example.com/product"),
+      // 归因参数只进 external_url。open_url 是 TikTok 另一套直达链接功能，往里写落地页
+      // 会让它启用一个不完整的直达链接、并卡在 ad_creative_snap/check。
       open_url: "",
       is_open_url: 0,
       auto_open: 0,

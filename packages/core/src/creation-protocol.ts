@@ -8,6 +8,7 @@ import {
   type LaunchConfigurationRow,
 } from "./launch.js";
 import { resolveBudgetFields, type ResolvedBudgetFields } from "./budget-mode.js";
+import { appendTrackingParams } from "./tracking-url.js";
 
 /** Confirmed TikTok draft-to-publish sequence.  Values are deliberately
  * account-neutral; credentials and dynamic signatures never belong here. */
@@ -565,7 +566,7 @@ export function buildDraftPayloads(
         creative_name: row.adName,
         creative_snap_id: "",
         creative_sketch_id: "",
-        external_url: row.productUrl,
+        external_url: appendTrackingParams(row.productUrl),
         image_list: [{ aweme_item_id: row.videoCode }],
         identity_type: config.identityType,
         identity_id: config.identityId ?? "",
@@ -634,7 +635,7 @@ export function buildProfileDraftPayloads(
   if (row.bid !== null) adForm.cpa_bid = String(row.bid);
   const { startTime, endTime } = materializeSchedule(row.startAt, row.endAt, timezone, now);
   adForm.schedule_type = 1; adForm.start_time = startTime; adForm.end_time = endTime;
-  const asset = list[0]; asset.creative_name = row.adName; asset.external_url = row.productUrl;
+  const asset = list[0]; asset.creative_name = row.adName; asset.external_url = appendTrackingParams(row.productUrl);
   asset.creative_snap_id = "";
   asset.creative_sketch_id = "";
   delete asset.origin_creative_id;
