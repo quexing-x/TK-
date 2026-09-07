@@ -1,6 +1,16 @@
 .connection-page {
   --connection-radius: 8px;
   color: var(--ink);
+  /*
+   * 这个页面整体渲染在一个模态框里（App.tsx 的 .connection-modal），所以它的可用宽度由
+   * 对话框决定，而不是视口。下面的断点因此用 @container 而不是 @media——用视口断点的话，
+   * 只要有人改了对话框宽度，这里的响应式就会在"视口很宽、容器很窄"的组合下完全失灵，
+   * 而且是静默的：布局照两列铺开，把卡片压到 128px，中文标题被挤成一字一行的竖排。
+   * 这不是假设，2026-09-07 就是这么坏的（production.css 的 `.production-ui .modal`
+   * 特异性更高，把对话框锁成了 720px）。
+   */
+  container-type: inline-size;
+  container-name: connection;
 }
 
 .connection-page :is(button, input, textarea, .cookie-import-step, .connection-form-block) {
@@ -492,7 +502,12 @@
 .connection-security-list > span { display: flex; align-items: flex-start; gap: 9px; color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
 .connection-security-list svg { flex: 0 0 auto; margin-top: 1px; color: var(--success); }
 
-@media (max-width: 1120px) {
+/*
+ * 断点按**容器**宽度算，不是视口。换算关系：容器 = 对话框宽 - .connection-section 的
+ * 左右 padding（32×2）。原来的视口断点 1120px / 860px 对应对话框 1053 / 808，
+ * 也就是容器 989 / 744——取整为 990 / 745。
+ */
+@container connection (max-width: 990px) {
   .connection-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
   .connection-account-meta { grid-column: 1 / -1; }
   .connection-account-meta > div:first-child { border-left: 0; }
@@ -504,7 +519,7 @@
   .connection-quality-panel { padding: 0 0 32px; border-right: 0; border-bottom: 1px solid var(--line); }
 }
 
-@media (max-width: 860px) {
+@container connection (max-width: 745px) {
   .connection-identity { grid-template-columns: auto minmax(0, 1fr); padding-inline: 24px; }
   .connection-identity-status { grid-column: 1 / -1; justify-self: start; }
   .connection-account-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
