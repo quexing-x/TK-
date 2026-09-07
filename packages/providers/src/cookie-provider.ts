@@ -1068,13 +1068,10 @@ export class CookieAdsProvider implements AdsProvider {
       && mutations.every((mutation) => mutation.templateMode === "none")
       && campaignKeys.size === 1
       && initialStatuses.size === 1;
-    const seriesKey = campaignKeys.size === 1 ? [...campaignKeys][0] : "mixed";
-    // Serialize only writes to the same account/series. The lock is deliberately
-    // independent from a local plan id, so two UI requests cannot concurrently
-    // attach drafts to the same TikTok series. Different series and accounts
-    // remain concurrent.
-    const reservationKey = `${context.accountId}:${seriesKey}`;
-    const releaseBatchLock = reservationKey ? await this.acquireBatchLock(reservationKey) : null;
+    // All creation entry points share one account's mutable draft session.
+    // Serializing inside one HTTP request (or only by series) does not protect
+    // against a simultaneous manual expansion or scheduled copy.
+    const releaseBatchLock = await this.acquireBatchLock(context.accountId);
     try {
       // 数据连接（旧称 Pixel）在每条 mutation 自己的创建前解析，数据取自那次本来
       // 就要发的 adgroup/list 实时读取。不再预先拉事件管理器目录：那个接口已对所有
@@ -1162,7 +1159,7 @@ export class CookieAdsProvider implements AdsProvider {
       }
       return results;
     } finally {
-      releaseBatchLock?.();
+      releaseBatchLock();
     }
   }
 
@@ -1236,7 +1233,11 @@ export class CookieAdsProvider implements AdsProvider {
       ? parseNativeScheduleStart(input.scheduledStartAt)
       : null;
     let copyAccepted = false;
+    const releaseBatchLock = await this.acquireBatchLock(context.accountId);
     try {
+      // The task may have waited behind another creation on this account.
+      // Revalidate before creating a draft, not only after it has been saved.
+      if (input.scheduledStartAt) parseNativeScheduleStart(input.scheduledStartAt);
       // 1) ad_snap/copy：把源广告组连同创意克隆进现有系列，返回草稿 snap/sketch。
       const copied = await requestCreationStep(
         "ad_snap/copy",
@@ -1446,6 +1447,8 @@ export class CookieAdsProvider implements AdsProvider {
           ? cause.retrySafe && dispatchState.acceptedMutationCount === 0
           : !copyAccepted,
       };
+    } finally {
+      releaseBatchLock();
     }
   }
 
@@ -1498,6 +1501,7 @@ export class CookieAdsProvider implements AdsProvider {
       acceptedMutationCount: 0,
       ...(input.onBeforeDispatch ? { onBeforeMutationDispatch: input.onBeforeDispatch } : {}),
     };
+    const releaseBatchLock = await this.acquireBatchLock(context.accountId);
     try {
       // 1) 按名字反查草稿。列表是全账户的，翻页翻到把要的都找齐为止。
       const wanted = input.names.map((name) => name.trim()).filter(Boolean);
@@ -1656,6 +1660,8 @@ export class CookieAdsProvider implements AdsProvider {
           ? cause.retrySafe && publishState.acceptedMutationCount === 0
           : !dispatched,
       };
+    } finally {
+      releaseBatchLock();
     }
   }
 
@@ -1790,7 +1796,9 @@ export class CookieAdsProvider implements AdsProvider {
       : null;
     let copyAccepted = false;
     let published = false;
+    const releaseBatchLock = await this.acquireBatchLock(context.accountId);
     try {
+      if (input.scheduledStartAt) parseNativeScheduleStart(input.scheduledStartAt);
       // 1) 复制整个源系列（含全部广告组与创意）。
       const copied = await requestCreationStep(
         "campaign_snap/copy",
@@ -2070,6 +2078,8 @@ export class CookieAdsProvider implements AdsProvider {
           ? cause.retrySafe && !published
           : !published,
       };
+    } finally {
+      releaseBatchLock();
     }
   }
 }
@@ -2821,20 +2831,34 @@ async function applyCopiedAdGroupOverrides(input: {
   }
 }
 
+/** Retry reads of existing draft ids, never draft saves/copies or publication. */
+async function retryDraftRead<T>(read: () => Promise<T>): Promise<T> {
+  const delays = [500, 1500];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await read();
+    } catch (cause) {
+      const delay = delays[attempt];
+      if (!(cause instanceof UnknownCreationStateError) || delay === undefined) throw cause;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 async function readAdSnapForms(
   sessionRequest: CapturedCookieRequest,
   credential: ParsedCookieCredential,
   dispatchState: CreationDispatchState,
   adSnapIds: string[],
 ): Promise<Map<string, Record<string, unknown>>> {
-  const detail = await requestCreationStep(
+  const detail = await retryDraftRead(() => requestCreationStep(
     "snap/detail",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/detail/", {
       ad_snap_ids: adSnapIds,
     }),
     credential,
     { semantics: "preflight-read", dispatchState },
-  );
+  ));
   const data = isRecord(detail.data) ? detail.data : undefined;
   const rawMap = data && isRecord(data.ad_snap_map) ? data.ad_snap_map : undefined;
   if (!rawMap) {
@@ -4718,10 +4742,10 @@ async function runAdvisoryDraftSequence(
       () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/campaign_snap/check/", {
         campaign_snap_id: ids.campaignSnapId,
       }), credential, boundary, note);
-    if (!fakeCampaignId) {
-      const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
-      fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) ?? ids.campaignSketchId;
-    }
+    const campaignData = campaignCheck && isRecord(campaignCheck.data) ? campaignCheck.data : undefined;
+    // The final check may replace the temporary campaign reference after all
+    // groups have been saved. Its response takes precedence over the early check.
+    fakeCampaignId = nonEmptyId(campaignData?.fake_campaign_id) || fakeCampaignId || ids.campaignSketchId;
   }
   const checkInfo = ids.publishItems.map((item) => ({
     ad_id: "",
@@ -4735,12 +4759,12 @@ async function runAdvisoryDraftSequence(
       ad_creative_snap_check_info: checkInfo,
       risk_info: ids.riskInfo,
     }), credential, boundary, note);
-  await requestAdvisoryCreationStep("snap/batch_create_cta_id",
+  await requestCreationStep("snap/batch_create_cta_id",
     () => creationPathRequest(sessionRequest, "/api/v4/i18n/creation/snap/batch_create_cta_id/", {
       campaign_id: ids.campaignId ?? "",
       campaign_snap_id: ids.campaignSnapId,
       ad_and_creative_snap_info_list: checkInfo,
-    }), credential, boundary, note);
+    }), credential, { semantics: "mutation", ...(dispatchState ? { dispatchState } : {}) });
   return failed;
 }
 
@@ -4752,13 +4776,30 @@ async function awaitCreationResult(
 ): Promise<Record<string, unknown>> {
   const asyncRequestId = responseId(published, "async_request_id");
   if (!asyncRequestId) return published;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  let lastQueryError: unknown;
+  let consecutiveQueryErrors = 0;
+  // Large batches can remain accepted/pending beyond the old ~9s window.
+  // Continue querying the same job for about a minute, with a wall-clock cap
+  // so slow individual reads cannot multiply into a 40-minute wait.
+  const queryDeadline = Date.now() + 90_000;
+  for (let attempt = 0; attempt < 80 && Date.now() < queryDeadline; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 750));
-    const detail = await requestCreationStep("async_creation/detail",
-      () => creationDetailRequest(sessionRequest, asyncRequestId),
-      credential,
-      { semantics: "result-query" },
-    );
+    let detail: Record<string, unknown>;
+    try {
+      detail = await requestCreationStep("async_creation/detail",
+        () => creationDetailRequest(sessionRequest, asyncRequestId),
+        credential,
+        { semantics: "result-query" },
+      );
+      lastQueryError = undefined;
+      consecutiveQueryErrors = 0;
+    } catch (cause) {
+      // A failed read says nothing about the accepted job. Keep polling the
+      // same request id; never repeat create_by_snap to recover a lost read.
+      lastQueryError = cause;
+      if (++consecutiveQueryErrors >= 3) throw cause;
+      continue;
+    }
     const data = isRecord(detail.data) ? detail.data : undefined;
     if (data?.status === 1 && isRecord(data.result)) {
       if (hasExplicitCreationFailure(data.result)) {
@@ -4777,7 +4818,7 @@ async function awaitCreationResult(
       throw new ConfirmedCreationFailureError("TikTok 已明确报告创建失败，未生成正式广告。");
     }
   }
-  throw new UnknownCreationStateError("TikTok 创建任务在 9 秒内未返回最终结果，转入 Cookie 远端列表核验。");
+  throw new UnknownCreationStateError(`TikTok 创建任务在本轮等待窗口内未返回最终结果，转入 Cookie 远端列表核验。${lastQueryError instanceof Error ? `最后查询异常：${lastQueryError.message}` : ""}`);
 }
 
 /**
@@ -6072,7 +6113,6 @@ async function requestDispatchedCreationJson(
       // take longer than 15 seconds. Keep the request alive long enough to
       // receive TikTok's authoritative response instead of manufacturing an
       // avoidable unknown state after the server has already accepted it.
-      signal: AbortSignal.timeout(30_000),
     };
     if (request.method === "POST" && request.body !== undefined) requestInit.body = request.body;
   } catch (cause) {
@@ -6103,7 +6143,7 @@ async function requestDispatchedCreationJson(
     let pending: Promise<Response>;
     try {
       // A synchronous exception proves fetch did not accept the request.
-      pending = fetch(request.url, requestInit);
+      pending = fetch(request.url, { ...requestInit, signal: AbortSignal.timeout(30_000) });
       if (boundary.semantics === "mutation" && boundary.dispatchState) {
         boundary.dispatchState.mutationDispatched = true;
       }
