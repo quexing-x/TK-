@@ -79,6 +79,17 @@ describe("launch item result presentation", () => {
     expect(feedback.lines.join(" ")).not.toContain("人工核验");
   });
 
+  it("shows an accepted asynchronous publish as waiting for the ordinary poll", () => {
+    expect(summarizeExecution({ plan, results: [{
+      itemId: "item-pending", accountId: "account-1", status: "unknown",
+      message: "TikTok 已受理发布请求", syncWarning: null, pendingReadback: true,
+    }] }, accounts)).toEqual({
+      tone: "warning",
+      title: "发布已受理 1 个广告组",
+      lines: ["测试账户：等待账户轮询确认正式对象"],
+    });
+  });
+
   it("shows confirmed and readback failures together without hiding either node", () => {
     const feedback = summarizeExecution({ plan, results: [
       { itemId: "item-failed", accountId: "account-1", status: "failed", message: "预算无效", syncWarning: null },
@@ -91,6 +102,22 @@ describe("launch item result presentation", () => {
       lines: [
         "测试账户：预算无效",
         "测试账户：结果核验失败：Cookie 连接中断；可只读重新核验，不会重复创建",
+      ],
+    });
+  });
+
+  it("keeps poll-waiting items visible alongside a real failure", () => {
+    const feedback = summarizeExecution({ plan, results: [
+      { itemId: "item-failed", accountId: "account-1", status: "failed", message: "预算无效", syncWarning: null },
+      { itemId: "item-pending", accountId: "account-1", status: "unknown", message: "已受理", syncWarning: null, pendingReadback: true },
+    ] }, accounts);
+
+    expect(feedback).toEqual({
+      tone: "danger",
+      title: "创建失败 1 个广告组，另 1 个等待轮询",
+      lines: [
+        "测试账户：预算无效",
+        "测试账户：发布已受理，等待账户轮询确认正式对象",
       ],
     });
   });
@@ -130,7 +157,7 @@ describe("launch item result presentation", () => {
       { status: "succeeded", syncWarning: null },
       { status: "failed", syncWarning: null },
     ])).toEqual({
-      message: "创建完成：成功 1 个广告组，失败 1 个广告组",
+      message: "成功 1 个广告组，失败 1 个广告组",
       tone: "error",
     });
     expect(summarizeLaunchOutcomeToast([
@@ -142,13 +169,35 @@ describe("launch item result presentation", () => {
     });
   });
 
+  it("does not report accepted items waiting for the ordinary poll as failed", () => {
+    expect(summarizeLaunchOutcomeToast([
+      { status: "unknown", syncWarning: null, pendingReadback: true },
+    ])).toEqual({
+      message: "发布已受理：1 个广告组等待轮询确认",
+      tone: "success",
+    });
+    expect(summarizeLaunchOutcomeToast([
+      { status: "unknown", syncWarning: null, evidence: { publishAcceptedAt: "2026-09-07T00:00:00.000Z" } },
+    ])).toEqual({
+      message: "发布已受理：1 个广告组等待轮询确认",
+      tone: "success",
+    });
+    expect(summarizeLaunchOutcomeToast([
+      { status: "failed", syncWarning: null },
+      { status: "unknown", syncWarning: null, pendingReadback: true },
+    ])).toEqual({
+      message: "失败 1 个广告组，1 个等待轮询",
+      tone: "error",
+    });
+  });
+
   it("keeps unknown counts separate from confirmed failures", () => {
     expect(summarizePlanAccountResult({
       accountId: "account-1", ok: false, message: "创建结果待确认：响应丢失",
       createdCount: 0, failedCount: 0, unknownCount: 1,
     })).toEqual({
-      tone: "danger",
-      text: "结果核验失败 1 条：创建结果待确认：响应丢失",
+      tone: "warning",
+      text: "待远端确认 1 条：创建结果待确认：响应丢失",
     });
     expect(summarizePlanAccountResult({
       accountId: "account-1", ok: false, message: "明确失败：预算被拒绝",

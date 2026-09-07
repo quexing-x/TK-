@@ -3499,7 +3499,7 @@ describe("AutomationStore", () => {
       unknownCount: 1,
     });
     expect(refreshed.message).toContain("明确失败 1 条，可单独重试");
-    expect(refreshed.message).toContain("结果核验失败 1 条，可执行只读重新核验");
+    expect(refreshed.message).toContain("等待轮询确认 1 条");
     expect(store.claimLaunchPlanItem(unknown!.itemId, "executor-b", "failed")).toBeNull();
   });
 
@@ -3602,6 +3602,121 @@ describe("AutomationStore", () => {
         status: "running",
       }),
     ]);
+  });
+
+  it("lets ordinary polling resolve an accepted launch and enrich a later ad", () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    });
+    const pending = store.listLaunchPlanItems(plan.id)[0]!;
+    store.claimLaunchPlanItem(pending.itemId, "executor-a", "pending");
+    store.updateLaunchPlanItemProgress(pending.itemId, "executor-a", {
+      phase: "readback",
+      evidence: {
+        asyncRequestId: "async-1",
+        publishAcceptedAt: new Date().toISOString(),
+        materialExpected: true,
+      },
+    });
+    store.completeLaunchPlanItemUnknown(
+      pending.itemId,
+      "executor-a",
+      "TikTok 已受理发布请求，正式对象将由账户轮询确认。",
+    );
+
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toEqual([expect.objectContaining({ itemId: pending.itemId, status: "unknown" })]);
+    store.resolveLaunchPlanItemFromPollReadback(pending.itemId, {
+      campaignId: "campaign-2",
+      adGroupId: "group-2",
+      warning: "广告仍在传播。",
+    });
+    expect(store.getLaunchPlanItem(pending.itemId)).toMatchObject({
+      status: "succeeded",
+      phase: "sync",
+      campaignId: "campaign-2",
+      adGroupId: "group-2",
+      adId: null,
+      syncWarning: "广告仍在传播。",
+    });
+    expect(store.listLaunchPlanItemAttempts(pending.itemId)[0]).toMatchObject({
+      status: "succeeded",
+      phase: "sync",
+    });
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toHaveLength(1);
+
+    store.resolveLaunchPlanItemFromPollReadback(pending.itemId, {
+      campaignId: "campaign-2",
+      adGroupId: "group-2",
+      adId: "ad-2",
+    });
+    expect(store.getLaunchPlanItem(pending.itemId)).toMatchObject({
+      status: "succeeded",
+      adId: "ad-2",
+      syncWarning: null,
+    });
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toEqual([]);
+  });
+
+  it("adopts legacy accepted readbacks after the worker is detached", () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2), launchItemRow(3)],
+    });
+    const [unknownItem, runningItem] = store.listLaunchPlanItems(plan.id);
+    store.claimLaunchPlanItem(unknownItem!.itemId, "legacy-a", "pending");
+    store.updateLaunchPlanItemProgress(unknownItem!.itemId, "legacy-a", {
+      phase: "readback",
+      evidence: { asyncRequestId: "legacy-async-a" },
+    });
+    store.completeLaunchPlanItemUnknown(unknownItem!.itemId, "legacy-a", "旧版回读超时");
+    store.claimLaunchPlanItem(runningItem!.itemId, "legacy-b", "pending");
+    store.updateLaunchPlanItemProgress(runningItem!.itemId, "legacy-b", {
+      phase: "readback",
+      evidence: {
+        asyncRequestId: "legacy-async-b",
+        publishAcceptedAt: new Date().toISOString(),
+      },
+    });
+
+    expect(store.recoverAcceptedLaunchReadbacks("2000-01-01T00:00:00.000Z"))
+      .toEqual({ recoveredItemCount: 1, planIds: [plan.id] });
+    expect(store.getLaunchPlanItem(unknownItem!.itemId)).toMatchObject({
+      status: "unknown",
+      errorMessage: expect.stringContaining("账户轮询"),
+      evidence: { asyncRequestId: "legacy-async-a", publishAcceptedAt: expect.any(String) },
+    });
+    expect(store.getLaunchPlanItem(runningItem!.itemId)).toMatchObject({
+      status: "running",
+      evidence: { asyncRequestId: "legacy-async-b", publishAcceptedAt: expect.any(String) },
+    });
+
+    expect(store.recoverAcceptedLaunchReadbacks(new Date().toISOString()))
+      .toEqual({ recoveredItemCount: 1, planIds: [plan.id] });
+    expect(store.getLaunchPlanItem(runningItem!.itemId)).toMatchObject({
+      status: "unknown",
+      claimedBy: null,
+      errorMessage: expect.stringContaining("账户轮询"),
+      evidence: { asyncRequestId: "legacy-async-b", publishAcceptedAt: expect.any(String) },
+    });
+    expect(store.listLaunchPlanItemAttempts(runningItem!.itemId)[0]).toMatchObject({
+      status: "unknown",
+      phase: "readback",
+      evidence: { asyncRequestId: "legacy-async-b", publishAcceptedAt: expect.any(String) },
+    });
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toHaveLength(2);
   });
 
   it("把实际发出的请求体一路留到失败的那次尝试上", () => {

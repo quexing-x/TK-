@@ -5025,6 +5025,106 @@ export class AutomationStore {
   }
 
   /**
+   * Launch items whose async TikTok publish was deliberately detached from the
+   * creation worker. Unknown items still need their formal campaign/ad-group;
+   * successful items without an ad stay eligible so a later poll can attach
+   * and enable material that appeared after the ad group.
+   */
+  listLaunchPlanItemsAwaitingPollReadback(accountId: string): LaunchPlanItemRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM launch_plan_items
+       WHERE account_id = ?
+         AND (status = 'unknown' OR (status = 'succeeded' AND ad_id IS NULL))
+       ORDER BY created_at, item_index`,
+    ).all(accountId) as SqlRow[];
+    return rows
+      .map(mapLaunchPlanItem)
+      .filter((item) => Boolean(item.evidence.publishAcceptedAt));
+  }
+
+  /**
+   * Adopt publications accepted by releases that still waited inside the
+   * creation worker. Unknown items are already detached; running items are
+   * adopted only after two missed lease heartbeats so an overlapping live
+   * process cannot lose ownership.
+   */
+  recoverAcceptedLaunchReadbacks(staleBefore: string): {
+    recoveredItemCount: number;
+    planIds: string[];
+  } {
+    const rows = this.db.prepare(
+      `SELECT * FROM launch_plan_items
+       WHERE phase = 'readback'
+         AND (status = 'unknown' OR (status = 'running' AND claimed_at <= ?))`,
+    ).all(staleBefore) as SqlRow[];
+    const candidates = rows.flatMap((row) => {
+      try {
+        const evidence = JSON.parse(String(row.evidence_json ?? "{}")) as Record<string, unknown>;
+        if (!evidence.asyncRequestId) return [];
+        if (String(row.status) !== "running" && evidence.publishAcceptedAt) return [];
+        return [{ row, evidence: {
+          ...evidence,
+          publishAcceptedAt: evidence.publishAcceptedAt
+            ?? String(row.updated_at ?? row.claimed_at ?? new Date().toISOString()),
+        } }];
+      } catch {
+        return [];
+      }
+    });
+    if (candidates.length === 0) return { recoveredItemCount: 0, planIds: [] };
+
+    const now = new Date().toISOString();
+    const message = "TikTok 已受理发布请求，正式对象将由账户轮询确认。";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const updateItem = this.db.prepare(
+        `UPDATE launch_plan_items
+         SET status = 'unknown', evidence_json = ?, error_message = ?,
+             claimed_by = NULL, claimed_at = NULL,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE item_id = ? AND phase = 'readback'
+           AND (status = 'unknown' OR (status = 'running' AND claimed_at <= ?))`,
+      );
+      const updateAttempt = this.db.prepare(
+        `UPDATE launch_plan_item_attempts
+         SET status = 'unknown', phase = 'readback', evidence_json = ?, error_message = ?,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE attempt_id = ? AND status IN ('running', 'unknown')`,
+      );
+      const planIds = new Set<string>();
+      let recoveredItemCount = 0;
+      for (const candidate of candidates) {
+        const evidenceJson = JSON.stringify(candidate.evidence);
+        const result = updateItem.run(
+          evidenceJson,
+          message,
+          now,
+          now,
+          String(candidate.row.item_id),
+          staleBefore,
+        );
+        if (Number(result.changes) === 0) continue;
+        recoveredItemCount += Number(result.changes);
+        planIds.add(String(candidate.row.plan_id));
+        if (candidate.row.attempt_id) {
+          updateAttempt.run(
+            evidenceJson,
+            message,
+            now,
+            now,
+            String(candidate.row.attempt_id),
+          );
+        }
+      }
+      this.db.exec("COMMIT");
+      return { recoveredItemCount, planIds: [...planIds] };
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  /**
    * 这个账户历史上用批量创建表建过的行，新到旧。
    *
    * 用途只有一个：给「生成扩组导入表」沿用落地页和定向。快照里没有这三个字段
@@ -5243,6 +5343,63 @@ export class AutomationStore {
     }
   }
 
+  /** Resolve or enrich an async launch from an ordinary account-sync snapshot. */
+  resolveLaunchPlanItemFromPollReadback(
+    itemId: string,
+    ids: { campaignId: string; adGroupId: string; adId?: string; warning?: string },
+  ): LaunchPlanItemRecord {
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare(
+        "SELECT * FROM launch_plan_items WHERE item_id = ? AND status IN ('unknown', 'succeeded')",
+      ).get(itemId) as SqlRow | undefined;
+      if (!current) throw new Error("等待轮询核验的创建任务不存在或状态已经变化。");
+      const row = this.db.prepare(
+        `UPDATE launch_plan_items
+         SET status = 'succeeded', campaign_id = ?, adgroup_id = ?, ad_id = ?,
+             phase = 'sync', error_message = NULL, sync_warning = ?,
+             claimed_by = NULL, claimed_at = NULL,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE item_id = ? AND status IN ('unknown', 'succeeded')
+         RETURNING *`,
+      ).get(
+        ids.campaignId,
+        ids.adGroupId,
+        ids.adId ?? null,
+        ids.warning?.slice(0, 2000) ?? null,
+        now,
+        now,
+        itemId,
+      ) as SqlRow | undefined;
+      if (!row) throw new Error("等待轮询核验的创建任务已被其他操作更新。");
+      this.db.prepare(
+        `UPDATE launch_plan_item_attempts
+         SET status = 'succeeded', phase = 'sync', error_message = NULL,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE attempt_id = ? AND status IN ('unknown', 'succeeded')`,
+      ).run(now, now, String(row.attempt_id));
+      const action = String(current.status) === "unknown"
+        ? "write-task.poll-readback-reconciled"
+        : "write-task.poll-readback-enriched";
+      this.writeAudit(String(row.actor_name), String(row.account_id), action, {
+        taskType: "launch",
+        taskId: itemId,
+        attemptId: row.attempt_id,
+        correlationId: row.correlation_id,
+        campaignId: ids.campaignId,
+        adGroupId: ids.adGroupId,
+        ...(ids.adId ? { adId: ids.adId } : {}),
+        ...(ids.warning ? { warning: ids.warning } : {}),
+      });
+      this.db.exec("COMMIT");
+      return mapLaunchPlanItem(row);
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
   completeLaunchPlanItemSync(
     itemId: string,
     syncWarning: string | null,
@@ -5453,7 +5610,7 @@ export class AutomationStore {
         ok: accountItems.length > 0 && accountItems.every((item) => item.status === "succeeded"),
         message: [
           failureMessage ? `明确失败：${failureMessage}` : "",
-          unknownMessage ? `结果核验失败：${unknownMessage}` : "",
+          unknownMessage ? `待远端确认：${unknownMessage}` : "",
         ].filter(Boolean).join("；").slice(0, 2000) || null,
         createdCount: accountItems.filter((item) => item.status === "succeeded").length,
         failedCount: failures.length,
@@ -5468,7 +5625,7 @@ export class AutomationStore {
       : [
           `已完成 ${items.filter((item) => item.status === "succeeded").length}/${items.length} 条`,
           ...(failedCount > 0 ? [`明确失败 ${failedCount} 条，可单独重试`] : []),
-          ...(unknownCount > 0 ? [`结果核验失败 ${unknownCount} 条，可执行只读重新核验`] : []),
+          ...(unknownCount > 0 ? [`等待轮询确认 ${unknownCount} 条`] : []),
         ].join("；") + "。";
     this.db
       .prepare(

@@ -133,6 +133,9 @@ export interface CreationMutation {
   /** Snap/sketch ids persisted before an unknown result. They scope read-only
    * reconciliation to this task instead of unrelated account drafts. */
   reconcileEvidence?: LaunchCreationEvidence;
+  /** Return after TikTok accepts the async publish request. The ordinary account
+   * poll will resolve formal object ids without occupying the creation worker. */
+  deferReadback?: boolean;
   onBeforeDispatch?: () => void;
   onProgress?: (progress: LaunchCreationProgress) => void;
 }
@@ -153,6 +156,8 @@ export interface CreationMutationResult extends CreationMutation {
   /** True only when read-only reconciliation positively proved that neither a
    * formal object nor this task's draft exists remotely. */
   reconciliationVerifiedAbsent?: boolean;
+  /** The publish mutation was accepted and persisted for ordinary-poll readback. */
+  pendingReadback?: boolean;
 }
 
 export class RetryableCreationError extends Error {

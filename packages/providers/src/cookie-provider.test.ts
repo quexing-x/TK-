@@ -2053,6 +2053,9 @@ describe("CookieAdsProvider", () => {
       creativeSnapId: null,
       creativeSketchId: null,
       asyncRequestId: null,
+      publishAcceptedAt: null,
+      materialExpected: null,
+      skippedVideoCodes: null,
       sentRequests: null,
       advisoryFailures: null,
     };
@@ -2099,6 +2102,9 @@ describe("CookieAdsProvider", () => {
       creativeSnapId: null,
       creativeSketchId: null,
       asyncRequestId: null,
+      publishAcceptedAt: null,
+      materialExpected: null,
+      skippedVideoCodes: null,
       sentRequests: null,
       advisoryFailures: null,
     };
@@ -2390,6 +2396,39 @@ describe("CookieAdsProvider", () => {
     expect(enables[0]?.body).toMatchObject({ creative_id: "creative", operation: "enable" });
   });
 
+  it("releases a deferred launch after publish acceptance without polling creation detail", async () => {
+    const requested: string[] = [];
+    const progress: LaunchCreationProgress[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [{
+      ...creationTestMutation("none"),
+      deferReadback: true,
+      onProgress: (value) => progress.push(value),
+    }]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "unknown",
+      retrySafe: false,
+      pendingReadback: true,
+    });
+    expect(requested.some((url) => url.includes("/async_creation/detail/"))).toBe(false);
+    expect(requested.some((url) => url.includes("/ad/update_status"))).toBe(false);
+    expect(progress).toContainEqual(expect.objectContaining({
+      phase: "readback",
+      evidence: expect.objectContaining({
+        asyncRequestId: "async",
+        materialExpected: true,
+        publishAcceptedAt: expect.any(String),
+      }),
+    }));
+  });
+
   it("createFromPreset 以 disabled 发布时不开启广告", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
@@ -2419,7 +2458,7 @@ describe("CookieAdsProvider", () => {
     expect(requested.some((url) => url.includes("/ad/update_status"))).toBe(false);
   });
 
-  it("stops before creative save when the HAR material lookup cannot resolve a code", async () => {
+  it("saves a draft and reaches publish when the material lookup cannot resolve a code", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -2438,10 +2477,12 @@ describe("CookieAdsProvider", () => {
       [mutation],
     );
 
-    expect(result).toMatchObject({ ok: false, failureKind: "retryable", retrySafe: true });
+    expect(result).toMatchObject({ ok: true });
+    expect(result?.warning).toContain("已跳过 1 条素材");
     expect(requested.some((url) => url.includes("material/tt_video/bulk/info"))).toBe(true);
-    expect(requested.some((url) => url.includes("ad_snap/save"))).toBe(false);
-    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
+    expect(requested.some((url) => url.includes("ad_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("create_by_snap"))).toBe(true);
   });
 
   it("自动优化：按完整投放上下文提问，并只开启产品选定的三项", async () => {
@@ -2769,7 +2810,7 @@ describe("CookieAdsProvider", () => {
     expect(JSON.stringify(assets?.title_list)).not.toContain("bad-code");
   });
 
-  it("整行授权码全部解析不到时仍然失败，不建空广告组", async () => {
+  it("整行授权码全部解析不到时继续保存草稿，由发布回执决定结果", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       const payload = url.includes("material/tt_video/bulk/info")
@@ -2786,9 +2827,8 @@ describe("CookieAdsProvider", () => {
       [mutation],
     );
 
-    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
-    expect(result?.message).toContain("全部无法在素材库中解析到帖子");
-    expect(result?.message).toContain("#bad-1");
+    expect(result).toMatchObject({ ok: true });
+    expect(result?.warning).toContain("已跳过 2 条素材");
   });
 
   it("runs the successful HAR Spark authorization sequence before saving the creative", async () => {
@@ -3069,7 +3109,7 @@ describe("CookieAdsProvider", () => {
       .toMatchObject({ campaign_id: "source-campaign", is_partial_publish: true });
   });
 
-  it("does not save a creative when TikTok does not confirm the authorization identity", async () => {
+  it("saves a creative without unconfirmed authorization identities", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -3092,13 +3132,15 @@ describe("CookieAdsProvider", () => {
 
     const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
 
-    expect(result).toMatchObject({ ok: false, failureKind: "retryable" });
+    expect(result).toMatchObject({ ok: true });
+    expect(result?.warning).toContain("已跳过 1 条素材");
     expect(requested.some((url) => url.includes("bulk/authorize"))).toBe(true);
     expect(requested.some((url) => url.includes("creative_fix_task"))).toBe(false);
-    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("create_by_snap"))).toBe(true);
   });
 
-  it("does not authorize or save a creative when bulk info omits its Spark identity", async () => {
+  it("continues to authorization and draft save when bulk info omits its Spark identity", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -3117,11 +3159,81 @@ describe("CookieAdsProvider", () => {
 
     const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
 
-    expect(result).toMatchObject({ ok: false, failureKind: "retryable", retrySafe: true });
+    expect(result).toMatchObject({ ok: true });
     expect(requested.some((url) => url.includes("bulk/info"))).toBe(true);
-    expect(requested.some((url) => url.includes("campaign_snap/save"))).toBe(false);
-    expect(requested.some((url) => url.includes("bulk/authorize"))).toBe(false);
-    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(false);
+    expect(requested.some((url) => url.includes("campaign_snap/save"))).toBe(true);
+    expect(requested.some((url) => url.includes("bulk/authorize"))).toBe(true);
+    expect(requested.some((url) => url.includes("creative_snap/save"))).toBe(true);
+  });
+
+  it.each([
+    "partial-authorization", "identity-mismatch", "missing-core", "missing-vid", "stale-mapping",
+    "lookup-rejection", "lookup-network", "authorize-rejection", "authorize-network",
+    "publish-rejection", "publish-timeout",
+  ])("keeps Spark material problems non-blocking: %s", async (scenario) => {
+    const codes = ["#one", "#two", "#three", "#four", "#five"];
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const progress: LaunchCreationProgress[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      requests.push({ url, body });
+      if (url.includes("bulk/info")) {
+        if (scenario === "lookup-network") throw new TypeError("lookup unavailable");
+        if (scenario === "lookup-rejection") return jsonResponse({ code: 40001, msg: "lookup rejected" });
+        return jsonResponse({ code: 0, data: { tt_video_map: Object.fromEntries(codes.map((code, i) => [code, {
+          item_id: `post-${i}`,
+          ...(scenario === "missing-core" ? {} : { core_user_id: "creator" }),
+          ...(scenario === "missing-vid" && i === 3 ? {} : { video_info: { vid: `vid-${i}` } }),
+        }])) } });
+      }
+      if (url.includes("bulk/authorize")) {
+        if (scenario === "authorize-network") throw new TypeError("authorize unavailable");
+        if (scenario === "authorize-rejection") return jsonResponse({ code: 40001, msg: "authorize rejected" });
+        const missing = ["partial-authorization", "publish-rejection", "publish-timeout"].includes(scenario);
+        return jsonResponse({ code: 0, data: {
+          identity_id_map: Object.fromEntries(codes.filter((_, i) => !missing || i !== 3)
+            .map((code, i) => [code, scenario === "identity-mismatch" && i === 3 ? "wrong-creator" : "creator"])),
+          ...(missing ? { error_map: { "#four": { code: 123, msg: "authorization pending #four" } } } : {}),
+        } });
+      }
+      if (url.includes("create_by_snap")) {
+        if (scenario === "publish-rejection") return jsonResponse({ code: 40002, msg: "publish rejected by TikTok" });
+        if (scenario === "publish-timeout") throw new TypeError("publish response lost");
+      }
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const mutation = creationTestMutation("none");
+    mutation.row.videoCode = codes.join(";");
+    mutation.preset.videoPostMappings = scenario === "stale-mapping"
+      ? [{ videoCode: "#four", postId: "old-post" }] : [];
+    mutation.onProgress = (event) => progress.push(event);
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [mutation]);
+    const creative = requests.find((r) => r.url.includes("creative_snap/save"));
+    expect(creative).toBeDefined();
+    const asset = (creative!.body.asset_group_sketch_form_data_list as Array<Record<string, unknown>>)[0]!;
+    const images = asset.image_list as Array<Record<string, unknown>>;
+    const allSkipped = /^(lookup|authorize)-(network|rejection)$/.test(scenario);
+    const partial = ["partial-authorization", "identity-mismatch", "publish-rejection", "publish-timeout"].includes(scenario);
+    expect(images).toHaveLength(allSkipped ? 0 : partial ? 4 : 5);
+    expect(images.every((v) => v.identity_id === "creator")).toBe(true);
+    expect(JSON.stringify(images)).not.toContain("#");
+    if (partial) expect(images.some((v) => v.aweme_item_id === "post-3")).toBe(false);
+    const publishIndex = requests.findIndex((r) => r.url.includes("create_by_snap"));
+    expect(publishIndex).toBeGreaterThan(requests.indexOf(creative!));
+    if (scenario.startsWith("publish-")) {
+      expect(result).toMatchObject({ ok: false, retrySafe: false });
+      expect(result?.message).toContain(scenario === "publish-rejection" ? "publish rejected by TikTok" : "publish response lost");
+    } else {
+      expect(result).toMatchObject({ ok: true });
+      if (allSkipped || partial) expect(result?.warning).toContain(`已跳过 ${allSkipped ? 5 : 1} 条素材`);
+    }
+    if (scenario === "partial-authorization") {
+      const warnings = progress.flatMap((p) => p.evidence?.advisoryFailures ?? []).join(";");
+      expect(warnings).toContain("素材 4");
+      expect(warnings).toContain("authorization pending");
+      expect(warnings).not.toContain("#four");
+    }
   });
 
   it.each([

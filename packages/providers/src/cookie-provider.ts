@@ -3038,6 +3038,7 @@ interface PreparedCookieDraft {
   publishItem: DraftPublishItem;
   riskInfo: Record<string, unknown>;
   dispatchState: CreationDispatchState;
+  materialExpected: boolean;
   /** 本行被跳过的授权码，随发布结果一起报给用户。 */
   skippedVideoCodes?: string[];
 }
@@ -3323,6 +3324,7 @@ async function runCookieDraftBatch(
         batchState,
         { adGroupPayloads, campaignPayloads, resolvedVideos, baseline },
       );
+      preparedItem.materialExpected = resolvedVideos.length > 0;
       // 跳过的素材必须跟着这条任务的结果一起报出去。
       if (skippedCodes.length > 0) preparedItem.skippedVideoCodes = skippedCodes;
       prepared.push(preparedItem);
@@ -3415,14 +3417,38 @@ async function runCookieDraftBatch(
     );
     const asyncRequestId = responseId(published, "async_request_id");
     const providerRequestId = responseId(published, "request_id");
+    const publishAcceptedAt = new Date().toISOString();
     for (const item of prepared) {
       item.mutation.onProgress?.({
-        phase: "publishing",
+        phase: item.mutation.deferReadback ? "readback" : "publishing",
         evidence: {
           ...(asyncRequestId ? { asyncRequestId } : {}),
           ...(providerRequestId ? { providerRequestId } : {}),
+          ...(item.mutation.deferReadback
+            ? {
+                publishAcceptedAt,
+                materialExpected: item.materialExpected,
+                ...(item.skippedVideoCodes?.length
+                  ? { skippedVideoCodes: item.skippedVideoCodes }
+                  : {}),
+              }
+            : {}),
         },
       });
+    }
+    if (prepared.every((item) => item.mutation.deferReadback === true)) {
+      return [
+        ...prepared.map((item): CreationMutationResult => ({
+          ...item.mutation,
+          row: item.row,
+          ok: false,
+          failureKind: "unknown",
+          retrySafe: false,
+          pendingReadback: true,
+          message: "TikTok 已受理发布请求，正式对象将由账户轮询确认。",
+        })),
+        ...failures,
+      ];
     }
     let completed: Record<string, unknown> | undefined;
     let terminalError: unknown;
@@ -4436,6 +4462,12 @@ async function runCookieDraftChain(
   if (!copyOnly) {
     singleAsset.image_list = buildSparkImageList(resolvedVideos);
     singleAsset.title_list = resolvedVideos.map((video) => ({ title: "", aweme_item_id: video.itemId }));
+    singleAsset.creative_assets_active_id = resolvedVideos[0]?.itemId ?? "";
+    delete singleAsset.origin_creative_id;
+    if (resolvedVideos.length === 0) {
+      singleAsset.identity_id = "";
+      delete singleAsset.identity_bc_id;
+    }
     if (resolvedVideos.some((video) => video.identityId)) {
       // Match TikTok's real from-scratch Spark creative_snap/save. Spark posts
       // use a per-image (level-2) identity: the creative declares identity_type=2
@@ -4554,6 +4586,7 @@ async function runCookieDraftChain(
         ? credential.creationProfile.publishPayload.risk_info
         : {},
       dispatchState,
+      materialExpected: false,
     };
   }
   // 不再走 snap/save_by_sketch 重铸，理由见批量发布那一处的注释。
@@ -4608,6 +4641,27 @@ async function runCookieDraftChain(
           : {}),
       },
     });
+    if (mutation.deferReadback) {
+      mutation.onProgress?.({
+        phase: "readback",
+        evidence: {
+          publishAcceptedAt: new Date().toISOString(),
+          materialExpected: copyOnly
+            ? publishItems.some((item) => item.creative_snap_info_list.length > 0)
+            : resolvedVideos.length > 0,
+          ...(skippedVideoCodes.length > 0 ? { skippedVideoCodes } : {}),
+        },
+      });
+      return {
+        ...mutation,
+        row: creationRow,
+        ok: false,
+        failureKind: "unknown",
+        retrySafe: false,
+        pendingReadback: true,
+        message: "TikTok 已受理发布请求，正式对象将由账户轮询确认。",
+      };
+    }
   } catch (cause) {
     if (cause instanceof ConfirmedCreationFailureError) throw cause;
     if (cause instanceof RetryableCreationError) throw cause;
@@ -4868,7 +4922,7 @@ async function resolveTikTokVideos(
       (item) => item.videoCode === code,
     ) ?? [];
     const postIds = [...new Set(matches.map((item) => item.postId))];
-    if (postIds.length > 1) {
+    if (!code.startsWith("#") && postIds.length > 1) {
       throw new RetryableCreationError("同一授权码配置了多个 Post ID，请先统一映射。");
     }
     if (code.startsWith("#")) needLibrary.push(code);
@@ -4893,10 +4947,7 @@ async function resolveTikTokVideos(
     const fromLibrary = library.get(code);
     if (code.startsWith("#")) {
       if (fromLibrary) {
-        const mappedPostId = mutation.preset.videoPostMappings?.find((item) => item.videoCode === code)?.postId;
-        if (mappedPostId && mappedPostId !== fromLibrary.itemId) {
-          throw new RetryableCreationError("授权码解析结果与保存的 Post ID 不一致，请刷新授权关系后重试。");
-        }
+        // 当前账户的实时授权结果优先于历史手工映射。
         videos.push(fromLibrary);
         continue;
       }
@@ -4906,14 +4957,13 @@ async function resolveTikTokVideos(
     const manualId = manual.get(code);
     videos.push({ itemId: manualId ?? code } satisfies ResolvedVideo);
   }
-  if (videos.length === 0) {
-    // 一个都解析不出来时仍然失败：没有素材就没有可创建的广告，
-    // 静默建出一个空广告组比报错更糟。
-    throw new RetryableCreationError(
-      skipped.length > 0
-        ? `本行 ${skipped.length} 个授权码全部无法在素材库中解析到帖子（${formatSkippedCodes(skipped)}）；请确认这些视频已授权到当前账户。`
-        : "有授权码无法在素材库中解析到帖子；请确认该视频已授权到当前账户。",
-    );
+  // 即使全部跳过，也保存真实的空素材草稿；不虚构身份或把授权码当作帖子 ID。
+  // 是否可发布由 TikTok 的发布响应决定。
+  const issues = (library as SparkVideoLibrary).issues;
+  const advisoryFailures = skipped.map((code) =>
+    `素材提示：已跳过素材 ${list.indexOf(code) + 1}，${issues?.get(code) ?? "素材查询未返回可用帖子"}`);
+  if (advisoryFailures.length > 0) {
+    mutation.onProgress?.({ phase: "validation", evidence: { advisoryFailures } });
   }
   if (skippedCodes) skippedCodes.push(...skipped);
   return videos;
@@ -4927,7 +4977,17 @@ function formatSkippedCodes(codes: string[]): string {
 
 /** 素材跳过提示。界面按「素材提示 / 已跳过 N 条素材」匹配并汇总，格式不要随意改。 */
 function skippedMaterialWarning(skipped: string[]): string {
-  return `素材提示：已跳过 ${skipped.length} 条素材（授权码无法在素材库中解析到帖子：${formatSkippedCodes(skipped)}），其余素材已正常创建。`;
+  return `素材提示：已跳过 ${skipped.length} 条素材（未取得可用帖子或授权身份：${formatSkippedCodes(skipped)}）；创建结果以 TikTok 发布回执为准。`;
+}
+
+class SparkVideoLibrary extends Map<string, ResolvedVideo> {
+  readonly issues = new Map<string, string>();
+}
+
+function sparkIssue(value: unknown, codes: string[]): string {
+  let detail = value instanceof Error ? value.message : typeof value === "string" ? value : JSON.stringify(value) ?? "授权未返回身份";
+  for (const code of codes) detail = detail.split(code).join("[授权码]");
+  return sanitizeProviderMessage(detail).slice(0, 500);
 }
 
 /**
@@ -4959,23 +5019,29 @@ async function resolveVideoCodesFromLibrary(
   dispatchState: CreationDispatchState,
 ): Promise<Map<string, ResolvedVideo>> {
   const uniqueCodes = [...new Set(codes)];
-  const out = new Map<string, ResolvedVideo>();
+  const out = new SparkVideoLibrary();
   // 逐批查询。素材库这两个接口有自己的单次查询上限，和「广告组最多 50 条素材」
   // 完全是两回事：生产实测单请求 33 个码就会被 TikTok 以
   // 「Authorization codes queried at one time exceeds the upper limit」拒掉，
   // 而一个 50 条素材的广告组本身是合法的。批量创建还会把整批所有行的码汇总成
   // 一个请求（曾出现 289 个码），不切分必炸。
   for (const chunk of chunkVideoCodes(uniqueCodes)) {
-    const response = await requestCreationStep(
-      "material/tt_video/bulk/info",
-      () => creationPathRequest(
-        sessionRequest,
-        "/api/v4/i18n/creation/material/tt_video/bulk/info/",
-        { video_code_list: chunk },
-      ),
-      credential,
-      { semantics: "preflight-read", dispatchState },
-    );
+    let response: Record<string, unknown>;
+    try {
+      response = await requestCreationStep(
+        "material/tt_video/bulk/info",
+        () => creationPathRequest(
+          sessionRequest,
+          "/api/v4/i18n/creation/material/tt_video/bulk/info/",
+          { video_code_list: chunk },
+        ),
+        credential,
+        { semantics: "preflight-read", dispatchState },
+      );
+    } catch (cause) {
+      for (const code of chunk) out.issues.set(code, sparkIssue(cause, uniqueCodes));
+      continue;
+    }
     const data = isRecord(response.data) ? response.data : {};
     const videoMap = isRecord(data.tt_video_map) ? data.tt_video_map : {};
     for (const code of chunk) {
@@ -4984,16 +5050,11 @@ async function resolveVideoCodesFromLibrary(
       const itemId = nonEmptyId(entry.item_id);
       if (!itemId) continue;
       const identityId = nonEmptyId(entry.core_user_id);
-      if (!identityId) {
-        throw dispatchState.mutationDispatched
-          ? new UnknownCreationStateError("TikTok 素材信息未返回可用的 Spark 身份；已有草稿请求发出，不能直接重试。")
-          : new RetryableCreationError("TikTok 素材信息未返回可用的 Spark 身份，请更新授权后重试本条。");
-      }
       const videoInfo = isRecord(entry.video_info) ? entry.video_info : {};
       const vid = nonEmptyId(videoInfo.vid) ?? nonEmptyId(videoInfo.video_id);
       out.set(code, {
         itemId,
-        identityId,
+        ...(identityId ? { identityId } : {}),
         ...(vid ? { vid } : {}),
       });
     }
@@ -5001,26 +5062,40 @@ async function resolveVideoCodesFromLibrary(
   const resolvedCodes = uniqueCodes.filter((code) => out.has(code));
   if (resolvedCodes.length === 0) return out;
   for (const chunk of chunkVideoCodes(resolvedCodes)) {
-    const authorized = await requestCreationStep(
-      "material/tt_video/bulk/authorize",
-      () => creationPathRequest(
-        sessionRequest,
-        "/api/v4/i18n/creation/material/tt_video/bulk/authorize/",
-        { auth_code_info_list: chunk.map((auth_code) => ({ auth_code })), is_check: false },
-      ),
-      credential,
-      { semantics: "preflight-read", dispatchState },
-    );
+    let authorized: Record<string, unknown>;
+    try {
+      authorized = await requestCreationStep(
+        "material/tt_video/bulk/authorize",
+        () => creationPathRequest(
+          sessionRequest,
+          "/api/v4/i18n/creation/material/tt_video/bulk/authorize/",
+          { auth_code_info_list: chunk.map((auth_code) => ({ auth_code })), is_check: false },
+        ),
+        credential,
+        { semantics: "preflight-read", dispatchState },
+      );
+    } catch (cause) {
+      for (const code of chunk) {
+        out.delete(code);
+        out.issues.set(code, sparkIssue(cause, uniqueCodes));
+      }
+      continue;
+    }
     const authorizedData = isRecord(authorized.data) ? authorized.data : {};
     const identityMap = isRecord(authorizedData.identity_id_map) ? authorizedData.identity_id_map : {};
+    const errorMap = isRecord(authorizedData.error_map) ? authorizedData.error_map : {};
     for (const code of chunk) {
       const video = out.get(code)!;
       const authorizedIdentity = nonEmptyId(identityMap[code]);
       if (!authorizedIdentity) {
-        throw new ConfirmedCreationFailureError("TikTok 未返回授权码对应的 Spark 身份，已停止创建创意。");
+        out.delete(code);
+        out.issues.set(code, sparkIssue(errorMap[code] ?? "授权响应未返回身份", uniqueCodes));
+        continue;
       }
       if (video.identityId && video.identityId !== authorizedIdentity) {
-        throw new ConfirmedCreationFailureError("TikTok 返回的 Spark 身份前后不一致，已停止创建创意。");
+        out.delete(code);
+        out.issues.set(code, "素材查询与授权响应的身份不一致");
+        continue;
       }
       out.set(code, { ...video, identityId: authorizedIdentity });
     }
@@ -5056,9 +5131,7 @@ async function prepareSparkPosts(
     (video): video is ResolvedVideo & { identityId: string; vid: string } => Boolean(video.identityId && video.vid),
   );
   if (sparkVideos.length === 0) return;
-  if (sparkVideos.length !== videos.filter((video) => video.identityId).length) {
-    throw new ConfirmedCreationFailureError("TikTok 未返回完整的 Spark 视频素材标识，已停止创建创意。");
-  }
+  // 缺少 vid 时跳过这些辅助准备请求；草稿仍使用已确认的帖子与身份。
 
   const postList = sparkVideos.map((video) => ({
     item_id: video.itemId,

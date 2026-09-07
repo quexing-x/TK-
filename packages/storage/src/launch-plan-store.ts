@@ -51,6 +51,10 @@ export class LaunchPlanStore {
     return this.store.recoverInterruptedLaunchPlanItems(staleBefore);
   }
 
+  recoverAcceptedReadbacks(staleBefore: string) {
+    return this.store.recoverAcceptedLaunchReadbacks(staleBefore);
+  }
+
   recoverLegacySeriesBlocks() {
     // One-way upgrade compatibility for plans created by releases that used
     // database series locks. New creation tasks never acquire these locks.

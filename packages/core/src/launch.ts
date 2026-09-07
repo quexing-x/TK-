@@ -92,6 +92,13 @@ export const LaunchCreationEvidenceSchema = z.object({
   creativeSnapId: z.string().min(1).nullable().default(null),
   creativeSketchId: z.string().min(1).nullable().default(null),
   asyncRequestId: z.string().min(1).nullable().default(null),
+  /** TikTok accepted the async publish request; formal ids are resolved by the
+   * ordinary account poll instead of holding the creation worker open. */
+  publishAcceptedAt: z.string().datetime().nullable().default(null),
+  /** Whether this item is expected to produce a formal ad as well as an ad group. */
+  materialExpected: z.boolean().nullable().default(null),
+  /** Material codes skipped before publish, retained for the eventual sync warning. */
+  skippedVideoCodes: z.array(z.string().min(1)).nullable().default(null),
   /**
    * 实际发出的创建请求体。
    *

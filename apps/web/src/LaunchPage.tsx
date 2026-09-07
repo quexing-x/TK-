@@ -872,17 +872,17 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2><p>后台执行时会自动刷新逐项状态和当前阶段。</p></div></div></div>
       <div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>
         {plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => {
-          const created = plan.executionResults.reduce((total, item) => total + item.createdCount, 0);
-          const failed = plan.executionResults.reduce((total, item) => total + item.failedCount + item.unknownCount, 0);
-          const verifying = plan.executionResults.reduce((total, item) => total + item.unknownCount, 0);
           const items = planItems[plan.id] ?? [];
           const failedItems = items.filter((item) => item.status === "failed");
-          const verifyingItems = items.filter((item) => item.status === "unknown");
+          const awaitingItems = items.filter((item) => item.status === "unknown" && item.evidence.publishAcceptedAt);
+          const verifyingItems = items.filter((item) => item.status === "unknown" && !item.evidence.publishAcceptedAt);
+          const created = items.filter((item) => item.status === "succeeded").length;
+          const failed = failedItems.length + verifyingItems.length;
           const skippedMaterials = countSkippedMaterials(items);
           return <tr key={plan.id}>
             <td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.mode === "copy" ? `${items.length || plan.launchRows.length} 个广告组 / ${plan.targetAccountIds.length} 个账户` : `${plan.launchRows.length} 条 × ${plan.targetAccountIds.length} 个账户`}</td>
-            <td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : ["failed", "unknown"].includes(item.status) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adGroupName} · {launchItemStatusLabel(item.status)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td>
-            <td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">广告组成功 {created} · 失败 {failed}{verifying > 0 ? `（其中结果核验失败 ${verifying}）` : ""}</small>}{skippedMaterials > 0 && <small className="plan-execution-summary">素材失败 {skippedMaterials} 条，已跳过；不影响已创建的广告组。</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{accountNameById.get(item.accountId) ?? item.accountId}：{detail.text}</small> : null; })}</td>
+            <td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">{items.map((item) => <small className={`status ${item.status === "succeeded" ? "active" : item.status === "failed" || (item.status === "unknown" && !item.evidence.publishAcceptedAt) ? "danger" : "warning"}`} key={item.itemId}>{item.launchRow.adGroupName} · {launchItemStatusLabel(item)} · {launchPhaseLabel(item.phase)}</small>)}</div>}</td>
+            <td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">广告组成功 {created} · 失败 {failed}{awaitingItems.length > 0 ? ` · 等待轮询 ${awaitingItems.length}` : ""}{verifyingItems.length > 0 ? ` · 结果待确认 ${verifyingItems.length}` : ""}</small>}{skippedMaterials > 0 && <small className="plan-execution-summary">素材失败 {skippedMaterials} 条，已跳过；不影响已创建的广告组。</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{accountNameById.get(item.accountId) ?? item.accountId}：{detail.text}</small> : null; })}</td>
             <td>{failedItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">修正后重试 {item.launchRow.adGroupName}</button>)}{verifyingItems.map((item) => <button className="secondary-button compact-button" disabled={busy} key={item.itemId} onClick={() => void retryPlanItem(plan.id, item.itemId)} type="button">重新核验 {item.launchRow.adGroupName}</button>)}{["blocked", "draft"].includes(plan.status) && <button disabled={busy || items.some((item) => item.status === "running")} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td>
           </tr>;
         })}
@@ -1054,16 +1054,27 @@ export function summarizeExecution(
   const accountNames = new Map(accounts.map((account) => [account.id, account.displayName]));
   const label = (accountId: string) => accountNames.get(accountId) ?? accountId;
   const failed = execution.results.filter((item) => item.status === "failed");
-  const verifying = execution.results.filter((item) => item.status === "unknown");
+  const awaiting = execution.results.filter((item) => item.status === "unknown" && item.pendingReadback);
+  const verifying = execution.results.filter((item) => item.status === "unknown" && !item.pendingReadback);
   const succeeded = execution.results.filter((item) => item.status === "succeeded");
   if (failed.length > 0 || verifying.length > 0) {
     return {
       tone: "danger",
-      title: `创建失败 ${failed.length + verifying.length} 个广告组`,
+      title: awaiting.length > 0
+        ? `创建失败 ${failed.length + verifying.length} 个广告组，另 ${awaiting.length} 个等待轮询`
+        : `创建失败 ${failed.length + verifying.length} 个广告组`,
       lines: [
         ...failed.map((item) => `${label(item.accountId)}：${item.message || "创建失败"}`),
         ...verifying.map((item) => `${label(item.accountId)}：结果核验失败：${item.message || "远端结果未确认"}；可只读重新核验，不会重复创建`),
+        ...awaiting.map((item) => `${label(item.accountId)}：发布已受理，等待账户轮询确认正式对象`),
       ],
+    };
+  }
+  if (awaiting.length > 0) {
+    return {
+      tone: "warning",
+      title: `发布已受理 ${awaiting.length} 个广告组`,
+      lines: awaiting.map((item) => `${label(item.accountId)}：等待账户轮询确认正式对象`),
     };
   }
   const skippedMaterials = countSkippedMaterials(succeeded);
@@ -1083,6 +1094,8 @@ export function summarizeExecution(
 type LaunchOutcome = {
   status: LaunchExecutionResult["results"][number]["status"];
   syncWarning: string | null;
+  pendingReadback?: boolean;
+  evidence?: { publishAcceptedAt?: string | null };
 };
 
 export function countSkippedMaterials(outcomes: LaunchOutcome[]): number {
@@ -1098,13 +1111,26 @@ export function summarizeLaunchOutcomeToast(outcomes: LaunchOutcome[]): {
   tone: "success" | "error";
 } {
   const succeeded = outcomes.filter((item) => item.status === "succeeded").length;
-  const failed = outcomes.filter((item) => item.status === "failed" || item.status === "unknown").length;
+  const awaiting = outcomes.filter((item) => item.status === "unknown"
+    && (item.pendingReadback || item.evidence?.publishAcceptedAt)).length;
+  const failed = outcomes.filter((item) => item.status === "failed"
+    || (item.status === "unknown" && !item.pendingReadback && !item.evidence?.publishAcceptedAt)).length;
   if (failed > 0) {
     return {
-      message: succeeded > 0
-        ? `创建完成：成功 ${succeeded} 个广告组，失败 ${failed} 个广告组`
-        : `创建失败：${failed} 个广告组未创建`,
+      message: [
+        succeeded > 0 ? `成功 ${succeeded} 个广告组` : null,
+        `失败 ${failed} 个广告组`,
+        awaiting > 0 ? `${awaiting} 个等待轮询` : null,
+      ].filter(Boolean).join("，"),
       tone: "error",
+    };
+  }
+  if (awaiting > 0) {
+    return {
+      message: succeeded > 0
+        ? `创建完成：成功 ${succeeded} 个广告组，另 ${awaiting} 个已受理并等待轮询确认`
+        : `发布已受理：${awaiting} 个广告组等待轮询确认`,
+      tone: "success",
     };
   }
   const skippedMaterials = countSkippedMaterials(outcomes);
@@ -1123,8 +1149,8 @@ export function summarizePlanAccountResult(
   if (result.failedCount === 0 && result.unknownCount === 0) return null;
   if (result.failedCount === 0) {
     return {
-      tone: "danger",
-      text: `结果核验失败 ${result.unknownCount} 条${result.message ? `：${result.message}` : ""}`,
+      tone: "warning",
+      text: `待远端确认 ${result.unknownCount} 条${result.message ? `：${result.message}` : ""}`,
     };
   }
   return {
@@ -1133,8 +1159,9 @@ export function summarizePlanAccountResult(
   };
 }
 
-function launchItemStatusLabel(status: LaunchPlanItemRecord["status"]): string {
-  return ({ pending: "排队中", running: "执行中", succeeded: "已成功", failed: "失败", unknown: "失败（结果核验）", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
+function launchItemStatusLabel(item: LaunchPlanItemRecord): string {
+  if (item.status === "unknown" && item.evidence.publishAcceptedAt) return "等待轮询";
+  return ({ pending: "排队中", running: "执行中", succeeded: "已成功", failed: "失败", unknown: "结果待确认", cancelled: "已取消" } as Record<string, string>)[item.status] ?? item.status;
 }
 
 function launchPhaseLabel(phase: LaunchPlanItemRecord["phase"]): string {
