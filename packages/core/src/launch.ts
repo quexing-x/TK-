@@ -356,6 +356,9 @@ export const LaunchConfigurationRowSchema = z.object({
   // Older locally saved plans did not contain a region.  Preserve their
   // readability while every newly saved plan receives it from its preset.
   region: z.string().trim().min(1).max(120).default("未设置"),
+  // 品编码。**只用于按品去重和跟品库对账，不参与创建报文，也绝不参与命名**，
+  // 见 launchSheetColumns 的说明。optional 是因为存量计划和非表格流程都没有它。
+  productCode: z.string().trim().max(128).optional(),
   // 新导入的表格会逐行保存定向；optional 保持旧计划和非表格复制流程可读，
   // 创建协议会在缺失时兼容回退到旧预设或不限定向。
   gender: LaunchGenderSchema.optional(),
@@ -483,6 +486,15 @@ export const LaunchSheetImportResultSchema = z.object({
 });
 export type LaunchSheetImportResult = z.infer<typeof LaunchSheetImportResultSchema>;
 
+/**
+ * 导入表的列定义。
+ *
+ * **「编码」是纯识别列，绝不参与命名。** 系列名和广告组名一律以表里写死的那两列为准，
+ * 不允许任何环节拿编码去拼名字——系列名重不重名决定了新组是并进原系列还是另开一条，
+ * 拼装只要差一个字符（分隔符、日期、大小写），本该并进原系列的组就会静悄悄另开一条，
+ * 而表里的编码列看上去还是对的，从结果上根本查不出来。编码只用于按品去重、跟品库对账、
+ * 以及反查这一行属于哪个品。
+ */
 export const launchSheetColumns = [
   { key: "campaignName", label: "推广系列名称", aliases: ["系列名称", "广告系列名称", "campaign", "campaign name"], required: true },
   { key: "adGroupName", label: "广告组名称", aliases: ["组名称", "adgroup", "ad group name"], required: true },
@@ -490,6 +502,9 @@ export const launchSheetColumns = [
   { key: "productUrl", label: "产品 URL", aliases: ["产品链接", "落地页", "product url", "url", "landing page"], required: true },
   { key: "ageRanges", label: "年龄", aliases: ["年龄段", "age", "age range", "age ranges"], required: false },
   { key: "gender", label: "性别", aliases: ["gender", "sex"], required: false },
+  // 排在最后、且非必填：存量表格没有这一列，按表头名匹配的 mapHeaders 会直接跳过它，
+  // 老表照样能导入。放在中间会打乱按位置写值的模板生成与 expandSheetTable。
+  { key: "productCode", label: "编码", aliases: ["产品编码", "品编码", "商品编码", "product code", "code", "sku"], required: false },
 ] as const;
 type LaunchSheetColumnKey = (typeof launchSheetColumns)[number]["key"];
 
@@ -643,11 +658,12 @@ export function parseLaunchSheetTable(
   // block head", i.e. an exact copy of the first ad-group's ads. This lets a
   // sheet express: one campaign → several ad-groups → each ad-group the same
   // set of video codes (= ads), without repeating the codes on every line.
-  let block: { campaignName: string; videoCode: string; productUrl: string } | null = null;
+  let block: { campaignName: string; videoCode: string; productUrl: string; productCode: string } | null = null;
   for (let index = 1; index < table.length; index += 1) {
     const source = table[index] ?? [];
     // 下载模板会预填 500 行“年龄全选 / 性别不限”。只要四个业务字段都为空，
     // 该行仍然是空白占位行，不能产生 500 条必填错误。
+    // 编码刻意不算进这四个判据：它是识别列，只填了编码而四个业务字段全空的行仍是空白行。
     const hasLaunchData = (["campaignName", "adGroupName", "videoCode", "productUrl"] as const)
       .some((key) => !isBlank(source[headerMap.get(key) ?? -1]));
     if (!hasLaunchData) continue;
@@ -656,18 +672,21 @@ export function parseLaunchSheetTable(
     const adGroupName = asText(source[headerMap.get("adGroupName") ?? -1]);
     let videoCode = asText(source[headerMap.get("videoCode") ?? -1]);
     let productUrl = asText(source[headerMap.get("productUrl") ?? -1]);
+    let productCode = asText(source[headerMap.get("productCode") ?? -1]);
     const ageRanges = parseLaunchAgeRanges(source[headerMap.get("ageRanges") ?? -1]);
     const gender = parseLaunchGender(source[headerMap.get("gender") ?? -1]);
     if (campaignName) {
       // New block head: its own 系列/代码/URL become the defaults inherited by
       // the continuation rows below until the next filled 系列名称.
-      block = { campaignName, videoCode, productUrl };
+      block = { campaignName, videoCode, productUrl, productCode };
     } else if (block) {
       // Continuation row: inherit the campaign, and fall back to the block
       // head's video codes / URL when this row leaves them blank.
       campaignName = block.campaignName;
       if (!videoCode) videoCode = block.videoCode;
       if (!productUrl) productUrl = block.productUrl;
+      // 续行同属一条系列，也就同属一个品，编码跟着块头走。
+      if (!productCode) productCode = block.productCode;
     }
     if (!campaignName) addError(errors, rowNumber, "推广系列名称", "请填写推广系列名称。");
     if (!adGroupName) addError(errors, rowNumber, "广告组名称", "请填写广告组名称。");
@@ -696,6 +715,9 @@ export function parseLaunchSheetTable(
       adGroupName,
       adName: name,
       region: preset.region,
+      // 空编码不落字段：schema 是 optional，写个空串会让「没填」和「填了空」在
+      // 后续按品聚合时变成两种要分别处理的状态。
+      ...(productCode ? { productCode } : {}),
       ageRanges,
       gender,
       dailyBudget: preset.dailyBudget,

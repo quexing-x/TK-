@@ -98,6 +98,7 @@ export interface ExpandSheetPlanResponse {
 const REASON_LABEL: Record<string, string> = {
   "cost-per-conversion-ok": "单转达标",
   observing: "零转化，累计花费还没到上限",
+  "not-started": "还没开始投，一分钱没花",
   "cost-per-conversion-high": "单转超标",
   "no-conversion-overspent": "零转化且已花超上限",
   "no-conversion-stalled": "零转化，且组已被规则关光",

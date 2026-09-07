@@ -40,6 +40,11 @@ export interface ExpandSheetSource {
   ageRanges?: readonly LaunchAgeRange[] | null;
   gender?: LaunchGender | null;
   inheritedFrom?: ExpandSheetInheritance | null;
+  /**
+   * 这个源组属于哪个品。**只写进表里供对账，不参与命名**——见 launchSheetColumns 的说明。
+   * 取不到就留空：编码只有品库和 agent 知道，这里不做从名字里猜编码的事。
+   */
+  productCode?: string | null;
 }
 
 export interface ExpandSheetInput {
@@ -78,6 +83,8 @@ export interface ExpandSheetRow {
   ageRanges: string;
   /** `不限` / `男` / `女`。 */
   gender: string;
+  /** 品编码，取不到时为空串。只供对账，不参与命名。 */
+  productCode: string;
   sourceAdGroupId: string;
   sourceAdGroupName: string;
   sourceCampaignId: string;
@@ -176,6 +183,7 @@ export function buildExpandSheetPlan(input: ExpandSheetInput): ExpandSheetPlan {
         productUrl,
         ageRanges: formatAgeRanges(source.ageRanges),
         gender: GENDER_LABEL[source.gender ?? "all"],
+        productCode: source.productCode?.trim() ?? "",
         sourceAdGroupId: source.sourceAdGroupId,
         sourceAdGroupName: source.sourceAdGroupName,
         sourceCampaignId: source.sourceCampaignId,
@@ -210,6 +218,7 @@ export function expandSheetTable(plan: ExpandSheetPlan): string[][] {
       row.productUrl,
       row.ageRanges,
       row.gender,
+      row.productCode,
     ]),
   ];
 }

@@ -10,6 +10,16 @@ import type { EntityOperationalStatus } from "./decision.js";
  * 指标口径是**自系列创建以来累计**，必须由 listEntityRangeMetrics 提供，不能拿实体上的
  * 当前 metrics 顶替：provider 每轮只拉当天（withTodayMetricWindow），实体上挂的是「今天到
  * 现在为止」的累计值，早上跑的时候几乎恒为 0。
+ *
+ * **已知局限：已关停的系列判 `excluded`，等于从名单里消失。**
+ * 站在「扫账户、逐条系列判该做什么」的视角这是对的——系列已经停了，对它本身没有动作可做。
+ * 但站在「这个品明天该不该有组在跑」的视角就是漏扩：品还在品库里，它的系列全关停了，
+ * 恰恰说明明天得给它开一条新的，而这里判 excluded 之后它既不在可扩名单、也不在重扩名单。
+ *
+ * 这条局限**刻意不在这里修**。修它要把判定单位从「系列」改成「品」，而品的识别（编码、
+ * 繁简、别名、一品多组）是模糊判断，写死进这里只会猜错。正确的补法是让 agent 按品库逐行
+ * 遍历、用 MCP 把关停系列一并读出来自己判——见 `.claude/skills/tk-expand-sheet`。
+ * 客户端自己跑一键扩组时仍会漏这批，靠 agent 定期出表纠偏。
  */
 
 /** 一条系列的累计表现，字段来自 listEntityRangeMetrics。 */
@@ -56,7 +66,13 @@ export interface ExpandCampaignInput {
 export interface ExpandThresholds {
   /** 单转上限，超过就不再在这条系列上扩组。 */
   maxCostPerConversion: number;
-  /** 零转化时容忍的累计花费上限，超过即判定这条系列跑不出来。 */
+  /**
+   * 零转化时容忍的累计花费上限。
+   *
+   * 2026-09-07 口径变更后零转化一律判重扩，这个阈值**不再改变 verdict**，只用来分
+   * reason（`observing` / `no-conversion-overspent`），让人一眼看出这条是刚起步还是
+   * 已经烧过一笔。
+   */
   maxSpendWithoutConversion: number;
   /**
    * 连续多少个自然日零转化就判重扩。
@@ -84,8 +100,10 @@ export type ExpandVerdict =
 export type ExpandReason =
   /** 有转化且单转达标。 */
   | "cost-per-conversion-ok"
-  /** 零转化，但累计花费还没到上限，继续观察。 */
+  /** 零转化，累计花费还没到上限。2026-09-07 起这也判重扩。 */
   | "observing"
+  /** 一分钱都没花过——还没开始跑，不是跑不出来。 */
+  | "not-started"
   /** 有转化但单转超标。 */
   | "cost-per-conversion-high"
   /** 零转化且累计花费已超上限。 */
@@ -220,24 +238,33 @@ export function classifyCampaignForExpand(
       : { ...base, verdict: "recreate-campaign", reason: "cost-per-conversion-high" };
   }
 
-  // 零转化、组已被规则关光、且**确实花过钱**：直接判重扩，不再看消耗。
+  // 一分钱都没花过：这条系列不是跑不出来，是还没开始跑。必须在「零转化即重扩」之前
+  // 拦下来，且**绝不能判成重扩**。
   //
-  // 观察期的前提是「再花一点就能看出结果」。组全关了之后系列一分钱也花不出去，
-  // 消耗永远停在当前值，那条 spend > 3 的线就再也跨不过去——系列会永久卡在
-  // 「观察中」，既不会被扩、也不会被判重扩，等于从名单里静默消失。
+  // 建好还没投的系列同样「无在投组」，而每早的自动关停正是挑 verdict=recreate-campaign
+  // 且 hasActiveAdGroups===false 的那批下手——判错等于把刚建好、还没来得及投的系列
+  // 当天关掉。实测账户里有 4 条这种系列（如「八寶茶」「隨身wifi」）。
+  if (spend <= 0) {
+    return { ...base, verdict: "expand", reason: "not-started" };
+  }
+
+  // 零转化、且组已被规则关光：这条系列不会再有新数据了。
   //
-  // spend > 0 这个前提不能省：建好还没投的系列同样「无在投组」，但它不是跑不出来，
-  // 只是还没开始。实测账户里有 4 条这种系列（如「八寶茶」「隨身wifi」），少了这个
-  // 判据会被判成需重扩、进而被一键关掉。
-  if (campaign.hasActiveAdGroups === false && spend > 0) {
+  // 组全关了之后系列一分钱也花不出去，消耗永远停在当前值。单独列出来是为了让人知道
+  // 它是「被关光的」而不是「还在烧」——两者都判重扩，但前者连关停动作都不用做。
+  if (campaign.hasActiveAdGroups === false) {
     return { ...base, verdict: "recreate-campaign", reason: "no-conversion-stalled" };
   }
 
-  // 零转化：花得还少就继续观察，花超了才判这条跑不出来。用 > 而不是 >=，
-  // 阈值本身仍属于观察期。
+  // 花过钱但一个转化都没有：一律重扩，观察期不再例外。
+  //
+  // 2026-09-07 口径变更（投手确认）：此前花费没到上限的「观察中」判 expand，也就是
+  // 继续在这条零转化的系列上加组。新口径是「没出转化就别在这条上继续加组，另开一条
+  // 重跑」——宁可多扩，不可漏扩：多扩的那条在导入表里看得见，漏扩的那个品是静默消失的。
+  // 代价是每天会多开一批新系列，投手已明确接受。
   return spend > thresholds.maxSpendWithoutConversion
     ? { ...base, verdict: "recreate-campaign", reason: "no-conversion-overspent" }
-    : { ...base, verdict: "expand", reason: "observing" };
+    : { ...base, verdict: "recreate-campaign", reason: "observing" };
 }
 
 export interface ExpandClassificationBuckets {

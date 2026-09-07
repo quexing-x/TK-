@@ -51,9 +51,10 @@ describe("扩组判定", () => {
   });
 
   describe("零转化时按累计花费判", () => {
-    it("花得还少就继续观察", () => {
+    // 2026-09-07 口径：花过钱但零转化的一律重扩，观察期不再是例外。
+    it("花得还少也判重扩，但 reason 仍分得出它只是刚起步", () => {
       const result = classifyCampaignForExpand(campaign({ spend: 2.5, conversions: 0 }));
-      expect(result.verdict).toBe("expand");
+      expect(result.verdict).toBe("recreate-campaign");
       expect(result.reason).toBe("observing");
       expect(result.costPerConversion).toBeNull();
     });
@@ -64,17 +65,21 @@ describe("扩组判定", () => {
       expect(result.reason).toBe("no-conversion-overspent");
     });
 
-    // 阈值本身仍属观察期，与单转那侧保持同一种边界语义。
-    it("正好等于阈值仍在观察期", () => {
-      expect(classifyCampaignForExpand(campaign({ spend: 3, conversions: 0 })).verdict)
-        .toBe("expand");
-      expect(classifyCampaignForExpand(campaign({ spend: 3.01, conversions: 0 })).verdict)
-        .toBe("recreate-campaign");
+    // 阈值本身仍属观察期，与单转那侧保持同一种边界语义。零转化一律重扩之后，
+    // 这条线不再改变 verdict，只决定 reason 怎么说。
+    it("消耗阈值只改 reason，不改 verdict", () => {
+      const atThreshold = classifyCampaignForExpand(campaign({ spend: 3, conversions: 0 }));
+      expect(atThreshold.verdict).toBe("recreate-campaign");
+      expect(atThreshold.reason).toBe("observing");
+      const over = classifyCampaignForExpand(campaign({ spend: 3.01, conversions: 0 }));
+      expect(over.verdict).toBe("recreate-campaign");
+      expect(over.reason).toBe("no-conversion-overspent");
     });
 
     it("零花费零转化是刚建的组，照常扩", () => {
-      expect(classifyCampaignForExpand(campaign({ spend: 0, conversions: 0 })).verdict)
-        .toBe("expand");
+      const result = classifyCampaignForExpand(campaign({ spend: 0, conversions: 0 }));
+      expect(result.verdict).toBe("expand");
+      expect(result.reason).toBe("not-started");
     });
   });
 
@@ -132,13 +137,13 @@ describe("扩组判定", () => {
       expect(buckets.excluded.map((item) => item.externalId)).toEqual(["d"]);
     });
 
-    it("可扩桶把有成绩的排在观察期前面", () => {
+    it("可扩桶把有成绩的排在没成绩的前面", () => {
       const buckets = classifyCampaignsForExpand([
-        campaign({ externalId: "观察", spend: 2, conversions: 0 }),
+        campaign({ externalId: "没投过", spend: 0, conversions: 0 }),
         campaign({ externalId: "单转8", spend: 24, conversions: 3 }),
         campaign({ externalId: "单转2", spend: 2, conversions: 1 }),
       ]);
-      expect(buckets.expand.map((item) => item.externalId)).toEqual(["单转2", "单转8", "观察"]);
+      expect(buckets.expand.map((item) => item.externalId)).toEqual(["单转2", "单转8", "没投过"]);
     });
 
     it("重扩桶按亏得最多排前面", () => {
@@ -186,9 +191,9 @@ describe("组已被规则关光的系列", () => {
     expect(result.reason).toBe("no-conversion-stalled");
   });
 
-  it("组还在跑时仍按消耗阈值走观察期", () => {
+  it("组还在跑时仍按消耗阈值分 reason", () => {
     const observing = classifyCampaignForExpand({ ...stalled, spend: 0.5, hasActiveAdGroups: true });
-    expect(observing.verdict).toBe("expand");
+    expect(observing.verdict).toBe("recreate-campaign");
     expect(observing.reason).toBe("observing");
     const overspent = classifyCampaignForExpand({ ...stalled, spend: 9, hasActiveAdGroups: true });
     expect(overspent.reason).toBe("no-conversion-overspent");
@@ -197,18 +202,28 @@ describe("组已被规则关光的系列", () => {
   // 没提供该信息时不能当成「已关光」——那会把一批还在跑的系列误判成需重扩。
   // 建好还没投的系列同样「无在投组」，但它不是跑不出来，只是还没开始。实测账户里
   // 有 4 条这种系列（如「八寶茶」「隨身wifi」），少了这个判据会被判重扩、进而被一键关掉。
-  it("从没花过钱的系列不算停跑，仍在观察期", () => {
+  it("从没花过钱的系列不算停跑，也不判重扩", () => {
     const result = classifyCampaignForExpand({ ...stalled, spend: 0 });
     expect(result.verdict).toBe("expand");
-    expect(result.reason).toBe("observing");
+    expect(result.reason).toBe("not-started");
   });
 
-  it("缺少该信息时保持原有判据", () => {
+  // 守的是一次真实事故边界。「零转化即重扩」之后，建好还没投的系列同时满足
+  // 零转化 + 无在投组，一旦判进重扩桶就会被每早的自动关停挑中（那条链路正是挑
+  // verdict=recreate-campaign 且 hasActiveAdGroups===false 的那批），当天关掉。
+  it("建好还没投的系列绝不进重扩桶", () => {
+    const buckets = classifyCampaignsForExpand([{ ...stalled, spend: 0 }]);
+    expect(buckets.recreateCampaign).toEqual([]);
+    expect(buckets.expand.map((item) => item.reason)).toEqual(["not-started"]);
+  });
+
+  it("缺少该信息时不当成已关光", () => {
     const result = classifyCampaignForExpand({
       externalId: "c", name: "系列", status: "enabled", spend: 0.5, conversions: 0,
     });
-    expect(result.verdict).toBe("expand");
     expect(result.hasActiveAdGroups).toBeNull();
+    // 关键是别落到 stalled——那是「组被关光」的结论，没有依据不能下。
+    expect(result.reason).toBe("observing");
   });
 
   // 有转化的系列不受这条影响：单转达标就该继续扩，组关光只是今天没在跑。

@@ -133,7 +133,7 @@ describe("导入表回读闭环", () => {
     const { sheetNames, table } = await readSheetTable(filePath);
 
     expect(sheetNames).toEqual(["批量创建", "填写规范"]);
-    expect(table[0]).toEqual(["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别"]);
+    expect(table[0]).toEqual(["推广系列名称", "广告组名称", "视频代码", "产品 URL", "年龄", "性别", "编码"]);
   });
 });
 
