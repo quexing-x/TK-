@@ -150,6 +150,11 @@
 .production-ui .manual-links a { color: var(--p-blue); border-color: var(--p-line); border-radius: var(--p-radius-control); background: var(--p-blue-tint); }
 .production-ui .modal-backdrop { background: rgb(17 24 39 / 40%); }
 .production-ui .modal { width: min(720px, calc(100vw - 80px)); color: var(--p-ink); border: 1px solid var(--p-line); border-radius: var(--p-radius-panel); background: var(--p-surface); box-shadow: var(--p-shadow-md); }
+/* 宽对话框必须重申宽度：上面那条是 `.production-ui .modal`（特异性 0,2,0），会压过
+   structure.css 里单类的 `.connection-modal`（0,1,0），把接入弹窗锁成 720px。
+   实测后果是接入界面整个挤爆——卡片被压到 128px、标题「广告组列表 cURL」变成 4px 宽
+   117px 高的竖排。任何后续在这里加宽对话框，都要一并加到这条选择器里。 */
+.production-ui .connection-modal { width: min(1180px, 94vw); }
 .production-ui .modal-heading { min-height: 60px; padding: 16px 24px; border-bottom: 1px solid var(--p-line); }
 .production-ui .modal-heading h2 { color: var(--p-ink); font-size: 16px; }
 .production-ui .modal-heading button { color: var(--p-muted); border-radius: var(--p-radius-control); background: var(--p-subtle); }
