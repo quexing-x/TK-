@@ -30,6 +30,7 @@ import {
   type LaunchOriginalPost,
   type LaunchProductInfo,
   type LaunchSentRequest,
+  appendTrackingParams,
 } from "@tk-auto/core";
 import type {
   AdsProvider,
@@ -4494,7 +4495,10 @@ async function runCookieDraftChain(
       optimizeGoal: mutation.preset.optimizeGoal,
       externalAction: mutation.preset.externalAction,
       placementIds: mutation.preset.placementIds,
-      externalUrl: creationRow.productUrl,
+      // 跟创意层写下去的落地页保持逐字一致。这一步只是问 TikTok「这个投放上下文有哪些
+      // 可用的自动化策略」，不决定落地页；但真机场景里投手在界面上填的本来就是带归因
+      // 参数的完整 URL，传半截反而不像真机，也给不出 TikTok 可能做的交叉校验一个交代。
+      externalUrl: appendTrackingParams(creationRow.productUrl),
     });
     const creativeDraft: Record<string, unknown> = {
       ...drafts.creative,
