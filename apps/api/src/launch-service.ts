@@ -67,6 +67,8 @@ export interface LaunchExecutionItemResult {
     message: string;
   }>;
   sync: ReadOnlySyncResult | null;
+  /** TikTok accepted the publish mutation; the ordinary account poll owns readback. */
+  pendingReadback?: boolean;
 }
 
 export class LaunchService {
@@ -439,6 +441,7 @@ export class LaunchService {
         operationId: item.operationId,
         attemptId: item.attemptId!,
         correlationId: item.correlationId,
+        ...(account.providerKind === "cookie" ? { deferReadback: true } : {}),
         ...(reconcileOnlyItemIds.has(item.itemId)
           ? { reconcileOnly: true, reconcileEvidence: item.evidence }
           : {}),
@@ -496,6 +499,7 @@ export class LaunchService {
             ok: false,
             created: [{ ok: false, message }],
             sync: null,
+            ...(created?.pendingReadback ? { pendingReadback: true } : {}),
           });
           continue;
         }

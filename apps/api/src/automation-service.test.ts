@@ -55,6 +55,8 @@ class FakeProvider implements AdsProvider {
   throwStatusError = false;
   statusDelayMs = 0;
   adGroupStatus = "enable";
+  adStatus = "enabled";
+  launchAdName: string | null = null;
   priorityHighStatus = "enable";
   shouldSyncFail = false;
   ignoreStatusWrites = false;
@@ -253,8 +255,8 @@ class FakeProvider implements AdsProvider {
         payload: {
           campaign_id: "campaign-1",
           adgroup_id: "adgroup-1",
-          ad_name: "测试广告",
-          ad_primary_status: "enabled",
+          ad_name: this.launchAdName ?? "测试广告",
+          ad_primary_status: this.adStatus,
           creative_primary_status: "delivery_ok",
           row_data: {
             campaign_id: "campaign-1",
@@ -394,6 +396,9 @@ class FakeProvider implements AdsProvider {
       }
       if (mutation.entityType === "material" && this.statusFailureKind === null && !this.shouldFail && !this.ignoreStatusWrites) {
         this.materialStatus = mutation.action === "enable" ? "enable" : "disable";
+      }
+      if (mutation.entityType === "ad" && this.statusFailureKind === null && !this.shouldFail && !this.ignoreStatusWrites) {
+        this.adStatus = mutation.action === "enable" ? "enabled" : "disabled";
       }
     }
     if (this.failReadbackAfterStatus) this.failNextSync = true;
@@ -778,6 +783,62 @@ describe("AutomationService", () => {
     expect(store.listAutomationDecisions("demo-account")[0]?.status).toBe(
       "preview",
     );
+  });
+
+  it("uses ordinary account polling to finish an accepted launch and enable its ad", async () => {
+    const account = store.getAccount("demo-account")!;
+    provider.scenario = "ad-switch";
+    provider.adStatus = "disabled";
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: account.id,
+      sourceAdGroupId: null,
+      targetAccountIds: [account.id],
+      launchPresetId: "default-launch-preset",
+      launchRows: [{
+        rowNumber: 2,
+        campaignName: "测试推广系列",
+        adGroupName: "测试广告组",
+        adName: "测试广告",
+        videoCode: "video-2",
+        productUrl: "https://example.com/product",
+        region: "US",
+        dailyBudget: 100,
+        bid: null,
+        startAt: null,
+        endAt: null,
+        initialStatus: "enabled",
+      }],
+    });
+    const item = store.listLaunchPlanItems(plan.id)[0]!;
+    provider.launchAdName = item.launchRow.adName;
+    store.claimLaunchPlanItem(item.itemId, "launch-worker", "pending");
+    store.updateLaunchPlanItemProgress(item.itemId, "launch-worker", {
+      phase: "readback",
+      evidence: {
+        asyncRequestId: "async-1",
+        publishAcceptedAt: new Date().toISOString(),
+        materialExpected: true,
+      },
+    });
+    store.completeLaunchPlanItemUnknown(item.itemId, "launch-worker", "等待账户轮询确认。");
+
+    await service.runAccount(account.id, "manual");
+
+    expect(store.getLaunchPlanItem(item.itemId)).toMatchObject({
+      status: "succeeded",
+      phase: "sync",
+      campaignId: "campaign-1",
+      adGroupId: "adgroup-1",
+      adId: "ad-1",
+      syncWarning: null,
+    });
+    expect(store.getMultiAccountLaunchPlan(plan.id)).toMatchObject({ status: "completed" });
+    expect(provider.mutations).toContainEqual({
+      entityType: "ad",
+      externalId: "ad-1",
+      action: "enable",
+    });
   });
 
   it("previews Meta rules while both runtime and account automation are off", async () => {

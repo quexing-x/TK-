@@ -3499,7 +3499,7 @@ describe("AutomationStore", () => {
       unknownCount: 1,
     });
     expect(refreshed.message).toContain("明确失败 1 条，可单独重试");
-    expect(refreshed.message).toContain("结果核验失败 1 条，可执行只读重新核验");
+    expect(refreshed.message).toContain("等待轮询确认 1 条");
     expect(store.claimLaunchPlanItem(unknown!.itemId, "executor-b", "failed")).toBeNull();
   });
 
@@ -3602,6 +3602,67 @@ describe("AutomationStore", () => {
         status: "running",
       }),
     ]);
+  });
+
+  it("lets ordinary polling resolve an accepted launch and enrich a later ad", () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    });
+    const pending = store.listLaunchPlanItems(plan.id)[0]!;
+    store.claimLaunchPlanItem(pending.itemId, "executor-a", "pending");
+    store.updateLaunchPlanItemProgress(pending.itemId, "executor-a", {
+      phase: "readback",
+      evidence: {
+        asyncRequestId: "async-1",
+        publishAcceptedAt: new Date().toISOString(),
+        materialExpected: true,
+      },
+    });
+    store.completeLaunchPlanItemUnknown(
+      pending.itemId,
+      "executor-a",
+      "TikTok 已受理发布请求，正式对象将由账户轮询确认。",
+    );
+
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toEqual([expect.objectContaining({ itemId: pending.itemId, status: "unknown" })]);
+    store.resolveLaunchPlanItemFromPollReadback(pending.itemId, {
+      campaignId: "campaign-2",
+      adGroupId: "group-2",
+      warning: "广告仍在传播。",
+    });
+    expect(store.getLaunchPlanItem(pending.itemId)).toMatchObject({
+      status: "succeeded",
+      phase: "sync",
+      campaignId: "campaign-2",
+      adGroupId: "group-2",
+      adId: null,
+      syncWarning: "广告仍在传播。",
+    });
+    expect(store.listLaunchPlanItemAttempts(pending.itemId)[0]).toMatchObject({
+      status: "succeeded",
+      phase: "sync",
+    });
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toHaveLength(1);
+
+    store.resolveLaunchPlanItemFromPollReadback(pending.itemId, {
+      campaignId: "campaign-2",
+      adGroupId: "group-2",
+      adId: "ad-2",
+    });
+    expect(store.getLaunchPlanItem(pending.itemId)).toMatchObject({
+      status: "succeeded",
+      adId: "ad-2",
+      syncWarning: null,
+    });
+    expect(store.listLaunchPlanItemsAwaitingPollReadback("demo-account"))
+      .toEqual([]);
   });
 
   it("把实际发出的请求体一路留到失败的那次尝试上", () => {

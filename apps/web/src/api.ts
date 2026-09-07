@@ -174,6 +174,7 @@ export interface LaunchExecutionResult {
     status: "pending" | "running" | "succeeded" | "failed" | "unknown" | "cancelled";
     message: string;
     syncWarning: string | null;
+    pendingReadback?: boolean;
   }>;
 }
 

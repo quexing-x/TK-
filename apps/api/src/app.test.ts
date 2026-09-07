@@ -3134,7 +3134,7 @@ describe("local API", () => {
     });
   });
 
-  it("executes a multi-account creation plan with each account's own Cookie session", async () => {
+  it("accepts a multi-account publish with each account's own Cookie session without waiting for readback", async () => {
     const second = store.createAccount({ displayName: "第二测试账户", accountType: "standard", enabled: true, providerKind: "cookie" });
     const creationConfig = {
       objectiveType: 1, buyingType: 1, campaignBudgetMode: 0, adBudgetMode: 0,
@@ -3237,10 +3237,16 @@ describe("local API", () => {
     const executed = await app.inject({ method: "POST", url: `/api/launch-plans/${created.json().id}/execute` });
 
     expect(executed.statusCode, executed.body).toBe(200);
-    expect(executed.json().plan, JSON.stringify(executed.json(), null, 2)).toMatchObject({ status: "completed", executionResults: [{ accountId: "demo-account", ok: true, createdCount: 1, failedCount: 0 }, { accountId: second.id, ok: true, createdCount: 1, failedCount: 0 }] });
+    expect(executed.json().plan, JSON.stringify(executed.json(), null, 2)).toMatchObject({
+      status: "blocked",
+      executionResults: [
+        { accountId: "demo-account", ok: false, createdCount: 0, failedCount: 0, unknownCount: 1 },
+        { accountId: second.id, ok: false, createdCount: 0, failedCount: 0, unknownCount: 1 },
+      ],
+    });
     expect(executed.json().results).toEqual(expect.arrayContaining([
-      expect.objectContaining({ accountId: "demo-account", status: "succeeded" }),
-      expect.objectContaining({ accountId: second.id, status: "succeeded" }),
+      expect.objectContaining({ accountId: "demo-account", status: "unknown", pendingReadback: true }),
+      expect.objectContaining({ accountId: second.id, status: "unknown", pendingReadback: true }),
     ]));
     expect(cookies).toContain("sessionid=first-test-session");
     expect(cookies).toContain("sessionid=second-test-session");

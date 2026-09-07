@@ -3038,6 +3038,7 @@ interface PreparedCookieDraft {
   publishItem: DraftPublishItem;
   riskInfo: Record<string, unknown>;
   dispatchState: CreationDispatchState;
+  materialExpected: boolean;
   /** 本行被跳过的授权码，随发布结果一起报给用户。 */
   skippedVideoCodes?: string[];
 }
@@ -3323,6 +3324,7 @@ async function runCookieDraftBatch(
         batchState,
         { adGroupPayloads, campaignPayloads, resolvedVideos, baseline },
       );
+      preparedItem.materialExpected = resolvedVideos.length > 0;
       // 跳过的素材必须跟着这条任务的结果一起报出去。
       if (skippedCodes.length > 0) preparedItem.skippedVideoCodes = skippedCodes;
       prepared.push(preparedItem);
@@ -3415,14 +3417,38 @@ async function runCookieDraftBatch(
     );
     const asyncRequestId = responseId(published, "async_request_id");
     const providerRequestId = responseId(published, "request_id");
+    const publishAcceptedAt = new Date().toISOString();
     for (const item of prepared) {
       item.mutation.onProgress?.({
-        phase: "publishing",
+        phase: item.mutation.deferReadback ? "readback" : "publishing",
         evidence: {
           ...(asyncRequestId ? { asyncRequestId } : {}),
           ...(providerRequestId ? { providerRequestId } : {}),
+          ...(item.mutation.deferReadback
+            ? {
+                publishAcceptedAt,
+                materialExpected: item.materialExpected,
+                ...(item.skippedVideoCodes?.length
+                  ? { skippedVideoCodes: item.skippedVideoCodes }
+                  : {}),
+              }
+            : {}),
         },
       });
+    }
+    if (prepared.every((item) => item.mutation.deferReadback === true)) {
+      return [
+        ...prepared.map((item): CreationMutationResult => ({
+          ...item.mutation,
+          row: item.row,
+          ok: false,
+          failureKind: "unknown",
+          retrySafe: false,
+          pendingReadback: true,
+          message: "TikTok 已受理发布请求，正式对象将由账户轮询确认。",
+        })),
+        ...failures,
+      ];
     }
     let completed: Record<string, unknown> | undefined;
     let terminalError: unknown;
@@ -4560,6 +4586,7 @@ async function runCookieDraftChain(
         ? credential.creationProfile.publishPayload.risk_info
         : {},
       dispatchState,
+      materialExpected: false,
     };
   }
   // 不再走 snap/save_by_sketch 重铸，理由见批量发布那一处的注释。
@@ -4614,6 +4641,27 @@ async function runCookieDraftChain(
           : {}),
       },
     });
+    if (mutation.deferReadback) {
+      mutation.onProgress?.({
+        phase: "readback",
+        evidence: {
+          publishAcceptedAt: new Date().toISOString(),
+          materialExpected: copyOnly
+            ? publishItems.some((item) => item.creative_snap_info_list.length > 0)
+            : resolvedVideos.length > 0,
+          ...(skippedVideoCodes.length > 0 ? { skippedVideoCodes } : {}),
+        },
+      });
+      return {
+        ...mutation,
+        row: creationRow,
+        ok: false,
+        failureKind: "unknown",
+        retrySafe: false,
+        pendingReadback: true,
+        message: "TikTok 已受理发布请求，正式对象将由账户轮询确认。",
+      };
+    }
   } catch (cause) {
     if (cause instanceof ConfirmedCreationFailureError) throw cause;
     if (cause instanceof RetryableCreationError) throw cause;

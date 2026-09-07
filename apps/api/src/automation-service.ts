@@ -1113,6 +1113,9 @@ export class AutomationService {
         output.entities,
         output.result,
       );
+      if (trigger !== "preview") {
+        await this.reconcileLaunchPlanReadbacks(accountId, account.providerKind, output.entities);
+      }
       await this.reconcileUncertainExpands(accountId, account.providerKind, account.timezone);
       // 每日执行器一天只跑一次，写失败就没有第二次机会——补写挂在这里，不受 06:00 那个
       // 小时门槛限制。失败只吞掉：它是补救动作，不该反过来把整轮同步打掉。
@@ -2136,6 +2139,93 @@ export class AutomationService {
           recordFailure: (message) =>
             this.store.recordCampaignCopyDraftPublishFailure(task.taskKey, message),
         });
+      }
+    }
+  }
+
+  /**
+   * Resolve async launch publications from the same formal-object snapshot used
+   * by ordinary account polling. A positive campaign/ad-group match is enough
+   * to finish creation; an ad that propagates later remains eligible for a
+   * later poll so it can be attached and enabled without delaying the worker.
+   */
+  private async reconcileLaunchPlanReadbacks(
+    accountId: string,
+    providerKind: ProviderKind,
+    entities: Parameters<typeof normalizeProviderEntity>[0][],
+  ): Promise<void> {
+    if (providerKind !== "cookie") return;
+    const waiting = this.store.listLaunchPlanItemsAwaitingPollReadback(accountId);
+    if (waiting.length === 0) return;
+    const snapshots = entities.map(normalizeProviderEntity);
+    const refreshedPlanIds = new Set<string>();
+
+    for (const item of waiting) {
+      try {
+        const campaignMatches = snapshots.filter((entity) =>
+          entity.entityType === "campaign"
+          && entity.name.trim() === item.launchRow.campaignName.trim());
+        if (campaignMatches.length !== 1) continue;
+        const campaignId = campaignMatches[0]!.externalId;
+        const adGroupMatches = snapshots.filter((entity) =>
+          entity.entityType === "ad-group"
+          && entity.parentCampaignId === campaignId
+          && entity.name.trim() === item.launchRow.adGroupName.trim());
+        if (adGroupMatches.length !== 1) continue;
+        const adGroupId = adGroupMatches[0]!.externalId;
+        const adMatches = snapshots.filter((entity) =>
+          entity.entityType === "ad"
+          && entity.parentAdGroupId === adGroupId
+          && entity.name.trim() === item.launchRow.adName.trim());
+        if (adMatches.length > 1) continue;
+        const ad = adMatches[0];
+        // The group was already positively reconciled on an earlier poll. Do
+        // not rewrite it every cycle while an expected ad is still propagating.
+        if (item.status === "succeeded" && !ad) continue;
+
+        const warnings: string[] = [];
+        const skipped = item.evidence.skippedVideoCodes ?? [];
+        if (skipped.length > 0) {
+          warnings.push(`素材提示：已跳过 ${skipped.length} 条素材（${skipped.join("、")}）。`);
+        }
+        if (!ad && item.evidence.materialExpected !== false) {
+          warnings.push("广告组已创建成功，本轮尚未回读到广告；后续账户轮询会继续补齐。");
+        }
+        if (ad && item.launchRow.initialStatus === "enabled" && ad.status !== "enabled") {
+          try {
+            const enabled = await this.changeStatus(
+              accountId,
+              { entityType: "ad", externalId: ad.externalId, action: "enable" },
+              "manual",
+              item.actor,
+              undefined,
+              false,
+              undefined,
+              "创建后广告已开启并完成状态回读。",
+            );
+            if (!enabled.result.ok) warnings.push(`广告 ${ad.externalId} 未能自动开启：${enabled.result.message}`);
+          } catch (cause) {
+            warnings.push(`广告 ${ad.externalId} 未能自动开启：${safeMessage(cause)}`);
+          }
+        }
+        this.store.resolveLaunchPlanItemFromPollReadback(item.itemId, {
+          campaignId,
+          adGroupId,
+          ...(ad ? { adId: ad.externalId } : {}),
+          ...(warnings.length > 0 ? { warning: warnings.join("；") } : {}),
+        });
+        refreshedPlanIds.add(item.planId);
+      } catch {
+        // A later ordinary poll retries unresolved items. This completion path
+        // must not turn a healthy account sync into a failed automation run.
+      }
+    }
+    for (const planId of refreshedPlanIds) {
+      try {
+        this.store.refreshLaunchPlanResult(planId);
+      } catch {
+        // The item transition is already durable; the next read or poll can
+        // refresh the denormalized plan summary.
       }
     }
   }

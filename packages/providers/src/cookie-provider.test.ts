@@ -2053,6 +2053,9 @@ describe("CookieAdsProvider", () => {
       creativeSnapId: null,
       creativeSketchId: null,
       asyncRequestId: null,
+      publishAcceptedAt: null,
+      materialExpected: null,
+      skippedVideoCodes: null,
       sentRequests: null,
       advisoryFailures: null,
     };
@@ -2099,6 +2102,9 @@ describe("CookieAdsProvider", () => {
       creativeSnapId: null,
       creativeSketchId: null,
       asyncRequestId: null,
+      publishAcceptedAt: null,
+      materialExpected: null,
+      skippedVideoCodes: null,
       sentRequests: null,
       advisoryFailures: null,
     };
@@ -2388,6 +2394,39 @@ describe("CookieAdsProvider", () => {
     expect(enables).toHaveLength(1);
     // 开的是本次回读到的广告，不是广告组，也不是任何存量对象。
     expect(enables[0]?.body).toMatchObject({ creative_id: "creative", operation: "enable" });
+  });
+
+  it("releases a deferred launch after publish acceptance without polling creation detail", async () => {
+    const requested: string[] = [];
+    const progress: LaunchCreationProgress[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+
+    const [result] = await new CookieAdsProvider().createFromPreset!(creationTestContext(false), [{
+      ...creationTestMutation("none"),
+      deferReadback: true,
+      onProgress: (value) => progress.push(value),
+    }]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      failureKind: "unknown",
+      retrySafe: false,
+      pendingReadback: true,
+    });
+    expect(requested.some((url) => url.includes("/async_creation/detail/"))).toBe(false);
+    expect(requested.some((url) => url.includes("/ad/update_status"))).toBe(false);
+    expect(progress).toContainEqual(expect.objectContaining({
+      phase: "readback",
+      evidence: expect.objectContaining({
+        asyncRequestId: "async",
+        materialExpected: true,
+        publishAcceptedAt: expect.any(String),
+      }),
+    }));
   });
 
   it("createFromPreset 以 disabled 发布时不开启广告", async () => {
