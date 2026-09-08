@@ -201,7 +201,7 @@ const navItems: Array<{
   label: string;
   description: string;
   icon: typeof Settings2;
-  section: "基础" | "TikTok" | "Meta" | "系统";
+  section: "基础" | "TikTok" | "系统";
 }> = [
   {
     key: "accounts",
@@ -365,8 +365,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
       ));
       setError(null);
       const staleConnections = payload.accountConnectionStates.filter((state) => {
-        // Meta health checks can reach Graph API. They must only run after an
-        // explicit user click in MetaConnectionPage, never during bootstrap.
         if (!operationalAccountIds.has(state.accountId)) return false;
         const connection = state.connection;
         if (
@@ -918,7 +916,6 @@ function UsersPage({
             <span className="panel-icon"><UserRound size={18} /></span>
             <div>
               <h2>广告平台账户</h2>
-              <p>TikTok 与 Meta 账户分区管理；接入、能力与自动化状态互不混用。</p>
             </div>
           </div>
           <button className="primary-button" disabled={!canManageAccounts} onClick={openNew} title={canManageAccounts ? undefined : "需要 accounts:manage 权限"} type="button">
@@ -948,7 +945,6 @@ function UsersPage({
                   setForm(applyAccountPlatformSelection(form, platform));
                 }}>
                   <option value="tiktok">TikTok Ads</option>
-                  <option value="meta">Meta Ads（Facebook / Instagram）</option>
                 </select>
               </Field>
               <Field label="账户类型">
@@ -2344,8 +2340,6 @@ function providerLabel(kind: ProviderKind): string {
   return {
     cookie: "Cookie 会话",
     "official-api": "TikTok Marketing API",
-    "meta-offline": "Meta 离线架构",
-    "meta-marketing-api": "Meta Marketing API（官方接入）",
   }[kind];
 }
 

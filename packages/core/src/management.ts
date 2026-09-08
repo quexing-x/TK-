@@ -40,10 +40,6 @@ export interface ManagedEntityRecord extends ManagedEntitySnapshot {
    * 不参与。人工暂停的组不在此集内。非广告组层恒为 false。
    */
   automationManaged: boolean;
-  /** Meta configured status returned by the object endpoint (for example ACTIVE/PAUSED). */
-  configuredStatus?: string | null;
-  /** Meta effective delivery status after parent-level effects are applied. */
-  effectiveStatus?: string | null;
 }
 
 export interface IgnoredEntityRecord {

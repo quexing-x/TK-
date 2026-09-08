@@ -191,13 +191,11 @@ export function CopyCampaignPanel(props: {
   accounts: AccountOption[];
   busy: boolean;
   onError: (message: string | null) => void;
-  platform?: "tiktok" | "meta";
   onCompleted?: () => void | Promise<void>;
   preselection?: CampaignCopyPreselection | null;
 }) {
   const { confirm, toast } = useOverlays();
-  const isMeta = props.platform === "meta";
-  const platformName = isMeta ? "Meta" : "TikTok";
+  const platformName = "TikTok";
   const [accountId, setAccountId] = useState<string>(props.accounts[0]?.id ?? "");
   const [entities, setEntities] = useState<ManagedEntityRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -533,7 +531,7 @@ export function CopyCampaignPanel(props: {
         groupsPerCampaign,
         initialStatus,
         scheduledStartAt,
-        createNewPosts: !isMeta,
+        createNewPosts: true,
         campaignBudget,
         adGroupBudget,
         bid,
@@ -567,20 +565,13 @@ export function CopyCampaignPanel(props: {
         <div>
           <span className="panel-icon"><Copy size={18} /></span>
           <div>
-            <h2>{isMeta ? "Meta 广告系列一键扩组" : "系列复制"}</h2>
-            <p>{isMeta
-              ? "以广告系列为优先目标，只复制 Campaign + Ad Set，不读取或创建 Ads、Creatives 与新帖子；无 Page ID 也可先执行两层复制。"
-              : "把推广系列复制成多个新系列，并决定每个新系列放几个广告组。系列预算的系列请用这里放量——往同一个系列里加广告组只会摊薄原有预算。"}</p>
+            <h2>系列复制</h2>
           </div>
         </div>
         <button className="secondary-button compact-button" disabled={disabled} type="button"
           onClick={() => load(accountId)}><RefreshCcw size={14} /> 重新读取</button>
       </div>
 
-      {isMeta && <div className="sheet-issues success meta-copy-post-gate">
-        <strong>Meta 复制门禁已启用</strong>
-        <span>本次只允许新建 Campaign 与 Ad Set，强制禁止创建新帖子、Creative 与 Ad。创建请求不依赖 Page ID 或 Page Token。</span>
-      </div>}
 
       {stuckTasks.length > 0 && (
         <div className="sheet-issues warning campaign-copy-stuck-tasks">
@@ -661,7 +652,7 @@ export function CopyCampaignPanel(props: {
             <button aria-pressed={launchTiming === "scheduled"} className={launchTiming === "scheduled" ? "active" : ""} disabled={disabled} onClick={() => setLaunchTiming("scheduled")} type="button">定时投放</button>
           </div>
           {launchTiming === "scheduled"
-            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>{isMeta ? "Meta 会先创建两层对象，完成状态写入门禁后按该时间启用；全程不创建新帖子。" : "新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。"} 默认最近的早上 06:00（未到 06:00 就是今天），可改。</small></label>
+            ? <label className="campaign-copy-timing-when"><input disabled={disabled} type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>新系列将以开启状态发布，并由 TikTok 在设定时间原生开始投放。默认最近的早上 06:00（未到 06:00 就是今天），可改。</small></label>
             : <small>一次会创建多个系列，默认关闭以避免误花费。</small>}
         </div>
       </div>
