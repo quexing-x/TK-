@@ -15,6 +15,12 @@
 - 固定 App ID `com.tkads.automation`，新版安装包覆盖程序文件并保留用户数据。
 - 当前安装包未配置商业代码签名证书，Windows 可能显示未知发布者提示。
 
+升级到 1.4.116 后会出现的变化：
+
+- **WAL 文件不会再无限膨胀。** 发 1.4.115 时在生产机上撞见一个 23 GB 的 WAL 日志文件，而主库本身才 2.6 GB——更离谱的是那 23 GB 里一帧数据都没有，checkpoint 返回「已写回 0 帧」。根因是 SQLite 的 journal_size_limit 默认「不限制」：自动 checkpoint 只把数据写回主库、从不截断文件，所以只要有过一次大事务（同步时批量写指标快照，或 30 天保留期的批量删除）把 WAL 撑上去，那个高水位就永久占着磁盘，而且再也不会降下来。现在给它设了 64 MB 上限，每次 checkpoint 完成会把文件截回去。单个事务需要更多空间时仍会临时涨过 64 MB，之后被收回。
+- 这个设置是**每个数据库连接各自生效**的，不像日志模式那样存进文件，所以它跟着打开数据库的那段代码走；测试钉住了这一点，避免以后有人把它挪到只在建库时执行一次的地方。
+- 那 23 GB 已经在你机器上回收了，磁盘可用空间从 88 GB 回到 135 GB。
+
 升级到 1.4.115 后会出现的变化：
 
 - **Meta 的最后一批痕迹也清掉了。** 用户手册里的 Meta 接入章节、三个 Meta App 审核用的合规页面（隐私政策 / 服务条款 / 资料删除），以及数据库里四张只服务于 Meta 的表（`meta_access_profiles`、`meta_creation_tasks`、`platform_rule_configurations`、`platform_automation_runtime`）。后两张看着像通用表，其实平台列被数据库约束死了只能是 meta；TikTok 的规则和运行时走的是 `rule_configurations` 与 `global_automation_settings`，不受影响。

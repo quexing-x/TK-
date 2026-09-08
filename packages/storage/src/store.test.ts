@@ -1178,6 +1178,33 @@ describe("AutomationStore", () => {
     );
   });
 
+  // 生产机上出现过一个 23 GB 的 WAL，而里面一帧数据都没有——journal_size_limit 默认
+  // 不限制，checkpoint 只把帧写回主库、从不截断文件，一次大事务撑出来的高水位就永久
+  // 占着磁盘。
+  //
+  // 断言必须走 store 自己的连接：跟持久化进文件的 journal_mode 不同，
+  // journal_size_limit 是**每连接**设置，另开一个连接读到的永远是默认的 -1。
+  // 这条同时钉住「打开库的那个地方要自己设」这件事。
+  it("给 WAL 设了尺寸上限，避免一次大事务永久占住磁盘", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-wal-"));
+    const databasePath = join(directory, "automation.db");
+    const store = new AutomationStore(databasePath);
+    const database = Reflect.get(store, "db") as DatabaseSync;
+
+    expect(
+      (database.prepare("PRAGMA journal_size_limit").get() as {
+        journal_size_limit: number;
+      }).journal_size_limit,
+    ).toBe(64 * 1024 * 1024);
+    expect(
+      (database.prepare("PRAGMA journal_mode").get() as { journal_mode: string })
+        .journal_mode,
+    ).toBe("wal");
+
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }, 15_000);
+
   it("does not re-enable a status permission after the one-time migration", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-store-"));
     const databasePath = join(directory, "automation.db");
