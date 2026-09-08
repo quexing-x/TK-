@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { ProviderKindSchema } from "./account.js";
-import { MetaCreationModeSchema } from "./meta-creation.js";
 
 export const ProviderCapabilitySchema = z.enum([
   "read-campaigns",
@@ -92,99 +91,9 @@ export type OfficialApiConnectionSettings = z.infer<
   typeof OfficialApiConnectionSettingsSchema
 >;
 
-export const MetaOfflineConnectionSettingsSchema = z.object({
-  kind: z.literal("meta-offline"),
-  businessId: z.string().trim().max(64).default(""),
-  adAccountId: z.string().trim().max(64).default(""),
-});
-export type MetaOfflineConnectionSettings = z.infer<
-  typeof MetaOfflineConnectionSettingsSchema
->;
-
-const MetaNumericIdSchema = z.string().trim().regex(/^\d+$/, "必须是数字 ID").max(64);
-const MetaAdAccountIdSchema = z.string().trim()
-  .regex(/^(?:act_)?\d+$/, "广告账户 ID 必须是数字或 act_数字")
-  .max(68);
-const MetaAccessProfileIdSchema = z.string().trim().uuid("共享凭据 Profile ID 必须是 UUID");
-const MetaNullablePageIdSchema = z.preprocess(
-  (value) => typeof value === "string" && value.trim() === "" ? null : value,
-  z.union([MetaNumericIdSchema, z.null()]),
-);
-
-export const MetaMarketingApiLiveModeSchema = z.enum([
-  "disabled",
-  "read-only",
-  "manual-status",
-  "automation-status",
-]);
-export type MetaMarketingApiLiveMode = z.infer<
-  typeof MetaMarketingApiLiveModeSchema
->;
-
-export const MetaStatusEntityTypeSchema = z.enum([
-  "campaign",
-  "ad-group",
-  "ad",
-]);
-export type MetaStatusEntityType = z.infer<typeof MetaStatusEntityTypeSchema>;
-
-const MetaMarketingApiLivePolicyFields = {
-  kind: z.literal("meta-marketing-api"),
-  /** Missing on legacy records is interpreted as disabled by the provider. */
-  liveMode: MetaMarketingApiLiveModeSchema.optional(),
-  allowedStatusEntityTypes: z.array(MetaStatusEntityTypeSchema)
-    .max(3)
-    .refine((items) => new Set(items).size === items.length, "启停对象层级不能重复")
-    .optional(),
-  /** Missing on legacy records remains fail-closed for creation. */
-  creationMode: MetaCreationModeSchema.optional(),
-} as const;
-
-const MetaMarketingApiCurrentConnectionSettingsSchema = z.object({
-  ...MetaMarketingApiLivePolicyFields,
-  profileId: MetaAccessProfileIdSchema,
-  adAccountId: z.string().trim()
-    .regex(/^act_\d+$/, "广告账户 ID 必须是 act_数字")
-    .max(68),
-  pageId: MetaNullablePageIdSchema,
-});
-
-const MetaMarketingApiLegacyConnectionSettingsSchema = z.object({
-  ...MetaMarketingApiLivePolicyFields,
-  adAccountId: MetaAdAccountIdSchema,
-  pageId: MetaNumericIdSchema,
-  appId: MetaNumericIdSchema,
-  businessId: MetaNumericIdSchema,
-  graphApiVersion: z.string().trim()
-    .regex(/^v\d+\.\d+$/, "Graph API 版本格式应为 v数字.数字")
-    .max(16),
-});
-
-export const MetaMarketingApiConnectionSettingsSchema = z.union([
-  MetaMarketingApiCurrentConnectionSettingsSchema,
-  MetaMarketingApiLegacyConnectionSettingsSchema,
-]).transform((settings) => ({
-  kind: settings.kind,
-  ...("profileId" in settings ? { profileId: settings.profileId } : {}),
-  adAccountId: settings.adAccountId.startsWith("act_")
-    ? settings.adAccountId
-    : `act_${settings.adAccountId}`,
-  pageId: settings.pageId,
-  ...(settings.liveMode ? { liveMode: settings.liveMode } : {}),
-  ...(settings.allowedStatusEntityTypes
-    ? { allowedStatusEntityTypes: settings.allowedStatusEntityTypes }
-    : {}),
-  ...(settings.creationMode ? { creationMode: settings.creationMode } : {}),
-}));
-export type MetaMarketingApiConnectionSettings = z.infer<
-  typeof MetaMarketingApiConnectionSettingsSchema
->;
-
 export const ProviderConnectionSettingsSchema = z.union([
   CookieConnectionSettingsSchema,
   OfficialApiConnectionSettingsSchema,
-  MetaOfflineConnectionSettingsSchema,
-  MetaMarketingApiConnectionSettingsSchema,
 ]);
 
 export type ProviderConnectionSettings = z.infer<
@@ -251,14 +160,9 @@ export const OfficialApiCredentialInputSchema = z.object({
   accessToken: z.string().trim().min(10),
 });
 
-export const MetaOfflineCredentialInputSchema = z.object({
-  kind: z.literal("meta-offline"),
-});
-
 export const ProviderCredentialInputSchema = z.discriminatedUnion("kind", [
   CookieCredentialInputSchema,
   OfficialApiCredentialInputSchema,
-  MetaOfflineCredentialInputSchema,
 ]);
 
 export type ProviderCredentialInput = z.infer<
