@@ -49,7 +49,29 @@ list_campaigns(accountId=<任一账户>, verdict="stopped")
 > 之所以仍然保留这一步自检：MCP 跑的是**安装目录里的** `resources/mcp/mcp-server.cjs`，
 > 它跟仓库代码是两回事——build 完没覆盖安装版，重启也还是旧代码。见 `mcp-runs-from-installed-bundle`。
 
-**2. 确认品库表存在。**
+**2. 数在投系列配额——这一步跳过会让整批创建撞墙。**
+
+**TikTok 每个广告账户最多 200 条「在投」系列。** 已关停的不占配额。满了之后，凡是需要
+**新建系列**的行一条都建不出来，而「并进已有系列」的照常成功——所以表现是成功与失败交替，
+看起来像随机故障。
+
+```sql
+-- 生产库只读即可，别去翻线上列表
+SELECT COUNT(*) FROM provider_entities
+ WHERE account_id = ? AND entity_type = 'campaign'
+   AND json_extract(payload_json,'$.campaign_primary_status') = 'delivery_ok';
+```
+
+`200 - 在投数` 就是这次最多能新建几条系列。超出的部分**不要提交**，先把数字摆给投手，
+由他决定关停哪些腾位置。2026-09-08 实测：251128 和 0918-1 建到在投数正好 200 就停住，
+分别白跑了 106 条和 40 条请求。
+
+撞墙时的判据（**别误判成回读慢**）：失败项判 `unknown`、报「TikTok 已受理发布请求」，
+但 `evidence_json` 里 `campaign_id` 为 **null** 而 `campaignSketchId` 有值——
+系列草稿建了、发布不出来。`advisoryFailures` 里的 `ad_creative_snap/check` 与失败
+100% 相关，但那是表象不是病因。
+
+**3. 确认品库表存在。**
 
 ```bash
 python .claude/skills/tk-expand-sheet/scripts/feishu_read.py --list-tables
@@ -296,6 +318,7 @@ python .claude/skills/tk-expand-sheet/scripts/feishu_read.py --table tbl4IgEwXru
 ```
 可扩 N1 + 重扩 N2 + 新建 N3 = N（品库去重后的品数）   ← 必须相等
 导入表行数 = 品库去重后的行数                          ← 必须相等
+要新建的系列数 ≤ 200 - 当前在投系列数                  ← 超了就别提交，见第 0 步
 待清理：账户里在跑、但品库里没有的品                    ← 单独列出，不动手删
 ```
 
