@@ -147,6 +147,10 @@ import {
 
 const SYNC_STALE_AFTER_MS = 15 * 60_000;
 
+// checkpoint 后 WAL 被截回的上限。取 64 MB 是为了让日常的批量写整个装得下、不会每次
+// 提交都触发一次截断的额外 IO，同时又把「一次异常事务永久占住几十 GB」这条路堵死。
+const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
+
 type SqlRow = Record<string, unknown>;
 
 export interface AutomationStoreOptions {
@@ -249,6 +253,14 @@ export class AutomationStore {
       this.db.exec("PRAGMA foreign_keys = ON");
       sourceSchemaVersion = this.readSchemaVersion();
       this.db.exec("PRAGMA journal_mode = WAL");
+      // WAL 文件只涨不缩：自动 checkpoint 走的是 PASSIVE 模式，只把帧写回主库、
+      // 并不截断文件，而 journal_size_limit 的默认值 -1 表示「不限制」。于是只要有
+      // 一次大事务（同步时批量写 entity_metric_snapshots、或 30 天保留期的批量删除）
+      // 把 WAL 撑上去，那个高水位就永久占着磁盘——生产机上实测到一个 23 GB 的 WAL，
+      // 而里面一帧数据都没有（checkpoint 返回 log=0），主库本身才 2.6 GB。
+      // 设上限后，每次 checkpoint 完成会把 WAL 截回这个尺寸。
+      // 单个事务需要更多空间时 WAL 仍会临时涨过 64 MB，之后被收回，不影响正确性。
+      this.db.exec(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES}`);
       this.migrationRunner = new MigrationRunner(this.db, () => {
         if (!databaseExistedBefore) return;
         const path = `${databasePath}.pre-migration-${fileTimestamp()}.bak`;
