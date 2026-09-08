@@ -7,19 +7,15 @@ import {
   classifyCampaignsForExpand,
   dateKeyInTimeZone,
   dateTimeSuffix,
-  buildMetaRulePredicate,
-  evaluateMetaRuleConfiguration,
   evaluateRuleConfiguration,
   filterEntitiesToRecentWindow,
   mapWithConcurrency,
   networkUnreachableMessagePrefix,
-  MetaAccessSecretBundleInputSchema,
   stripAutomaticAdGroupNameSuffixes,
   type AutomationCandidate,
   type AutomationRunRecord,
   type AutomationTrigger,
   type ManualStatusInput,
-  type MetaRuleConfiguration,
   type ManagedEntityRecord,
   type PollCycleRecord,
   type PollFailureKind,
@@ -934,20 +930,9 @@ export class AutomationService {
   ): Promise<AutomationRunRecord> {
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
-    if (account.platform === "meta" && account.providerKind !== "meta-marketing-api") {
-      throw new Error("Meta 离线账户不能进入规则引擎。");
-    }
     const systemRuntimeEnabled = this.store.getSystemRuntimeState().enabled;
-    const platformRuntimeEnabled = account.platform === "meta"
-      ? this.store.getMetaAutomationRuntime().enabled
-      : true;
     if (trigger !== "preview" && !systemRuntimeEnabled) {
       throw new Error("全局自动化已关闭，总开关关闭时检测和执行均已暂停。");
-    }
-    if (trigger !== "preview" && !platformRuntimeEnabled) {
-      throw new Error(account.platform === "meta"
-        ? "Meta 自动化总开关已关闭，检测和执行均已暂停。"
-        : "全局自动化已关闭，自动化检测和执行均已暂停。");
     }
     if (this.runningAccounts.has(accountId)) {
       throw new AutomationBusyError("该账户已有检测任务正在运行。");
@@ -996,15 +981,6 @@ export class AutomationService {
           connection,
           "change-status",
         );
-        if (
-          account.platform === "meta"
-          && (
-            connection.settings.kind !== "meta-marketing-api"
-            || connection.settings.liveMode !== "automation-status"
-          )
-        ) {
-          throw new Error("Meta 自动启停必须在该账户显式开启 automation-status 模式。");
-        }
       }
       const context = await this.loadContext(
         accountId,
@@ -1046,14 +1022,8 @@ export class AutomationService {
         // 纯记账：连接在同步期间被重置或删除都会走到这里。数据已经取回来了，
         // 规则该照常判，不能让一次状态回写把成功的一轮翻成失败。
       }
-      const metaRuleConfiguration = account.platform === "meta"
-        ? this.store.getMetaRuleConfiguration()
-        : null;
-      const ruleConfiguration = account.platform === "tiktok"
-        ? this.store.getRuleConfiguration()
-        : null;
-      const ruleVersion = metaRuleConfiguration?.updatedAt
-        ?? ruleConfiguration?.updatedAt;
+      const ruleConfiguration = this.store.getRuleConfiguration();
+      const ruleVersion = ruleConfiguration.updatedAt;
       if (!ruleVersion) throw new Error("平台规则配置缺失。");
       const dataQualityWarnings = [
         ...output.result.warnings,
@@ -1076,37 +1046,30 @@ export class AutomationService {
         message,
         {
           ...suggestionMetadata,
-          rulePredicate: metaRuleConfiguration
-            ? buildMetaDecisionPredicate(metaRuleConfiguration, candidate)
-            : buildRulePredicate(ruleConfiguration!, candidate),
+          rulePredicate: buildRulePredicate(ruleConfiguration, candidate),
         },
       );
       // 持久管辖集：自动化自己关停、尚未被自动重开的广告组。即便当天消耗归零，也留在
       // 评估范围里，让归因延迟、关停之后才回传的转化仍能触发开启规则把它开回来——
       // 只按当天 spend>0 判存活会在过零点后把这类组踢出、跨天再也开不回来。
-      const evaluation = metaRuleConfiguration
-        ? evaluateMetaRuleConfiguration(
-            output.result.quality.status === "invalid" ? [] : output.entities,
-            metaRuleConfiguration,
-          )
-        : (() => {
-            const managedSince = new Date(
-              Date.now() - AUTOMATION_MANAGED_LOOKBACK_HOURS * 60 * 60_000,
-            ).toISOString();
-            const managedAdGroupIds = new Set(
-              this.store.listAutomationDisabledAdGroupIds(accountId, managedSince),
-            );
-            const recent = filterEntitiesToRecentWindow(
-              output.entities,
-              new Date(),
-              ruleConfiguration!.lookbackHours,
-              managedAdGroupIds,
-            );
-            return evaluateRuleConfiguration(
-              output.result.quality.status === "invalid" ? [] : recent.entities,
-              ruleConfiguration!,
-            );
-          })();
+      const evaluation = (() => {
+        const managedSince = new Date(
+          Date.now() - AUTOMATION_MANAGED_LOOKBACK_HOURS * 60 * 60_000,
+        ).toISOString();
+        const managedAdGroupIds = new Set(
+          this.store.listAutomationDisabledAdGroupIds(accountId, managedSince),
+        );
+        const recent = filterEntitiesToRecentWindow(
+          output.entities,
+          new Date(),
+          ruleConfiguration.lookbackHours,
+          managedAdGroupIds,
+        );
+        return evaluateRuleConfiguration(
+          output.result.quality.status === "invalid" ? [] : recent.entities,
+          ruleConfiguration,
+        );
+      })();
       this.store.saveReadOnlySync(
         accountId,
         account.providerKind,
@@ -1155,9 +1118,7 @@ export class AutomationService {
         }
       }
 
-      const { maxActionsPerRun } = account.platform === "meta"
-        ? this.store.getMetaAutomationRuntime()
-        : this.store.getGlobalAutomationSettings();
+      const { maxActionsPerRun } = this.store.getGlobalAutomationSettings();
       const orderedEligible = qualityEligible.sort(compareAutomationCandidates);
       const closingAdGroups = new Set(
         orderedEligible
@@ -1574,114 +1535,6 @@ export class AutomationService {
         externalId: task.externalId,
         action: task.action === "enable" ? "enable" : "disable",
       }, claimed, executorId, connection, false);
-    } finally {
-      this.runningAccounts.delete(accountId);
-    }
-  }
-
-  async reconcileMetaStatusOperation(
-    accountId: string,
-    operationId: string,
-    actor: WriteTaskActor = {
-      id: "meta-readback-reconcile",
-      name: "Meta 只读回读核验",
-      kind: "system",
-    },
-  ): Promise<{
-    operation: AdOperationRecord;
-    asset: ManagedEntityRecord | null;
-    resolution: "succeeded" | "failed" | "unknown";
-    message: string;
-  }> {
-    if (this.runningAccounts.has(accountId)) {
-      throw new AutomationBusyError("该账户已有任务正在执行，请稍后再做只读回读核验。");
-    }
-    this.runningAccounts.add(accountId);
-    try {
-    const account = this.store.getAccount(accountId);
-    if (!account) throw new Error("账号不存在。");
-    if (account.platform !== "meta" || account.providerKind !== "meta-marketing-api") {
-      throw new Error("只有 Meta Marketing API 账户支持只读回读核验。");
-    }
-    const task = this.store.getAdOperationByOperationId(operationId);
-    if (task.accountId !== accountId || task.providerKind !== account.providerKind) {
-      throw new Error("状态写任务不属于当前 Meta 账户。");
-    }
-    if (task.status !== "unknown") {
-      throw new Error("只有结果未知的 Meta 状态写任务可以执行只读回读核验。");
-    }
-    const connection = this.store.getProviderConnection(accountId, account.providerKind);
-    if (!connection || (connection.status !== "ready" && connection.status !== "failed")) {
-      throw new Error(connectionUnavailableMessage(
-        account.displayName,
-        account.providerKind,
-        connection?.status,
-      ));
-    }
-    if (connection.status === "ready") {
-      this.providers.requireAccountCapability(
-        accountId,
-        account.providerKind,
-        connection,
-        "read-campaigns",
-      );
-    } else {
-      const authorizationExpired = connection.authorizationExpiresAt
-        ? new Date(connection.authorizationExpiresAt).getTime() <= Date.now()
-        : false;
-      const provider = this.providers.get(account.providerKind);
-      if (
-        !connection.hasCredential
-        || connection.authorizationStatus !== "active"
-        || authorizationExpired
-        || connection.capabilityVersion !== provider.capabilityVersion
-        || !provider.capabilities.has("read-campaigns")
-        || !connection.authorizedCapabilities.includes("read-campaigns")
-      ) {
-        throw new Error("Meta 连接失败且未保留有效的只读授权，不能执行回读核验。");
-      }
-    }
-    const context = await this.loadContext(accountId, account.providerKind, account.timezone);
-    const refreshed = await this.providers.syncReadOnly(account.providerKind, context);
-    this.store.saveReadOnlySync(
-      accountId,
-      account.providerKind,
-      refreshed.entities,
-      refreshed.result,
-    );
-    const asset = this.store.listCurrentManagedEntities(accountId, account.providerKind).find(
-      (entity) => entity.entityType === task.entityType && entity.externalId === task.externalId,
-    ) ?? null;
-    const readbackUsable = asset !== null && this.isEntitySyncUsable(
-      accountId,
-      account.providerKind,
-      refreshed.result.quality,
-      { entityType: task.entityType, externalId: task.externalId },
-    );
-    if (!readbackUsable || (asset.status !== "enabled" && asset.status !== "disabled")) {
-      const message = refreshed.result.warnings.length > 0
-        ? `只读回读仍无法确认结果：${refreshed.result.warnings.join("；")}`
-        : "只读回读仍未返回可确认的目标对象状态；任务保持 unknown，且不会自动重试。";
-      return {
-        operation: this.store.getAdOperation(task.id),
-        asset,
-        resolution: "unknown",
-        message,
-      };
-    }
-    const operation = this.store.resolveUnknownStatusWriteTaskFromReadback(
-      task.id,
-      asset.status,
-      actor,
-    );
-    return {
-      operation,
-      asset,
-      resolution: operation.status === "succeeded" ? "succeeded" : "unknown",
-      message: operation.status === "succeeded"
-        ? operation.message ?? "Meta 只读回读核验已完成。"
-        : `只读回读当前为 ${asset.status}，但该状态可能仍处于 Meta 传播延迟；任务保持 unknown，且不会自动重试。`,
-    };
     } finally {
       this.runningAccounts.delete(accountId);
     }
@@ -2588,52 +2441,6 @@ export class AutomationService {
     if (latestSync.quality.status === "invalid") {
       throw new WriteBlockedBeforeDispatchError("同步契约已失效，所有真实 Provider 写入已阻止。");
     }
-    if (account.platform === "meta") {
-      const syncAge = Date.now() - new Date(latestSync.finishedAt).getTime();
-      if (!Number.isFinite(syncAge) || syncAge < 0 || syncAge > destructiveSyncFreshnessMs) {
-        throw new WriteBlockedBeforeDispatchError(
-          "Meta 最新可信同步已超过 5 分钟，请先重新同步后再启停。",
-        );
-      }
-      if (
-        !entity
-        || !this.store.listCurrentManagedEntities(accountId, account.providerKind).some(
-          (item) => item.entityType === entity.entityType && item.externalId === entity.externalId,
-        )
-      ) {
-        throw new WriteBlockedBeforeDispatchError(
-          "Meta 对象不在最新可信同步快照中，状态写入已阻止。",
-        );
-      }
-      const connection = this.store.getProviderConnection(accountId, account.providerKind);
-      const liveMode = connection?.settings.kind === "meta-marketing-api"
-        ? connection.settings.liveMode
-        : "disabled";
-      if (requireAutomatic && liveMode !== "automation-status") {
-        throw new WriteBlockedBeforeDispatchError(
-          "Meta 自动启停未获授 automation-status 账户级权限。",
-        );
-      }
-      if (
-        !requireAutomatic
-        && liveMode !== "manual-status"
-        && liveMode !== "automation-status"
-      ) {
-        throw new WriteBlockedBeforeDispatchError(
-          "Meta 人工启停未获授账户级写入权限。",
-        );
-      }
-      if (
-        !entity
-        || entity.entityType === "material"
-        || connection?.settings.kind !== "meta-marketing-api"
-        || !connection.settings.allowedStatusEntityTypes?.includes(entity.entityType)
-      ) {
-        throw new WriteBlockedBeforeDispatchError(
-          "Meta 对象层级不在账户启停 allowlist，状态写入已阻止。",
-        );
-      }
-    }
     if (
       latestSync.quality.status !== "healthy"
       && (
@@ -2648,14 +2455,6 @@ export class AutomationService {
         throw new WriteBlockedBeforeDispatchError(
           "全局自动化总开关已关闭，自动状态写入已暂停。",
         );
-      }
-      const platformRuntimeEnabled = account.platform === "meta"
-        ? this.store.getMetaAutomationRuntime().enabled
-        : true;
-      if (!platformRuntimeEnabled) {
-        throw new WriteBlockedBeforeDispatchError(account.platform === "meta"
-          ? "Meta 自动化总开关已关闭，自动状态写入已暂停。"
-          : "全局自动化已关闭，自动状态写入已暂停。");
       }
       if (!account.enabled) {
         throw new WriteBlockedBeforeDispatchError("账户自动化已关闭，自动状态写入已阻止。");
@@ -2685,38 +2484,9 @@ export class AutomationService {
     providerKind: ProviderKind,
     timezone: string,
   ): Promise<ProviderContext> {
-    if (providerKind === "meta-offline") {
-      throw new Error("Meta Marketing API 尚未接入；当前仅提供零网络离线架构。");
-    }
     const connection = this.store.getProviderConnection(accountId, providerKind);
     if (!connection) {
       throw new Error("接入参数或凭据尚未配置。");
-    }
-    if (providerKind === "meta-marketing-api") {
-      if (
-        connection.settings.kind !== "meta-marketing-api"
-        || !connection.settings.profileId
-      ) {
-        throw new Error("Meta 广告账户尚未绑定共享凭据 Profile。");
-      }
-      const profile = this.store.getStoredMetaAccessProfile(connection.settings.profileId);
-      if (!profile?.secretRef) {
-        throw new Error("Meta 共享凭据 Profile 尚未保存 App Secret 与 Access Token。");
-      }
-      const secret = await this.vault.read(profile.secretRef);
-      if (!secret) throw new Error("Meta 共享凭据引用已失效，请重新保存。");
-      return {
-        accountId,
-        settings: connection.settings,
-        credential: MetaAccessSecretBundleInputSchema.parse(JSON.parse(secret)),
-        resolvedMetaAccessProfile: {
-          profileId: profile.id,
-          appId: profile.appId,
-          businessId: profile.businessId,
-          graphApiVersion: profile.graphApiVersion,
-        },
-        timezone,
-      };
     }
     if (!connection.credentialRef) {
       throw new Error("接入参数或凭据尚未配置。");
@@ -2759,26 +2529,6 @@ function compareAutomationCandidates(
   );
   if (externalIdDifference !== 0) return externalIdDifference;
   return left.thresholdCode.localeCompare(right.thresholdCode);
-}
-
-function buildMetaDecisionPredicate(
-  configuration: MetaRuleConfiguration,
-  candidate: AutomationCandidate,
-): Record<string, unknown> {
-  const rule = configuration.rules.find(
-    (item) => item.code === candidate.thresholdCode,
-  );
-  if (!rule) {
-    throw new Error(`Meta 规则 ${candidate.thresholdCode} 不在当前配置中。`);
-  }
-  return {
-    ...buildMetaRulePredicate(rule),
-    schemaVersion: configuration.schemaVersion,
-    action: candidate.action,
-    metric: candidate.metric,
-    operator: candidate.operator,
-    thresholdValue: candidate.thresholdValue,
-  };
 }
 
 function buildRulePredicate(
@@ -2988,7 +2738,6 @@ export class AutomationScheduler {
     this.polling = true;
     try {
       if (!this.store.getSystemRuntimeState().enabled) return;
-      const metaRuntime = this.store.getMetaAutomationRuntime();
       const accounts = this.store.listAccounts();
       this.forgetRemovedAccounts(accounts);
       const dueAccounts = accounts.filter((account) => {
@@ -2997,18 +2746,7 @@ export class AutomationScheduler {
           account.providerKind,
         );
         if (!connection?.hasCredential) return false;
-        if (account.platform === "meta") {
-          if (
-            !metaRuntime.enabled
-            || !account.enabled
-            || account.providerKind !== "meta-marketing-api"
-            || connection.settings.kind !== "meta-marketing-api"
-            || connection.settings.liveMode !== "automation-status"
-          ) return false;
-        }
-        const pollingIntervalMinutes = account.platform === "meta"
-          ? metaRuntime.pollingIntervalMinutes
-          : this.store.getGlobalAutomationSettings().pollingIntervalMinutes;
+        const { pollingIntervalMinutes } = this.store.getGlobalAutomationSettings();
         // 存的是「上一轮结束时刻」而不是「下一次到期时刻」：间隔设置改小之后要立刻
         // 生效，存到期时刻会让新间隔等一个旧周期才开始起作用。
         const startedFrom = this.lastPolledAt.get(account.id)
@@ -3276,9 +3014,7 @@ function connectionUnavailableMessage(
   providerKind: ProviderKind,
   status: string | undefined,
 ): string {
-  const providerLabel = providerKind === "meta-offline"
-    ? "Meta 离线架构"
-    : providerKind === "cookie" ? "Cookie 接入" : "API 接入";
+  const providerLabel = providerKind === "cookie" ? "Cookie 接入" : "API 接入";
   const stateLabel =
     status === "not-configured"
       ? "尚未接入"

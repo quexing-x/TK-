@@ -73,26 +73,6 @@ import {
   RuleConfigurationSchema,
   type RuleConfiguration,
   type RuleConfigurationInput,
-  defaultMetaAutomationRuntime,
-  defaultMetaRuleConfiguration,
-  MetaAutomationRuntimeInputSchema,
-  MetaAutomationRuntimeSchema,
-  MetaRuleConfigurationInputSchema,
-  MetaRuleConfigurationSchema,
-  type MetaAutomationRuntime,
-  type MetaAutomationRuntimeInput,
-  type MetaRuleConfiguration,
-  type MetaRuleConfigurationInput,
-  MetaAccessProfileInputSchema,
-  MetaAccessProfileSchema,
-  type MetaAccessProfile,
-  type MetaAccessProfileInput,
-  MetaAdCreationInputSchema,
-  MetaCreationProgressSchema,
-  MetaCreationTaskRecordSchema,
-  type MetaCreationProgress,
-  type MetaCreationTaskRecord,
-  type MetaCreationTaskStatus,
   METRIC_RETENTION_DAYS,
   countConsecutiveZeroConversionDays,
   dateKeyInTimeZone,
@@ -212,61 +192,12 @@ export interface StoredNotificationChannel extends NotificationChannelRecord {
   credentialRef: string | null;
 }
 
-export interface StoredMetaAccessProfile extends MetaAccessProfile {
-  secretRef: string | null;
-}
-
-export class MetaAccessProfileInUseError extends Error {
-  readonly code = "META_ACCESS_PROFILE_IN_USE";
-
-  constructor(readonly profileId: string, readonly referenceCount: number) {
-    super(`Meta access profile is still referenced by ${referenceCount} account(s).`);
-    this.name = "MetaAccessProfileInUseError";
-  }
-}
-
-export class MetaAccessProfileAppIdConflictError extends Error {
-  readonly code = "META_ACCESS_PROFILE_APP_ID_CONFLICT";
-
-  constructor(readonly appId: string) {
-    super(`Meta App ID ${appId} already has an access profile.`);
-    this.name = "MetaAccessProfileAppIdConflictError";
-  }
-}
-
-export class MetaAccessProfileAppIdLockedError extends Error {
-  readonly code = "META_ACCESS_PROFILE_APP_ID_LOCKED";
-
-  constructor(readonly profileId: string) {
-    super("当前 App ID 已绑定加密密钥，不会因普通档案保存而自动清除。请先明确执行密钥轮换后再更换 App 身份。");
-    this.name = "MetaAccessProfileAppIdLockedError";
-  }
-}
-
-export class MetaAccessProfileVersionConflictError extends Error {
-  readonly code = "META_ACCESS_PROFILE_VERSION_CONFLICT";
-
-  constructor(readonly profileId: string) {
-    super("Meta App 档案已发生变化，请刷新后重新保存 Secret 与 Token。");
-    this.name = "MetaAccessProfileVersionConflictError";
-  }
-}
-
 export class PlatformConfigurationConflictError extends Error {
   readonly code = "PLATFORM_CONFIGURATION_CONFLICT";
 
   constructor(readonly platform: "meta", readonly resource: "rules" | "runtime") {
     super(`${platform} ${resource} configuration was updated by another request.`);
     this.name = "PlatformConfigurationConflictError";
-  }
-}
-
-export class MetaCreationIdempotencyConflictError extends Error {
-  readonly code = "META_CREATION_IDEMPOTENCY_CONFLICT";
-
-  constructor(readonly accountId: string, readonly idempotencyKey: string) {
-    super("相同幂等键已用于不同的 Meta 创建请求，请更换幂等键后重试。");
-    this.name = "MetaCreationIdempotencyConflictError";
   }
 }
 
@@ -728,34 +659,6 @@ export class AutomationStore {
     if (!current) return null;
     if (!providerBelongsToPlatform(current.platform, settings.providerKind)) {
       throw new Error("接入方式与账户平台不匹配，账户平台不可在编辑时切换。");
-    }
-    if (settings.providerKind === "meta-offline" && settings.enabled) {
-      throw new Error("Meta 离线架构不能开启账户自动化。");
-    }
-    if (
-      current.platform === "meta"
-      && settings.providerKind === "meta-marketing-api"
-      && settings.enabled
-    ) {
-      const connection = this.getProviderConnection(accountId, "meta-marketing-api");
-      const authorized = new Set(connection?.authorizedCapabilities ?? []);
-      const requiredCapabilities: ProviderCapability[] = [
-        "read-campaigns",
-        "read-ad-groups",
-        "read-ads",
-        "change-status",
-      ];
-      if (
-        connection?.status !== "ready"
-        || connection.authorizationStatus !== "active"
-        || connection.settings.kind !== "meta-marketing-api"
-        || connection.settings.liveMode !== "automation-status"
-        || requiredCapabilities.some((capability) => !authorized.has(capability))
-      ) {
-        throw new Error(
-          "Meta 账户自动化只能在连接检测通过、Automation status 模式且读写能力完整时开启。",
-        );
-      }
     }
     const result = this.db
       .prepare(
@@ -1312,348 +1215,6 @@ export class AutomationStore {
     return this.getRuleConfiguration();
   }
 
-  getMetaRuleConfiguration(): MetaRuleConfiguration {
-    this.ensureGlobalDefaults();
-    const row = this.db
-      .prepare(
-        "SELECT * FROM platform_rule_configurations WHERE platform = 'meta'",
-      )
-      .get() as SqlRow;
-    return MetaRuleConfigurationSchema.parse({
-      schemaVersion: row.schema_version,
-      metricWindow: row.metric_window,
-      layers: JSON.parse(String(row.layers_json)),
-      rules: JSON.parse(String(row.rules_json)),
-      updatedAt: row.updated_at,
-    });
-  }
-
-  updateMetaRuleConfiguration(
-    input: MetaRuleConfigurationInput,
-    expectedUpdatedAt?: string,
-  ): MetaRuleConfiguration {
-    const configuration = MetaRuleConfigurationInputSchema.parse(input);
-    const current = this.getMetaRuleConfiguration();
-    const expected = expectedUpdatedAt ?? current.updatedAt;
-    const now = nextIsoTimestamp(current.updatedAt);
-    const result = this.db
-      .prepare(
-        `UPDATE platform_rule_configurations
-         SET schema_version = ?, metric_window = ?, layers_json = ?, rules_json = ?, updated_at = ?
-         WHERE platform = 'meta' AND updated_at = ?`,
-      )
-      .run(
-        configuration.schemaVersion,
-        configuration.metricWindow,
-        JSON.stringify(configuration.layers),
-        JSON.stringify(configuration.rules),
-        now,
-        expected,
-      );
-    if (result.changes === 0) {
-      throw new PlatformConfigurationConflictError("meta", "rules");
-    }
-    this.writeSystemAudit("platform.meta.rules.updated", configuration);
-    return this.getMetaRuleConfiguration();
-  }
-
-  getMetaAutomationRuntime(): MetaAutomationRuntime {
-    this.ensureGlobalDefaults();
-    const row = this.db
-      .prepare(
-        "SELECT * FROM platform_automation_runtime WHERE platform = 'meta'",
-      )
-      .get() as SqlRow;
-    return MetaAutomationRuntimeSchema.parse({
-      enabled: fromSqlBoolean(row.enabled),
-      pollingIntervalMinutes: row.polling_interval_minutes,
-      maxActionsPerRun: row.max_actions_per_run,
-      updatedAt: row.updated_at,
-    });
-  }
-
-  updateMetaAutomationRuntime(
-    input: MetaAutomationRuntimeInput,
-    expectedUpdatedAt?: string,
-  ): MetaAutomationRuntime {
-    const runtime = MetaAutomationRuntimeInputSchema.parse(input);
-    const current = this.getMetaAutomationRuntime();
-    const expected = expectedUpdatedAt ?? current.updatedAt;
-    const now = nextIsoTimestamp(current.updatedAt);
-    const result = this.db
-      .prepare(
-        `UPDATE platform_automation_runtime
-         SET enabled = ?, polling_interval_minutes = ?, max_actions_per_run = ?, updated_at = ?
-         WHERE platform = 'meta' AND updated_at = ?`,
-      )
-      .run(
-        toSqlBoolean(runtime.enabled),
-        runtime.pollingIntervalMinutes,
-        runtime.maxActionsPerRun,
-        now,
-        expected,
-      );
-    if (result.changes === 0) {
-      throw new PlatformConfigurationConflictError("meta", "runtime");
-    }
-    this.writeSystemAudit("platform.meta.runtime.updated", runtime);
-    return this.getMetaAutomationRuntime();
-  }
-
-  createMetaCreationTask(
-    accountId: string,
-    rawInput: unknown,
-  ): MetaCreationTaskRecord {
-    const account = this.getAccount(accountId);
-    if (!account || account.platform !== "meta" || account.providerKind !== "meta-marketing-api") {
-      throw new Error("只有 Meta Marketing API 账户可以创建 Meta 广告任务。");
-    }
-    const input = MetaAdCreationInputSchema.parse(rawInput);
-    const existing = this.db.prepare(
-      "SELECT * FROM meta_creation_tasks WHERE account_id = ? AND idempotency_key = ?",
-    ).get(accountId, input.idempotencyKey) as SqlRow | undefined;
-    if (existing) {
-      const task = mapMetaCreationTask(existing);
-      if (JSON.stringify(task.input) !== JSON.stringify(input)) {
-        throw new MetaCreationIdempotencyConflictError(accountId, input.idempotencyKey);
-      }
-      return task;
-    }
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    const inserted = this.db.prepare(
-      `INSERT OR IGNORE INTO meta_creation_tasks (
-        id, account_id, idempotency_key, input_json, status, phase,
-        campaign_id, ad_set_id, creative_id, ad_id, message,
-        attempt_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'pending', 'pending', NULL, NULL, NULL, NULL, NULL, 0, ?, ?)`,
-    ).run(id, accountId, input.idempotencyKey, JSON.stringify(input), now, now);
-    if (inserted.changes === 0) {
-      const concurrent = this.db.prepare(
-        "SELECT * FROM meta_creation_tasks WHERE account_id = ? AND idempotency_key = ?",
-      ).get(accountId, input.idempotencyKey) as SqlRow | undefined;
-      if (!concurrent) throw new Error("Meta 创建任务保存失败。");
-      const task = mapMetaCreationTask(concurrent);
-      if (JSON.stringify(task.input) !== JSON.stringify(input)) {
-        throw new MetaCreationIdempotencyConflictError(accountId, input.idempotencyKey);
-      }
-      return task;
-    }
-    this.writeAudit("local-user", accountId, "meta.creation.created", {
-      taskId: id,
-      idempotencyKey: input.idempotencyKey,
-    });
-    return this.getMetaCreationTask(id);
-  }
-
-  getMetaCreationTask(taskId: string): MetaCreationTaskRecord {
-    const row = this.db.prepare(
-      "SELECT * FROM meta_creation_tasks WHERE id = ?",
-    ).get(taskId) as SqlRow | undefined;
-    if (!row) throw new Error("Meta 创建任务不存在。");
-    return mapMetaCreationTask(row);
-  }
-
-  listMetaCreationTasks(accountId: string, limit = 50): MetaCreationTaskRecord[] {
-    const rows = this.db.prepare(
-      `SELECT * FROM meta_creation_tasks
-       WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
-    ).all(accountId, Math.max(1, Math.min(200, Math.floor(limit)))) as SqlRow[];
-    return rows.map(mapMetaCreationTask);
-  }
-
-  claimMetaCreationTask(taskId: string): MetaCreationTaskRecord | null {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(
-      `UPDATE meta_creation_tasks
-       SET status = 'running', attempt_count = attempt_count + 1, message = NULL, updated_at = ?
-       WHERE id = ? AND status IN ('pending', 'failed')`,
-    ).run(now, taskId);
-    return result.changes > 0 ? this.getMetaCreationTask(taskId) : null;
-  }
-
-  markMetaCreationTaskDispatching(taskId: string): void {
-    const result = this.db.prepare(
-      `UPDATE meta_creation_tasks
-       SET message = ?, updated_at = ?
-       WHERE id = ? AND status = 'running'`,
-    ).run(
-      "Meta 远端写入请求即将发送；若执行中断，任务将先转为 unknown 并要求只读对账。",
-      new Date().toISOString(),
-      taskId,
-    );
-    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
-  }
-
-  recoverInterruptedMetaCreationTasks(staleBefore: string): number {
-    const staleAt = new Date(staleBefore);
-    if (Number.isNaN(staleAt.getTime())) {
-      throw new Error("Meta 创建任务恢复时间无效。");
-    }
-    const cutoff = staleAt.toISOString();
-    const now = new Date().toISOString();
-    const message = "执行进程中断，无法确认 Meta 是否已完成远端创建；任务已转为 unknown，请先执行只读对账。";
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const rows = this.db.prepare(
-        `SELECT id, account_id, phase FROM meta_creation_tasks
-         WHERE status = 'running' AND updated_at <= ?`,
-      ).all(cutoff) as SqlRow[];
-      let recovered = 0;
-      for (const row of rows) {
-        const result = this.db.prepare(
-          `UPDATE meta_creation_tasks
-           SET status = 'unknown', message = ?, updated_at = ?
-           WHERE id = ? AND status = 'running' AND updated_at <= ?`,
-        ).run(message, now, String(row.id), cutoff);
-        if (result.changes === 0) continue;
-        recovered += 1;
-        this.writeAudit("system", String(row.account_id), "meta.creation.interrupted", {
-          taskId: String(row.id),
-          phase: String(row.phase),
-        });
-      }
-      this.db.exec("COMMIT");
-      return recovered;
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      throw cause;
-    }
-  }
-
-  updateMetaCreationProgress(
-    taskId: string,
-    rawProgress: MetaCreationProgress,
-  ): MetaCreationTaskRecord {
-    const progress = MetaCreationProgressSchema.parse(rawProgress);
-    const result = this.db.prepare(
-      `UPDATE meta_creation_tasks SET
-        phase = ?,
-        campaign_id = COALESCE(?, campaign_id),
-        ad_set_id = COALESCE(?, ad_set_id),
-        creative_id = COALESCE(?, creative_id),
-        ad_id = COALESCE(?, ad_id),
-        message = ?, updated_at = ?
-       WHERE id = ? AND status = 'running'`,
-    ).run(
-      progress.phase,
-      progress.campaignId ?? null,
-      progress.adSetId ?? null,
-      progress.creativeId ?? null,
-      progress.adId ?? null,
-      progress.message,
-      new Date().toISOString(),
-      taskId,
-    );
-    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
-    return this.getMetaCreationTask(taskId);
-  }
-
-  completeMetaCreationTask(
-    taskId: string,
-    status: Extract<MetaCreationTaskStatus, "succeeded" | "failed" | "unknown">,
-    message: string,
-    ids: {
-      campaignId?: string;
-      adSetId?: string;
-      creativeId?: string;
-      adId?: string;
-    } = {},
-  ): MetaCreationTaskRecord {
-    const phase = status === "succeeded" ? "completed" : undefined;
-    const result = this.db.prepare(
-      `UPDATE meta_creation_tasks SET
-        status = ?, phase = COALESCE(?, phase),
-        campaign_id = COALESCE(?, campaign_id),
-        ad_set_id = COALESCE(?, ad_set_id),
-        creative_id = COALESCE(?, creative_id),
-        ad_id = COALESCE(?, ad_id),
-        message = ?, updated_at = ?
-       WHERE id = ? AND status = 'running'`,
-    ).run(
-      status,
-      phase ?? null,
-      ids.campaignId ?? null,
-      ids.adSetId ?? null,
-      ids.creativeId ?? null,
-      ids.adId ?? null,
-      message,
-      new Date().toISOString(),
-      taskId,
-    );
-    if (result.changes === 0) throw new Error("Meta 创建任务执行权已变化。");
-    const task = this.getMetaCreationTask(taskId);
-    this.writeAudit("local-user", task.accountId, `meta.creation.${status}`, {
-      taskId,
-      phase: task.phase,
-      campaignId: task.campaignId,
-      adSetId: task.adSetId,
-      creativeId: task.creativeId,
-      adId: task.adId,
-    });
-    return task;
-  }
-
-  resolveUnknownMetaCreationTask(
-    taskId: string,
-    resolution: "succeeded" | "failed" | "unknown",
-    message: string,
-    ids: {
-      campaignId?: string;
-      adSetId?: string;
-      creativeId?: string;
-      adId?: string;
-    } = {},
-  ): MetaCreationTaskRecord {
-    const current = this.getMetaCreationTask(taskId);
-    if (current.status !== "unknown") {
-      throw new Error("只有 unknown 的 Meta 创建任务可以执行只读对账。");
-    }
-    const merged = {
-      campaignId: ids.campaignId ?? current.campaignId,
-      adSetId: ids.adSetId ?? current.adSetId,
-      creativeId: ids.creativeId ?? current.creativeId,
-      adId: ids.adId ?? current.adId,
-    };
-    const phase = resolution === "succeeded"
-      ? "completed"
-      : merged.adId
-        ? "ad"
-        : merged.creativeId
-          ? "creative"
-          : merged.adSetId
-            ? "ad-set"
-            : merged.campaignId
-              ? "campaign"
-              : "pending";
-    const result = this.db.prepare(
-      `UPDATE meta_creation_tasks SET
-        status = ?, phase = ?, campaign_id = ?, ad_set_id = ?,
-        creative_id = ?, ad_id = ?, message = ?, updated_at = ?
-       WHERE id = ? AND status = 'unknown'`,
-    ).run(
-      resolution,
-      phase,
-      merged.campaignId,
-      merged.adSetId,
-      merged.creativeId,
-      merged.adId,
-      message,
-      new Date().toISOString(),
-      taskId,
-    );
-    if (result.changes === 0) throw new Error("Meta 创建任务状态已变化。");
-    const task = this.getMetaCreationTask(taskId);
-    this.writeAudit("local-user", task.accountId, `meta.creation.reconciled.${resolution}`, {
-      taskId,
-      phase: task.phase,
-      campaignId: task.campaignId,
-      adSetId: task.adSetId,
-      creativeId: task.creativeId,
-      adId: task.adId,
-    });
-    return task;
-  }
 
   getSystemRuntimeState(): SystemRuntimeState {
     this.ensureGlobalDefaults();
@@ -1948,223 +1509,10 @@ export class AutomationStore {
       )
       .all(accountId) as SqlRow[];
     return rows.map((row) => toPublicProviderConnection(
-      this.hydrateMetaConnectionCredential(mapStoredProviderConnection(row)),
+      mapStoredProviderConnection(row),
     ));
   }
 
-  listMetaAccessProfiles(): MetaAccessProfile[] {
-    const rows = this.db
-      .prepare("SELECT * FROM meta_access_profiles ORDER BY name COLLATE NOCASE, id")
-      .all() as SqlRow[];
-    return rows.map((row) => toPublicMetaAccessProfile(
-      mapStoredMetaAccessProfile(row, this.countMetaAccessProfileReferences(String(row.id))),
-    ));
-  }
-
-  getMetaAccessProfile(profileId: string): MetaAccessProfile | null {
-    const stored = this.getStoredMetaAccessProfile(profileId);
-    return stored ? toPublicMetaAccessProfile(stored) : null;
-  }
-
-  getStoredMetaAccessProfile(profileId: string): StoredMetaAccessProfile | null {
-    const row = this.db
-      .prepare("SELECT * FROM meta_access_profiles WHERE id = ?")
-      .get(profileId) as SqlRow | undefined;
-    return row
-      ? mapStoredMetaAccessProfile(row, this.countMetaAccessProfileReferences(profileId))
-      : null;
-  }
-
-  createMetaAccessProfile(input: MetaAccessProfileInput): MetaAccessProfile {
-    const profile = MetaAccessProfileInputSchema.parse(input);
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    try {
-      this.db
-        .prepare(
-          `INSERT INTO meta_access_profiles (
-            id, name, app_id, business_id, graph_api_version, secret_ref, updated_at
-          ) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
-        )
-        .run(
-          id,
-          profile.name,
-          profile.appId,
-          profile.businessId,
-          profile.graphApiVersion,
-          now,
-        );
-    } catch (cause) {
-      if (isSqliteUniqueConstraint(cause)) {
-        throw new MetaAccessProfileAppIdConflictError(profile.appId);
-      }
-      throw cause;
-    }
-    this.writeSystemAudit("platform.meta.access-profile.created", {
-      profileId: id,
-      appId: profile.appId,
-      hasBusinessId: profile.businessId !== null,
-    });
-    return this.getMetaAccessProfile(id) as MetaAccessProfile;
-  }
-
-  updateMetaAccessProfile(
-    profileId: string,
-    input: MetaAccessProfileInput,
-  ): {
-    profile: MetaAccessProfile;
-    invalidatedSecretRef: string | null;
-  } | null {
-    const profile = MetaAccessProfileInputSchema.parse(input);
-    const current = this.getStoredMetaAccessProfile(profileId);
-    if (!current) return null;
-    const appIdChanged = current.appId !== profile.appId;
-    if (appIdChanged && current.secretRef !== null) {
-      throw new MetaAccessProfileAppIdLockedError(profileId);
-    }
-    const connectionConfigurationChanged = appIdChanged
-      || current.businessId !== profile.businessId
-      || current.graphApiVersion !== profile.graphApiVersion;
-    const now = nextIsoTimestamp(current.updatedAt);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db
-        .prepare(
-          `UPDATE meta_access_profiles
-           SET name = ?, app_id = ?, business_id = ?, graph_api_version = ?,
-               secret_ref = ?, updated_at = ?
-           WHERE id = ?`,
-        )
-        .run(
-          profile.name,
-          profile.appId,
-          profile.businessId,
-          profile.graphApiVersion,
-          current.secretRef,
-          now,
-          profileId,
-        );
-      if (connectionConfigurationChanged) {
-        this.markMetaAccessProfileConnectionsUntested(
-          profileId,
-          current.secretRef === null ? "not-configured" : "untested",
-        );
-      }
-      this.writeSystemAudit("platform.meta.access-profile.updated", {
-        profileId,
-        appId: profile.appId,
-        hasBusinessId: profile.businessId !== null,
-        secretBundleInvalidated: false,
-      });
-      this.db.exec("COMMIT");
-    } catch (cause) {
-      this.db.exec("ROLLBACK");
-      if (isSqliteUniqueConstraint(cause)) {
-        throw new MetaAccessProfileAppIdConflictError(profile.appId);
-      }
-      throw cause;
-    }
-    return {
-      profile: this.getMetaAccessProfile(profileId) as MetaAccessProfile,
-      invalidatedSecretRef: null,
-    };
-  }
-
-  setMetaAccessProfileSecretReference(
-    profileId: string,
-    secretRef: string,
-    expected?: { appId: string; updatedAt: string },
-  ): MetaAccessProfile {
-    const current = this.getStoredMetaAccessProfile(profileId);
-    if (!current) throw new Error("Meta access profile not found.");
-    const result = expected
-      ? this.db.prepare(
-        `UPDATE meta_access_profiles SET secret_ref = ?, updated_at = ?
-         WHERE id = ? AND app_id = ? AND updated_at = ?`,
-      ).run(
-        secretRef,
-        nextIsoTimestamp(current.updatedAt),
-        profileId,
-        expected.appId,
-        expected.updatedAt,
-      )
-      : this.db
-        .prepare("UPDATE meta_access_profiles SET secret_ref = ?, updated_at = ? WHERE id = ?")
-        .run(secretRef, nextIsoTimestamp(current.updatedAt), profileId);
-    if (result.changes === 0) {
-      throw new MetaAccessProfileVersionConflictError(profileId);
-    }
-    this.markMetaAccessProfileConnectionsUntested(profileId, "untested");
-    this.writeSystemAudit("platform.meta.access-profile.secret.updated", {
-      profileId,
-    });
-    return this.getMetaAccessProfile(profileId) as MetaAccessProfile;
-  }
-
-  clearMetaAccessProfileSecret(profileId: string): string | null {
-    const current = this.getStoredMetaAccessProfile(profileId);
-    if (!current) return null;
-    this.db
-      .prepare("UPDATE meta_access_profiles SET secret_ref = NULL, updated_at = ? WHERE id = ?")
-      .run(nextIsoTimestamp(current.updatedAt), profileId);
-    this.markMetaAccessProfileConnectionsUntested(profileId, "not-configured");
-    this.writeSystemAudit("platform.meta.access-profile.secret.deleted", {
-      profileId,
-    });
-    return current.secretRef;
-  }
-
-  deleteMetaAccessProfile(profileId: string): string | null {
-    const current = this.getStoredMetaAccessProfile(profileId);
-    if (!current) return null;
-    if (current.referenceCount > 0) {
-      throw new MetaAccessProfileInUseError(profileId, current.referenceCount);
-    }
-    this.db.prepare("DELETE FROM meta_access_profiles WHERE id = ?").run(profileId);
-    this.writeSystemAudit("platform.meta.access-profile.deleted", {
-      profileId,
-      appId: current.appId,
-      hadSecretBundle: current.hasAccessToken,
-    });
-    return current.secretRef;
-  }
-
-  private countMetaAccessProfileReferences(profileId: string): number {
-    return this.listMetaAccessProfileAccountIds(profileId).length;
-  }
-
-  private listMetaAccessProfileAccountIds(profileId: string): string[] {
-    const rows = this.db
-      .prepare(
-        "SELECT account_id, settings_json FROM provider_connections WHERE provider_kind = 'meta-marketing-api'",
-      )
-      .all() as SqlRow[];
-    return rows.flatMap((row) => {
-      try {
-        const settings = JSON.parse(String(row.settings_json)) as Record<string, unknown>;
-        return settings.profileId === profileId ? [String(row.account_id)] : [];
-      } catch {
-        return [];
-      }
-    });
-  }
-
-  private markMetaAccessProfileConnectionsUntested(
-    profileId: string,
-    status: "not-configured" | "untested",
-  ): void {
-    const accountIds = this.listMetaAccessProfileAccountIds(profileId);
-    const update = this.db.prepare(
-      `UPDATE provider_connections SET
-        status = ?, authorization_status = 'not-authorized',
-        capability_version = 'legacy-unversioned', authorized_capabilities_json = '[]',
-        authorized_at = NULL, authorization_expires_at = NULL,
-        last_message = NULL, last_tested_at = NULL, updated_at = ?
-       WHERE account_id = ? AND provider_kind = 'meta-marketing-api'`,
-    );
-    const now = new Date().toISOString();
-    for (const accountId of accountIds) update.run(status, now, accountId);
-  }
 
   getProviderConnection(
     accountId: string,
@@ -2176,32 +1524,8 @@ export class AutomationStore {
       )
       .get(accountId, kind) as SqlRow | undefined;
     return row
-      ? this.hydrateMetaConnectionCredential(mapStoredProviderConnection(row))
+      ? mapStoredProviderConnection(row)
       : null;
-  }
-
-  private hydrateMetaConnectionCredential(
-    connection: StoredProviderConnection,
-  ): StoredProviderConnection {
-    if (connection.kind !== "meta-marketing-api") return connection;
-    const profileId = connection.settings.kind === "meta-marketing-api"
-      ? connection.settings.profileId
-      : undefined;
-    if (!profileId) {
-      return {
-        ...connection,
-        credentialRef: null,
-        hasCredential: false,
-        status: "not-configured",
-      };
-    }
-    const profile = this.getStoredMetaAccessProfile(profileId);
-    return {
-      ...connection,
-      credentialRef: profile?.secretRef ?? null,
-      hasCredential: Boolean(profile?.secretRef),
-      status: profile?.secretRef ? connection.status : "not-configured",
-    };
   }
 
   saveProviderConnectionSettings(
@@ -2210,19 +1534,8 @@ export class AutomationStore {
   ): ProviderConnection {
     const account = this.getAccount(accountId);
     if (!account) throw new Error(`Unknown account: ${accountId}`);
-    if (settings.kind === "meta-offline") {
-      throw new Error("Meta 当前仅提供离线架构，不能保存接入参数。");
-    }
     if (!providerBelongsToPlatform(account.platform, settings.kind)) {
       throw new Error("接入方式与账户平台不匹配。");
-    }
-    const metaProfile = settings.kind === "meta-marketing-api"
-      ? settings.profileId
-        ? this.getStoredMetaAccessProfile(settings.profileId)
-        : null
-      : null;
-    if (settings.kind === "meta-marketing-api" && !metaProfile) {
-      throw new Error("请先选择有效的 Meta 共享凭据档案。");
     }
     const now = new Date().toISOString();
     this.db
@@ -2246,12 +1559,6 @@ export class AutomationStore {
           updated_at = excluded.updated_at`,
       )
       .run(accountId, settings.kind, JSON.stringify(settings), now);
-    if (settings.kind === "meta-marketing-api") {
-      this.db.prepare(
-        `UPDATE provider_connections SET status = ?, last_tested_at = NULL, updated_at = ?
-         WHERE account_id = ? AND provider_kind = 'meta-marketing-api'`,
-      ).run(metaProfile?.secretRef ? "untested" : "not-configured", now, accountId);
-    }
     this.writeAudit("local-user", accountId, "provider.settings.updated", {
       providerKind: settings.kind,
       settings,
@@ -2266,9 +1573,6 @@ export class AutomationStore {
     kind: ProviderKind,
     credentialRef: string,
   ): ProviderConnection {
-    if (kind === "meta-marketing-api") {
-      throw new Error("Meta App Secret 与 Token 必须通过共享凭据档案管理。");
-    }
     assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const result = this.db
       .prepare(
@@ -2295,9 +1599,6 @@ export class AutomationStore {
     accountId: string,
     kind: ProviderKind,
   ): string | null {
-    if (kind === "meta-marketing-api") {
-      throw new Error("Meta App Secret 与 Token 必须通过共享凭据档案管理。");
-    }
     assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const existing = this.getProviderConnection(accountId, kind);
     if (!existing) return null;
@@ -2395,21 +1696,6 @@ export class AutomationStore {
   ): ProviderConnection | null {
     assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     let expectedConnectionCredentialRef = expected.credentialRef;
-    if (kind === "meta-marketing-api") {
-      const profileId = expected.settings.kind === "meta-marketing-api"
-        ? expected.settings.profileId
-        : undefined;
-      const profile = profileId
-        ? this.getStoredMetaAccessProfile(profileId)
-        : null;
-      if (!profile || profile.secretRef !== expected.credentialRef) return null;
-      const raw = this.db.prepare(
-        "SELECT credential_ref FROM provider_connections WHERE account_id = ? AND provider_kind = ?",
-      ).get(accountId, kind) as SqlRow | undefined;
-      expectedConnectionCredentialRef = typeof raw?.credential_ref === "string"
-        ? raw.credential_ref
-        : null;
-    }
     const now = new Date().toISOString();
     const capabilities = input.authorizationStatus === "active"
       ? input.capabilities
@@ -2739,16 +2025,6 @@ export class AutomationStore {
         automationManaged: snapshot.entityType === "ad-group"
           && automationManaged.has(snapshot.externalId),
         syncedAt: String(row.synced_at),
-        ...(kind === "meta-marketing-api"
-          ? {
-              configuredStatus:
-                typeof payload.status === "string" ? payload.status : null,
-              effectiveStatus:
-                typeof payload.effective_status === "string"
-                  ? payload.effective_status
-                  : null,
-            }
-          : {}),
       };
     });
   }
@@ -6979,9 +6255,7 @@ export class AutomationStore {
     entityType: ProviderEntity["entityType"],
     externalId: string,
   ): boolean {
-    const statuses = providerKind === "meta-marketing-api"
-      ? "('pending', 'running', 'unknown')"
-      : "('running', 'unknown')";
+    const statuses = "('running', 'unknown')";
     const row = this.db.prepare(
       `SELECT 1 FROM ad_operations
        WHERE account_id = ? AND provider_kind = ? AND entity_type = ? AND external_id = ?
@@ -7586,45 +6860,6 @@ export class AutomationStore {
         rules_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS platform_automation_runtime (
-        platform TEXT PRIMARY KEY CHECK (platform = 'meta'),
-        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-        polling_interval_minutes INTEGER NOT NULL CHECK (polling_interval_minutes BETWEEN 1 AND 60),
-        max_actions_per_run INTEGER NOT NULL CHECK (max_actions_per_run BETWEEN 1 AND 100),
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS meta_access_profiles (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        app_id TEXT NOT NULL UNIQUE,
-        business_id TEXT,
-        graph_api_version TEXT NOT NULL,
-        secret_ref TEXT,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS meta_creation_tasks (
-        id TEXT PRIMARY KEY,
-        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-        idempotency_key TEXT NOT NULL,
-        input_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'unknown')),
-        phase TEXT NOT NULL CHECK (phase IN ('pending', 'campaign', 'ad-set', 'creative', 'ad', 'completed')),
-        campaign_id TEXT,
-        ad_set_id TEXT,
-        creative_id TEXT,
-        ad_id TEXT,
-        message TEXT,
-        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE (account_id, idempotency_key)
-      );
-
-      CREATE INDEX IF NOT EXISTS meta_creation_tasks_account_created
-      ON meta_creation_tasks (account_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS global_runtime_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -8888,33 +8123,6 @@ export class AutomationStore {
 
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO platform_rule_configurations (
-          platform, schema_version, metric_window, layers_json, rules_json, updated_at
-        ) VALUES ('meta', ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        defaultMetaRuleConfiguration.schemaVersion,
-        defaultMetaRuleConfiguration.metricWindow,
-        JSON.stringify(defaultMetaRuleConfiguration.layers),
-        JSON.stringify(defaultMetaRuleConfiguration.rules),
-        now,
-      );
-
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO platform_automation_runtime (
-          platform, enabled, polling_interval_minutes, max_actions_per_run, updated_at
-        ) VALUES ('meta', ?, ?, ?, ?)`,
-      )
-      .run(
-        toSqlBoolean(defaultMetaAutomationRuntime.enabled),
-        defaultMetaAutomationRuntime.pollingIntervalMinutes,
-        defaultMetaAutomationRuntime.maxActionsPerRun,
-        now,
-      );
-
-    this.db
-      .prepare(
         `INSERT OR IGNORE INTO global_runtime_state (id, enabled, updated_at)
          VALUES (1, 1, ?)`,
       )
@@ -9582,24 +8790,6 @@ function mapLaunchPreset(row: SqlRow): LaunchPresetRecord {
   });
 }
 
-function mapMetaCreationTask(row: SqlRow): MetaCreationTaskRecord {
-  return MetaCreationTaskRecordSchema.parse({
-    id: row.id,
-    accountId: row.account_id,
-    input: JSON.parse(String(row.input_json)),
-    status: row.status,
-    phase: row.phase,
-    campaignId: row.campaign_id ?? null,
-    adSetId: row.ad_set_id ?? null,
-    creativeId: row.creative_id ?? null,
-    adId: row.ad_id ?? null,
-    message: row.message ?? null,
-    attemptCount: Number(row.attempt_count),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  });
-}
-
 function mapProviderConnection(row: SqlRow): ProviderConnection {
   return ProviderConnectionSchema.parse({
     accountId: row.account_id,
@@ -9626,32 +8816,6 @@ function mapStoredProviderConnection(row: SqlRow): StoredProviderConnection {
   };
 }
 
-function mapStoredMetaAccessProfile(
-  row: SqlRow,
-  referenceCount: number,
-): StoredMetaAccessProfile {
-  const secretRef = typeof row.secret_ref === "string" ? row.secret_ref : null;
-  const record = MetaAccessProfileSchema.parse({
-    id: row.id,
-    name: row.name,
-    appId: row.app_id,
-    businessId: row.business_id ?? null,
-    graphApiVersion: row.graph_api_version,
-    hasAppSecret: secretRef !== null,
-    hasAccessToken: secretRef !== null,
-    referenceCount,
-    updatedAt: row.updated_at,
-  });
-  return { ...record, secretRef };
-}
-
-function toPublicMetaAccessProfile(
-  profile: StoredMetaAccessProfile,
-): MetaAccessProfile {
-  const { secretRef: _secretRef, ...publicProfile } = profile;
-  return publicProfile;
-}
-
 function toPublicProviderConnection(
   connection: StoredProviderConnection,
 ): ProviderConnection {
@@ -9663,9 +8827,6 @@ function assertProviderConnectionMutationAllowed(
   account: AccountConfig | null,
   kind: ProviderKind,
 ): void {
-  if (account?.providerKind === "meta-offline" || kind === "meta-offline") {
-    throw new Error("Meta 当前仅提供离线架构，不能修改接入连接。");
-  }
   if (account && !providerBelongsToPlatform(account.platform, kind)) {
     throw new Error("接入方式与账户平台不匹配。");
   }

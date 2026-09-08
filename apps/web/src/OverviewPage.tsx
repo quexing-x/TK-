@@ -13,11 +13,11 @@ import type { ReactNode } from "react";
 import type { AccountConfig, SystemRuntimeState } from "@tk-auto/core";
 import type { BootstrapPayload } from "./api";
 
-type OverviewDestination = "ads" | "meta-assets" | "meta-rules";
+type OverviewDestination = "ads";
 
 /**
- * The overview intentionally stays connection-only. Platform metrics,
- * decisions and operations belong to their isolated TikTok or Meta modules.
+ * The overview intentionally stays connection-only. Metrics, decisions and
+ * operations belong to the TikTok modules.
  */
 export function OverviewPage({
   accounts,
@@ -42,14 +42,6 @@ export function OverviewPage({
       action: () => onNavigate("ads"),
       actionLabel: "进入 TikTok 广告管理",
     },
-    {
-      key: "meta" as const,
-      title: "Meta 接入",
-      description: "Marketing API 账户连接与权限",
-      accounts: accounts.filter((account) => account.platform === "meta"),
-      action: () => onNavigate("meta-assets"),
-      actionLabel: "进入 Meta 广告管理",
-    },
   ];
 
   return (
@@ -61,7 +53,7 @@ export function OverviewPage({
         <div className="runtime-copy">
           <span className="section-kicker">CONNECTION OVERVIEW</span>
           <h2>平台接入总览</h2>
-          <p>这里只展示账户连接、权限与自动化开关；TikTok 与 Meta 的指标和规则互不混用。</p>
+          <p>这里只展示账户连接、权限与自动化开关。</p>
         </div>
         <div className={`runtime-state-card ${runtime.enabled ? "active" : "paused"}`}>
           <span>全局自动化</span>
@@ -92,19 +84,19 @@ export function OverviewPage({
           return (
             <article className={`platform-access-card platform-${group.key}`} key={group.key}>
               <header>
-                <div className="platform-access-icon">{group.key === "meta" ? <Link2 size={19} /> : <ShieldCheck size={19} />}</div>
+                <div className="platform-access-icon"><ShieldCheck size={19} /></div>
                 <div><h3>{group.title}</h3><p>{group.description}</p></div>
                 <span className="platform-access-count">{readyCount}/{group.accounts.length} 正常</span>
               </header>
               <div className="platform-access-list">
                 {group.accounts.length === 0 ? (
-                  <div className="platform-access-empty"><CircleAlert size={16} /><span>暂无已建立的{group.key === "meta" ? " Meta" : " TikTok"}账户接入</span></div>
+                  <div className="platform-access-empty"><CircleAlert size={16} /><span>暂无已建立的 TikTok 账户接入</span></div>
                 ) : group.accounts.map((account) => {
                   const state = stateByAccountId.get(account.id);
                   const access = connectionOverviewStatus(state);
                   return (
                     <div className="platform-access-row" key={account.id}>
-                      <div className="platform-access-account"><strong>{account.displayName}</strong><small>{account.providerKind === "meta-marketing-api" ? "Meta Marketing API" : account.providerKind === "cookie" ? "Cookie 会话" : "官方 API"}</small></div>
+                      <div className="platform-access-account"><strong>{account.displayName}</strong><small>{account.providerKind === "cookie" ? "Cookie 会话" : "官方 API"}</small></div>
                       <span className={`status ${access.tone === "healthy" ? "active" : access.tone === "danger" ? "danger" : "warning"}`}><i />{access.label}</span>
                       <span className="platform-access-detail">{account.enabled ? "自动化已开启" : "自动化未开启"}</span>
                       {access.tone !== "healthy" && <small className="platform-access-blocker" title={access.blocker}>{access.blocker}</small>}
@@ -112,7 +104,7 @@ export function OverviewPage({
                   );
                 })}
               </div>
-              <footer><button className="icon-text-link" type="button" onClick={group.action}>{group.actionLabel}<ArrowRight size={14} /></button>{group.key === "meta" && <button className="icon-text-link secondary-link" type="button" onClick={() => onNavigate("meta-rules")}><SlidersHorizontal size={14} />Meta 规则</button>}</footer>
+              <footer><button className="icon-text-link" type="button" onClick={group.action}>{group.actionLabel}<ArrowRight size={14} /></button></footer>
             </article>
           );
         })}
@@ -126,7 +118,6 @@ export function OverviewPage({
         {children}
       </section>
 
-      <div className="connection-overview-note"><CheckCircle2 size={16} /><span>Meta 与 TikTok 的规则引擎、自动启停和广告对象列表已在页面层隔离；总览不再混合展示平台指标。</span><Play size={15} /></div>
     </section>
   );
 }

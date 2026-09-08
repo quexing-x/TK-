@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   CookieConnectionSettingsSchema,
-  MetaMarketingApiConnectionSettingsSchema,
   ProviderCredentialInputSchema,
   syncLayerComplete,
   type SyncDataQuality,
@@ -100,70 +99,4 @@ describe("provider connection validation", () => {
     ).toBe("official-api");
   });
 
-  it("validates Meta IDs without accepting endpoints or secrets in settings", () => {
-    expect(MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      profileId: "11111111-1111-4111-8111-111111111111",
-      adAccountId: "act_300000000000003",
-      pageId: "400000000000004",
-    })).toMatchObject({
-      profileId: "11111111-1111-4111-8111-111111111111",
-      adAccountId: "act_300000000000003",
-    });
-    expect(MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      profileId: "11111111-1111-4111-8111-111111111111",
-      adAccountId: "act_300000000000003",
-      pageId: "400000000000004",
-      liveMode: "manual-status",
-      allowedStatusEntityTypes: ["campaign", "ad-group", "ad"],
-    })).toMatchObject({
-      liveMode: "manual-status",
-      allowedStatusEntityTypes: ["campaign", "ad-group", "ad"],
-    });
-    expect(MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      profileId: "11111111-1111-4111-8111-111111111111",
-      adAccountId: "act_300000000000003",
-      pageId: "400000000000004",
-      liveMode: "automation-status",
-      allowedStatusEntityTypes: ["ad"],
-    }).liveMode).toBe("automation-status");
-    expect(MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      profileId: "11111111-1111-4111-8111-111111111111",
-      adAccountId: "act_300000000000003",
-      pageId: "",
-    }).pageId).toBeNull();
-    const legacy = MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      appId: "100000000000001",
-      businessId: "200000000000002",
-      adAccountId: "act_300000000000003",
-      pageId: "400000000000004",
-      graphApiVersion: "v26.0",
-    });
-    expect(legacy).toEqual({
-      kind: "meta-marketing-api",
-      adAccountId: "act_300000000000003",
-      pageId: "400000000000004",
-    });
-    expect(legacy).not.toHaveProperty("appId");
-    expect(legacy).not.toHaveProperty("businessId");
-    expect(legacy).not.toHaveProperty("graphApiVersion");
-    expect(() => MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      profileId: "invalid profile id",
-      adAccountId: "act_3",
-      pageId: "4",
-    })).toThrow();
-    expect(() => MetaMarketingApiConnectionSettingsSchema.parse({
-      kind: "meta-marketing-api",
-      profileId: "11111111-1111-4111-8111-111111111111",
-      adAccountId: "3",
-      pageId: "4",
-      liveMode: "manual-status",
-      allowedStatusEntityTypes: ["ad", "ad"],
-    })).toThrow("启停对象层级不能重复");
-  });
 });

@@ -19,4 +19,4 @@ export function filterManagedAccounts(accounts: AccountConfig[], states: Connect
     && (scope === "all" || (scope === "enabled" ? a.enabled : !a.enabled)));
 }
 export const accountTypeNames = { standard: "普通广告账户", agency: "代理账户", shop: "TikTok Shop" };
-export const providerNames = { cookie: "Cookie 会话", "official-api": "TikTok Marketing API", "meta-offline": "Meta 离线", "meta-marketing-api": "Meta Marketing API" };
+export const providerNames = { cookie: "Cookie 会话", "official-api": "TikTok Marketing API" };

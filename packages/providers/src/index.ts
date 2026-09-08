@@ -3,8 +3,5 @@ export * from "./curl-import.js";
 export * from "./network-error.js";
 export * from "./official-api-provider.js";
 export * from "./pixel-resolver.js";
-export * from "./meta-offline-provider.js";
-export * from "./meta-marketing-api-provider.js";
-export * from "./meta-marketing-api-http-transport.js";
 export * from "./registry.js";
 export * from "./types.js";
