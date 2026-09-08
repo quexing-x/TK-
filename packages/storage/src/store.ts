@@ -6852,15 +6852,6 @@ export class AutomationStore {
         updated_at TEXT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS platform_rule_configurations (
-        platform TEXT PRIMARY KEY CHECK (platform = 'meta'),
-        schema_version TEXT NOT NULL,
-        metric_window TEXT NOT NULL,
-        layers_json TEXT NOT NULL,
-        rules_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS global_runtime_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
@@ -8003,6 +7994,28 @@ export class AutomationStore {
         }
       },
     );
+    /*
+     * Meta 整体下线后清掉它的两张表。
+     *
+     * 放在所有 Meta 迁移之后：上面那些迁移仍然要跑，存量库得先被改造成含 meta 列的
+     * 形状，这里才谈得上删——顺序颠倒会让老库在中途报“no such table”。
+     *
+     * meta_access_profiles.secret_ref 指向 data/credentials 下的 .dpapi 文件。表删掉
+     * 之后那些文件就没人引用了，但**不在这里删**：storage 层拿不到 vault，而且删文件
+     * 不能跟着事务回滚。孤儿文件由使用方按下面这条 SQL 读出 ref 后自行清理。
+     *
+     * platform_rule_configurations / platform_automation_runtime 一并整表删除：
+     * 它们的 platform 列 CHECK 死了只能是 'meta'，TikTok 的规则与运行时走的是
+     * rule_configurations 和 global_automation_settings，跟这两张表无关。
+     */
+    this.applyMigration("drop-meta-tables-v1", () => {
+      this.db.exec(`
+        DROP TABLE IF EXISTS meta_creation_tasks;
+        DROP TABLE IF EXISTS meta_access_profiles;
+        DROP TABLE IF EXISTS platform_rule_configurations;
+        DROP TABLE IF EXISTS platform_automation_runtime;
+      `);
+    });
     this.ensureGlobalDefaults();
   }
 

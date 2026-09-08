@@ -100,6 +100,20 @@ describe("AutomationStore", () => {
     expect(migratedDatabase.prepare(
       "SELECT migration_key FROM schema_migrations WHERE migration_key = 'meta-marketing-api-provider-v1'",
     ).get()).toEqual({ migration_key: "meta-marketing-api-provider-v1" });
+    // Meta 下线迁移必须排在上面两条之后：老库要先被改造成含 meta 列的形状，
+    // 这条才谈得上删表。顺序反了，老库会在中途撞 "no such table"。
+    expect(migratedDatabase.prepare(
+      "SELECT migration_key FROM schema_migrations WHERE migration_key = 'drop-meta-tables-v1'",
+    ).get()).toEqual({ migration_key: "drop-meta-tables-v1" });
+    expect(migratedDatabase.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'meta_%'",
+    ).all()).toEqual([]);
+    // platform_rule_configurations / platform_automation_runtime 的 platform 列 CHECK 死了
+    // 只能是 'meta'，Meta 下线后整表删除；TikTok 的规则与运行时不走这两张表。
+    expect(migratedDatabase.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table'
+         AND name IN ('platform_rule_configurations', 'platform_automation_runtime')`,
+    ).all()).toEqual([]);
     migrated.close();
     rmSync(directory, { recursive: true, force: true });
   });
