@@ -17,7 +17,7 @@
 
 升级到 1.4.115 后会出现的变化：
 
-- **Meta 的最后一批痕迹也清掉了。** 用户手册里的 Meta 接入章节、三个 Meta App 审核用的合规页面（隐私政策 / 服务条款 / 资料删除），以及数据库里四张只服务于 Meta 的表（、、、）。后两张的平台列被数据库约束死了只能是 meta，TikTok 的规则和运行时走的是另外两张表，不受影响。
+- **Meta 的最后一批痕迹也清掉了。** 用户手册里的 Meta 接入章节、三个 Meta App 审核用的合规页面（隐私政策 / 服务条款 / 资料删除），以及数据库里四张只服务于 Meta 的表（`meta_access_profiles`、`meta_creation_tasks`、`platform_rule_configurations`、`platform_automation_runtime`）。后两张看着像通用表，其实平台列被数据库约束死了只能是 meta；TikTok 的规则和运行时走的是 `rule_configurations` 与 `global_automation_settings`，不受影响。
 - **升级时会自动删掉这四张表里的数据。** 已在真实数据副本上验证：表全删，账户与操作记录一条不少，数据库完整性检查通过。如果你之前保存过 Meta App Secret，加密文件本身还留在「文档\TK Ads Automation\data\credentials」下，需要手动删除。
 
 升级到 1.4.114 后会出现的变化：
