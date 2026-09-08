@@ -1,7 +1,6 @@
 import type {
   ProviderConnectionSettings,
   ProviderCredentialInput,
-  MetaAccessSecretBundleInput,
   ProviderEntity,
   ProviderKind,
   PlatformKind,
@@ -15,38 +14,15 @@ import type {
   ProviderCapability,
   LaunchOriginalPost,
   LaunchProductInfo,
-  MetaAdCreationInput,
-  MetaCreationProgress,
 } from "@tk-auto/core";
 
 export type { ProviderCapability } from "@tk-auto/core";
 
-export interface ResolvedMetaAccessProfile {
-  profileId: string;
-  appId: string;
-  businessId?: string | null;
-  graphApiVersion: string;
-}
-
 export interface ProviderContext {
   accountId: string;
   settings: ProviderConnectionSettings;
-  credential: ProviderCredentialInput | (MetaAccessSecretBundleInput & { kind?: never });
+  credential: ProviderCredentialInput;
   timezone?: string;
-  resolvedMetaAccessProfile?: ResolvedMetaAccessProfile;
-}
-
-export interface MetaAdAccountDiscoveryContext {
-  credential: MetaAccessSecretBundleInput;
-  resolvedMetaAccessProfile: ResolvedMetaAccessProfile;
-}
-
-export interface DiscoveredMetaAdAccount {
-  adAccountId: string;
-  name: string;
-  currency: string;
-  timezone: string;
-  accountStatus: number;
 }
 
 export interface ProviderHealth {
@@ -74,28 +50,6 @@ export interface StatusMutation {
 
 export interface StatusMutationResult extends StatusMutation {
   ok: boolean;
-  message: string;
-  failureKind?: "retryable" | "unknown";
-}
-
-export interface MetaAdCreationMutation {
-  input: MetaAdCreationInput;
-  existing: {
-    campaignId?: string;
-    adSetId?: string;
-    creativeId?: string;
-    adId?: string;
-  };
-  onBeforeDispatch?: () => void;
-  onProgress?: (progress: MetaCreationProgress) => void;
-}
-
-export interface MetaAdCreationResult {
-  ok: boolean;
-  campaignId?: string;
-  adSetId?: string;
-  creativeId?: string;
-  adId?: string;
   message: string;
   failureKind?: "retryable" | "unknown";
 }
@@ -220,17 +174,6 @@ export interface StatusMutationProvider extends ProviderContract {
   ): Promise<StatusMutationResult[]>;
 }
 
-export interface MetaAdCreationProvider extends ProviderContract {
-  createMetaAd(
-    context: ProviderContext,
-    mutation: MetaAdCreationMutation,
-  ): Promise<MetaAdCreationResult>;
-  reconcileMetaAd(
-    context: ProviderContext,
-    mutation: Pick<MetaAdCreationMutation, "input" | "existing">,
-  ): Promise<MetaAdCreationResult>;
-}
-
 export type NewCreationMutation = Omit<
   CreationMutation,
   "templateMode" | "templateCampaignId"
@@ -319,7 +262,6 @@ export type AdsProvider = ProviderContract
   & Partial<ReadProvider>
   & Partial<OriginalPostMigrationProvider>
   & Partial<StatusMutationProvider>
-  & Partial<MetaAdCreationProvider>
   & Partial<CreationProvider>
   & Partial<TemplateCopyProvider>
   & Partial<AppealProvider>

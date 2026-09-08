@@ -11,11 +11,6 @@ import {
 } from "@tk-auto/core";
 import { CookieAdsProvider } from "./cookie-provider.js";
 import { OfficialApiAdsProvider } from "./official-api-provider.js";
-import { MetaOfflineAdsProvider } from "./meta-offline-provider.js";
-import {
-  MetaMarketingApiAdsProvider,
-  type MetaMarketingApiTransportFactory,
-} from "./meta-marketing-api-provider.js";
 import { RetryableCreationError } from "./types.js";
 import type {
   AdsProvider,
@@ -34,10 +29,6 @@ import type {
   DeleteAdGroupMutationResult,
   NewCreationMutation,
   TemplateCopyMutation,
-  MetaAdAccountDiscoveryContext,
-  DiscoveredMetaAdAccount,
-  MetaAdCreationMutation,
-  MetaAdCreationResult,
 } from "./types.js";
 
 export interface CopyCampaignInput {
@@ -67,8 +58,6 @@ export interface CopyCampaignResult {
 }
 
 export interface ProviderRegistryOptions {
-  /** Omitted in the desktop default so Meta remains physically unable to use the network. */
-  metaMarketingApiTransportFactory?: MetaMarketingApiTransportFactory;
 }
 
 export class ProviderRegistry {
@@ -208,20 +197,6 @@ export class ProviderRegistry {
     return provider.readEntityById(context, entityType, externalId);
   }
 
-  discoverMetaAdAccounts(
-    context: MetaAdAccountDiscoveryContext,
-  ): Promise<DiscoveredMetaAdAccount[]> {
-    const provider = this.get("meta-marketing-api") as AdsProvider & {
-      discoverAdAccounts?: (
-        input: MetaAdAccountDiscoveryContext,
-      ) => Promise<DiscoveredMetaAdAccount[]>;
-    };
-    if (!provider.discoverAdAccounts) {
-      throw new Error("Meta Marketing API Provider 未实现广告账户发现。");
-    }
-    return provider.discoverAdAccounts(context);
-  }
-
   readAdGroupOriginalPosts(
     kind: ProviderKind,
     context: ProviderContext,
@@ -256,28 +231,6 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持广告启停。`);
     }
     return provider.changeStatus(context, mutations);
-  }
-
-  createMetaAd(
-    context: ProviderContext,
-    mutation: MetaAdCreationMutation,
-  ): Promise<MetaAdCreationResult> {
-    const provider = this.get("meta-marketing-api");
-    if (!provider.createMetaAd || !provider.capabilities.has("create-campaigns")) {
-      throw new RetryableCreationError("Meta Marketing API Provider 尚未实现广告创建。");
-    }
-    return provider.createMetaAd(context, mutation);
-  }
-
-  reconcileMetaAd(
-    context: ProviderContext,
-    mutation: Pick<MetaAdCreationMutation, "input" | "existing">,
-  ): Promise<MetaAdCreationResult> {
-    const provider = this.get("meta-marketing-api");
-    if (!provider.reconcileMetaAd || !provider.capabilities.has("create-campaigns")) {
-      throw new RetryableCreationError("Meta Marketing API Provider 尚未实现创建结果对账。");
-    }
-    return provider.reconcileMetaAd(context, mutation);
   }
 
   deleteAdGroups(
@@ -488,7 +441,5 @@ function defaultProviders(options: ProviderRegistryOptions): AdsProvider[] {
   return [
     new CookieAdsProvider(),
     new OfficialApiAdsProvider(),
-    new MetaOfflineAdsProvider(),
-    new MetaMarketingApiAdsProvider(options.metaMarketingApiTransportFactory),
   ];
 }
