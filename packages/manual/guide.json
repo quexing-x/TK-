@@ -126,17 +126,14 @@
     {
       "id": "account-management",
       "title": "7. 用户管理",
-      "intro": "用户管理中的每一行代表一个广告平台账户。TikTok 与 Meta 使用独立 Provider、规则和调度边界；Meta 可选择永久离线 Provider，或按 liveMode 分阶段开放只读同步、人工三层启停与自动三层启停。",
+      "intro": "用户管理中的每一行代表一个广告平台账户。TikTok 账户可选择 Cookie 会话或 Marketing API 接入，新账户默认关闭自动化。",
       "steps": [
-        "点击新增账户，先选择 TikTok Ads 或 Meta Ads，再填写账户名称和类型。TikTok 可选择 Cookie 或 Marketing API；Meta 可选择永久离线架构或 Marketing API 架构，新账户默认关闭 liveMode 与自动化。",
-        "Meta 接入先创建共享 App 档案：App ID 全局唯一，App Secret 与 Access Token 作为一组加密保存，Business Portfolio ID 可选。广告账户只引用档案并保存 Ad Account ID、可选 Page ID 与三层启停 allowlist；有 BM 时发现其 owned ad accounts，无 BM 时发现 Token 可访问账户。",
+        "点击新增账户，填写账户名称和类型，再选择 Cookie 或 Marketing API 接入方式。新账户默认关闭自动化。",
         "新账户自动使用九条全局规则、5 分钟轮询间隔和单轮最多 15 个启停操作，但不会复制其他账户的 Cookie 或 Token。",
         "使用自动化开关可以让调度器跳过整个账户；重新开启不会丢失配置。",
         "用户管理每 30 秒刷新状态展示；后台按全局轮询间隔检测真实连接，Cookie 失败时会标注“Cookie 已失效”。"
       ],
-      "notes": [
-        "Meta 离线账户不保存任何凭据；Meta Marketing API 的秘密包仅保存到本机加密 Vault，保存后不回显。修改 App ID 会清除旧 Secret/Token 引用并要求重新录入；只改名称、BM 或 Graph 版本不会清除。unknown 启停只允许只读回读，单次相反状态继续保持 unknown，禁止自动重发或反向写入。"
-      ]
+      "notes": []
     },
     {
       "id": "automation-center",
