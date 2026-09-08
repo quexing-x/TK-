@@ -76,8 +76,6 @@ import { AutomationFeaturesPage } from "./AutomationFeaturesPage";
 import { LaunchPage } from "./LaunchPage";
 import { MaintenancePage } from "./MaintenancePage";
 import { OverviewPage } from "./OverviewPage";
-import { MetaAssetsPage } from "./MetaAssetsPage";
-import { MetaRulesPage } from "./MetaRulesPage";
 import {
   accountAccessStatus,
   canEnableAccountAutomation,
@@ -96,7 +94,6 @@ import {
 } from "./local-refresh";
 import {
   applyAccountPlatformSelection,
-  filterMetaAccounts,
   filterTikTokOperationalAccounts,
 } from "./platform-account-view";
 import {
@@ -139,8 +136,6 @@ export type PageKey =
   | "automation"
   | "ads"
   | "analytics"
-  | "meta-assets"
-  | "meta-rules"
   | "rules"
   | "notifications"
   | "launch"
@@ -157,8 +152,6 @@ export const pageHash: Record<PageKey, string> = {
   automation: "#automation",
   ads: "#ads",
   analytics: "#analytics",
-  "meta-assets": "#meta-assets",
-  "meta-rules": "#meta-rules",
   rules: "#rules",
   notifications: "#notifications",
   launch: "#launch",
@@ -170,7 +163,8 @@ export function pageFromHash(hash = window.location.hash): PageKey {
   // Account management now lives on the home page. Preserve old bookmarks by
   // redirecting them to the home page instead of keeping a duplicate route.
   if (hash === "#users") return "overview";
-  // Meta workspace is intentionally retired from the UI for the current release.
+  // Meta 已整体移除。这两个 hash 仍然接住，是为了让老书签落到总览而不是空白页——
+  // 路由表里已经没有它们了，去掉这行的话它们会走到 unknown 分支。
   if (hash === "#meta-assets" || hash === "#meta-rules") return "overview";
   const found = (Object.entries(pageHash) as Array<[PageKey, string]>).find(
     ([, value]) => value === hash,
@@ -449,9 +443,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
     : [];
   const operationalAccountIds = new Set(operationalAccounts.map((item) => item.id));
   const operationalConnectionStates = bootstrap?.accountConnectionStates.filter((item) => operationalAccountIds.has(item.accountId)) ?? [];
-  const metaAccounts = bootstrap ? filterMetaAccounts(bootstrap.accounts) : [];
-  const metaAccountIds = new Set(metaAccounts.map((item) => item.id));
-  const metaConnectionStates = bootstrap?.accountConnectionStates.filter((item) => metaAccountIds.has(item.accountId)) ?? [];
   const pageAccountId = accountIdForPage(operationalAccounts, selectedAccountId, page);
   const account = operationalAccounts.find(
     (item) => item.id === pageAccountId,
@@ -535,10 +526,6 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
     <SystemUsersPage onError={setError} />
   ) : page === "maintenance" ? (
     <MaintenancePage accounts={bootstrap.accounts} onError={setError} />
-  ) : page === "meta-assets" ? (
-    <MetaAssetsPage accounts={metaAccounts} connectionStates={metaConnectionStates} onConnectionsChanged={loadBootstrap} onError={setError} onOpenAccounts={() => { navigateTo("overview"); window.setTimeout(() => document.getElementById("account-management")?.scrollIntoView({ behavior: "smooth" }), 0); }} />
-  ) : page === "meta-rules" ? (
-    <MetaRulesPage accounts={metaAccounts} onError={setError} />
   ) : page === "rules" ? (
     <RulesPage settings={bootstrap.globalAutomationSettings} onSettingsSaved={loadBootstrap} onError={setError} />
   ) : page === "notifications" ? (
@@ -614,11 +601,7 @@ function automationConnectionMessage(
   account: AccountConfig,
   connection: ProviderConnection | null,
 ): string {
-  const providerLabel = account.providerKind === "meta-offline"
-    ? "Meta 离线架构"
-    : account.providerKind === "meta-marketing-api"
-      ? "Meta Marketing API"
-    : account.providerKind === "cookie" ? "Cookie 接入" : "API 接入";
+  const providerLabel = account.providerKind === "cookie" ? "Cookie 接入" : "API 接入";
   const stateLabel =
     !connection || connection.status === "not-configured"
       ? "尚未接入"
@@ -665,9 +648,7 @@ function connectionStatusSummary(
   connection: ProviderConnection | null | undefined,
 ): string {
   if (!connection || connection.status === "not-configured") {
-    return account.providerKind === "meta-offline"
-      ? "离线架构已建立，API 尚未接入"
-      : "尚未导入接入信息";
+    return "尚未导入接入信息";
   }
   if (connection.status === "untested") {
     return "已导入，等待后台连接检测";
@@ -687,17 +668,6 @@ function canEnableConfiguredAccountAutomation(
     capabilities: AccountProviderCapabilities | undefined;
   } | undefined,
 ): boolean {
-  if (account.providerKind === "meta-offline") return false;
-  if (account.platform === "meta") {
-    const settings = state?.connection?.settings;
-    return state?.connection?.status === "ready"
-      && settings?.kind === "meta-marketing-api"
-      && settings.liveMode === "automation-status"
-      && hasProviderCapability(state.capabilities, "read-campaigns")
-      && hasProviderCapability(state.capabilities, "read-ad-groups")
-      && hasProviderCapability(state.capabilities, "read-ads")
-      && hasProviderCapability(state.capabilities, "change-status");
-  }
   return state?.connection?.status === "ready"
     && canEnableAccountAutomation(state.capabilities);
 }
@@ -817,12 +787,6 @@ function UsersPage({
 
   const enableAfterConnection = async (account: AccountConfig) => {
     if (!canManageAccounts) return;
-    if (account.platform === "meta") {
-      // Meta connection testing is explicit, but account automation remains a
-      // separate user decision after selecting automation-status liveMode.
-      await onChanged();
-      return;
-    }
     const capabilities = await api.getAccountCapabilities(account.id);
     if (!canEnableAccountAutomation(capabilities)) {
       await onChanged();
@@ -900,13 +864,13 @@ function UsersPage({
                 label={`${account.displayName}：${account.enabled ? "关闭" : "开启"}账户自动化`}
                 onChange={() => void toggleAccount(account)}
               />
-              <span className={automationReady && account.enabled ? "status active" : "status"}>{account.platform === "meta" ? account.providerKind === "meta-offline" ? "离线架构不可开启" : account.enabled ? automationReady ? "Meta 账户已开启" : "已开启 · 接入异常" : automationReady ? "Meta 账户已关闭" : "需 Automation liveMode" : account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
+              <span className={automationReady && account.enabled ? "status active" : "status"}>{account.enabled ? automationReady ? "已开启" : "已开启 · 能力异常" : automationReady ? "已关闭" : "能力接入后开启"}</span>
             </div>
           </td>
           <td>
             <div className="row-actions">
               <button disabled={!canManageAccounts} type="button" onClick={() => openEdit(account)}><Pencil size={14} /> 编辑</button>
-              <button disabled={!canManageAccounts || account.providerKind === "meta-offline"} title={account.providerKind === "meta-offline" ? "Meta 离线 Provider 不接收任何凭据" : undefined} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> {account.providerKind === "meta-offline" ? "离线" : "接入"}</button>
+              <button disabled={!canManageAccounts} type="button" onClick={() => setConnecting(account)}><PlugZap size={14} /> 接入</button>
               <button className="danger-button" disabled={saving || !canManageAccounts} type="button" onClick={() => void deleteAccount(account)}><Trash2 size={14} /> 删除</button>
             </div>
           </td>
@@ -925,7 +889,7 @@ function UsersPage({
       <section className={`account-platform-group account-platform-${platform}`}>
         <header className="account-platform-heading">
           <div>
-            <span className={platform === "meta" ? "status warning" : "status active"}>{platformLabel(platform)}</span>
+            <span className="status active">{platformLabel(platform)}</span>
             <div><h3>{title}</h3><p>{description}</p></div>
           </div>
           <strong>{count} 个账户</strong>
@@ -963,7 +927,6 @@ function UsersPage({
         </div>
         <div className="account-platform-groups">
           {renderPlatformAccountGroup("tiktok", "TikTok Ads 账户", "Cookie / 官方 API 接入与 TikTok 自动化")}
-          {renderPlatformAccountGroup("meta", "Meta Ads 账户", "Marketing API 接入与 Meta 独立自动化")}
         </div>
       </div>
       </>}
@@ -1001,20 +964,14 @@ function UsersPage({
                   setForm({
                     ...form,
                     providerKind,
-                    enabled: providerKind === "meta-offline" ? false : form.enabled,
+                    enabled: form.enabled,
                   });
                 }}>
-                  {(form.platform ?? "tiktok") === "meta" ? <>
-                    <option value="meta-marketing-api">Meta Marketing API（官方接入）</option>
-                    <option value="meta-offline">Meta 离线架构</option>
-                  </> : <>
-                    <option value="cookie">Cookie 会话</option>
-                    <option value="official-api">TikTok Marketing API</option>
-                  </>}
+                  <option value="cookie">Cookie 会话</option>
+                  <option value="official-api">TikTok Marketing API</option>
                 </select>
               </Field>
-              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} disabled={form.providerKind === "meta-offline" || (!form.enabled && (!editing || !canEnableConfiguredAccountAutomation(editing, connectionStates[editing.id])))} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
-              {(form.platform ?? "tiktok") === "meta" && <p className="retention-note">Meta Marketing API 账户可在完成共享 App 档案、Automation liveMode 与能力检测后独立开启；Meta 离线架构始终关闭。</p>}
+              <div className="field toggle-field"><span>自动化开关</span><Toggle checked={form.enabled} disabled={!form.enabled && (!editing || !canEnableConfiguredAccountAutomation(editing, connectionStates[editing.id]))} label="自动化开关" onChange={(enabled) => setForm({ ...form, enabled })} /></div>
             </div>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button>
@@ -2335,9 +2292,6 @@ function connectionStateLabel(
     | undefined,
   kind: ProviderKind,
 ): ReactNode {
-  if (kind === "meta-offline") {
-    return <span className="status warning">离线架构 · 无网络</span>;
-  }
   const connection = state?.connection;
   const cookieReadiness = state?.readiness;
   const latestSync = state?.latestSync;
@@ -2396,7 +2350,7 @@ function providerLabel(kind: ProviderKind): string {
 }
 
 function platformLabel(platform: PlatformKind): string {
-  return platform === "meta" ? "Meta Ads" : "TikTok Ads";
+  return "TikTok Ads";
 }
 
 function accountTypeLabel(type: AccountConfig["accountType"]): string {

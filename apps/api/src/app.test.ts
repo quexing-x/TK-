@@ -71,31 +71,6 @@ describe("local API", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
   }
 
-  function createMetaOfflineAccount() {
-    return store.createAccount({
-      displayName: "Meta 离线测试账户",
-      platform: "meta",
-      accountType: "standard",
-      enabled: false,
-      providerKind: "meta-offline",
-    });
-  }
-
-  function seedMetaOfflineAdGroup(accountId: string, externalId = "meta-group-1") {
-    const now = new Date().toISOString();
-    store.saveReadOnlySync(accountId, "meta-offline", [{
-      entityType: "ad-group",
-      externalId,
-      payload: { ad_name: "Meta 离线广告组", status: "ENABLE" },
-    }], {
-      startedAt: now,
-      finishedAt: now,
-      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
-      warnings: [],
-      quality: testSyncQuality(now),
-    });
-  }
-
   it("returns bootstrap configuration", async () => {
     const response = await app.inject({ method: "GET", url: "/api/bootstrap" });
 

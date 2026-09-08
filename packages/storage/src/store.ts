@@ -1573,9 +1573,6 @@ export class AutomationStore {
     kind: ProviderKind,
     credentialRef: string,
   ): ProviderConnection {
-    if (kind === "meta-marketing-api") {
-      throw new Error("Meta App Secret 与 Token 必须通过共享凭据档案管理。");
-    }
     assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const result = this.db
       .prepare(
@@ -1602,9 +1599,6 @@ export class AutomationStore {
     accountId: string,
     kind: ProviderKind,
   ): string | null {
-    if (kind === "meta-marketing-api") {
-      throw new Error("Meta App Secret 与 Token 必须通过共享凭据档案管理。");
-    }
     assertProviderConnectionMutationAllowed(this.getAccount(accountId), kind);
     const existing = this.getProviderConnection(accountId, kind);
     if (!existing) return null;
@@ -2031,16 +2025,6 @@ export class AutomationStore {
         automationManaged: snapshot.entityType === "ad-group"
           && automationManaged.has(snapshot.externalId),
         syncedAt: String(row.synced_at),
-        ...(kind === "meta-marketing-api"
-          ? {
-              configuredStatus:
-                typeof payload.status === "string" ? payload.status : null,
-              effectiveStatus:
-                typeof payload.effective_status === "string"
-                  ? payload.effective_status
-                  : null,
-            }
-          : {}),
       };
     });
   }
@@ -6271,9 +6255,7 @@ export class AutomationStore {
     entityType: ProviderEntity["entityType"],
     externalId: string,
   ): boolean {
-    const statuses = providerKind === "meta-marketing-api"
-      ? "('pending', 'running', 'unknown')"
-      : "('running', 'unknown')";
+    const statuses = "('running', 'unknown')";
     const row = this.db.prepare(
       `SELECT 1 FROM ad_operations
        WHERE account_id = ? AND provider_kind = ? AND entity_type = ? AND external_id = ?
@@ -8845,9 +8827,6 @@ function assertProviderConnectionMutationAllowed(
   account: AccountConfig | null,
   kind: ProviderKind,
 ): void {
-  if (account?.providerKind === "meta-offline" || kind === "meta-offline") {
-    throw new Error("Meta 当前仅提供离线架构，不能修改接入连接。");
-  }
   if (account && !providerBelongsToPlatform(account.platform, kind)) {
     throw new Error("接入方式与账户平台不匹配。");
   }

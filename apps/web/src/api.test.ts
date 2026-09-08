@@ -52,52 +52,6 @@ describe("web API client", () => {
     );
   });
 
-  it("keeps the Meta ad-account discovery response contract aligned with the API", async () => {
-    const payload = [{
-      adAccountId: "act_300000000000003",
-      name: "Meta 上海测试账户",
-      currency: "USD",
-      timezone: "Asia/Shanghai",
-      accountStatus: 1,
-    }];
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(api.discoverMetaAdAccounts("profile-1")).resolves.toEqual(payload);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/platforms/meta/access-profiles/profile-1/discover-ad-accounts",
-      expect.objectContaining({ method: "POST" }),
-    );
-  });
-
-  it("requests Meta unknown-operation reconciliation through its read-only endpoint", async () => {
-    const payload = {
-      operation: { status: "succeeded" },
-      asset: { externalId: "meta-ad-1", status: "disabled" },
-      resolution: "succeeded",
-      message: "只读回读确认目标状态 disabled 已生效。",
-    };
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(api.reconcileMetaStatusOperation("account-1", "operation-1"))
-      .resolves.toEqual(payload);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/accounts/account-1/meta/status-operations/operation-1/reconcile",
-      expect.objectContaining({ method: "POST" }),
-    );
-  });
-
   it("deletes an advertising account through the account endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -169,46 +123,6 @@ describe("web API client", () => {
     );
 
     await expect(api.bootstrap()).rejects.toThrow("配置保存失败。");
-  });
-
-  it("turns Zod field details into an actionable Meta validation error", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({
-          error: "VALIDATION_ERROR",
-          message: "请求数据不符合配置规则。",
-          details: {
-            formErrors: [],
-            fieldErrors: {
-              appSecret: ["String must contain at least 8 character(s)"],
-              accessToken: ["String must contain at least 20 character(s)"],
-            },
-          },
-        }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
-
-    const error = await api.saveMetaAccessProfileSecret("profile-1", {
-      appSecret: "short-secret",
-      accessToken: "short-token-value-that-is-not-sent-back",
-    }).catch((cause: unknown) => cause);
-
-    expect(error).toBeInstanceOf(ApiRequestError);
-    expect(error).toMatchObject({
-      status: 400,
-      code: "VALIDATION_ERROR",
-      message: "App Secret 至少需要 8 个字符",
-      fieldErrors: {
-        appSecret: ["String must contain at least 8 character(s)"],
-        accessToken: ["String must contain at least 20 character(s)"],
-      },
-    });
-    expect((error as ApiRequestError).getFieldMessage("accessToken"))
-      .toBe("Access Token 至少需要 20 个字符");
   });
 
   it("clears local authentication and notifies the app when logout finds an expired session", async () => {

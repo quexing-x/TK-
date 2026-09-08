@@ -1,25 +1,20 @@
 import { z } from "zod";
 
-export const PlatformKindSchema = z.enum(["tiktok", "meta"]);
+/*
+ * 只剩 TikTok。枚举保留单成员形式而不是塌成字符串常量：存量数据库里仍有
+ * platform / provider_kind 列和历史迁移，保留 schema 让读取路径继续走同一套校验。
+ */
+export const PlatformKindSchema = z.enum(["tiktok"]);
 export type PlatformKind = z.infer<typeof PlatformKindSchema>;
 
 export const ProviderKindSchema = z.enum([
   "cookie",
   "official-api",
-  "meta-offline",
-  "meta-marketing-api",
 ]);
 export type ProviderKind = z.infer<typeof ProviderKindSchema>;
 
-export function platformForProvider(providerKind: ProviderKind): PlatformKind {
-  switch (providerKind) {
-    case "meta-offline":
-    case "meta-marketing-api":
-      return "meta";
-    case "cookie":
-    case "official-api":
-      return "tiktok";
-  }
+export function platformForProvider(_providerKind: ProviderKind): PlatformKind {
+  return "tiktok";
 }
 
 export function providerBelongsToPlatform(
@@ -55,13 +50,6 @@ function validatePlatformProviderPair(
       code: z.ZodIssueCode.custom,
       path: ["providerKind"],
       message: "接入方式与广告平台不匹配。",
-    });
-  }
-  if (input.providerKind === "meta-offline" && input.enabled) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["enabled"],
-      message: "Meta 离线架构不能开启账户自动化。",
     });
   }
 }
