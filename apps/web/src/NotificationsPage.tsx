@@ -458,7 +458,7 @@ function HistoryTables({ deliveries, cycles }: { deliveries: NotificationDeliver
   return (
     <div className="notification-history-grid">
       <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><BellRing size={18} /></span><div><h2>最近轮询汇总</h2><p>仅记录存在到期账户的实际轮询批次。</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><BellRing size={18} /></span><div><h2>最近轮询汇总</h2></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>完成时间</th><th>账户数</th><th>开启</th><th>关闭</th><th>无操作</th><th>失败 / 跳过</th></tr></thead><tbody>
           {cycles.length === 0 ? <tr><td colSpan={6}>尚无轮询汇总。</td></tr> : cycles.slice(0, 10).map((cycle) => {
             const summary = summarizeCycle(cycle);
@@ -467,7 +467,7 @@ function HistoryTables({ deliveries, cycles }: { deliveries: NotificationDeliver
         </tbody></table></div>
       </div>
       <div className="panel table-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><Send size={18} /></span><div><h2>最近推送记录</h2><p>失败任务最多重试 3 次，不影响广告轮询。</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><Send size={18} /></span><div><h2>最近推送记录</h2></div></div></div>
         <div className="table-wrap"><table><thead><tr><th>创建时间</th><th>渠道</th><th>状态</th><th>尝试次数</th><th>结果</th></tr></thead><tbody>
           {deliveries.length === 0 ? <tr><td colSpan={5}>尚无推送记录。若已配置渠道，说明近期轮询候选为 0、无需推送；推送失败会在此显示并标红。</td></tr> : deliveries.slice(0, 20).map((delivery) => <tr key={delivery.id}><td>{formatTime(delivery.createdAt)}</td><td>{channelLabel(delivery.channelKind)}</td><td><span className={`status ${delivery.status === "sent" ? "active" : delivery.status === "failed" ? "danger" : "warning"}`}>{deliveryStatusLabel(delivery)}</span></td><td>{delivery.attemptCount}</td><td><small>{delivery.lastError ?? (delivery.sentAt ? `发送于 ${formatTime(delivery.sentAt)}` : "等待处理")}</small></td></tr>)}
         </tbody></table></div>

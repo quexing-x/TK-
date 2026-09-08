@@ -1369,6 +1369,9 @@ function AdsManagementPage({
   const ignoredCount = filtered.filter((entity) => entity.ignored).length;
   const currentSpend = filtered.reduce((total, entity) => total + (entity.metrics.spend ?? 0), 0);
   const currentConversions = sumAdsManagementConversions(filtered);
+  // 汇总 CPA：总消耗 ÷ 总转化。不能平均每行的 cost_per_conversion（按对象数加权而不是
+  // 按转化数），零转化时给 null 让 formatMetric 显示「—」，不用 0 或 Infinity 顶替。
+  const currentCpa = currentConversions > 0 ? currentSpend / currentConversions : null;
 
   return (
     <section className="page-stack ads-page">
@@ -1378,13 +1381,23 @@ function AdsManagementPage({
         却每天占掉一整行高度。只有消耗的时间口径必须留下——账户时区和本地
         时区可能差好几个小时，那是消歧，不是解释。
       */}
-      <div className="ads-metric-rail tk-metric-strip" aria-label="广告管理摘要">
-        <article><small>当前对象</small><strong>{filtered.length}</strong></article>
-        <article><small>投放中</small><strong>{enabledCount}</strong></article>
+      <div className="ads-metric-rail tk-metric-strip is-headline" aria-label="广告管理摘要">
         <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong></article>
-        <article className="stat-jump" role="button" tabIndex={0} title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scrollToSection("manual-takeover-section"); } }}><small>人工接管</small><strong>{ignoredCount}</strong></article>
+        <article><small>CPA</small><strong>{formatMetric(currentCpa)}</strong></article>
         <article><small>转化</small><strong>{formatMetric(currentConversions)}</strong></article>
-        <span className="tk-strip-note">{adsManagementSpendRangeLabel(spendRange)}{createdWindow === "recent" ? ` · 建于 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS}h 内` : ""}</span>
+        {/*
+          人工接管从指标格降级成一个小入口：它是「去哪儿看」而不是「今天跑得怎么样」，
+          占一整格会跟消耗/CPA/转化抢注意力。**只在真有接管对象时出现**——常态是 0，
+          常年显示一个 0 是纯噪音。跳转能力保留，那是这页唯一能直达接管区的入口。
+        */}
+        <span className="tk-strip-note">
+          {ignoredCount > 0 && (
+            <button className="tk-strip-link" type="button" title="查看人工接管广告组" onClick={() => scrollToSection("manual-takeover-section")}>
+              人工接管 {ignoredCount}
+            </button>
+          )}
+          {adsManagementSpendRangeLabel(spendRange)}{createdWindow === "recent" ? ` · 建于 ${ADS_MANAGEMENT_RECENT_WINDOW_HOURS}h 内` : ""}
+        </span>
       </div>
       <div className="panel filter-panel">
         <div className="form-grid management-filters">
@@ -1425,7 +1438,7 @@ function AdsManagementPage({
 
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em></h2><p>人工接管的广告组不参与自动化决策</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>广告对象 <em className="heading-count">{filtered.length}</em><em className="heading-count">{enabledCount} 投放中</em></h2></div></div>
           <small className="inline-protection-note">
             {remoteRefreshing
               ? "正在后台刷新平台数据…"
@@ -1478,7 +1491,7 @@ function AdsManagementPage({
       </div>
 
       <div className="panel table-panel" id="schedule-section">
-        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2><p>总开关关闭时不执行；已取消和已完成任务不计入计数。</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><CircleGauge size={18} /></span><div><h2>广告组定时任务 <em className="heading-count">{activeScheduleCount}</em></h2></div></div></div>
         <div className="tk-tablewrap tk-scroll-sm"><table className="tk-table"><thead><tr><th>广告组</th><th>类型</th><th>动作</th><th>下次执行</th><th>最近结果</th><th className="tk-sticky-end">操作</th></tr></thead><tbody>{schedules.length === 0 ? <tr><td className="tk-empty-cell" colSpan={6}>暂无定时任务。</td></tr> : schedules.map((schedule) => <tr key={schedule.id}><td className="tk-name"><b><span className="tk-tail">{schedule.entityName}</span></b><small>{schedule.externalId}</small></td><td className="tk-muted">{schedule.scheduleType === "overnight" ? "每日过夜" : "单次定时"}</td><td>{schedule.action === "enable" ? "开启" : "关闭"}</td><td className="tk-muted">{new Date(schedule.nextRunAt).toLocaleString()}</td><td className="tk-muted">{schedule.lastMessage ?? scheduleStatusLabel(schedule.status)}</td><td className="tk-sticky-end">{schedule.status === "scheduled" ? <button className="danger-button compact-button" disabled={!canOperateAds} onClick={() => void cancelSchedule(schedule)} title={canOperateAds ? undefined : "需要 ads:operate 权限"} type="button">取消</button> : "—"}</td></tr>)}</tbody></table></div>
       </div>
 
@@ -1658,8 +1671,11 @@ function AllAccountsAdsView({
 
   const enabledCount = visible.filter(({ entity }) => entity.status === "enabled").length;
   const currentSpend = rows.reduce((total, { entity }) => total + (entity.metrics.spend ?? 0), 0);
-  const ignoredCount = visible.filter(({ entity }) => entity.ignored).length;
   const currentConversions = sumAdsManagementConversions(rows.map(({ entity }) => entity));
+  // 汇总 CPA 只能用「总消耗 ÷ 总转化」，不能把每行的 cost_per_conversion 平均——那是
+  // 按对象数而不是按转化数加权，几条零转化的组就能把结果拉得没法看。零转化时给 null，
+  // formatMetric 会显示「—」：0 会被读成「白嫖到量」，Infinity 更没法看。
+  const currentCpa = currentConversions > 0 ? currentSpend / currentConversions : null;
 
   const changeStatus = async (account: AccountConfig, entity: ManagedEntityRecord) => {
     if (!hasProviderCapability(accountCapabilities[account.id], "change-status")) return;
@@ -1697,17 +1713,22 @@ function AllAccountsAdsView({
 
   return (
     <section className="page-stack all-accounts-ads-page">
-      <div className="ads-metric-rail tk-metric-strip" aria-label="全部账户广告组摘要">
-        <article><small>当前对象</small><strong>{rows.length}</strong></article>
-        <article><small>投放中</small><strong>{enabledCount}</strong></article>
+      {/*
+        摘要条只留三个真正要天天盯的数：消耗、CPA、转化。
+
+        「当前对象 / 投放中」是这张表的规模，不是投放结果——它们跟着表头走（下面的
+        heading-count），而不是占掉摘要条的两格。「人工接管」同理下沉到表格里：那一列
+        每行都有，摘要再报一次总数只是重复。留下的三个数字用大号等宽字体，扫一眼就能读。
+      */}
+      <div className="ads-metric-rail tk-metric-strip is-headline" aria-label="全部账户广告组摘要">
         <article><small>{spendRange === "today" ? "今日消耗" : "区间消耗"}</small><strong>{formatMetric(currentSpend)}</strong></article>
-        <article><small>人工接管</small><strong>{ignoredCount}</strong></article>
+        <article><small>CPA</small><strong>{formatMetric(currentCpa)}</strong></article>
         <article><small>转化</small><strong>{formatMetric(currentConversions)}</strong></article>
         <span className="tk-strip-note">所有账户 · {adsManagementSpendRangeLabel(spendRange)}</span>
       </div>
       <div className="panel table-panel">
         <div className="panel-heading">
-          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组</h2><p>汇总各账户最新健康同步中仍存在的广告组；默认只看规则窗口内的对象，可直接执行启停和人工接管。</p></div></div>
+          <div><span className="panel-icon"><ListFilter size={18} /></span><div><h2>全部账户广告组 <em className="heading-count">{rows.length}</em><em className="heading-count">{enabledCount} 投放中</em></h2></div></div>
           <div className="row-actions">
             <select aria-label="广告组状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
               <option value="enabled">已开启</option>
@@ -1841,7 +1862,7 @@ function AnalyticsPage({
         <DailyTrendChart days={days} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
       <details className="panel table-panel collapsible-panel">
-        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2><p>每条是一次同步写下的当日累计中间态，仅用于排查同步；业务指标以上方按日口径为准。</p></div></div></summary>
+        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
           <tbody>{batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
@@ -2599,7 +2620,7 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
         <DailyTrendChart days={days} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
       <details className="panel table-panel collapsible-panel">
-        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2><p>每条是一次同步写下的当日累计中间态，仅用于排查同步；业务指标以上方按日口径为准。</p></div></div></summary>
+        <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
           <tbody>{batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>

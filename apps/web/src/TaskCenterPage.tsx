@@ -167,7 +167,7 @@ export function TaskCenterPage({ accounts, preferredAccountId, onError }: TaskCe
     <div className="task-workbench">
 
     <div className="panel table-panel task-list-pane">
-      <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>任务历史</h2><p>明确失败可由用户单项重试；结果未知必须先核验，系统不会自动重放。</p></div></div></div>
+      <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>任务历史</h2></div></div></div>
       <div className="table-wrap"><table><thead><tr><th>账户</th><th>任务</th><th>动作</th><th>状态</th><th>阶段</th><th>尝试</th><th>更新时间</th></tr></thead><tbody>{tasks.length === 0 ? <tr><td colSpan={7}>没有符合条件的任务。</td></tr> : tasks.map((task) => <tr className={selectedId === task.taskId ? "selected-row" : undefined} key={`${task.kind}:${task.taskId}`} onClick={() => setSelectedId(task.taskId)}><td>{accountName(accounts, task.accountId)}</td><td><strong>{task.label}</strong><br /><small>{task.kind === "launch" ? "广告创建" : "广告启停"}</small></td><td>{actionLabel(task.action)}</td><td><TaskStatus task={task} /></td><td>{phaseLabel(task.phase)}</td><td>{task.attemptCount}</td><td>{new Date(task.updatedAt).toLocaleString()}</td></tr>)}</tbody></table></div>
     </div>
 

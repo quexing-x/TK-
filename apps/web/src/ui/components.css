@@ -466,6 +466,48 @@
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * 头条模式：摘要条只剩「消耗 / CPA / 转化」三个数时用它。
+ *
+ * 数字放到页面标题级（28px，设计系统冻结档位里最大的那档），标签沉到辅助级并压到数字
+ * 上方，让一格里只有一个视觉重心。这是数据密度的做法，不是营销 Hero——没有渐变、光晕、
+ * 大圆角和新配色，表面、边框、圆角全部沿用原值。
+ */
+.ads-metric-rail.tk-metric-strip.is-headline > article {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--sp-4) var(--sp-5);
+}
+
+.ads-metric-rail.tk-metric-strip.is-headline small {
+  order: -1;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.ads-metric-rail.tk-metric-strip.is-headline strong {
+  /* 等宽 + tabular-nums：这几个数字每 30 秒刷新一次，非等宽会让它们左右跳。 */
+  font-family: Consolas, SFMono-Regular, ui-monospace, monospace;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+/* 人工接管：降级成注记区里的小链接，只在有值时渲染（见 App.tsx）。 */
+.ads-metric-rail.tk-metric-strip .tk-strip-link {
+  margin-right: var(--sp-3);
+  padding: 0;
+  border: 0;
+  color: var(--primary);
+  background: none;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ads-metric-rail.tk-metric-strip .tk-strip-link:hover { text-decoration: underline; }
+
 /* The jump target is the one interactive cell — make that readable as such. */
 .ads-metric-rail.tk-metric-strip > article.stat-jump { cursor: pointer; }
 .ads-metric-rail.tk-metric-strip > article.stat-jump:hover {
