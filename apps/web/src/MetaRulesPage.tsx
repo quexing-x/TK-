@@ -177,7 +177,7 @@ export function MetaRulesPage({
       </header>
 
       <section className="panel meta-runtime-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>Meta 独立运行开关</h2><p>还需账户 enabled、liveMode=automation-status、连接能力与规则层级同时满足</p></div></div><button className={runtime.enabled ? "danger-button" : "primary-button"} disabled={!canControlRuntime || busy !== null || (!runtime.enabled && enabledMetaAccounts === 0)} onClick={() => void toggleRuntime()} type="button">{runtime.enabled ? <Pause size={16} /> : <Play size={16} />}{busy === "runtime-toggle" ? "保存中…" : runtime.enabled ? "暂停 Meta 自动化" : "开启 Meta 自动化"}</button></div>
+        <div className="panel-heading"><div><span className="panel-icon"><Activity size={18} /></span><div><h2>Meta 独立运行开关</h2></div></div><button className={runtime.enabled ? "danger-button" : "primary-button"} disabled={!canControlRuntime || busy !== null || (!runtime.enabled && enabledMetaAccounts === 0)} onClick={() => void toggleRuntime()} type="button">{runtime.enabled ? <Pause size={16} /> : <Play size={16} />}{busy === "runtime-toggle" ? "保存中…" : runtime.enabled ? "暂停 Meta 自动化" : "开启 Meta 自动化"}</button></div>
         <form className="meta-runtime-form" onSubmit={(event) => void saveRuntime(event)}>
           <label className="field"><span>轮询间隔（分钟）</span><input min={1} max={60} type="number" value={runtime.pollingIntervalMinutes} onChange={(event) => setRuntime({ ...runtime, pollingIntervalMinutes: Number(event.target.value) })} /></label>
           <label className="field"><span>每轮最大动作</span><input min={1} max={100} type="number" value={runtime.maxActionsPerRun} onChange={(event) => setRuntime({ ...runtime, maxActionsPerRun: Number(event.target.value) })} /></label>
@@ -187,7 +187,7 @@ export function MetaRulesPage({
       </section>
 
       <section className="panel meta-layer-panel">
-        <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>参与自动化的对象层级</h2><p>三层均独立关闭；保存规则不会自动打开层级或运行开关</p></div></div></div>
+        <div className="panel-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>参与自动化的对象层级</h2></div></div></div>
         <div className="meta-layer-grid">
           <LayerToggle label="广告系列" note="系列层配置状态" checked={configuration.layers.campaign} disabled={!canManageRules} onChange={(checked) => updateLayer("campaign", checked)} />
           <LayerToggle label="广告组" note="广告组层配置状态" checked={configuration.layers.adGroup} disabled={!canManageRules} onChange={(checked) => updateLayer("adGroup", checked)} />
@@ -196,7 +196,7 @@ export function MetaRulesPage({
       </section>
 
       <section className="panel meta-rule-matrix">
-        <div className="panel-heading"><div><span className="panel-icon"><Gauge size={18} /></span><div><h2>Meta 规则矩阵</h2><p>九条规则独立存储；阈值只作用于 Meta account-today 指标</p></div></div><button className="primary-button" disabled={!canManageRules || busy !== null} onClick={() => void saveRules()} type="button"><Save size={16} />{busy === "rules" ? "保存中…" : "保存 Meta 规则"}</button></div>
+        <div className="panel-heading"><div><span className="panel-icon"><Gauge size={18} /></span><div><h2>Meta 规则矩阵</h2></div></div><button className="primary-button" disabled={!canManageRules || busy !== null} onClick={() => void saveRules()} type="button"><Save size={16} />{busy === "rules" ? "保存中…" : "保存 Meta 规则"}</button></div>
         <div className="meta-rule-list">
           {metaAutomationRuleDefinitions.map((definition, index) => {
             const rule = configuration.rules.find((item) => item.code === definition.code);

@@ -868,7 +868,7 @@ export function ExpandGroupsPanel({
   </div>;
 
   return <div className="panel expand-groups-panel">
-    <div className="panel-heading"><div><span className="panel-icon"><CopyPlus size={18} /></span><div><h2>一键扩组</h2><p>先选账户，再勾选目标广告组，按预设为每个源组各复制 N 个新组（挂原系列、克隆源创意）。</p></div></div></div>
+    <div className="panel-heading"><div><span className="panel-icon"><CopyPlus size={18} /></span><div><h2>一键扩组</h2></div></div></div>
 
     {eligibleStates.length > 0 && <div className="expand-account-picker">
       <span className="expand-picker-label">账户</span>
