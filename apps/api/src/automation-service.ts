@@ -1131,7 +1131,15 @@ export class AutomationService {
       }
 
       const { maxActionsPerRun } = this.store.getGlobalAutomationSettings();
-      const orderedEligible = qualityEligible.sort(compareAutomationCandidates);
+      // 等得越久越靠前，避免被单轮上限截断的候选永远排在同一个位置上饿死。
+      // 只回看 24 小时：等待轮数要能随执行清零，否则历史积累会让老候选永远压着新的。
+      const waitCounts = this.store.listTruncatedCandidateWaitCounts(
+        accountId,
+        new Date(Date.now() - 24 * 60 * 60_000).toISOString(),
+      );
+      const orderedEligible = qualityEligible.sort(
+        (left, right) => compareAutomationCandidates(left, right, waitCounts),
+      );
       const closingAdGroups = new Set(
         orderedEligible
           .filter(
@@ -2521,14 +2529,35 @@ const rulePriorities: ReadonlyMap<string, number> = new Map(
   ]),
 );
 
+/** 候选在等待轮数上的键，与 `listTruncatedCandidateWaitCounts` 的键一致。 */
+function candidateWaitKey(candidate: AutomationCandidate): string {
+  return `${candidate.entity.externalId}:${candidate.thresholdCode}`;
+}
+
+/**
+ * 候选排序。规则优先级最大，其次是**已经被截断了多少轮**，然后才是原来的确定性判据。
+ *
+ * 等待轮数这一级是防饿死用的。没有它时，四级判据全是静态的——最后一级是 externalId
+ * 字典序，而 externalId 由平台分配、永不改变——所以排在 `maxActionsPerRun` 之外的候选
+ * **下一轮还在同一个位置**，永远轮不到执行。实测一个广告组连续 9 轮被截，消耗一路
+ * 从 1.15 涨到 1.37，每轮都命中「有消耗无加购」却一次都没关成。
+ *
+ * 放在规则优先级**之后**：高优先级的规则该先执行，不能因为某个低优先级候选等得久就
+ * 插到前面。同一优先级内部才按等待轮数排队，等得越久越靠前。
+ */
 function compareAutomationCandidates(
   left: AutomationCandidate,
   right: AutomationCandidate,
+  waitCounts: ReadonlyMap<string, number> = new Map(),
 ): number {
   const priorityDifference =
     (rulePriorities.get(left.thresholdCode) ?? Number.MAX_SAFE_INTEGER) -
     (rulePriorities.get(right.thresholdCode) ?? Number.MAX_SAFE_INTEGER);
   if (priorityDifference !== 0) return priorityDifference;
+  const waitDifference =
+    (waitCounts.get(candidateWaitKey(right)) ?? 0) -
+    (waitCounts.get(candidateWaitKey(left)) ?? 0);
+  if (waitDifference !== 0) return waitDifference;
   if (left.action !== right.action) return left.action === "disable" ? -1 : 1;
   // 素材在广告之下，最后处理：先收口上层，避免上层被关之后还去动它的素材。
   const layerOrder = { campaign: 0, "ad-group": 1, ad: 2, material: 3 } as const;

@@ -827,6 +827,88 @@ describe("AutomationStore", () => {
         .not.toContain("ag-old");
     });
 
+    // 候选排序原本完全确定（最后一级是 externalId 字典序，而 externalId 由平台分配、
+    // 永不改变），所以排在单轮上限之外的候选**下一轮还在同一个位置**，永远轮不到。
+    // 实测一个广告组连续 9 轮被截、消耗从 1.15 涨到 1.37，每轮都判「该关」却没关成。
+    // 这个计数就是排序里「等得越久越靠前」的依据。
+    describe("被单轮上限截断的等待轮数", () => {
+      const 截断 = (externalId: string, code = "NO_CART_CLOSE") => {
+        const run = store.createAutomationRun("demo-account", "cookie", "scheduler", true);
+        store.saveAutomationDecision(
+          run,
+          {
+            thresholdId: code,
+            thresholdCode: code,
+            entity: {
+              entityType: "ad-group", externalId, name: externalId, status: "enabled",
+              parentCampaignId: null, parentAdGroupId: null,
+              campaignBudget: null, campaignBudgetOptimized: false,
+              metrics: {
+                cost_per_conversion: null, cost_per_click: null, cost_per_cart: null,
+                budget: null, spend: 1.37, conversions: 0, clicks: 12, carts: 0, impressions: 728,
+              },
+            },
+            action: "disable", metric: "spend", metricValue: 1.37,
+            operator: "gte", thresholdValue: 0.8, cooldownMinutes: 60, reason: "test",
+          },
+          "skipped",
+          "超过全局单轮最大建议数 30。",
+        );
+      };
+
+      it("按「外部ID:规则码」数被截断的轮数", () => {
+        截断("ag-starved");
+        截断("ag-starved");
+        截断("ag-starved");
+        截断("ag-once");
+        const counts = store.listTruncatedCandidateWaitCounts("demo-account", since());
+        expect(counts.get("ag-starved:NO_CART_CLOSE")).toBe(3);
+        expect(counts.get("ag-once:NO_CART_CLOSE")).toBe(1);
+      });
+
+      it("同一个组的不同规则分开计数——排队是按「这条规则对这个对象」排的", () => {
+        截断("ag-two-rules", "NO_CART_CLOSE");
+        截断("ag-two-rules", "NO_CONV_SPEND_CLOSE");
+        截断("ag-two-rules", "NO_CONV_SPEND_CLOSE");
+        const counts = store.listTruncatedCandidateWaitCounts("demo-account", since());
+        expect(counts.get("ag-two-rules:NO_CART_CLOSE")).toBe(1);
+        expect(counts.get("ag-two-rules:NO_CONV_SPEND_CLOSE")).toBe(2);
+      });
+
+      // 只数被上限截断的那种 skipped。父级已关、冷却期内、总开关常开这些也是 skipped，
+      // 但它们是设计好的保护、不是排队，混进来会让永远不该执行的候选一路插到最前面。
+      it("其它原因的 skipped 不算进等待轮数", () => {
+        const run = store.createAutomationRun("demo-account", "cookie", "scheduler", true);
+        store.saveAutomationDecision(
+          run,
+          {
+            thresholdId: "NO_CART_CLOSE", thresholdCode: "NO_CART_CLOSE",
+            entity: {
+              entityType: "ad-group", externalId: "ag-cooling", name: "ag-cooling", status: "enabled",
+              parentCampaignId: null, parentAdGroupId: null,
+              campaignBudget: null, campaignBudgetOptimized: false,
+              metrics: {
+                cost_per_conversion: null, cost_per_click: null, cost_per_cart: null,
+                budget: null, spend: 1, conversions: 0, clicks: 0, carts: 0, impressions: 0,
+              },
+            },
+            action: "disable", metric: "spend", metricValue: 1,
+            operator: "gte", thresholdValue: 0.8, cooldownMinutes: 60, reason: "test",
+          },
+          "skipped",
+          "仍在 60 分钟冷却期内。",
+        );
+        expect(store.listTruncatedCandidateWaitCounts("demo-account", since())
+          .has("ag-cooling:NO_CART_CLOSE")).toBe(false);
+      });
+
+      it("超出回看窗口的等待不再累计——执行之后要能清零", () => {
+        截断("ag-history");
+        const future = new Date(Date.now() + 60_000).toISOString();
+        expect(store.listTruncatedCandidateWaitCounts("demo-account", future).size).toBe(0);
+      });
+    });
+
     it("在管关停的广告组在实体快照上标出 automationManaged，供界面判定是否参与自动化", () => {
       recordDecision("ag-managed", "disable");
       store.saveReadOnlySync("demo-account", "cookie", [

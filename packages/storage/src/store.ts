@@ -6244,6 +6244,38 @@ export class AutomationStore {
     return rows.map((row) => String(row.external_id));
   }
 
+  /**
+   * 每个候选「因为超出单轮上限而被截断」了多少轮。键是 `外部ID:规则码`。
+   *
+   * 排序用它做防饿死：候选排序原本完全确定（规则优先级 → 动作 → 层级 → externalId
+   * 字典序），而 externalId 是平台分配、永不改变的，所以**排在上限之外的候选下一轮
+   * 还在同一个位置**，不会因为等过一轮就往前挪。实测一个广告组连续 9 轮被截，
+   * 消耗从 1.15 涨到 1.37，规则每 5 分钟判它一次「该关」却一次都没执行——而且它
+   * 每轮都有决策记录、看起来一切正常，只有 error_message 写着被截断。
+   *
+   * 只数 since 之后的：等待轮数要能随执行清零，否则历史积累会让老候选永远压着新的。
+   */
+  listTruncatedCandidateWaitCounts(
+    accountId: string,
+    since: string,
+  ): Map<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT external_id, threshold_code, COUNT(*) AS waits
+         FROM automation_decisions
+         WHERE account_id = ? AND status = 'skipped' AND created_at >= ?
+           AND error_message LIKE '超过全局单轮最大建议数%'
+         GROUP BY external_id, threshold_code`,
+      )
+      .all(accountId, since) as SqlRow[];
+    return new Map(
+      rows.map((row) => [
+        `${String(row.external_id)}:${String(row.threshold_code)}`,
+        Number(row.waits),
+      ]),
+    );
+  }
+
   hasUnknownDecision(
     accountId: string,
     entityType: ProviderEntity["entityType"],
