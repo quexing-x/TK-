@@ -140,6 +140,7 @@ function matchRule(
   const cpa = entity.metrics.cost_per_conversion;
   const spend = entity.metrics.spend;
   const carts = entity.metrics.carts;
+  const clicks = entity.metrics.clicks;
   const value = (key: string): number => rule.values[key] ?? Number.NaN;
 
   switch (rule.code) {
@@ -197,6 +198,14 @@ function matchRule(
       return spend !== null &&
         spend >= value("spend") &&
         carts === value("carts")
+        ? primary("spend", spend, "gte", value("spend"))
+        : null;
+    // 花了钱一个点击都没有：连流量都没进来，谈不上转化漏斗，比「无加购」更早暴露。
+    // clicks 为 null 表示这一层没取到点击数，不能当成 0——那会把数据缺失误判成没人点。
+    case "NO_CLICK_CLOSE":
+      return spend !== null &&
+        spend >= value("spend") &&
+        clicks === value("clicks")
         ? primary("spend", spend, "gte", value("spend"))
         : null;
     case "HAS_CART_OPEN":
