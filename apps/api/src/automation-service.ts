@@ -596,15 +596,23 @@ export class AutomationService {
   }
 
   /**
-   * 每早定点关掉「跑不出来又已经停跑」的系列。
+   * 关掉「跑不出来又已经停跑」的系列。命中即关，不等固定时刻。
    *
-   * 判据整段复用扩组分类，不另起一套：判为需重扩（单转超标，或零转化且花超，或零转化
-   * 且组已关光）、**且系列下已经没有在投的广告组**。组还在跑的绝不碰——那说明系列还在
-   * 产生数据，关系列会连带掐掉正在投放的组。
+   * 判据整段复用扩组分类，不另起一套：判为需重扩（单转超上限，或零转化且组已关光）、
+   * **且系列下已经没有在投的广告组**。组还在跑的绝不碰——那说明系列还在产生数据，
+   * 关系列会连带掐掉正在投放的组。
    *
    * 为什么不进规则链：规则链是单实体 + 当日指标 + 单阈值，而这条要「自创建以来累计」
-   * 加「跨实体的组状态」，表达不了。按 deletion / dailyEnable 做成每日执行器，
-   * 由 claimDailyAutomationRun 保证每账户每个本地日只跑一次。
+   * 加「跨实体的组状态」，表达不了。
+   *
+   * **2026-09-09 口径变更（投手确认）**：此前是每早 `scheduleHour` 定点跑、每天最多关
+   * `dailyLimit` 条。改成命中即关且不设条数上限——因为 TikTok 限制每账户最多 200 条
+   * **在投**系列（已关停的不占配额），等一天再关意味着配额一直被废系列占着，当晚就
+   * 因此撞墙：两个账户各有 89 / 40 条创建请求因为建不出新系列而白跑。
+   *
+   * 节流没有完全取消，只是从「每天一次」收紧到「每 5 分钟一次」：这个执行器要跑全量
+   * 实体分类加 14 天逐日的零转化统计，挂在每 30 秒一轮的维护循环上会把库压垮。
+   * 5 分钟的延迟对「关掉一条已经停跑的系列」没有任何实际代价。
    */
   async runScheduledStalledCampaignClose(accountId: string, asOf = new Date()): Promise<void> {
     const settings = this.store.getAutomationFeatureSettings().closeStalledCampaigns;
@@ -614,13 +622,16 @@ export class AutomationService {
       || !account?.enabled
       || !this.store.getSystemRuntimeState().enabled
     ) return;
-    if (timePartsInTimeZone(asOf, account.timezone).hour !== settings.scheduleHour) return;
     const connection = this.store.getProviderConnection(accountId, account.providerKind);
     if (connection?.status !== "ready") return;
 
     const localDate = dateKeyInTimeZone(asOf, account.timezone);
+    // 复用每日执行台账，但把 key 的粒度从「本地日」收紧到「本地日 + 5 分钟片」，
+    // 这样既保留了跨进程的并发保护，又不再是一天只跑一次。
+    const { hour, minute } = timePartsInTimeZone(asOf, account.timezone);
+    const slot = `${localDate}T${String(hour).padStart(2, "0")}:${String(Math.floor(minute / 5) * 5).padStart(2, "0")}`;
     if (
-      this.store.claimDailyAutomationRun(accountId, "close-stalled-campaigns", localDate)
+      this.store.claimDailyAutomationRun(accountId, "close-stalled-campaigns", slot)
         !== "claimed"
     ) return;
     try {
@@ -671,11 +682,12 @@ export class AutomationService {
           maxConsecutiveZeroConversionDays: settings.maxConsecutiveZeroConversionDays,
         },
       );
-      // 只关组已经全停的那批。dailyLimit 是判据出错时的兜底：一次关光整个账户的代价
-      // 比漏关几条大得多。
-      const closable = recreateCampaign
-        .filter((item) => item.hasActiveAdGroups === false)
-        .slice(0, settings.dailyLimit);
+      // 只关组已经全停的那批——这是投手明确的前提，组还在投的一律不碰。
+      //
+      // 不再截断到 dailyLimit：在投系列有 200 条的硬上限，留着废系列不关就是占着配额
+      // 不让新的建出来。而「组已全停」本身就是一道足够强的闸门——一条组全关了的系列
+      // 既不花钱也不产生数据，关掉它没有任何投放上的代价。
+      const closable = recreateCampaign.filter((item) => item.hasActiveAdGroups === false);
       for (const item of closable) {
         try {
           await this.changeStatus(
@@ -697,7 +709,7 @@ export class AutomationService {
         }
       }
     } finally {
-      this.store.finishDailyAutomationRun(accountId, "close-stalled-campaigns", localDate);
+      this.store.finishDailyAutomationRun(accountId, "close-stalled-campaigns", slot);
     }
   }
 

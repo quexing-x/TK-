@@ -52,27 +52,28 @@ describe("扩组判定", () => {
 
   describe("零转化时按累计花费判", () => {
     // 2026-09-07 口径：花过钱但零转化的一律重扩，观察期不再是例外。
-    it("花得还少也判重扩，但 reason 仍分得出它只是刚起步", () => {
+    // 组还在投就不判重扩，无论花了多少：判重扩只剩「单转超上限」和「无在投组且无转化」
+    // 两条（2026-09-09 口径）。默认夹具 hasActiveAdGroups 为 true。
+    it("零转化但组还在投，留在可扩桶", () => {
       const result = classifyCampaignForExpand(campaign({ spend: 2.5, conversions: 0 }));
-      expect(result.verdict).toBe("recreate-campaign");
+      expect(result.verdict).toBe("expand");
       expect(result.reason).toBe("observing");
       expect(result.costPerConversion).toBeNull();
     });
 
-    it("花超上限就判重扩系列", () => {
+    it("花超上限但组还在投，仍不判重扩，只是 reason 换成花超", () => {
       const result = classifyCampaignForExpand(campaign({ spend: 16.17, conversions: 0 }));
-      expect(result.verdict).toBe("recreate-campaign");
+      expect(result.verdict).toBe("expand");
       expect(result.reason).toBe("no-conversion-overspent");
     });
 
-    // 阈值本身仍属观察期，与单转那侧保持同一种边界语义。零转化一律重扩之后，
-    // 这条线不再改变 verdict，只决定 reason 怎么说。
+    // 消耗阈值从来不改 verdict，只决定 reason 怎么说；口径收窄后 verdict 恒为 expand。
     it("消耗阈值只改 reason，不改 verdict", () => {
       const atThreshold = classifyCampaignForExpand(campaign({ spend: 3, conversions: 0 }));
-      expect(atThreshold.verdict).toBe("recreate-campaign");
+      expect(atThreshold.verdict).toBe("expand");
       expect(atThreshold.reason).toBe("observing");
       const over = classifyCampaignForExpand(campaign({ spend: 3.01, conversions: 0 }));
-      expect(over.verdict).toBe("recreate-campaign");
+      expect(over.verdict).toBe("expand");
       expect(over.reason).toBe("no-conversion-overspent");
     });
 
@@ -129,11 +130,13 @@ describe("扩组判定", () => {
       const buckets = classifyCampaignsForExpand([
         campaign({ externalId: "a", spend: 24, conversions: 3 }),
         campaign({ externalId: "b", spend: 23.9, conversions: 1 }),
+        // 零转化但组还在投 → 可扩；要进重扩桶得同时没有在投组。
         campaign({ externalId: "c", spend: 16.17, conversions: 0 }),
+        campaign({ externalId: "e", spend: 16.17, conversions: 0, hasActiveAdGroups: false }),
         campaign({ externalId: "d", status: "disabled" }),
       ]);
-      expect(buckets.expand.map((item) => item.externalId)).toEqual(["a"]);
-      expect(buckets.recreateCampaign.map((item) => item.externalId)).toEqual(["b", "c"]);
+      expect(buckets.expand.map((item) => item.externalId)).toEqual(["a", "c"]);
+      expect(buckets.recreateCampaign.map((item) => item.externalId)).toEqual(["b", "e"]);
       expect(buckets.excluded.map((item) => item.externalId)).toEqual(["d"]);
     });
 
@@ -148,8 +151,8 @@ describe("扩组判定", () => {
 
     it("重扩桶按亏得最多排前面", () => {
       const buckets = classifyCampaignsForExpand([
-        campaign({ externalId: "少", spend: 5, conversions: 0 }),
-        campaign({ externalId: "多", spend: 65, conversions: 0 }),
+        campaign({ externalId: "少", spend: 5, conversions: 0, hasActiveAdGroups: false }),
+        campaign({ externalId: "多", spend: 65, conversions: 0, hasActiveAdGroups: false }),
       ]);
       expect(buckets.recreateCampaign.map((item) => item.externalId)).toEqual(["多", "少"]);
     });
@@ -168,7 +171,11 @@ describe("扩组判定", () => {
     };
     expect(classifyCampaignForExpand(campaign({ spend: 10, conversions: 1 }), strict).verdict)
       .toBe("recreate-campaign");
-    expect(classifyCampaignForExpand(campaign({ spend: 2, conversions: 0 }), strict).verdict)
+    // 零转化那侧收窄后，maxSpendWithoutConversion 只影响 reason；要判重扩得没有在投组。
+    expect(classifyCampaignForExpand(campaign({ spend: 2, conversions: 0 }), strict).reason)
+      .toBe("no-conversion-overspent");
+    expect(classifyCampaignForExpand(
+      campaign({ spend: 2, conversions: 0, hasActiveAdGroups: false }), strict).verdict)
       .toBe("recreate-campaign");
   });
 });
@@ -191,11 +198,13 @@ describe("组已被规则关光的系列", () => {
     expect(result.reason).toBe("no-conversion-stalled");
   });
 
-  it("组还在跑时仍按消耗阈值分 reason", () => {
+  // 「组还在跑」是这条系列没被判死的唯一理由——它还在产生数据，现在下结论太早。
+  it("组还在跑就不判重扩，只按消耗阈值分 reason", () => {
     const observing = classifyCampaignForExpand({ ...stalled, spend: 0.5, hasActiveAdGroups: true });
-    expect(observing.verdict).toBe("recreate-campaign");
+    expect(observing.verdict).toBe("expand");
     expect(observing.reason).toBe("observing");
     const overspent = classifyCampaignForExpand({ ...stalled, spend: 9, hasActiveAdGroups: true });
+    expect(overspent.verdict).toBe("expand");
     expect(overspent.reason).toBe("no-conversion-overspent");
   });
 
