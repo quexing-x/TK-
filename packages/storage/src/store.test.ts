@@ -3257,21 +3257,33 @@ describe("AutomationStore", () => {
     database.exec("DROP TRIGGER reject_attempt_completion");
   });
 
-  it("refuses to cancel a plan while an item is running", () => {
+  // 取消 = 立刻停止派发，不是立刻终止一切。正在 running 的那条不强行中断——
+  // provider 的写请求已经发出去了，中断只会制造「结果未知」；它跑完落自己的终态即可，
+  // 而 execute 开头的 cancelled 判断保证不会再有下一批。
+  //
+  // 以前这里挡着「有 running 就拒绝」，导致队列跑起来就停不下来：worker 连续认领，
+  // 两批之间的空档抢不住，界面按钮也用同一道判据，最后只能改库才停下。
+  it("即使有条目正在创建也能取消，只是不中断那一条", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",
       sourceAccountId: "demo-account",
       sourceAdGroupId: null,
       targetAccountIds: ["demo-account"],
       launchPresetId: "default-launch-preset",
-      launchRows: [launchItemRow(2)],
+      launchRows: [launchItemRow(2), launchItemRow(3)],
     });
-    const item = store.listLaunchPlanItems(plan.id)[0]!;
-    store.claimLaunchPlanItem(item.itemId, "executor-a", "pending");
+    const items = store.listLaunchPlanItems(plan.id);
+    store.claimLaunchPlanItem(items[0]!.itemId, "executor-a", "pending");
 
-    expect(() => store.cancelMultiAccountLaunchPlan(plan.id)).toThrow("正在创建");
-    expect(store.getMultiAccountLaunchPlan(plan.id)?.status).not.toBe("cancelled");
-    expect(store.listLaunchPlanItems(plan.id)[0]?.status).toBe("running");
+    expect(store.cancelMultiAccountLaunchPlan(plan.id)).toBe(true);
+    expect(store.getMultiAccountLaunchPlan(plan.id)?.status).toBe("cancelled");
+
+    const after = store.listLaunchPlanItems(plan.id);
+    // 跑着的那条原样保留，还没派发的那条被收口
+    expect(after.find((item) => item.itemId === items[0]!.itemId)?.status).toBe("running");
+    expect(after.find((item) => item.itemId === items[1]!.itemId)?.status).toBe("cancelled");
+    // 计划已取消，worker 不会再取到它
+    expect(store.listQueuedLaunchPlans().map((queued) => queued.planId)).not.toContain(plan.id);
   });
 
   it("renews launch and status leases so another instance cannot recover active work", () => {
@@ -3498,7 +3510,9 @@ describe("AutomationStore", () => {
         claimedBy: "instance-a",
       });
       expect(second.claimLaunchPlanItem(item.itemId, "instance-b", "pending")).toBeNull();
-      expect(() => second.cancelMultiAccountLaunchPlan(plan.id)).toThrow("正在创建");
+      // 另一个实例照样能取消——租约保护的是「谁在执行这一条」，不是「能不能停下整个计划」。
+      expect(second.cancelMultiAccountLaunchPlan(plan.id)).toBe(true);
+      expect(first.listLaunchPlanItems(plan.id)[0]?.status).toBe("running");
 
       const statusTask = first.createStatusWriteTask({
         accountId: "demo-account",
