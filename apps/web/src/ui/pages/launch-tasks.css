@@ -216,6 +216,30 @@
   min-width: 240px;
 }
 
+/* 进度那行是这一列的主语：先看它，再决定要不要看下面的失败项。
+   数字用等宽，否则每次刷新计数变化会让整行左右跳。 */
+.launch-workspace .plan-progress-counts {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.launch-workspace .plan-progress-counts b {
+  font-family: Consolas, "SF Mono", monospace;
+  font-size: 16px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* 失败项限高，超出滚动——一次几十条失败时不能把整张表撑开。 */
+.launch-workspace .plan-failed-list {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
 /* Task center workspace */
 .task-center-page {
   gap: 0;
