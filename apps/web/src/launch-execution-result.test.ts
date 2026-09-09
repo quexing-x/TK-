@@ -4,6 +4,7 @@ import type { LaunchExecutionResult } from "./api";
 import {
   buildSourceAdGroupOptions,
   describeRepeatSubmission,
+  launchPlanProgress,
   launchSubmissionFingerprint,
   summarizeExecution,
   summarizeLaunchOutcomeToast,
@@ -14,6 +15,26 @@ const accounts = [{ id: "account-1", displayName: "测试账户" }] as AccountCo
 const plan = {} as LaunchExecutionResult["plan"];
 
 describe("launch item result presentation", () => {
+  it("keeps confirmed failures and readback items in separate progress buckets", () => {
+    expect(launchPlanProgress([
+      { status: "succeeded" },
+      { status: "failed" },
+      { status: "unknown" },
+      { status: "pending" },
+      { status: "running" },
+      { status: "cancelled" },
+    ])).toEqual({
+      total: 6,
+      settled: 3,
+      succeeded: 1,
+      failed: 1,
+      readback: 1,
+      pending: 1,
+      running: 1,
+      cancelled: 1,
+    });
+  });
+
   it("shows one distinguishable source option per ad group", () => {
     const entities = [
       { entityType: "ad-group", externalId: "group-2", name: "蓝牙音响组", ignored: false },
