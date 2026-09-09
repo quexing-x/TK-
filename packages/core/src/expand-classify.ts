@@ -256,15 +256,19 @@ export function classifyCampaignForExpand(
     return { ...base, verdict: "recreate-campaign", reason: "no-conversion-stalled" };
   }
 
-  // 花过钱但一个转化都没有：一律重扩，观察期不再例外。
+  // 花过钱、还没出转化，但组还在投：**留在可扩桶，不判重扩**。
   //
-  // 2026-09-07 口径变更（投手确认）：此前花费没到上限的「观察中」判 expand，也就是
-  // 继续在这条零转化的系列上加组。新口径是「没出转化就别在这条上继续加组，另开一条
-  // 重跑」——宁可多扩，不可漏扩：多扩的那条在导入表里看得见，漏扩的那个品是静默消失的。
-  // 代价是每天会多开一批新系列，投手已明确接受。
+  // 2026-09-09 口径统一（投手确认），判重扩只剩两条：单转 > 上限，或「无在投组且无转化」。
+  // 组还在投就说明这条系列还有机会，判死刑为时过早。
+  //
+  // 这是对 2026-09-07 那次「零转化一律重扩」的回退。那次改动的代价当晚就暴露了：
+  // 两个纵姿账户在投的 160 条系列里有 140 多条卡在「花了几毛钱、还没出转化」，
+  // 全被判成重扩——既让重扩名单虚高，又会让「判重扩即关闭」把刚起步的系列成片关掉。
+  //
+  // 仍然分两个 reason：花超上限的值得单独看一眼，它比纯观察期更接近该换一条的状态。
   return spend > thresholds.maxSpendWithoutConversion
-    ? { ...base, verdict: "recreate-campaign", reason: "no-conversion-overspent" }
-    : { ...base, verdict: "recreate-campaign", reason: "observing" };
+    ? { ...base, verdict: "expand", reason: "no-conversion-overspent" }
+    : { ...base, verdict: "expand", reason: "observing" };
 }
 
 export interface ExpandClassificationBuckets {

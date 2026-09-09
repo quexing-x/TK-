@@ -1827,7 +1827,9 @@ describe("AutomationService", () => {
     });
 
     // dailyLimit 是判据出错时的兜底：一次关光整个账户的代价比漏关几条大得多。
-    it("受每日上限约束", async () => {
+    // 不再截断到 dailyLimit：在投系列有 200 条硬上限，留着废系列不关就是占着配额不让
+    // 新的建出来。「组已全停」本身就是足够强的闸门——那样的系列既不花钱也不产生数据。
+    it("命中多少关多少，不受每日上限截断", async () => {
       const settings = store.getAutomationFeatureSettings();
       settings.closeStalledCampaigns.enabled = true;
       settings.closeStalledCampaigns.dailyLimit = 2;
@@ -1840,7 +1842,22 @@ describe("AutomationService", () => {
 
       await service.runScheduledStalledCampaignClose("demo-account", atSix);
 
-      expect(provider.mutations).toHaveLength(2);
+      expect(provider.mutations).toHaveLength(4);
+    });
+
+    // 关闭不再等 scheduleHour：配额被废系列占着，等到第二天早上才关等于白等一天。
+    it("不在计划小时也照样关", async () => {
+      const settings = store.getAutomationFeatureSettings();
+      settings.closeStalledCampaigns.enabled = true;
+      store.updateAutomationFeatureSettings(settings);
+      const 午后 = new Date(atSix.getTime() + 8 * 60 * 60_000);
+      vi.useFakeTimers();
+      vi.setSystemTime(午后);
+      seedCampaigns([{ id: "c-1", name: "停跑1", spend: 5, conversions: 0, groupEnabled: false }]);
+
+      await service.runScheduledStalledCampaignClose("demo-account", 午后);
+
+      expect(provider.mutations).toHaveLength(1);
     });
   });
 
