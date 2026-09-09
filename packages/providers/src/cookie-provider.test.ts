@@ -690,6 +690,35 @@ describe("CookieAdsProvider", () => {
     });
   });
 
+  // 抓包带的是抓包那一刻界面的分页设置——广告组层实测是 20，552 个组就要翻 28 页。
+  // 同一份抓包里系列层用的是 100，所以大页本身平台支持，20 只是界面默认值。
+  it("把捕获的每页条数改写成 100，减少翻页往返", async () => {
+    let sentBody = "";
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      sentBody = String(init?.body ?? "");
+      return new Response(JSON.stringify({ data: { table: [] }, code: 0 }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }));
+
+    await new CookieAdsProvider().syncReadOnly({
+      accountId: "test-account", timezone: "Asia/Taipei",
+      settings: { kind: "cookie", advertiserId: "123456", healthUrl: "", campaignsUrl: "", adGroupsUrl: "", adsUrl: "" },
+      credential: { kind: "cookie", cookie: "sessionid=test-cookie", csrfHeaderName: "x-csrftoken", requestTemplates: [{
+        target: "ad-group", url: "https://ads.tiktok.com/api/v4/i18n/statistics/op/adgroup/list/?aadvid=123456",
+        method: "POST",
+        body: JSON.stringify({ common_req: { page: 1, page_size: 20, filters: [{ field: "ad_platform_status" }] } }),
+        contentType: "application/json",
+      }] },
+    });
+
+    const body = JSON.parse(sentBody) as { common_req: { page_size: number; filters: unknown[] } };
+    expect(body.common_req.page_size).toBe(100);
+    // 只动 page_size：状态筛选值与响应里的 delivery_ok 不是一套编码，
+    // 没有真机样本对照就改会静默拉到错误的子集。
+    expect(body.common_req.filters).toEqual([{ field: "ad_platform_status" }]);
+  });
+
   it("replays a valid list cURL without explicit dates instead of stopping polling", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ data: { table: [] }, code: 0 }), {

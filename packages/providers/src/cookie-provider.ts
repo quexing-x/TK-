@@ -668,11 +668,11 @@ export class CookieAdsProvider implements AdsProvider {
         : entityType === "ad"
           ? adFinalListRequest(request)
           : request;
-      const windowedRequest = withTodayMetricWindow(
+      const windowedRequest = withLargePageSize(withTodayMetricWindow(
         entityRequest,
         context.timezone ?? "UTC",
         new Date(),
-      );
+      ));
       return {
         entityType,
         ready: true as const,
@@ -2911,6 +2911,70 @@ function hasNonEmptyOriginReference(
   return visit(profile.campaignPayload)
     || visit(profile.adGroupPayload)
     || visit(profile.creativePayload);
+}
+
+/** 列表请求每页取多少条。抓包时界面用什么值就存了什么值，广告组层常见的是 20。 */
+const LIST_PAGE_SIZE = 100;
+
+/**
+ * 把列表请求的每页条数改写成 `LIST_PAGE_SIZE`。
+ *
+ * 抓下来的 cURL 带的是抓包那一刻 TikTok 界面的分页设置——广告组层实测是 20，于是
+ * 552 个组要翻 28 页，每翻一页就是一次往返。同一份抓包里系列层用的是 100，所以大页
+ * 本身是平台支持的，20 只是界面默认值。
+ *
+ * **这个改写不改变返回的数据集，只改变翻几次。** 分页终止靠响应里的明确结束信息
+ * （`hasExplicitPaginationEnd`），不是「返回条数 < page_size」那种推断，所以即使某个
+ * 层级的接口把页大小截回 20，行为也只是退回现状、绝不会漏数据。
+ *
+ * 只动 page_size，不碰 filters：状态筛选值（`ad_platform_status: "999"` 这类枚举码）
+ * 与响应里的 `delivery_ok` 不是一套，没有真机样本对照就改会静默拉到错误的子集。
+ */
+function withLargePageSize(request: CapturedCookieRequest): CapturedCookieRequest {
+  let changed = false;
+  const url = new URL(request.url);
+  for (const key of ["page_size", "pageSize", "limit", "count"]) {
+    if (!url.searchParams.has(key)) continue;
+    url.searchParams.set(key, String(LIST_PAGE_SIZE));
+    changed = true;
+  }
+
+  let body = request.body;
+  const contentType = request.contentType?.toLowerCase() ?? "";
+  if (body && (contentType.includes("json") || body.trim().startsWith("{"))) {
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      const rewrite = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(rewrite);
+        if (!isRecord(value)) return value;
+        const next: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value)) {
+          if (key === "page_size" || key === "pageSize") {
+            next[key] = typeof item === "string" ? String(LIST_PAGE_SIZE) : LIST_PAGE_SIZE;
+            changed = true;
+            continue;
+          }
+          next[key] = rewrite(item);
+        }
+        return next;
+      };
+      const rewritten = rewrite(parsed);
+      if (changed) body = JSON.stringify(rewritten);
+    } catch {
+      // 解析不了就原样replay，跟 withRequestedPage 的处理保持一致。
+    }
+  } else if (body && contentType.includes("application/x-www-form-urlencoded")) {
+    const fields = new URLSearchParams(body);
+    for (const key of ["page_size", "pageSize", "limit", "count"]) {
+      if (!fields.has(key)) continue;
+      fields.set(key, String(LIST_PAGE_SIZE));
+      changed = true;
+    }
+    if (changed) body = fields.toString();
+  }
+
+  if (!changed) return request;
+  return { ...request, url: url.toString(), ...(body === undefined ? {} : { body }) };
 }
 
 function withTodayMetricWindow(
@@ -7681,7 +7745,7 @@ async function requestCompleteListPages(
   for (let page = 1; page <= 100; page += 1) {
     const payload = await requestCreationStep(
       `${step} 第 ${page} 页`,
-      () => page === 1 ? template : withRequestedPage(template, page),
+      () => withLargePageSize(page === 1 ? template : withRequestedPage(template, page)),
       credential,
       { semantics, dispatchState },
     );
