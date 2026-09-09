@@ -3,7 +3,7 @@ import { CheckCircle2, CircleX, Download, FileSpreadsheet, Pencil, Rocket, Setti
 import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
-import { downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
+import { downloadFailedLaunchItems, downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
 import {
   accountAccessStatus,
   canUseCopySource,
@@ -147,6 +147,34 @@ function launchAgeLabel(ageRanges: readonly string[] | undefined): string {
   return (ageRanges?.length ? ageRanges : LaunchAgeRangeValues)
     .map((value) => value === "55-100" ? "55+" : value)
     .join(";");
+}
+
+export type LaunchPlanProgress = {
+  total: number;
+  settled: number;
+  succeeded: number;
+  failed: number;
+  readback: number;
+  pending: number;
+  running: number;
+  cancelled: number;
+};
+
+/** 结果行的固定五类口径；unknown 只做回读展示，不算明确失败。 */
+export function launchPlanProgress(items: readonly Pick<LaunchPlanItemRecord, "status">[]): LaunchPlanProgress {
+  const succeeded = items.filter((item) => item.status === "succeeded").length;
+  const failed = items.filter((item) => item.status === "failed").length;
+  const readback = items.filter((item) => item.status === "unknown").length;
+  return {
+    total: items.length,
+    settled: succeeded + failed + readback,
+    succeeded,
+    failed,
+    readback,
+    pending: items.filter((item) => item.status === "pending").length,
+    running: items.filter((item) => item.status === "running").length,
+    cancelled: items.filter((item) => item.status === "cancelled").length,
+  };
 }
 
 export function nextPresetCopyName(
@@ -752,37 +780,18 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     catch (cause) { onError(messageOf(cause)); }
     finally { setBusy(false); }
   };
-  /**
-   * 批量重试失败项。逐项串行，不并发。
-   *
-   * 每一项都是一次真实的创建写入，同一账户并发提交只会互相抢同一份 Cookie 会话草稿。
-   * 中途某项失败不中断其余——单项失败的原因（重名、URL 无效）各不相干，一条挡住其余
-   * 的话人得点很多次才能把队列清空。
-   */
-  const retryPlanItems = async (planId: string, itemIds: string[]) => {
-    if (itemIds.length === 0) return;
+  const exportPlanFailures = async (
+    plan: MultiAccountLaunchPlanRecord,
+    items: LaunchPlanItemRecord[],
+  ) => {
     try {
       setBusy(true);
-      let lastExecution: Awaited<ReturnType<typeof api.retryLaunchPlanItem>> | null = null;
-      let failures = 0;
-      for (const itemId of itemIds) {
-        try {
-          lastExecution = await api.retryLaunchPlanItem(planId, itemId);
-        } catch {
-          failures += 1;
-        }
-      }
-      if (lastExecution) {
-        setExecutionFeedback(summarizeExecution(lastExecution, accounts));
-        notifiedTerminalPlanIds.current.add(planId);
-      }
-      toast(
-        failures === 0
-          ? `已重试 ${itemIds.length} 项`
-          : `已重试 ${itemIds.length - failures} 项，${failures} 项未能提交`,
-        failures === 0 ? "success" : "error",
-      );
-      await load();
+      const accountNames = plan.targetAccountIds.map((accountId) => accountNameById.get(accountId) ?? accountId);
+      const fileLabel = accountNames.length <= 1
+        ? accountNames[0] ?? "未识别账户"
+        : `${accountNames[0] ?? "未识别账户"}等${accountNames.length}个账户`;
+      const count = await downloadFailedLaunchItems(items, { fileLabel });
+      toast(`已按导入表格式导出 ${count} 个失败项`, "success");
       onError(null);
     } catch (cause) { onError(messageOf(cause)); }
     finally { setBusy(false); }
@@ -892,46 +901,56 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
 
     <div className="panel table-panel">
       <div className="panel-heading"><div><span className="panel-icon"><Rocket size={18} /></span><div><h2>投放结果</h2></div></div></div>
-      <div className="table-wrap"><table><thead><tr><th>创建内容</th><th>预设</th><th>计划任务</th><th>逐项实时状态</th><th>发布结果</th><th>操作</th></tr></thead><tbody>
-        {plans.length === 0 ? <tr><td colSpan={6}>暂无投放计划。</td></tr> : plans.map((plan) => {
+      <div className="table-wrap"><table className="launch-results-table"><thead><tr><th>账户 / 计划</th><th>预设</th><th>执行状态</th><th>结果</th><th>操作</th></tr></thead><tbody>
+        {plans.length === 0 ? <tr><td colSpan={5}>暂无投放计划。</td></tr> : plans.map((plan) => {
           const items = planItems[plan.id] ?? [];
           const failedItems = items.filter((item) => item.status === "failed");
-          const awaitingItems = items.filter((item) => item.status === "unknown" && item.evidence.publishAcceptedAt);
-          const verifyingItems = items.filter((item) => item.status === "unknown" && !item.evidence.publishAcceptedAt);
-          const created = items.filter((item) => item.status === "succeeded").length;
-          const failed = failedItems.length + verifyingItems.length;
-          const pendingCount = items.filter((item) => item.status === "pending").length;
-          const runningCount = items.filter((item) => item.status === "running").length;
-          const cancelledCount = items.filter((item) => item.status === "cancelled").length;
-          // 需要人过问的两类：明确失败的，和「发出去了但结果未知」的。
-          // awaitingItems（已被 TikTok 受理、等轮询确认）不在其中——那类会自愈。
-          const blockingItems = [...failedItems, ...verifyingItems];
+          const progress = launchPlanProgress(items);
+          const plannedTotal = plan.mode === "copy"
+            ? plan.launchRows.length
+            : plan.launchRows.length * plan.targetAccountIds.length;
+          const total = progress.total || plannedTotal;
+          const percent = (count: number) => total > 0 ? `${(count / total) * 100}%` : "0%";
+          const targetNames = plan.targetAccountIds.map((accountId) => accountNameById.get(accountId) ?? accountId);
+          const accountLabel = targetNames.length <= 1 ? targetNames[0] : `${targetNames[0]} 等 ${targetNames.length} 个账户`;
+          const active = activePlanIds.includes(plan.id);
+          const resultState = plan.status === "cancelled"
+            ? { label: "已取消", tone: "danger" }
+            : progress.running > 0 || active
+              ? { label: "创建中", tone: "running" }
+              : plan.status === "blocked" || progress.failed > 0
+                ? { label: "未全部完成", tone: "warning" }
+                : progress.readback > 0
+                  ? { label: "等待回读", tone: "warning" }
+                  : plan.status === "completed"
+                    ? { label: "已收口", tone: "success" }
+                    : { label: "排队中", tone: "warning" };
           const skippedMaterials = countSkippedMaterials(items);
           return <tr key={plan.id}>
-            <td>{plan.sourceAdName}</td><td>{plan.presetName}</td><td>{plan.mode === "copy" ? `${items.length || plan.launchRows.length} 个广告组 / ${plan.targetAccountIds.length} 个账户` : `${plan.launchRows.length} 条 × ${plan.targetAccountIds.length} 个账户`}</td>
-            <td>{items.length === 0 ? "尚未执行" : <div className="plan-item-progress">
-              {/* 只报进度和失败项。逐条列出 153 个广告组既找不到重点、又把整页撑开，
-                  而人在这一列真正要回答的只有两个问题：跑到哪了、哪些没成。 */}
-              <span className="plan-progress-counts">
-                <b>{created}</b>/{items.length} 成功
-                {pendingCount > 0 ? ` · ${pendingCount} 待跑` : ""}
-                {runningCount > 0 ? ` · ${runningCount} 创建中` : ""}
-                {awaitingItems.length > 0 ? ` · ${awaitingItems.length} 待轮询确认` : ""}
-                {cancelledCount > 0 ? ` · ${cancelledCount} 已取消` : ""}
+            <td className="plan-account-cell" title={targetNames.join("、")}><strong>{accountLabel || "未识别账户"}</strong><small>{plan.sourceAdName} · {total} 条</small></td>
+            <td className="plan-preset-cell">{plan.presetName}</td>
+            <td><div className="plan-item-progress">
+              <span className="plan-progress-total"><b>{progress.settled}</b>/{total}</span>
+              <span aria-label={`成功 ${progress.succeeded}，失败 ${progress.failed}，回读 ${progress.readback}，共 ${total}`} className="plan-progress-rail" role="img">
+                <i className="success" style={{ width: percent(progress.succeeded) }} />
+                <i className="failed" style={{ width: percent(progress.failed) }} />
+                <i className="readback" style={{ width: percent(progress.readback) }} />
               </span>
-              {blockingItems.length > 0 && <div className="plan-failed-list">
-                {blockingItems.slice(0, 6).map((item) => <small className="status danger" key={item.itemId}>
-                  {item.launchRow.adGroupName} · {launchItemStatusLabel(item)}
-                </small>)}
-                {blockingItems.length > 6 && <small className="plan-execution-summary">…另有 {blockingItems.length - 6} 条未列出</small>}
-              </div>}
-            </div>}</td>
-            <td><span className={`status ${plan.status === "completed" ? "active" : plan.status === "cancelled" ? "danger" : "warning"}`}>{plan.status === "completed" ? "已发布" : plan.status === "blocked" ? "未全部完成" : plan.status}</span>{plan.executionResults.length > 0 && <small className="plan-execution-summary">广告组成功 {created} · 失败 {failed}{awaitingItems.length > 0 ? ` · 等待轮询 ${awaitingItems.length}` : ""}{verifyingItems.length > 0 ? ` · 结果待确认 ${verifyingItems.length}` : ""}</small>}{skippedMaterials > 0 && <small className="plan-execution-summary">素材失败 {skippedMaterials} 条，已跳过；不影响已创建的广告组。</small>}{plan.executionResults.map((item) => { const detail = summarizePlanAccountResult(item); return detail ? <small className={detail.tone === "danger" ? "plan-execution-error" : "plan-execution-summary"} key={item.accountId}>{accountNameById.get(item.accountId) ?? item.accountId}：{detail.text}</small> : null; })}</td>
-            {/* 一项一个按钮会在失败多的时候堆成一列，而它们做的是同一件事。
-                合成一个批量按钮：重试用的是原来那行数据，逐个点和一起点没有区别。
-                名字也不再叫「修正后重试」——界面上没有任何修改那行数据的入口，
-                这个按钮就是重跑一遍，叫「修正后」会让人以为得先去改点什么。 */}
-            <td>{blockingItems.length > 0 && <button className="secondary-button compact-button" disabled={busy} onClick={() => void retryPlanItems(plan.id, blockingItems.map((item) => item.itemId))} type="button">重试 {blockingItems.length} 个失败项</button>}{["blocked", "draft"].includes(plan.status) && <button disabled={busy} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</td>
+              <span className="plan-progress-counts">
+                <small className="success">成功 <b>{progress.succeeded}</b></small>
+                <small className="failed">失败 <b>{progress.failed}</b></small>
+                <small className="readback">回读 <b>{progress.readback}</b></small>
+                <small>待处理 <b>{progress.pending}</b></small>
+                <small>创建中 <b>{progress.running}</b></small>
+                {progress.cancelled > 0 && <small>已取消 <b>{progress.cancelled}</b></small>}
+              </span>
+              {failedItems.length > 0 && <details className="plan-failed-details">
+                <summary>{failedItems.length} 个失败项</summary>
+                <div className="plan-failed-list">{failedItems.map((item) => <span key={item.itemId} title={item.errorMessage ?? "创建失败"}><strong>{item.launchRow.adGroupName}</strong><small>{item.errorMessage ?? "创建失败"}</small></span>)}</div>
+              </details>}
+            </div></td>
+            <td><span className={`plan-result-state ${resultState.tone}`}><i />{resultState.label}</span>{skippedMaterials > 0 && <small className="plan-execution-summary">{skippedMaterials} 条素材已跳过</small>}</td>
+            <td><div className="plan-result-actions">{failedItems.length > 0 && <button className="secondary-button compact-button" disabled={busy} onClick={() => void exportPlanFailures(plan, items)} title={`按原导入表七列格式导出 ${failedItems.length} 个明确失败项`} type="button"><Download size={14} /> 导出失败列表</button>}{["blocked", "draft"].includes(plan.status) && <button className="compact-button" disabled={busy} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</div></td>
           </tr>;
         })}
       </tbody></table></div>
@@ -1205,13 +1224,4 @@ export function summarizePlanAccountResult(
     tone: "danger",
     text: `失败 ${result.failedCount} 条${result.unknownCount > 0 ? ` · 结果核验失败 ${result.unknownCount} 条` : ""}${result.message ? `：${result.message}` : ""}`,
   };
-}
-
-function launchItemStatusLabel(item: LaunchPlanItemRecord): string {
-  if (item.status === "unknown" && item.evidence.publishAcceptedAt) return "等待轮询";
-  return ({ pending: "排队中", running: "执行中", succeeded: "已成功", failed: "失败", unknown: "结果待确认", cancelled: "已取消" } as Record<string, string>)[item.status] ?? item.status;
-}
-
-function launchPhaseLabel(phase: LaunchPlanItemRecord["phase"]): string {
-  return ({ validation: "校验", campaign_draft: "系列草稿", adgroup_draft: "广告组草稿", creative_draft: "广告草稿", publishing: "发布", readback: "回读", sync: "同步" } as Record<string, string>)[phase] ?? phase;
 }

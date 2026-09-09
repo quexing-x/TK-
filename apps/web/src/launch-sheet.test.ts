@@ -1,7 +1,33 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createLaunchTemplateBuffer, downloadLaunchTemplate, parseCsvTable, readLaunchSpreadsheet } from "./launch-sheet.js";
+import type { LaunchConfigurationRow } from "@tk-auto/core";
+import {
+  createFailedLaunchRowsBuffer,
+  createLaunchTemplateBuffer,
+  downloadFailedLaunchItems,
+  downloadLaunchTemplate,
+  parseCsvTable,
+  readLaunchSpreadsheet,
+  selectFailedLaunchRows,
+} from "./launch-sheet.js";
 
 const preset = { name: "测试预设", region: "US", dailyBudget: 120, bid: null, startAt: null, endAt: null, initialStatus: "disabled" as const };
+const failedRow: LaunchConfigurationRow = {
+  rowNumber: 27,
+  campaignName: "秋季促销系列",
+  adGroupName: "耳机广告组-失败",
+  videoCode: "video-001;video-002",
+  productUrl: "https://example.com/product?sku=42",
+  productCode: "DM0042",
+  ageRanges: ["25-34", "35-44"],
+  gender: "female",
+  adName: "260910:027",
+  region: "US",
+  dailyBudget: 120,
+  bid: 4.5,
+  startAt: null,
+  endAt: null,
+  initialStatus: "disabled",
+};
 
 describe("launch spreadsheet", () => {
   afterEach(() => {
@@ -78,6 +104,78 @@ describe("launch spreadsheet", () => {
       "DM002451",
     ]);
   });
+  it("exports every original import column and can be imported again", { timeout: 30_000 }, async () => {
+    const { Workbook } = await import("exceljs");
+    const buffer = await createFailedLaunchRowsBuffer([failedRow]);
+    const workbook = new Workbook();
+    await workbook.xlsx.load(buffer);
+    const worksheet = workbook.getWorksheet("失败列表")!;
+
+    expect(worksheet.getRow(1).values).toEqual([
+      undefined,
+      "推广系列名称",
+      "广告组名称",
+      "视频代码",
+      "产品 URL",
+      "年龄",
+      "性别",
+      "编码",
+    ]);
+    expect(worksheet.getRow(2).values).toEqual([
+      undefined,
+      "秋季促销系列",
+      "耳机广告组-失败",
+      "video-001;video-002",
+      "https://example.com/product?sku=42",
+      "25-34;35-44",
+      "女",
+      "DM0042",
+    ]);
+
+    const file = new File([buffer as BlobPart], "失败列表.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const imported = await readLaunchSpreadsheet(file, preset);
+    expect(imported.errors).toEqual([]);
+    expect(imported.rows[0]).toMatchObject({
+      campaignName: failedRow.campaignName,
+      adGroupName: failedRow.adGroupName,
+      videoCode: failedRow.videoCode,
+      productUrl: failedRow.productUrl,
+      productCode: failedRow.productCode,
+      ageRanges: failedRow.ageRanges,
+      gender: failedRow.gender,
+    });
+  });
+
+  it("selects confirmed failures without exporting unknown readback items", () => {
+    expect(selectFailedLaunchRows([
+      { status: "failed", launchRow: failedRow },
+      { status: "unknown", launchRow: { ...failedRow, adGroupName: "等待回读" } },
+      { status: "succeeded", launchRow: { ...failedRow, adGroupName: "已成功" } },
+    ])).toEqual([failedRow]);
+  });
+
+  it("downloads the failed rows with a safe account label", async () => {
+    const anchor = { href: "", download: "", click: vi.fn(), remove: vi.fn() };
+    const appendChild = vi.fn();
+    const createObjectURL = vi.fn(() => "blob:failed-rows");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("document", { createElement: vi.fn(() => anchor), body: { appendChild } });
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+
+    const count = await downloadFailedLaunchItems(
+      [{ status: "failed", launchRow: failedRow }],
+      { fileLabel: "账户/A", now: new Date(2026, 8, 10, 13, 5, 6) },
+    );
+
+    expect(count).toBe(1);
+    expect(anchor.download).toBe("TK广告失败列表-账户-A-20260910-130506.xlsx");
+    expect(anchor.href).toBe("blob:failed-rows");
+    expect(appendChild).toHaveBeenCalledWith(anchor);
+    expect(anchor.click).toHaveBeenCalledOnce();
+    expect(anchor.remove).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:failed-rows");
+  });
+
   it("downloads a populated workbook template", async () => {
     const anchor = { href: "", download: "", click: vi.fn(), remove: vi.fn() };
     const appendChild = vi.fn();

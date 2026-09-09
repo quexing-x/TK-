@@ -1,8 +1,11 @@
 import type { CellValue } from "exceljs";
 import { loadExcelJs } from "./exceljs-loader.js";
 import {
+  LaunchAgeRangeValues,
   launchSheetColumns,
   parseLaunchSheetTable,
+  type LaunchConfigurationRow,
+  type LaunchPlanItemRecord,
   type LaunchPresetInput,
   type LaunchSheetImportResult,
 } from "@tk-auto/core";
@@ -11,6 +14,7 @@ const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 // 模板预填 18 岁以上：Smart+ 推广系列禁止向 18 岁以下投放。
 const DEFAULT_AGE_RANGES = "18-24;25-34;35-44;45-54;55-100";
 const TEMPLATE_DATA_ROW_COUNT = 500;
+const LAUNCH_SHEET_WIDTHS = [32, 30, 28, 45, 48, 12, 16] as const;
 
 export async function readLaunchSpreadsheet(
   file: File,
@@ -57,6 +61,78 @@ export async function downloadLaunchTemplate(
   URL.revokeObjectURL(url);
 }
 
+/**
+ * 只选择平台已经明确判定为失败的项目。
+ *
+ * unknown 可能已经被 TikTok 受理，只是等待回读；把它混进重导表会有重复创建风险。
+ */
+export function selectFailedLaunchRows(
+  items: readonly Pick<LaunchPlanItemRecord, "status" | "launchRow">[],
+): LaunchConfigurationRow[] {
+  return items
+    .filter((item) => item.status === "failed")
+    .map((item) => item.launchRow);
+}
+
+export async function downloadFailedLaunchItems(
+  items: readonly Pick<LaunchPlanItemRecord, "status" | "launchRow">[],
+  options: { fileLabel?: string; now?: Date } = {},
+): Promise<number> {
+  const rows = selectFailedLaunchRows(items);
+  if (rows.length === 0) throw new Error("当前计划没有可导出的明确失败项。");
+  const output = await createFailedLaunchRowsBuffer(rows);
+  const blob = new Blob([output as BlobPart], { type: XLSX_MIME });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  const label = sanitizeFileNamePart(options.fileLabel ?? "");
+  anchor.download = `TK广告失败列表${label ? `-${label}` : ""}-${formatFileTimestamp(options.now ?? new Date())}.xlsx`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  return rows.length;
+}
+
+/** 生成七列导入表格式的失败数据；修改后可直接从第一张工作表重新导入。 */
+export async function createFailedLaunchRowsBuffer(
+  rows: readonly LaunchConfigurationRow[],
+): Promise<ArrayBuffer> {
+  const { Workbook } = await loadExcelJs();
+  const workbook = new Workbook();
+  const worksheet = workbook.addWorksheet("失败列表", { views: [{ state: "frozen", ySplit: 1 }] });
+  worksheet.addRow(launchSheetColumns.map((column) => column.label));
+  rows.forEach((row, index) => {
+    const excelRow = index + 2;
+    worksheet.addRow([
+      row.campaignName,
+      row.adGroupName,
+      row.videoCode,
+      row.productUrl,
+      (row.ageRanges?.length ? row.ageRanges : LaunchAgeRangeValues).join(";"),
+      formatGender(row.gender),
+      row.productCode ?? "",
+    ]);
+    worksheet.getCell(`F${excelRow}`).dataValidation = {
+      type: "list",
+      allowBlank: true,
+      formulae: ['"不限,男,女"'],
+      showErrorMessage: true,
+      errorTitle: "性别填写错误",
+      error: "请选择不限、男或女。",
+    };
+  });
+  worksheet.columns = LAUNCH_SHEET_WIDTHS.map((width) => ({ width }));
+  styleHeader(worksheet.getRow(1));
+  worksheet.autoFilter = { from: "A1", to: "G1" };
+  worksheet.getColumn(3).alignment = { vertical: "middle", wrapText: true };
+  worksheet.getColumn(4).alignment = { vertical: "middle", wrapText: true };
+  worksheet.getColumn(5).alignment = { vertical: "middle", wrapText: true };
+  worksheet.getColumn(6).alignment = { vertical: "middle", horizontal: "center" };
+  const output = await workbook.xlsx.writeBuffer();
+  return output as ArrayBuffer;
+}
+
 /** 生成可测试、可下载的工作簿内容；不会触发浏览器下载。 */
 export async function createLaunchTemplateBuffer(
   options: { originalPostMigration?: boolean } = {},
@@ -77,9 +153,7 @@ export async function createLaunchTemplateBuffer(
       error: "请选择不限、男或女。",
     };
   }
-  input.columns = [
-    { width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }, { width: 48 }, { width: 12 }, { width: 16 },
-  ];
+  input.columns = LAUNCH_SHEET_WIDTHS.map((width) => ({ width }));
   styleHeader(input.getRow(1));
   input.autoFilter = { from: "A1", to: "G1" };
   input.getColumn(5).alignment = { vertical: "middle", wrapText: true };
@@ -96,9 +170,7 @@ export async function createLaunchTemplateBuffer(
     "不限",
     "DM002451",
   ]);
-  example.columns = [
-    { width: 32 }, { width: 30 }, { width: 28 }, { width: 45 }, { width: 48 }, { width: 12 }, { width: 16 },
-  ];
+  example.columns = LAUNCH_SHEET_WIDTHS.map((width) => ({ width }));
   styleHeader(example.getRow(1));
   example.getRow(2).alignment = { vertical: "middle", wrapText: true };
 
@@ -152,6 +224,20 @@ function styleHeader(row: { font: object; fill: object; alignment: object }): vo
   row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111820" } };
   row.alignment = { vertical: "middle", horizontal: "center" };
 }
+
+function formatGender(gender: LaunchConfigurationRow["gender"]): string {
+  return gender === "male" ? "男" : gender === "female" ? "女" : "不限";
+}
+
+function formatFileTimestamp(date: Date): string {
+  const part = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${part(date.getMonth() + 1)}${part(date.getDate())}-${part(date.getHours())}${part(date.getMinutes())}${part(date.getSeconds())}`;
+}
+
+function sanitizeFileNamePart(value: string): string {
+  return value.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").replace(/[. ]+$/g, "").slice(0, 48);
+}
+
 function extractCellValue(value: CellValue): unknown {
   if (value === null || value === undefined || typeof value !== "object" || value instanceof Date) return value;
   if ("result" in value) return value.result;

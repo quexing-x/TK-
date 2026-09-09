@@ -198,46 +198,160 @@
 .launch-workspace > .table-panel thead { position: sticky; top: 0; z-index: 1; }
 .launch-workspace .sheet-dropzone { min-height: 176px; border-radius: var(--module-radius); }
 .launch-workspace .launch-dispatch-mode { border-block: 1px solid var(--line); }
-/*
- * 逐项状态列：一个计划下几十条广告组的状态全堆在这一格里。
- *
- * 这里**不能用 max-width 掐宽度**。表格是 auto 布局，浏览器按各列的内容需求分配宽度；
- * 给这一格设 max-width 等于告诉它"我最多只要 300px"，剩下的宽度就被平分给了另外几个
- * 基本是空的列——结果内容最多的一列反而最窄。实测（视口 1180）：这一列本来分到 460px，
- * 内容却被压在 300px 里，白白浪费 160px；窗口再窄一点，中文标签就会挤成一团。
- *
- * 改用 grid 逐行排：每条状态独占一行、有明确间距，扫一眼就能找到失败的那几条。
- * justify-items: start 让标签只占自身宽度，不被拉成整行的色块。
- */
+.launch-results-table { min-width: 900px; table-layout: fixed; }
+.launch-results-table th:nth-child(1) { width: 22%; }
+.launch-results-table th:nth-child(2) { width: 15%; }
+.launch-results-table th:nth-child(3) { width: 38%; }
+.launch-results-table th:nth-child(4) { width: 10%; }
+.launch-results-table th:nth-child(5) { width: 15%; }
+.launch-results-table td { height: 72px; vertical-align: middle; }
+
+.launch-workspace .plan-account-cell,
+.launch-workspace .plan-preset-cell { overflow: hidden; }
+.launch-workspace .plan-account-cell strong,
+.launch-workspace .plan-account-cell small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.launch-workspace .plan-account-cell strong { font-size: 13px; font-weight: 600; }
+.launch-workspace .plan-account-cell small { margin-top: 5px; color: var(--ink-faint); }
+
 .launch-workspace .plan-item-progress {
   display: grid;
-  gap: 6px;
-  justify-items: start;
-  min-width: 240px;
+  grid-template-columns: 54px minmax(120px, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 300px;
 }
 
-/* 进度那行是这一列的主语：先看它，再决定要不要看下面的失败项。
-   数字用等宽，否则每次刷新计数变化会让整行左右跳。 */
-.launch-workspace .plan-progress-counts {
-  font-size: 13px;
-  color: var(--text-secondary);
+.launch-workspace .plan-progress-total {
+  color: var(--ink-soft);
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-
-.launch-workspace .plan-progress-counts b {
-  font-family: Consolas, "SF Mono", monospace;
+.launch-workspace .plan-progress-total b {
+  color: var(--ink);
   font-size: 16px;
-  color: var(--text-primary);
   font-weight: 600;
 }
 
-/* 失败项限高，超出滚动——一次几十条失败时不能把整张表撑开。 */
+.launch-workspace .plan-progress-rail {
+  height: 7px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line-strong) 58%, transparent);
+}
+.launch-workspace .plan-progress-rail i { height: 100%; display: block; }
+.launch-workspace .plan-progress-rail i.success { background: var(--success); }
+.launch-workspace .plan-progress-rail i.failed { background: var(--danger); }
+.launch-workspace .plan-progress-rail i.readback { background: var(--amber); }
+
+.launch-workspace .plan-progress-counts {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 5px 12px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.launch-workspace .plan-progress-counts small { color: inherit; }
+.launch-workspace .plan-progress-counts small.success { color: var(--success); }
+.launch-workspace .plan-progress-counts small.failed { color: var(--danger); }
+.launch-workspace .plan-progress-counts small.readback { color: var(--amber); }
+.launch-workspace .plan-progress-counts b {
+  color: currentColor;
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: inherit;
+  font-weight: 600;
+}
+
+.launch-workspace .plan-failed-details { grid-column: 1 / -1; width: 100%; }
+.launch-workspace .plan-failed-details summary {
+  width: fit-content;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  list-style-position: inside;
+}
+.launch-workspace .plan-failed-details summary:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 .launch-workspace .plan-failed-list {
+  margin-top: 7px;
   display: grid;
-  gap: 4px;
-  justify-items: start;
-  max-height: 132px;
+  gap: 1px;
+  max-height: 108px;
   overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--line));
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+.launch-workspace .plan-failed-list > span {
+  min-width: 0;
+  padding: 5px 8px;
+  display: grid;
+  grid-template-columns: minmax(100px, .8fr) minmax(140px, 1.2fr);
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.launch-workspace .plan-failed-list > span:last-child { border-bottom: 0; }
+.launch-workspace .plan-failed-list strong,
+.launch-workspace .plan-failed-list small {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.launch-workspace .plan-failed-list strong { color: var(--danger); }
+
+.launch-workspace .plan-result-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.launch-workspace .plan-result-state i {
+  width: 7px;
+  height: 7px;
+  display: block;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.launch-workspace .plan-result-state.success { color: var(--success); }
+.launch-workspace .plan-result-state.warning { color: var(--amber); }
+.launch-workspace .plan-result-state.danger { color: var(--danger); }
+.launch-workspace .plan-result-state.running { color: var(--primary); }
+.launch-workspace .plan-result-state + .plan-execution-summary { margin-top: 5px; }
+
+.launch-workspace .plan-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.launch-workspace .plan-result-actions button { white-space: nowrap; }
+
+@media (max-width: 1040px) {
+  .launch-results-table { min-width: 820px; }
+  .launch-results-table th:nth-child(1) { width: 20%; }
+  .launch-results-table th:nth-child(3) { width: 40%; }
+  .launch-results-table th:nth-child(5) { width: 15%; }
 }
 
 /* Task center workspace */
