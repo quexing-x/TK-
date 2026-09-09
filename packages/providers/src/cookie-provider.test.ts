@@ -3512,51 +3512,64 @@ describe("CookieAdsProvider", () => {
     expect(signals[0]).not.toBe(signals[1]);
   });
 
-  it.each([true, false])("serializes draft sessions only for the same account (same=%s)", async (sameAccount) => {
-    stubExpandCopyFetch();
-    const originalFetch = fetch;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    let started!: () => void;
-    const entered = new Promise<void>((resolve) => { started = resolve; });
-    let copies = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      if (String(input).includes("ad_snap/copy") && ++copies === 1) {
-        started();
-        await gate;
+  // 扩组之间只按系列互斥：同一个系列串行（两个 create_by_snap 不同时发布进去），
+  // 同账户的不同系列、以及不同账户，都放行并发。
+  it.each([
+    ["同账户同系列", true, true, 1],
+    ["同账户不同系列", true, false, 2],
+    ["不同账户", false, true, 2],
+  ] as const)(
+    "serializes expansions per campaign, not per account (%s)",
+    async (_label, sameAccount, sameCampaign, expectedCopies) => {
+      stubExpandCopyFetch();
+      const originalFetch = fetch;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      let copies = 0;
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).includes("ad_snap/copy") && ++copies === 1) {
+          started();
+          await gate;
+        }
+        return originalFetch(input, init);
+      }));
+      const provider = new CookieAdsProvider();
+      const context = creationTestContext(false);
+      const input = { sourceAdGroupId: "source", existingCampaignId: "campaign", names: ["group"], initialStatus: "disabled" as const };
+      const first = provider.copyAdGroupToExistingCampaign(context, input);
+      await entered;
+      const second = provider.copyAdGroupToExistingCampaign(
+        { ...context, accountId: sameAccount ? context.accountId : "another-account" },
+        { ...input, existingCampaignId: sameCampaign ? "campaign" : "other-campaign" },
+      );
+      let observedCopies = 0;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        observedCopies = copies;
+      } finally {
+        release();
       }
-      return originalFetch(input, init);
-    }));
-    const provider = new CookieAdsProvider();
-    const context = creationTestContext(false);
-    const input = { sourceAdGroupId: "source", existingCampaignId: "campaign", names: ["group"], initialStatus: "disabled" as const };
-    const first = provider.copyAdGroupToExistingCampaign(context, input);
-    await entered;
-    const second = provider.copyAdGroupToExistingCampaign(
-      { ...context, accountId: sameAccount ? context.accountId : "another-account" }, input,
-    );
-    let observedCopies = 0;
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      observedCopies = copies;
-    } finally {
-      release();
-    }
-    expect((await Promise.all([first, second])).every((result) => result.ok)).toBe(true);
-    expect(observedCopies).toBe(sameAccount ? 1 : 2);
-  });
+      expect((await Promise.all([first, second])).every((result) => result.ok)).toBe(true);
+      expect(observedCopies).toBe(expectedCopies);
+    },
+  );
 
-  it("new creation shares the expansion lock and proceeds after expansion rejects", async () => {
+  it("new creation stays exclusive against expansions and is never starved by them", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let started!: () => void;
     const entered = new Promise<void>((resolve) => { started = resolve; });
     let creationReads = 0;
+    let copies = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.includes("ad_snap/copy")) {
-        started();
-        await gate;
+        if (++copies === 1) {
+          started();
+          await gate;
+        }
         return jsonResponse({ code: 40001, msg: "source rejected" });
       }
       creationReads++;
@@ -3569,16 +3582,25 @@ describe("CookieAdsProvider", () => {
     });
     await entered;
     const creation = provider.createFromPreset(context, [creationTestMutation("none")]);
+    // 独占方一排队，后到的扩组就得让路——哪怕它挂在另一个系列上。否则一串扩组
+    // 能把新建无限往后推。
+    const queuedExpansion = provider.copyAdGroupToExistingCampaign(context, {
+      sourceAdGroupId: "source", existingCampaignId: "other-campaign", names: ["group"], initialStatus: "disabled",
+    });
     let readsBeforeRelease = 0;
+    let copiesBeforeRelease = 0;
     try {
       await new Promise((resolve) => setTimeout(resolve, 0));
       readsBeforeRelease = creationReads;
+      copiesBeforeRelease = copies;
     } finally {
       release();
     }
     expect((await expansion).ok).toBe(false);
     expect((await creation)[0]?.ok).toBe(true);
+    expect((await queuedExpansion).ok).toBe(false);
     expect(readsBeforeRelease).toBe(0);
+    expect(copiesBeforeRelease).toBe(1);
   });
 
   it("finishes first-pass expansion after a transient draft read failure without recopying", async () => {

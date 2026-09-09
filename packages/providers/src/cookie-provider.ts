@@ -109,7 +109,7 @@ export class CookieAdsProvider implements AdsProvider {
   // 2026-08-25 的提额规则就是这么白开了一整天。
   readonly capabilityVersion = "cookie-capabilities-v5-2026-08";
   readonly capabilities = capabilities;
-  private readonly creationBatchLocks = new Map<string, Promise<void>>();
+  private readonly creationGates = new Map<string, AccountCreationGate>();
 
   resolveCapabilities(context: ProviderContext): ReadonlySet<ProviderCapability> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -1164,17 +1164,20 @@ export class CookieAdsProvider implements AdsProvider {
     }
   }
 
-  private async acquireBatchLock(key: string): Promise<() => void> {
-    const previous = this.creationBatchLocks.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => { release = resolve; });
-    const tail = previous.then(() => current);
-    this.creationBatchLocks.set(key, tail);
-    await previous;
-    return () => {
-      release();
-      if (this.creationBatchLocks.get(key) === tail) this.creationBatchLocks.delete(key);
-    };
+  private gate(accountId: string): AccountCreationGate {
+    const existing = this.creationGates.get(accountId);
+    if (existing) return existing;
+    const created = new AccountCreationGate();
+    this.creationGates.set(accountId, created);
+    return created;
+  }
+
+  /**
+   * 独占整个账户的创建会话。新建、系列复制、补发布都会新建系列草稿，那是账户级的
+   * 共享可变状态，必须互斥。
+   */
+  private async acquireBatchLock(accountId: string): Promise<() => void> {
+    return this.gate(accountId).acquireExclusive();
   }
 
   async create(
@@ -1234,7 +1237,12 @@ export class CookieAdsProvider implements AdsProvider {
       ? parseNativeScheduleStart(input.scheduledStartAt)
       : null;
     let copyAccepted = false;
-    const releaseBatchLock = await this.acquireBatchLock(context.accountId);
+    // 扩组不独占账户：同账户的多个扩组可以并发，同一个系列仍然串行。整条链路上的
+    // 每一步都用 ad_snap_id / ad_sketch_id / async_request_id 显式寻址，报文里没有
+    // 「当前草稿」这种会被并发的另一条改掉的隐式状态。新建 / 系列复制 / 补发布仍然
+    // 独占账户——它们要新建系列草稿，那个才是账户级共享的。
+    const releaseBatchLock = await this.gate(context.accountId)
+      .acquireShared(input.existingCampaignId);
     try {
       // The task may have waited behind another creation on this account.
       // Revalidate before creating a draft, not only after it has been saved.
@@ -2082,6 +2090,81 @@ export class CookieAdsProvider implements AdsProvider {
     } finally {
       releaseBatchLock();
     }
+  }
+}
+
+/**
+ * 一个账户上的创建闸门。
+ *
+ * 两种持有方式：
+ * - 独占（新建 / 系列复制 / 补发布）：整个账户互斥。这些路径会新建系列草稿，那是
+ *   账户级的共享可变状态，谁都不能在旁边同时改。
+ * - 共享（扩组）：同账户的扩组之间并发，但同一个 `existing_campaign_id` 仍然串行。
+ *   扩组每一步都拿显式的草稿标识寻址，彼此不会串草稿；把并发限制在「不同系列」上，
+ *   是为了不让两个 create_by_snap 同时往同一个系列里发布。
+ *
+ * 独占方优先：只要有独占方在排队，新的共享方就得等它做完，避免一串扩组把新建饿死。
+ * 这把锁只覆盖同一个 Provider 实例，不覆盖用户自己开的浏览器或另一个进程——与改动
+ * 前的边界一致。
+ */
+export class AccountCreationGate {
+  /** 独占方的排队链。 */
+  private exclusiveTail: Promise<void> = Promise.resolve();
+  /** 已排队或正在跑的独占方数量。 */
+  private exclusivePending = 0;
+  /** 正在跑的并发扩组数。 */
+  private sharedActive = 0;
+  /** sharedActive 归零时唤醒正在等待的独占方。 */
+  private sharedDrained: (() => void) | null = null;
+  /** 每个系列一条串行链。 */
+  private readonly scopeTails = new Map<string, Promise<void>>();
+
+  async acquireExclusive(): Promise<() => void> {
+    // 同步自增：此后进来的共享方都会看见它并让路。
+    this.exclusivePending += 1;
+    const previous = this.exclusiveTail;
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.exclusiveTail = previous.then(() => current);
+    await previous;
+    // 排在前面的扩组已经在跑了，等它们退干净再动账户。
+    while (this.sharedActive > 0) {
+      await new Promise<void>((resolve) => { this.sharedDrained = resolve; });
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.exclusivePending -= 1;
+      release();
+    };
+  }
+
+  async acquireShared(scopeKey: string): Promise<() => void> {
+    // 1) 同系列串行。
+    const previous = this.scopeTails.get(scopeKey) ?? Promise.resolve();
+    let releaseScope!: () => void;
+    const current = new Promise<void>((resolve) => { releaseScope = resolve; });
+    const tail = previous.then(() => current);
+    this.scopeTails.set(scopeKey, tail);
+    await previous;
+    // 2) 账户准入。让路期间不计入 sharedActive，否则独占方永远等不到归零。
+    //    循环退出与 sharedActive 自增之间没有 await，独占方插不进来。
+    while (this.exclusivePending > 0) await this.exclusiveTail;
+    this.sharedActive += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseScope();
+      if (this.scopeTails.get(scopeKey) === tail) this.scopeTails.delete(scopeKey);
+      this.sharedActive -= 1;
+      if (this.sharedActive === 0 && this.sharedDrained) {
+        const drained = this.sharedDrained;
+        this.sharedDrained = null;
+        drained();
+      }
+    };
   }
 }
 

@@ -726,6 +726,86 @@ describe("local API", () => {
     expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(1);
   });
 
+  it("runs one account's expansions concurrently and still reports failures in the submitted order", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const finishOrder: string[] = [];
+    // 第 2 条拖得最久、第 5 条最快：完成顺序必然不是勾选顺序，失败清单要经得起这个。
+    const delaysByBaseName = new Map([["源2", 40], ["源5", 1]]);
+    const copyAdGroupToExistingCampaign = vi.fn(async (_context: unknown, input: { names: string[] }) => {
+      const base = String(input.names[0]).split("-")[0]!;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, delaysByBaseName.get(base) ?? 10));
+      inFlight -= 1;
+      finishOrder.push(base);
+      if (base === "源2" || base === "源5") {
+        return { ok: false, message: `${base} 被拒`, failureKind: "failed" as const, retrySafe: true };
+      }
+      return { ok: true, message: "复制成功", adGroupIds: ["created"] };
+    });
+    const provider = {
+      kind: "cookie",
+      displayName: "concurrent expansion provider",
+      capabilityVersion: "scheduled-expansion-v1",
+      capabilities: new Set(["copy-ads"]),
+      copyAdGroupToExistingCampaign,
+    } as unknown as AdsProvider & {
+      copyAdGroupToExistingCampaign: typeof copyAdGroupToExistingCampaign;
+    };
+    store.saveProviderConnectionSettings("demo-account", {
+      kind: "cookie",
+      advertiserId: "1001",
+      healthUrl: "",
+      campaignsUrl: "",
+      adGroupsUrl: "",
+      adsUrl: "",
+    });
+    const reference = await vault.create(JSON.stringify({
+      kind: "cookie",
+      cookie: "sessionid=test-session",
+      csrfHeaderName: "x-csrftoken",
+      requestTemplates: [],
+    }));
+    store.setProviderCredentialReference("demo-account", "cookie", reference);
+    store.updateProviderStatus("demo-account", "cookie", "ready", "ready");
+    store.updateProviderAuthorization("demo-account", "cookie", {
+      status: "active",
+      capabilityVersion: "scheduled-expansion-v1",
+      capabilities: ["copy-ads"],
+    });
+    await app.close();
+    app = await createApp({ store, vault, providers: new ProviderRegistry([provider]), disableAuth: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ad-groups/batch-expand",
+      payload: {
+        sources: Array.from({ length: 6 }, (_unused, index) => ({
+          accountId: "demo-account",
+          sourceCampaignId: `campaign-${index + 1}`,
+          sourceCampaignName: `campaign ${index + 1}`,
+          sourceAdGroupId: `adgroup-${index + 1}`,
+          sourceAdGroupName: `源${index + 1}`,
+        })),
+        count: 1,
+        dailyBudget: 50,
+        bid: 7,
+        launchImmediately: true,
+        sameCampaign: true,
+        scheduledStartAt: null,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(6);
+    // 串行时这里恒为 1；上限来自 expandAccountConcurrency，不能无脑 Promise.all。
+    expect(maxInFlight).toBe(3);
+    expect(finishOrder.indexOf("源5")).toBeLessThan(finishOrder.indexOf("源2"));
+    expect(response.json()).toMatchObject({ createdGroups: 4, skipped: 0 });
+    expect(response.json().failed.map((entry: { name: string }) => entry.name)).toEqual(["源2", "源5"]);
+  });
+
   it("publishes the draft an uncertain expansion left behind and closes the record", async () => {
     const publishExistingDrafts = vi.fn(async () => ({
       ok: true,

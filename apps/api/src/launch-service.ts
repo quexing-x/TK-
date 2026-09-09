@@ -15,6 +15,7 @@ import {
   buildExpandSheetPlan,
   buildLineageReport,
   collectReservedNames,
+  mapWithConcurrency,
   LaunchAgeRangeValues,
   DRAFT_AD_STATUS,
   DRAFT_CLEANUP_MIN_AGE_HOURS,
@@ -49,6 +50,26 @@ import { WriteTaskKernel, withLeaseHeartbeat } from "./write-task-kernel.js";
 
 const launchLeaseTimeoutMs = 30 * 60 * 1000;
 const launchLeaseHeartbeatMs = 60 * 1000;
+
+/**
+ * 同一个账户里同时在跑的扩组数。
+ *
+ * 一条扩组从 ad_snap/copy 到终态回读大约十来个来回、实测 p50 约 14 秒，而这十几秒
+ * 几乎全在等 TikTok。串行时一批 31 个源组就是 6 分钟，200 个源组要 40 分钟——比
+ * HTTP 超时还长。Provider 侧的账户闸门已经放开扩组之间的互斥（同系列仍然串行），
+ * 这里决定实际开几条。
+ *
+ * 取 3 与轮询的 pollAccountConcurrency 一致：同一个 Cookie 会话同时打太多请求会被
+ * TikTok 限流，而扩组被限流的代价比同步高——半途失败会在后台留下草稿。要再快就调
+ * 这个数，但要先拿一整批真实扩组的失败率对照，别凭感觉往上加。
+ */
+const expandAccountConcurrency = 3;
+
+/** 一个源广告组的扩组结果。并发跑完后按入参顺序折算成对外的计数与失败清单。 */
+type ExpandSourceOutcome =
+  | { kind: "created" }
+  | { kind: "skipped" }
+  | { kind: "failed"; name: string; message: string };
 
 export interface LaunchExecutionItemResult {
   itemId: string;
@@ -1654,7 +1675,7 @@ export class LaunchService {
   }
 
   // 一键扩组：批量选中的源广告组，每个各扩 count 个新组。
-  // 按账户串行、账户内逐源串行执行，复用 copyAdGroupWithinAccount。
+  // 按账户串行、账户内并发 expandAccountConcurrency 条，复用 copyAdGroupWithinAccount。
   // 幂等：相同 (账户+源组+扩组预设指纹) 已成功则跳过，不重复建组。
   async batchExpandAdGroups(input: {
     sources: Array<{
@@ -1722,12 +1743,12 @@ export class LaunchService {
           .filter((entity) => entity.entityType === "ad-group")
           .map((entity) => entity.name.trim()),
       );
-      for (const source of sources) {
-        const sourceBaseName = stripGeneratedAdGroupNameSuffixes(
-          source.sourceAdGroupName,
-        );
+      // 组名与 taskKey 先按输入顺序一次性排完。它们只取决于输入，不取决于上一条扩得
+      // 成不成，所以结果与串行时逐条分配完全一致；但**必须**在并发之前分配完——放进
+      // 泳道里现算的话，序号就跟着调度顺序走，同一批提交两次可能得到不同的名字。
+      const planned = sources.map((source) => {
         const baseAdGroupName = allocateExpandBaseName({
-          cleanedSourceName: sourceBaseName,
+          cleanedSourceName: stripGeneratedAdGroupNameSuffixes(source.sourceAdGroupName),
           deliveryAt: deliveryDate,
           timeZone: expandTimeZone,
           usedBaseNames,
@@ -1745,79 +1766,97 @@ export class LaunchService {
           scheduledStartAt,
           sameCampaign: input.sameCampaign,
         })).digest("hex");
+        return { source, baseAdGroupName, taskKey };
+      });
 
-        const claim = this.store.claimAdGroupExpandTask(
-          taskKey,
-          source.accountId,
-          source.sourceAdGroupId,
-          {
-            sourceCampaignId: source.sourceCampaignId,
-            localDate: dateKeyInTimeZone(deliveryDate, expandTimeZone ?? "UTC"),
-            requestedCount: count,
-            // 组名规则与 copyAdGroupWithinAccount 一致（`基名-序号`），落库供重复提交
-            // 预检回答「今天扩出来的是哪几个组」。
-            generatedNames: Array.from(
-              { length: count },
-              (_unused, index) => `${baseAdGroupName}-${index + 1}`,
-            ),
-          },
-        );
-        if (claim !== "claimed") {
-          if (claim === "unknown") {
-            failed.push({
-              name: source.sourceAdGroupName,
-              message: "上次扩组结果待人工确认，已禁止自动重试。",
-            });
-          } else {
-            skipped += 1;
-          }
-          continue;
-        }
-
-        try {
-          const results = await this.copyAdGroupWithinAccount({
-            accountId: source.accountId,
-            sourceCampaignId: source.sourceCampaignId,
-            sourceCampaignName: source.sourceCampaignName,
-            sourceAdGroupId: source.sourceAdGroupId,
-            baseAdGroupName,
-            count,
-            dailyBudget: input.dailyBudget,
-            bid: input.bid,
-            launchImmediately,
-            sameCampaign: input.sameCampaign,
-            scheduledStartAt,
-            onBeforeDispatch: () => this.store.markAdGroupExpandTaskDispatching(taskKey),
-          });
-          const ok = results.length > 0 && results.every((result) => result.ok);
-          if (ok) {
-            createdGroups += count;
-            this.store.finishAdGroupExpandTask(taskKey, "succeeded");
-            if (scheduledStartAt) {
-              scheduled += count;
+      // 账户内并发。claim 落在泳道里而不是提前一次性做完：提前占位的话，进程中途
+      // 挂掉会把还没轮到的那些也留成 running，得靠人来收。
+      const outcomes = await mapWithConcurrency(
+        planned,
+        expandAccountConcurrency,
+        async ({ source, baseAdGroupName, taskKey }): Promise<ExpandSourceOutcome> => {
+          const claim = this.store.claimAdGroupExpandTask(
+            taskKey,
+            source.accountId,
+            source.sourceAdGroupId,
+            {
+              sourceCampaignId: source.sourceCampaignId,
+              localDate: dateKeyInTimeZone(deliveryDate, expandTimeZone ?? "UTC"),
+              requestedCount: count,
+              // 组名规则与 copyAdGroupWithinAccount 一致（`基名-序号`），落库供重复提交
+              // 预检回答「今天扩出来的是哪几个组」。
+              generatedNames: Array.from(
+                { length: count },
+                (_unused, index) => `${baseAdGroupName}-${index + 1}`,
+              ),
+            },
+          );
+          if (claim !== "claimed") {
+            if (claim === "unknown") {
+              return {
+                kind: "failed",
+                name: source.sourceAdGroupName,
+                message: "上次扩组结果待人工确认，已禁止自动重试。",
+              };
             }
-          } else {
+            return { kind: "skipped" };
+          }
+
+          try {
+            const results = await this.copyAdGroupWithinAccount({
+              accountId: source.accountId,
+              sourceCampaignId: source.sourceCampaignId,
+              sourceCampaignName: source.sourceCampaignName,
+              sourceAdGroupId: source.sourceAdGroupId,
+              baseAdGroupName,
+              count,
+              dailyBudget: input.dailyBudget,
+              bid: input.bid,
+              launchImmediately,
+              sameCampaign: input.sameCampaign,
+              scheduledStartAt,
+              onBeforeDispatch: () => this.store.markAdGroupExpandTaskDispatching(taskKey),
+            });
+            const ok = results.length > 0 && results.every((result) => result.ok);
+            if (ok) {
+              this.store.finishAdGroupExpandTask(taskKey, "succeeded");
+              return { kind: "created" };
+            }
             const partialSuccess = results.some((result) => result.ok)
               && results.some((result) => !result.ok);
             const unknown = partialSuccess || results.some(
               (result) => result.failureKind === "unknown" || result.retrySafe === false,
             );
             this.store.finishAdGroupExpandTask(taskKey, unknown ? "unknown" : "failed");
-            failed.push({
+            return {
+              kind: "failed",
               name: source.sourceAdGroupName,
               message: `${results.find((result) => !result.ok)?.message ?? "创建失败"}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
-            });
+            };
+          } catch (cause) {
+            const unknown = cause instanceof UnknownCreationStateError;
+            this.store.finishAdGroupExpandTask(taskKey, unknown ? "unknown" : "failed");
+            return {
+              kind: "failed",
+              name: source.sourceAdGroupName,
+              message: `${safeError(cause)}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
+            };
           }
-        } catch (cause) {
-          const unknown = cause instanceof UnknownCreationStateError;
-          this.store.finishAdGroupExpandTask(taskKey, unknown ? "unknown" : "failed");
-          failed.push({
-            name: source.sourceAdGroupName,
-            message: `${safeError(cause)}${unknown ? "（结果待确认，禁止自动重试）" : ""}`,
-          });
+        },
+      );
+
+      // mapWithConcurrency 按入参下标返回，所以失败清单仍然是用户勾选的顺序，
+      // 不是先跑完谁就先报谁。
+      for (const outcome of outcomes) {
+        if (outcome.kind === "created") {
+          createdGroups += count;
+          if (scheduledStartAt) scheduled += count;
+        } else if (outcome.kind === "skipped") {
+          skipped += 1;
+        } else {
+          failed.push({ name: outcome.name, message: outcome.message });
         }
       }
-
     }
 
     return { createdGroups, scheduled, failed, skipped };
