@@ -409,3 +409,55 @@ describe("单次转化且加购不足", () => {
     expect(rule?.enabled).toBe(false);
   });
 });
+
+describe("有消耗无点击关闭（NO_CLICK_CLOSE）", () => {
+  // 花了钱一个点击都没有：连流量都没进来，谈不上转化漏斗，比「无加购」更早暴露问题。
+  const 组 = (over: Record<string, unknown>): ProviderEntity => ({
+    entityType: "ad-group",
+    externalId: "group-clicks",
+    payload: {
+      campaign_id: "c-1",
+      adgroup_id: "group-clicks",
+      ad_primary_status: "enable",
+      create_time: "2026-07-15T02:00:00.000Z",
+      row_data: {
+        campaign_id: "c-1",
+        time_attr_convert_cnt: 0,
+        time_attr_on_web_cart: 0,
+        ...over,
+      },
+    },
+  });
+  const 判 = (entity: ProviderEntity) =>
+    evaluateRuleConfiguration([entity], configuration()).candidates
+      .find((c) => c.entity.externalId === "group-clicks");
+
+  it("消耗达标且零点击就关闭", () => {
+    const hit = 判(组({ stat_cost: 0.5, click_cnt: 0 }));
+    expect(hit?.thresholdCode).toBe("NO_CLICK_CLOSE");
+    expect(hit?.action).toBe("disable");
+    expect(hit?.metricValue).toBe(0.5);
+  });
+
+  it("消耗没到设定值不关", () => {
+    expect(判(组({ stat_cost: 0.49, click_cnt: 0 }))?.thresholdCode).not.toBe("NO_CLICK_CLOSE");
+  });
+
+  it("有点击就不归这条管", () => {
+    expect(判(组({ stat_cost: 5, click_cnt: 1 }))?.thresholdCode).not.toBe("NO_CLICK_CLOSE");
+  });
+
+  // 取不到点击数不能当成 0——那会把数据缺失误判成「没人点」，直接关掉正常投放的组。
+  it("点击数缺失时不触发", () => {
+    expect(判(组({ stat_cost: 5 }))?.thresholdCode).not.toBe("NO_CLICK_CLOSE");
+  });
+
+  // 零点击必然零加购，两条会同时成立；评估器命中第一条就 break，所以这条要排在前面，
+  // 关闭理由才说得准。
+  it("与「有消耗无加购」同时成立时，这条优先", () => {
+    // 消耗取 1.5：高于无加购的 1 和无点击的 0.5，但低于零转化消耗的 2——
+    // 否则会先命中优先级更高的 NO_CONV_SPEND_CLOSE，测不到这两条的相对顺序。
+    const hit = 判(组({ stat_cost: 1.5, click_cnt: 0, time_attr_on_web_cart: 0 }));
+    expect(hit?.thresholdCode).toBe("NO_CLICK_CLOSE");
+  });
+});

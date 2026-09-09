@@ -149,6 +149,9 @@ describe("规则分组（仅界面表述）", () => {
       "CV1_LOW_CART_CPA_CLOSE",
       "NO_CONV_SPEND_CLOSE",
       "NO_CONV_CPC_CLOSE",
+      // 「有消耗无点击」同样只有关闭方向：连点击都没有的组不存在「恢复」的判据，
+      // 恢复要看加购或转化，那是加购组和转化组的事。
+      "NO_CLICK_CLOSE",
     ]);
   });
 

@@ -12,6 +12,7 @@ export const AutomationRuleCodeSchema = z.enum([
   "NO_CONV_SPEND_CLOSE",
   "NO_CONV_CPC_CLOSE",
   "NO_CART_CLOSE",
+  "NO_CLICK_CLOSE",
   "HAS_CART_OPEN",
 ]);
 export type AutomationRuleCode = z.infer<typeof AutomationRuleCodeSchema>;
@@ -128,6 +129,23 @@ export const automationRuleDefinitions: readonly AutomationRuleDefinition[] = [
     ],
   },
   {
+    // **必须排在「有消耗无加购」之前**：零点击必然零加购，两条会同时成立，而评估器
+    // 是按 automationRuleDefinitions 的**数组顺序**逐条试、命中第一条就 break——
+    // 决定谁先被匹配的是这个顺序，不是 priority（priority 只管候选之间的执行先后），
+    // 也不是 configuration.rules 的顺序（那只是个按 code 取值的映射源）。
+    // 让这条先命中，关闭理由才说得准：「花了钱一个点击都没有」比「没有加购」更早，
+    // 也更能说明问题——连流量都没进来，谈不上转化漏斗。
+    code: "NO_CLICK_CLOSE",
+    label: "有消耗无点击",
+    description: "消耗达到设定值，且点击量等于设定值时关闭。",
+    priority: 5,
+    action: "disable",
+    parameters: [
+      { key: "spend", label: "最低消耗", unit: "账户币种", step: 0.01 },
+      { key: "clicks", label: "点击量", unit: "次", step: 1 },
+    ],
+  },
+  {
     code: "NO_CART_CLOSE",
     label: "有消耗无加购",
     description: "消耗达到设定值，且加购量等于设定值时关闭。",
@@ -200,6 +218,9 @@ export const defaultRuleConfiguration: RuleConfigurationInput = {
     { code: "CV2_CPA_OPEN", enabled: true, values: { conversions: 2, cpa: 7.5 } },
     { code: "NO_CONV_SPEND_CLOSE", enabled: true, values: { conversions: 0, spend: 2 } },
     { code: "NO_CONV_CPC_CLOSE", enabled: true, values: { conversions: 0, cpc: 0.5 } },
+    // 这个数组的顺序不影响匹配：评估器遍历的是 automationRuleDefinitions，
+    // configuration.rules 只是个按 code 取值的映射源。谁先被匹配由定义数组的顺序决定。
+    { code: "NO_CLICK_CLOSE", enabled: true, values: { spend: 0.5, clicks: 0 } },
     { code: "NO_CART_CLOSE", enabled: true, values: { spend: 1, carts: 0 } },
     { code: "HAS_CART_OPEN", enabled: true, values: { spend: 1, carts: 1 } },
   ],
