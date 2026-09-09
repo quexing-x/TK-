@@ -5504,14 +5504,25 @@ export class AutomationStore {
     ) as MultiAccountLaunchPlanRecord;
   }
 
+  /**
+   * 取消投放计划：**任何时候都能取消**，不要求当下没有正在创建的任务。
+   *
+   * 曾经这里挡着一句「有 running 就拒绝」，实际效果是队列一旦跑起来就再也停不下来——
+   * worker 连续认领新批次，两批之间的空档小到抢不住（2026-09-09 实测：高频探测 4 分钟
+   * 没抢到一次，期间又跑了 16 条）。界面上的取消按钮用的是同一道判据，所以同样点不动。
+   * 想通过杀后台调度器腾出空档更是死路：本地 API 就寄生在调度器进程里，调度器一死，
+   * 取消接口本身也没了。那次只能直接改库才停下来。
+   *
+   * 现在的语义是「立刻停止派发」而不是「立刻终止一切」：
+   * - 计划标记 cancelled，pending / failed 的条目一并收口，worker 不会再认领它们；
+   * - **正在 running 的那一两条不强行中断**——provider 的写请求已经发出去了，
+   *   中断只会制造「结果未知」。它们照常跑完并落自己的终态，`execute` 开头的
+   *   `plan.status === "cancelled"` 判断保证不会再有下一批。
+   */
   cancelMultiAccountLaunchPlan(planId: string): boolean {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const running = this.db
-        .prepare("SELECT 1 FROM launch_plan_items WHERE plan_id = ? AND status = 'running' LIMIT 1")
-        .get(planId);
-      if (running) throw new Error("计划仍有正在创建的任务，当前不能取消。");
       const result = this.db
         .prepare(
         `UPDATE multi_account_launch_plans
