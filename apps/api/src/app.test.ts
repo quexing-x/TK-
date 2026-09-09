@@ -2759,6 +2759,71 @@ describe("local API", () => {
     expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
+  it("一个账户的多个系列只做一次创建后同步，每条仍按最终快照核对", async () => {
+    const created: CreationMutationResult[] = [];
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
+      mutations.map((mutation): CreationMutationResult => {
+        const suffix = mutation.row.rowNumber;
+        const result: CreationMutationResult = {
+          ...mutation,
+          ok: true,
+          campaignId: `campaign-created-${suffix}`,
+          adGroupId: `group-created-${suffix}`,
+          adId: `ad-created-${suffix}`,
+          message: "created",
+        };
+        created.push(result);
+        return result;
+      }),
+    );
+    // 最终快照看得见此前建出来的全部对象——这正是收成一次之后每条的核对依据。
+    const syncReadOnly = vi.fn<NonNullable<AdsProvider["syncReadOnly"]>>(async () => {
+      const entities = created.flatMap((result) => [
+        { entityType: "campaign" as const, externalId: result.campaignId!, payload: {} },
+        { entityType: "ad-group" as const, externalId: result.adGroupId!, payload: {} },
+        { entityType: "ad" as const, externalId: result.adId!, payload: {} },
+      ]);
+      return {
+        entities,
+        result: {
+          startedAt: "2026-07-17T00:00:00.000Z",
+          finishedAt: "2026-07-17T00:00:01.000Z",
+          counts: {
+            campaign: created.length,
+            "ad-group": created.length,
+            ad: created.length,
+            material: 0,
+          },
+          warnings: [],
+          quality: testSyncQuality("2026-07-17T00:00:01.000Z"),
+        },
+      };
+    });
+    // apiLaunchRow(n) 的 campaignName 是 campaign-n，四行就是四个系列批次。
+    // rowNumber 从 2 起——导入表第 1 行是表头。
+    const planId = await installLaunchTestProvider(
+      createFromPreset,
+      [apiLaunchRow(2), apiLaunchRow(3), apiLaunchRow(4), apiLaunchRow(5)],
+      syncReadOnly,
+    );
+
+    const executed = await app.inject({
+      method: "POST",
+      url: `/api/launch-plans/${planId}/execute`,
+    });
+
+    expect(executed.statusCode).toBe(200);
+    const results = executed.json().results as Array<{ status: string; syncWarning: string | null }>;
+    expect(results).toHaveLength(4);
+    expect(createFromPreset).toHaveBeenCalledTimes(4);
+    // 这条是整个改动的要点：全账户三层分页一个账户只跑一次。挂在每个系列末尾时
+    // 它是新建计划的全部耗时（153 个组的计划里 97 分钟有 96.7 分钟在这儿）。
+    expect(syncReadOnly).toHaveBeenCalledTimes(1);
+    for (const result of results) {
+      expect(result).toMatchObject({ status: "succeeded", syncWarning: null });
+    }
+  });
+
   it("keeps creation succeeded and account automation unchanged on non-healthy readback quality", async () => {
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
       mutations.map((mutation): CreationMutationResult => ({

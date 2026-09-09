@@ -65,6 +65,37 @@ const launchLeaseHeartbeatMs = 60 * 1000;
  */
 const expandAccountConcurrency = 3;
 
+/**
+ * 一个账户攒下来待做的「创建后同步」。见 LaunchService.applyCreationSync 的注释：
+ * 这一步是全账户三层分页，必须一个账户只做一次，不能一个系列一次。
+ */
+interface PendingCreationSync {
+  accountId: string;
+  providerKind: ProviderKind;
+  context: ProviderContext;
+  successes: Array<{
+    item: LaunchPlanItemRecord;
+    created: {
+      campaignId?: string | undefined;
+      adGroupId?: string | undefined;
+      adId?: string | undefined;
+    };
+    output: LaunchExecutionItemResult;
+  }>;
+}
+
+/**
+ * 把一个账户下各系列攒的待同步合成一次。context 取最后一条：它是最晚一次读出来的
+ * 凭据，前面那些只会更旧。
+ */
+function mergePendingCreationSync(
+  pending: readonly PendingCreationSync[],
+): PendingCreationSync | null {
+  const last = pending.at(-1);
+  if (!last) return null;
+  return { ...last, successes: pending.flatMap((entry) => entry.successes) };
+}
+
 /** 一个源广告组的扩组结果。并发跑完后按入参顺序折算成对外的计数与失败清单。 */
 type ExpandSourceOutcome =
   | { kind: "created" }
@@ -257,13 +288,19 @@ export class LaunchService {
         // serially; otherwise one source group can overwrite the draft state
         // another group is validating or reading back. Separate accounts stay
         // independent and may still execute in parallel.
+        const deferredSync: PendingCreationSync[] = [];
         for (const group of groups) {
           results.push(await this.executeSeriesBatch(
             plan.presetSnapshot!.creationConfig,
             group,
             actor,
+            deferredSync,
           ));
         }
+        // 创建后同步收在这里做，一个账户一次。挂在每个系列末尾时它是整个计划的
+        // 全部耗时（见 applyCreationSync 的注释）。
+        const pending = mergePendingCreationSync(deferredSync);
+        if (pending) await this.applyCreationSync(pending);
         return results;
       }),
     );
@@ -312,6 +349,12 @@ export class LaunchService {
     preset: CreationPresetConfig,
     candidates: LaunchPlanItemRecord[],
     actor: WriteTaskActor,
+    /**
+     * 传了就把创建后同步攒起来交给调用方收尾，不在本批次里做。
+     *
+     * 不传（单条重试）时仍然当场同步——一条就一次，没有放大。
+     */
+    deferredSync?: PendingCreationSync[],
   ): Promise<LaunchExecutionItemResult[]> {
     const executorId = randomUUID();
     const reconcileOnlyItemIds = new Set(
@@ -558,70 +601,17 @@ export class LaunchService {
       }
 
       if (successes.length > 0) {
-        let commonSyncWarnings: string[] = [];
-        let syncResult: ReadOnlySyncResult | null = null;
-        let syncEntities: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>["entities"] = [];
-        let syncCompleted = false;
-        try {
-          const sync = await this.providers.syncReadOnly(account.providerKind, context);
-          syncResult = sync.result;
-          syncEntities = sync.entities;
-          this.store.saveReadOnlySync(first.accountId, account.providerKind, sync.entities, sync.result);
-          syncCompleted = true;
-          if (sync.result.quality.status !== "healthy" || sync.result.warnings.length > 0) {
-            commonSyncWarnings = [
-              ...(sync.result.quality.status !== "healthy"
-                ? [`创建后同步质量为 ${sync.result.quality.status}`]
-                : []),
-              ...sync.result.warnings,
-            ];
-          }
-        } catch (cause) {
-          commonSyncWarnings.push(safeError(cause));
-          this.store.updateProviderStatus(
-            first.accountId,
-            account.providerKind,
-            "failed",
-            `创建后同步异常：${commonSyncWarnings.join("；")}`,
-          );
+        if (deferredSync) {
+          // 攒给调用方在整个账户跑完后统一同步一次。
+          deferredSync.push({ accountId: first.accountId, providerKind: account.providerKind, context, successes });
+          return [...preflightFailures, ...outputs];
         }
-        for (const success of successes) {
-          // Original-post migration resolves its published asset-group id via
-          // get_creative_fields_by_ad before the provider reports success.
-          // That asset group is not guaranteed to appear in the ordinary ad
-          // statistics list, so an empty ad list must not invalidate the
-          // stronger object-specific readback evidence.
-          const originalPostAssetVerified = Boolean(
-            success.item.sourceSnapshot && success.created.adId,
-          );
-          const itemSyncWarnings = commonSyncWarnings.filter((warning) =>
-            !(originalPostAssetVerified
-              && warning === "ad 响应成功，但暂未识别到列表数据。"),
-          );
-          const missing = [
-            ["campaign", success.created.campaignId] as const,
-            ["ad-group", success.created.adGroupId] as const,
-            ...(success.created.adId ? [["ad", success.created.adId] as const] : []),
-          ].filter(([entityType, externalId]) =>
-            syncCompleted
-            && !(originalPostAssetVerified && entityType === "ad")
-            && !syncEntities.some((entity) => entity.entityType === entityType && entity.externalId === externalId),
-          );
-          const itemWarning = [
-            success.output.syncWarning,
-            ...itemSyncWarnings,
-            ...(missing.length > 0 ? [`创建后未回读到：${missing.map(([type]) => type).join("、")}`] : []),
-          ].filter(Boolean).join("；") || null;
-          try {
-            this.launchStore.sync(success.item.itemId, itemWarning);
-          } catch (cause) {
-            success.output.syncWarning = [itemWarning, `同步阶段记录失败：${safeError(cause)}`]
-              .filter(Boolean)
-              .join("；");
-          }
-          success.output.syncWarning ??= itemWarning;
-          success.output.sync = syncResult;
-        }
+        await this.applyCreationSync({
+          accountId: first.accountId,
+          providerKind: account.providerKind,
+          context,
+          successes,
+        });
       }
       // 预检被剔除的那些必须一起回给调用方，否则界面上会凭空少几条。
       return [...preflightFailures, ...outputs];
@@ -650,6 +640,87 @@ export class LaunchService {
           sync: null,
         };
       })];
+    }
+  }
+
+  /**
+   * 创建后的账户同步与逐条回读核对。
+   *
+   * **一个账户一次，不是一个系列一次。** 这一步是把账户的系列 / 广告组 / 广告三层
+   * 全部分页拉一遍（生产实测 p50 36 秒），只为核对刚建的那几个对象在不在列表里。
+   * 原来它挂在每个系列批次末尾：2026-09-09 那个 153 条广告组的计划有 150 多个系列，
+   * 于是跑了 150 多次全量同步——整个计划 97.2 分钟里 96.7 分钟花在这上面，创建请求
+   * 本身几乎不占时间。
+   *
+   * 收成一次不丢证据：核对用的是全部创建完成之后的快照，比中途那张更全。真正兜底
+   * 的回读早就交给账户轮询了（`reconcileLaunchPlanReadbacks` 用同一份轮询快照补齐
+   * `unknown` 和「组建好了广告还没传播出来」的条目），这里只是顺带刷新本地快照。
+   */
+  private async applyCreationSync(input: PendingCreationSync): Promise<void> {
+    const { accountId, providerKind, context, successes } = input;
+    let commonSyncWarnings: string[] = [];
+    let syncResult: ReadOnlySyncResult | null = null;
+    let syncEntities: Awaited<ReturnType<ProviderRegistry["syncReadOnly"]>>["entities"] = [];
+    let syncCompleted = false;
+    try {
+      const sync = await this.providers.syncReadOnly(providerKind, context);
+      syncResult = sync.result;
+      syncEntities = sync.entities;
+      this.store.saveReadOnlySync(accountId, providerKind, sync.entities, sync.result);
+      syncCompleted = true;
+      if (sync.result.quality.status !== "healthy" || sync.result.warnings.length > 0) {
+        commonSyncWarnings = [
+          ...(sync.result.quality.status !== "healthy"
+            ? [`创建后同步质量为 ${sync.result.quality.status}`]
+            : []),
+          ...sync.result.warnings,
+        ];
+      }
+    } catch (cause) {
+      commonSyncWarnings.push(safeError(cause));
+      this.store.updateProviderStatus(
+        accountId,
+        providerKind,
+        "failed",
+        `创建后同步异常：${commonSyncWarnings.join("；")}`,
+      );
+    }
+    for (const success of successes) {
+      // Original-post migration resolves its published asset-group id via
+      // get_creative_fields_by_ad before the provider reports success.
+      // That asset group is not guaranteed to appear in the ordinary ad
+      // statistics list, so an empty ad list must not invalidate the
+      // stronger object-specific readback evidence.
+      const originalPostAssetVerified = Boolean(
+        success.item.sourceSnapshot && success.created.adId,
+      );
+      const itemSyncWarnings = commonSyncWarnings.filter((warning) =>
+        !(originalPostAssetVerified
+          && warning === "ad 响应成功，但暂未识别到列表数据。"),
+      );
+      const missing = [
+        ["campaign", success.created.campaignId] as const,
+        ["ad-group", success.created.adGroupId] as const,
+        ...(success.created.adId ? [["ad", success.created.adId] as const] : []),
+      ].filter(([entityType, externalId]) =>
+        syncCompleted
+        && !(originalPostAssetVerified && entityType === "ad")
+        && !syncEntities.some((entity) => entity.entityType === entityType && entity.externalId === externalId),
+      );
+      const itemWarning = [
+        success.output.syncWarning,
+        ...itemSyncWarnings,
+        ...(missing.length > 0 ? [`创建后未回读到：${missing.map(([type]) => type).join("、")}`] : []),
+      ].filter(Boolean).join("；") || null;
+      try {
+        this.launchStore.sync(success.item.itemId, itemWarning);
+      } catch (cause) {
+        success.output.syncWarning = [itemWarning, `同步阶段记录失败：${safeError(cause)}`]
+          .filter(Boolean)
+          .join("；");
+      }
+      success.output.syncWarning ??= itemWarning;
+      success.output.sync = syncResult;
     }
   }
 
