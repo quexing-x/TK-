@@ -628,8 +628,6 @@ td small { color: #8792a2; font-size: 10px; line-height: 1.5; }
 .sheet-issues.danger { color: #9d2440; border-color: #f0ccd5; background: #fff7f9; }
 .sheet-issues.warning { color: #865b12; border-color: #f1dfba; background: #fffaf0; }
 .sheet-issues ul { margin: 7px 0 0; padding-left: 18px; display: grid; gap: 4px; }
-.sheet-preview-table td { vertical-align: top; }
-.sheet-preview-table small { color: #84909a; }
 .launch-sheet-panel > .form-actions { padding: 16px 18px 0; }
 
 @media (max-width: 980px) {
