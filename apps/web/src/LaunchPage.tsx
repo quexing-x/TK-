@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, CircleX, Download, FileSpreadsheet, Pencil, Rocket, Settings2, Trash2, Upload, X } from "./ui/icons";
-import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, type AccountConfig, type AccountProviderCapabilities, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
+import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, splitVideoCodes, type AccountConfig, type AccountProviderCapabilities, type LaunchBudgetMode, type LaunchConfigurationRow, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
 import { downloadFailedLaunchItems, downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
@@ -139,14 +139,54 @@ export function regionLabelForCountryCodes(countryCodes: number[]): string {
   return countryCodes.length > 0 ? countryCodes.join(",") : "未设置";
 }
 
-function launchGenderLabel(gender: "all" | "male" | "female" | undefined): string {
-  return gender === "male" ? "男" : gender === "female" ? "女" : "不限";
-}
+/** 摘要只需要这几列；用最小结构而不是整行，测试构造数据也不用编无关字段。 */
+export type LaunchSummaryRow = Pick<
+  LaunchConfigurationRow,
+  "campaignName" | "videoCode" | "startAt" | "dailyBudget" | "campaignBudget" | "bid" | "initialStatus"
+>;
 
-function launchAgeLabel(ageRanges: readonly string[] | undefined): string {
-  return (ageRanges?.length ? ageRanges : LaunchAgeRangeValues)
-    .map((value) => value === "55-100" ? "55+" : value)
-    .join(";");
+/**
+ * 导入后的一屏计划摘要，取代原先那张逐行清单（前 100 行 × 10 列）。
+ *
+ * 清单帮不了发布前的判断：系列名、组名、视频代码在表格里已经核过一遍，真正要在
+ * 这里确认的是「发到哪个账户、多少系列多少组、什么时候开始跑、每天花多少钱」
+ * ——这几个数原先散落在预设卡和表格列里，翻来翻去还数不出来。
+ *
+ * 预算 / 出价 / 时间来自预设、逐行相同，所以只有真的不一致时才显示「各行不同」：
+ * 那说明这张表被手改过，必须让人看见，**不能取第一行糊弄过去**。
+ */
+export function summarizeLaunchPlan(input: {
+  rows: readonly LaunchSummaryRow[];
+  accountNames: readonly string[];
+  timeZone: string;
+  budgetMode: LaunchBudgetMode;
+}) {
+  const { rows, accountNames, timeZone, budgetMode } = input;
+  const first = rows[0];
+  if (!first) return null;
+  // 不能只返回值：bid 本身允许是 null（自动出价），得跟「各行不一致」分开。
+  const shared = <T,>(pick: (row: LaunchSummaryRow) => T): { same: boolean; value: T } => ({
+    same: new Set(rows.map(pick)).size === 1,
+    value: pick(first),
+  });
+  const startAt = shared((row) => row.startAt);
+  const dailyBudget = shared((row) => row.dailyBudget);
+  const campaignBudget = shared((row) => row.campaignBudget ?? null);
+  const bid = shared((row) => row.bid);
+  const initialStatus = shared((row) => row.initialStatus);
+  const budget = budgetMode === "campaign" ? campaignBudget : dailyBudget;
+  return {
+    accountNames,
+    accountCount: accountNames.length,
+    campaigns: new Set(rows.map((row) => row.campaignName.trim()).filter(Boolean)).size,
+    groups: rows.length,
+    // 一行有几个视频代码就算几条广告，与 5000 条上限同口径。
+    ads: rows.reduce((sum, row) => sum + Math.max(1, splitVideoCodes(row.videoCode).length), 0),
+    startLabel: !startAt.same ? "各行不同" : startAt.value ? formatInTimeZone(startAt.value, timeZone) : "立即",
+    budgetLabel: !budget.same ? "各行不同" : `${budget.value ?? dailyBudget.value} / ${budgetMode === "campaign" ? "系列" : "组"}`,
+    bidLabel: !bid.same ? "各行不同" : bid.value === null ? "自动" : String(bid.value),
+    statusLabel: !initialStatus.same ? "各行不同" : initialStatus.value === "enabled" ? "开启" : "关闭",
+  };
 }
 
 export type LaunchPlanProgress = {
@@ -267,6 +307,9 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const fileInput = useRef<HTMLInputElement>(null);
   // 上次提交的内容指纹与时间。提交后不再清空表格，靠它做重复提交提醒。
   const lastSubmission = useRef<{ fingerprint: string; at: number } | null>(null);
+  // 与 lastSubmission 同一份事实，但要参与渲染（收起摘要）所以另存一份 state：
+  // ref 改了不触发重渲染，摘要会一直摊在那儿。
+  const [submittedSheet, setSubmittedSheet] = useState<{ fingerprint: string; at: number } | null>(null);
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const terminalPlanNotificationsReady = useRef(false);
   const notifiedTerminalPlanIds = useRef(new Set<string>());
@@ -391,6 +434,24 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   }, [sourceAdGroups, sourceGroupQuery]);
   const selectedSourceGroups = sourceAdGroups.filter((group) => sourceAdGroupIds.includes(group.adGroupId));
   const selectedAccountIds = launchMode === "single" ? (sourceAccountId ? [sourceAccountId] : []) : targetIds;
+  const launchPlanSummary = useMemo(() => summarizeLaunchPlan({
+    rows: sheet?.rows ?? [],
+    accountNames: selectedAccountIds.map((id) => accountNameById.get(id) ?? id),
+    timeZone: accounts.find((item) => item.id === selectedAccountIds[0])?.timezone ?? "UTC",
+    budgetMode: resolveConfiguredBudgetMode(selectedPresetCreationConfig),
+  }), [sheet, selectedAccountIds, accounts, accountNameById, selectedPresetCreationConfig]);
+  /**
+   * 这张表提交过没有。提交后表格**依然不清空**（清空会让「创建并发布」变灰，
+   * 用户看到的是「系统挡住我了」），只把摘要收起来：已经发出去的东西不该继续
+   * 占着发布区，下面的「投放结果」才是该看的地方。
+   *
+   * 指纹一变（换表、换账户、换预设）自动展开，因为那是一批新内容。
+   */
+  const currentSubmissionFingerprint = useMemo(
+    () => sheet ? launchSubmissionFingerprint({ mode: launchMode, presetId, accountIds: selectedAccountIds, rows: sheet.rows }) : null,
+    [sheet, launchMode, presetId, selectedAccountIds],
+  );
+  const sheetSubmitted = submittedSheet !== null && submittedSheet.fingerprint === currentSubmissionFingerprint;
   const notReadyAccountIds = selectedAccountIds.filter((accountId) =>
     connectionOf(accountId)?.status !== "ready"
     || !canUseLaunchTarget(accountCapabilities[accountId], launchMode === "copy" ? "copy" : "create"),
@@ -764,6 +825,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       // 用户看到的是「系统挡住我了」，而真实原因只是表单被重置。防误重复点改由
       // 上面的指纹二次确认负责。
       lastSubmission.current = { fingerprint, at: Date.now() };
+      setSubmittedSheet(lastSubmission.current);
       // 复制预览是一次性冻结证据（带过期时间），必须清；幂等键也要换，否则同一个
       // clientRequestId 会被服务端当成同一次提交去重。
       setCopyPreview(null); setPlanRequestId(crypto.randomUUID());
@@ -893,7 +955,18 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       <div className="sheet-rule-grid"><article><strong>1. 选择广告预设</strong><span>{selectedPreset ? `当前：${selectedPreset.name} · ${selectedPreset.region}` : "请先选择预设。"}</span></article><article><strong>2. {launchMode === "copy" ? "配置目标账户" : "填写创建设置"}</strong><span>{launchMode === "copy" ? `已配置 ${copyTargetConfigs.length} 个账户，共创建 ${copyTaskCount} 个广告组。` : "填写系列、广告组、视频、链接、年龄和性别；模板已预填全选/不限。"}</span></article><article><strong>3. {launchMode === "copy" ? "原帖自动读取" : "多视频代码"}</strong><span>{launchMode === "copy" ? "逐账户核对 item_id；目标账户必须绑定同一个 TikTok 身份。" : "同一单元格可用 `；`、`;` 或换行分隔多个代码，作为同一广告组的多个素材。"}</span></article><article><strong>4. 最终确认</strong><span>{launchMode === "copy" ? "点击迁移时自动读取并核对原帖，核对通过后进入创建队列。" : "广告名称自动生成后进入后台队列。"}</span></article></div>
       <label className="field" style={{ margin: "0 18px 12px" }}><span>本次使用的广告预设</span><select value={presetId} onChange={(event) => { setPresetId(event.target.value); setSheet(null); }}><option value="">请选择预设</option>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label>
       {selectedPreset && <div className="selected-preset-summary" aria-label="当前广告预设详情"><strong>{selectedPreset.name}</strong><div><span><small>地区</small>{selectedPreset.region}</span><span><small>每日预算</small>{selectedPreset.dailyBudget}</span><span><small>出价</small>{selectedPreset.bid ?? "自动"}</span><span><small>创建时间</small>{presetStartLabel(selectedPreset)}</span><span><small>预设初始状态</small>{selectedPreset.initialStatus === "enabled" ? "开启" : "关闭"}</span><span><small>创建参数</small>{selectedPresetLaunchReady ? "已就绪" : "待补全"}</span></div>{launchMode === "copy" && <p>原帖迁移的数量、预算、出价、时间和创建后状态，以上方每个目标账户的配置为准。</p>}</div>}
-      {launchMode !== "copy" && <><button className="sheet-dropzone" disabled={busy || !selectedPreset} onClick={() => fileInput.current?.click()} type="button"><Upload size={22} /><strong>{fileName || "选择 .xlsx / .csv 文件"}</strong><span>{selectedPreset ? "导入不会立即创建广告。" : "请先选择广告预设。"}</span></button><input ref={fileInput} accept=".xlsx,.csv" hidden onChange={(event) => void importFile(event.target.files?.[0])} type="file" />{sheet && <div className="sheet-result"><div className="sheet-summary"><span className={sheet.errors.length === 0 ? "status active" : "status danger"}>{sheet.errors.length === 0 ? <CheckCircle2 size={14} /> : <X size={14} />}{sheet.errors.length === 0 ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组` : `${sheet.errors.length} 个错误`}</span></div>{sheet.errors.length > 0 && <IssueList issues={sheet.errors} />}{sheet.rows.length > 0 && <div className="table-wrap"><table className="sheet-preview-table"><thead><tr><th>来源行</th><th>推广系列</th><th>广告组</th><th>视频代码</th><th>产品 URL</th><th>年龄</th><th>性别</th><th>广告名称</th><th>预算</th><th>出价</th></tr></thead><tbody>{sheet.rows.slice(0, 100).map((row) => <tr key={`${row.rowNumber}-${row.videoCode}`}><td>{row.rowNumber}</td><td>{row.campaignName}</td><td>{row.adGroupName}</td><td>{row.videoCode}</td><td><small>{row.productUrl}</small></td><td><small>{launchAgeLabel(row.ageRanges)}</small></td><td>{launchGenderLabel(row.gender)}</td><td>{row.adName}</td><td>{row.dailyBudget}</td><td>{row.bid ?? "自动"}</td></tr>)}</tbody></table></div>}</div>}</>}
+      {launchMode !== "copy" && <><button className="sheet-dropzone" disabled={busy || !selectedPreset} onClick={() => fileInput.current?.click()} type="button"><Upload size={22} /><strong>{fileName || "选择 .xlsx / .csv 文件"}</strong><span>{selectedPreset ? "导入不会立即创建广告。" : "请先选择广告预设。"}</span></button><input ref={fileInput} accept=".xlsx,.csv" hidden onChange={(event) => void importFile(event.target.files?.[0])} type="file" />{sheet && <div className="sheet-result"><div className="sheet-summary"><span className={sheet.errors.length === 0 ? "status active" : "status danger"}>{sheet.errors.length === 0 ? <CheckCircle2 size={14} /> : <X size={14} />}{sheet.errors.length === 0 ? `本次导入共创建 ${importedCampaignCount} 个系列（同名跳过），${sheet.rows.length} 个广告组` : `${sheet.errors.length} 个错误`}</span></div>{sheet.errors.length > 0 && <IssueList issues={sheet.errors} />}{launchPlanSummary && (sheetSubmitted
+        ? <div className="launch-plan-summary submitted"><strong><CheckCircle2 size={14} /> 已提交 {launchPlanSummary.campaigns} 系列 / {launchPlanSummary.groups} 组{launchPlanSummary.accountCount > 1 ? ` × ${launchPlanSummary.accountCount} 账户` : ""}</strong><span>{submittedSheet ? new Date(submittedSheet.at).toLocaleString("zh-CN") : ""} · 进度看下方「投放结果」</span></div>
+        : <div className="launch-plan-summary" aria-label="本次创建计划"><div>
+          <span><small>发布到</small>{launchPlanSummary.accountNames[0] ?? "未选择账户"}{launchPlanSummary.accountCount > 1 ? ` 等 ${launchPlanSummary.accountCount} 个` : ""}</span>
+          <span><small>推广系列</small>{launchPlanSummary.campaigns} 个</span>
+          <span><small>广告组</small>{launchPlanSummary.groups} 个{launchPlanSummary.accountCount > 1 ? ` × ${launchPlanSummary.accountCount} = ${launchPlanSummary.groups * launchPlanSummary.accountCount}` : ""}</span>
+          <span><small>广告</small>{launchPlanSummary.ads} 条</span>
+          <span><small>创建时间</small>{launchPlanSummary.startLabel}</span>
+          <span><small>预算</small>{launchPlanSummary.budgetLabel}</span>
+          <span><small>出价</small>{launchPlanSummary.bidLabel}</span>
+          <span><small>创建后状态</small>{launchPlanSummary.statusLabel}</span>
+        </div></div>)}</div>}</>}
       {copyPreview && <div className={previewValid ? "creation-template-note copy-preview-result migration-confirmation" : "sheet-issues warning copy-preview-result"}><strong>{previewValid ? `最终确认 · ${previewSources.length} 个源组 · ${previewSources.reduce((sum, source) => sum + source.posts.length, 0)} 帖 · ${copyPreview.items.length} 个广告组` : "原帖检查没有产出任何可创建的广告组"}</strong><span className="status">{previewSecondsLeft > 0 ? `原帖证据已冻结 · ${formatCountdown(previewSecondsLeft)}` : "原帖证据已过期，执行时会重新回读并逐条校验"}</span>{copyPreview.blockers.length > 0 && <><small>以下情况会在执行时跳过，其余广告组照常创建：</small><ul>{copyPreview.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></>}{copyPreview.warnings.length > 0 && <ul>{copyPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}{previewValid && <><div className="migration-source-list">{previewSources.map((source) => <div className="migration-source-summary" key={source.adGroupId}><strong>{source.campaignName} / {source.adGroupName}</strong><span>源广告组 ID：{source.adGroupId}</span><span>产品 URL：{source.productUrl ?? "未读取"}</span><span>原帖：{source.posts.length} 条</span><details><summary>查看前 5 条原帖</summary>{source.posts.slice(0, 5).map((post) => <small key={post.itemId}>{post.displayName ?? post.itemId} · item_id：{post.itemId}</small>)}</details></div>)}</div><div className="table-wrap"><table><thead><tr><th>目标账户</th><th>总数量</th><th>预算 / 出价</th><th>创建后状态</th><th>自动生成广告组名称</th><th>最终创建时间</th><th>原帖核对</th></tr></thead><tbody>{copyPreview.targetConfigs.map((config) => { const account = accounts.find((item) => item.id === config.accountId); const accountItems = copyPreview.items.filter((candidate) => candidate.accountId === config.accountId); const firstItem = accountItems[0]; const matchedPosts = new Map(accountItems.flatMap((item) => item.targetPostMapping.posts.map((post) => [post.itemId, post]))).size; const expectedPosts = previewSources.reduce((sum, source) => sum + source.posts.length, 0); return <tr key={config.accountId}><td>{account?.displayName ?? config.accountId}<small>{account?.timezone ?? "UTC"}</small></td><td>{config.quantity} × {previewSources.length} = {accountItems.length}</td><td>{config.dailyBudget} / {config.bid ?? "自动"}</td><td><span className={config.initialStatus === "enabled" ? "status active" : "status"}>{config.initialStatus === "enabled" ? "开启" : "关闭"}</span></td><td>{accountItems.slice(0, 4).map((item) => <small key={`${item.sourceSnapshot.adGroupId}-${item.itemIndex}`}>{item.launchRow.adGroupName}</small>)}{accountItems.length > 4 && <small>另 {accountItems.length - 4} 个…</small>}</td><td>{firstItem?.launchRow.startAt ? formatInTimeZone(firstItem.launchRow.startAt, account?.timezone ?? "UTC") : "立即"}</td><td>{matchedPosts}/{expectedPosts} 已匹配</td></tr>; })}</tbody></table></div></>}</div>}
       {publishBlockers.length > 0 && <div className="sheet-issues warning publish-blockers" id="publish-blockers"><strong>暂不能发布</strong><ul>{publishBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}
       {executionFeedback && <div className={executionFeedback.tone === "success" ? "creation-template-note" : `sheet-issues ${executionFeedback.tone}`}><strong>{executionFeedback.title}</strong><ul>{executionFeedback.lines.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ul></div>}

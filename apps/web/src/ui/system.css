@@ -1300,6 +1300,47 @@ td strong { color: var(--ink); }
   border-top: 1px solid var(--line);
   font-size: 12px;
 }
+/* 导入后的计划摘要。沿用 .selected-preset-summary 的字段栅格，只是没有标题行。 */
+.launch-plan-summary {
+  margin: 0 18px 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.launch-plan-summary > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.launch-plan-summary > div > span {
+  display: grid;
+  gap: 3px;
+  color: var(--ink);
+  font-weight: 700;
+}
+.launch-plan-summary small {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 500;
+}
+/* 提交后收起成一行：内容已经发出去了，不该再占着发布区。 */
+.launch-plan-summary.submitted {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.launch-plan-summary.submitted > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+}
+.launch-plan-summary.submitted > span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
 .launch-page .table-panel { margin-top: 32px; }
 
 .task-center-page > .panel { box-shadow: none; }
