@@ -781,7 +781,8 @@ describe("local API", () => {
       method: "POST",
       url: "/api/ad-groups/batch-expand",
       payload: {
-        sources: Array.from({ length: 6 }, (_unused, index) => ({
+        // 14 个源组：多于并发上限，才量得出上限本身而不是源组数。
+        sources: Array.from({ length: 14 }, (_unused, index) => ({
           accountId: "demo-account",
           sourceCampaignId: `campaign-${index + 1}`,
           sourceCampaignName: `campaign ${index + 1}`,
@@ -798,11 +799,12 @@ describe("local API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(6);
-    // 串行时这里恒为 1；上限来自 expandAccountConcurrency，不能无脑 Promise.all。
-    expect(maxInFlight).toBe(3);
+    expect(copyAdGroupToExistingCampaign).toHaveBeenCalledTimes(14);
+    // 串行时这里恒为 1；上限来自 expandAccountConcurrency（实测定的 10），
+    // 而且必须**有**上限——不能无脑 Promise.all 把 14 条一起打出去。
+    expect(maxInFlight).toBe(10);
     expect(finishOrder.indexOf("源5")).toBeLessThan(finishOrder.indexOf("源2"));
-    expect(response.json()).toMatchObject({ createdGroups: 4, skipped: 0 });
+    expect(response.json()).toMatchObject({ createdGroups: 12, skipped: 0 });
     expect(response.json().failed.map((entry: { name: string }) => entry.name)).toEqual(["源2", "源5"]);
   });
 
