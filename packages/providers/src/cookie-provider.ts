@@ -1069,10 +1069,25 @@ export class CookieAdsProvider implements AdsProvider {
       && mutations.every((mutation) => mutation.templateMode === "none")
       && campaignKeys.size === 1
       && initialStatuses.size === 1;
-    // All creation entry points share one account's mutable draft session.
-    // Serializing inside one HTTP request (or only by series) does not protect
-    // against a simultaneous manual expansion or scheduled copy.
-    const releaseBatchLock = await this.acquireBatchLock(context.accountId);
+    // 新建按**系列**互斥，不独占整个账户。
+    //
+    // 一次调用里的 mutations 来自同一个系列（调用方按系列分批），链上每一步都带自己
+    // 那份 campaign_snap_id / ad_snap_id / campaign_sketch_id：campaign_snap/save 提交
+    // 完整报文并由响应回 ID，campaign_snap/check 与 ad_snap/save 都显式传 ID，没有
+    // 「当前草稿」这种按会话隐式绑定、会被旁边那条改掉的状态。
+    //
+    // 跨系列共享的只有 reservations，而它是本次调用自己的内存态、不跨调用。
+    //
+    // 系列复制与补发布仍然独占账户：它们成批动整棵系列树，不像这里只挂一条新系列。
+    //
+    // 一次调用里混着多个系列时**退回独占**。调用方现在总是按系列分批（
+    // executeSeriesBatch 里有「系列批次包含多个系列，无法执行」的断言），所以这条
+    // 走不到；但真走到了，按其中任意一个系列名加锁都护不住其余那些。
+    const singleCampaignKey = campaignKeys.size === 1 ? [...campaignKeys][0]! : null;
+    const gate = this.gate(context.accountId);
+    const releaseBatchLock = singleCampaignKey
+      ? await gate.acquireShared("create", singleCampaignKey)
+      : await gate.acquireExclusive();
     try {
       // 数据连接（旧称 Pixel）在每条 mutation 自己的创建前解析，数据取自那次本来
       // 就要发的 adgroup/list 实时读取。不再预先拉事件管理器目录：那个接口已对所有
@@ -1242,7 +1257,7 @@ export class CookieAdsProvider implements AdsProvider {
     // 「当前草稿」这种会被并发的另一条改掉的隐式状态。新建 / 系列复制 / 补发布仍然
     // 独占账户——它们要新建系列草稿，那个才是账户级共享的。
     const releaseBatchLock = await this.gate(context.accountId)
-      .acquireShared(input.existingCampaignId);
+      .acquireShared("expand", input.existingCampaignId);
     try {
       // The task may have waited behind another creation on this account.
       // Revalidate before creating a draft, not only after it has been saved.
@@ -2093,17 +2108,25 @@ export class CookieAdsProvider implements AdsProvider {
   }
 }
 
+/** 共享持有的写类型。不同类型之间仍然互斥，见 AccountCreationGate。 */
+export type AccountWriteKind = "create" | "expand";
+
 /**
  * 一个账户上的创建闸门。
  *
  * 两种持有方式：
- * - 独占（新建 / 系列复制 / 补发布）：整个账户互斥。这些路径会新建系列草稿，那是
- *   账户级的共享可变状态，谁都不能在旁边同时改。
- * - 共享（扩组）：同账户的扩组之间并发，但同一个 `existing_campaign_id` 仍然串行。
- *   扩组每一步都拿显式的草稿标识寻址，彼此不会串草稿；把并发限制在「不同系列」上，
- *   是为了不让两个 create_by_snap 同时往同一个系列里发布。
+ * - 独占（系列复制 / 补发布）：整个账户互斥。它们成批动整棵系列树。
+ * - 共享（新建 / 扩组）：同类型之间并发，但**同一个系列仍然串行**。两条链的每一步
+ *   都带自己那份 snap / sketch 标识，账户级没有会被旁边那条改掉的隐式草稿指针；
+ *   按系列串行是为了不让两个 create_by_snap 同时往同一个系列里发布。
  *
- * 独占方优先：只要有独占方在排队，新的共享方就得等它做完，避免一串扩组把新建饿死。
+ * **不同类型的共享方之间仍然互斥。** 新建按系列**名**加锁、扩组按系列 **ID** 加锁，
+ * 两个键空间对不上——新建挂到同名的已有系列、而扩组正好在扩那条系列时，按各自的键
+ * 都锁不住对方。与其把两个键空间强行统一，不如让两类写整体错开：这类同时发生的场景
+ * （一边跑批量创建、一边手点扩组）本来就少，而 2026-09-07 的账户独占锁原本就护着它，
+ * 这里不能悄悄把那层保护拆掉。
+ *
+ * 独占方优先：只要有独占方在排队，新的共享方就得等它做完，避免一串共享方把它饿死。
  * 这把锁只覆盖同一个 Provider 实例，不覆盖用户自己开的浏览器或另一个进程——与改动
  * 前的边界一致。
  */
@@ -2112,12 +2135,36 @@ export class AccountCreationGate {
   private exclusiveTail: Promise<void> = Promise.resolve();
   /** 已排队或正在跑的独占方数量。 */
   private exclusivePending = 0;
-  /** 正在跑的并发扩组数。 */
+  /** 正在跑的共享方数量。 */
   private sharedActive = 0;
-  /** sharedActive 归零时唤醒正在等待的独占方。 */
-  private sharedDrained: (() => void) | null = null;
+  /** 当前在跑的共享方是哪一类；sharedActive 为 0 时无意义。 */
+  private sharedKind: AccountWriteKind | null = null;
+  /** sharedActive 归零时要唤醒的等待者（独占方，以及另一类共享方）。 */
+  private readonly drainWaiters: Array<() => void> = [];
+  /** 各类共享方正在门口等的数量。用来做交接，避免一类把另一类拖死。 */
+  private readonly sharedWaiting = new Map<AccountWriteKind, number>();
   /** 每个系列一条串行链。 */
   private readonly scopeTails = new Map<string, Promise<void>>();
+
+  private waitingOtherKind(kind: AccountWriteKind): boolean {
+    for (const [other, count] of this.sharedWaiting) {
+      if (other !== kind && count > 0) return true;
+    }
+    return false;
+  }
+
+  private waitForDrain(): Promise<void> {
+    return new Promise<void>((resolve) => { this.drainWaiters.push(resolve); });
+  }
+
+  private releaseShared(): void {
+    this.sharedActive -= 1;
+    if (this.sharedActive > 0) return;
+    this.sharedKind = null;
+    // 一次唤醒全部：醒来的每一个都会重新检查条件，抢不到的会再等一轮。
+    const waiters = this.drainWaiters.splice(0, this.drainWaiters.length);
+    for (const wake of waiters) wake();
+  }
 
   async acquireExclusive(): Promise<() => void> {
     // 同步自增：此后进来的共享方都会看见它并让路。
@@ -2127,10 +2174,8 @@ export class AccountCreationGate {
     const current = new Promise<void>((resolve) => { release = resolve; });
     this.exclusiveTail = previous.then(() => current);
     await previous;
-    // 排在前面的扩组已经在跑了，等它们退干净再动账户。
-    while (this.sharedActive > 0) {
-      await new Promise<void>((resolve) => { this.sharedDrained = resolve; });
-    }
+    // 已经在跑的共享方要先退干净，再动账户。
+    while (this.sharedActive > 0) await this.waitForDrain();
     let released = false;
     return () => {
       if (released) return;
@@ -2140,30 +2185,55 @@ export class AccountCreationGate {
     };
   }
 
-  async acquireShared(scopeKey: string): Promise<() => void> {
-    // 1) 同系列串行。
-    const previous = this.scopeTails.get(scopeKey) ?? Promise.resolve();
+  async acquireShared(kind: AccountWriteKind, scopeKey: string): Promise<() => void> {
+    // 1) 同系列串行。键带上类型，免得两类写的键空间意外撞在一起。
+    const tailKey = `${kind} ${scopeKey}`;
+    const previous = this.scopeTails.get(tailKey) ?? Promise.resolve();
     let releaseScope!: () => void;
     const current = new Promise<void>((resolve) => { releaseScope = resolve; });
     const tail = previous.then(() => current);
-    this.scopeTails.set(scopeKey, tail);
+    this.scopeTails.set(tailKey, tail);
     await previous;
-    // 2) 账户准入。让路期间不计入 sharedActive，否则独占方永远等不到归零。
-    //    循环退出与 sharedActive 自增之间没有 await，独占方插不进来。
-    while (this.exclusivePending > 0) await this.exclusiveTail;
+    // 2) 账户准入：独占方在排队时让路；另一类共享方在跑时也让路。
+    //    让路期间不计入 sharedActive，否则等待方永远等不到归零；但要计入
+    //    sharedWaiting，正在跑的那一类才知道该停止放新的进来。
+    //    跳出循环与自增之间没有 await，别人插不进来。
+    this.sharedWaiting.set(kind, (this.sharedWaiting.get(kind) ?? 0) + 1);
+    try {
+      for (;;) {
+        if (this.exclusivePending > 0) {
+          await this.exclusiveTail;
+          continue;
+        }
+        if (this.sharedActive > 0 && this.sharedKind !== kind) {
+          await this.waitForDrain();
+          continue;
+        }
+        // 交接：另一类已经在门口等了，本类就不再加人，让在跑的这批排空。
+        // 没有这一条，一批接一批的新泳道能把等在旁边的另一类无限往后推。
+        //
+        // 这里刻意保留 `sharedActive > 0` 这个前提：等待的条件必须是「有东西正在跑」，
+        // 而在跑的东西总会结束，所以一定能推进。去掉它（两边都空着也互相让）会让
+        // 两类同时在门口时谁都不进，直接死锁。代价是恰好在排空那一瞬间到达的同类
+        // 仍可能插到前面——那只是多等一批，不是无限等。
+        if (this.sharedActive > 0 && this.waitingOtherKind(kind)) {
+          await this.waitForDrain();
+          continue;
+        }
+        break;
+      }
+    } finally {
+      this.sharedWaiting.set(kind, (this.sharedWaiting.get(kind) ?? 1) - 1);
+    }
     this.sharedActive += 1;
+    this.sharedKind = kind;
     let released = false;
     return () => {
       if (released) return;
       released = true;
       releaseScope();
-      if (this.scopeTails.get(scopeKey) === tail) this.scopeTails.delete(scopeKey);
-      this.sharedActive -= 1;
-      if (this.sharedActive === 0 && this.sharedDrained) {
-        const drained = this.sharedDrained;
-        this.sharedDrained = null;
-        drained();
-      }
+      if (this.scopeTails.get(tailKey) === tail) this.scopeTails.delete(tailKey);
+      this.releaseShared();
     };
   }
 }
