@@ -52,14 +52,13 @@ const launchLeaseTimeoutMs = 30 * 60 * 1000;
 const launchLeaseHeartbeatMs = 60 * 1000;
 
 /**
- * 同一个账户里同时在跑的扩组数。
+ * 同一个账户里同时在跑的写链数。扩组（按源组）与新建（按系列）共用这一个数。
  *
- * 一条扩组从 ad_snap/copy 到终态回读大约十来个来回、实测 p50 约 14 秒，而这十几秒
- * 几乎全在等 TikTok。串行时一批 31 个源组就是 6 分钟，200 个源组要 40 分钟——比
- * HTTP 超时还长。Provider 侧的账户闸门已经放开扩组之间的互斥（同系列仍然串行），
- * 这里决定实际开几条。
+ * 两条链的形状一样：十来个 HTTP 来回、耗时几乎全在等 TikTok（扩组单条 p50 约 14 秒，
+ * 新建单条广告组实测 26~38 秒），每条链平均只有 0.5~0.7 次请求/秒。串行时扩组
+ * 200 个源组要 40 分钟、新建 153 条要一个多小时，都比 HTTP 超时还长。
  *
- * **10 是量出来的，不是猜的。** 2026-09-10 拿这个账户的列表读接口打并发阶梯
+ * **10 是量出来的，不是猜的。** 2026-09-10 拿账户的列表读接口打并发阶梯
  * （1/3/5/10/15/20/30/40/60，每档并发数×2 个请求）：
  *
  *   并发   1  p50  931ms  吞吐  0.99/s  错误 0%
@@ -67,15 +66,14 @@ const launchLeaseHeartbeatMs = 60 * 1000;
  *   并发  60  p50 1382ms  吞吐 37.32/s  错误 0%
  *
  * 全程 0 错误、延迟没有拐点，而且压测期间另外三个账户还在各自跑同步——真实上限
- * 只会更高。一条扩组平均约 0.7 req/s，10 条同时跑也才 7 req/s，比实测扛住的
- * 37 req/s 低五倍以上。所以**请求速率不是瓶颈，之前那个 3 属于凭空保守**。
+ * 只会更高。10 条链同时跑也才 5~7 req/s，比实测扛住的 37 req/s 低五倍以上。
+ * 所以**请求速率不是瓶颈**；此前扩组取 3 是凭空保守。
  *
- * 阶梯量的是**读接口**。创建接口（ad_snap/copy、create_by_snap）是另一条更贵的
- * 写路径，可能另有更紧的配额，阶梯证不了它。真要判断只能看一整批真实扩组的失败
- * 率——那是唯一的哨兵（见 docs 与 automation 里同样的口径）。失败率相对历史抬头
- * 就把这个数调回去。
+ * 阶梯量的是**读接口**。创建接口（campaign_snap/save、ad_snap/copy、create_by_snap）
+ * 是另一条更贵的写路径，可能另有更紧的配额，阶梯证不了它。判据只有一个：一整批
+ * 真实创建 / 扩组的失败率。相对历史抬头就把这个数调回去。
  */
-const expandAccountConcurrency = 10;
+const accountWriteConcurrency = 10;
 
 /**
  * 一个账户攒下来待做的「创建后同步」。见 LaunchService.applyCreationSync 的注释：
@@ -294,23 +292,27 @@ export class LaunchService {
     const groupsByAccount = groupLaunchItemsByAccountAndCampaign(candidates);
     const accountResults = await Promise.all(
       [...groupsByAccount.values()].map(async (groups) => {
-        const results = [];
-        // A Cookie account has one mutable Ads Manager draft/session context.
-        // Different campaigns for the same account must therefore be created
-        // serially; otherwise one source group can overwrite the draft state
-        // another group is validating or reading back. Separate accounts stay
-        // independent and may still execute in parallel.
+        // 账户内**按系列并发**。
+        //
+        // 同一个系列的广告组本来就在一次 executeSeriesBatch 里一起建，Provider 的
+        // 闸门又按系列名互斥，所以不会出现两条链同时往同一个系列里写。不同系列各自
+        // 走 campaign_snap/save → campaign_snap/check → ad_snap/save，每步都带自己
+        // 那份 snap / sketch 标识，账户级没有会被旁边那条改掉的隐式草稿指针；
+        // createFromPreset 里的 reservations 也是每次调用自己的内存态，不跨批次。
+        //
+        // 串行时实测：单条广告组 26~38 秒、峰值同时在跑恒为 1，153 条要一个多小时。
         const deferredSync: PendingCreationSync[] = [];
-        for (const group of groups) {
-          results.push(await this.executeSeriesBatch(
+        const results = await mapWithConcurrency(
+          groups,
+          accountWriteConcurrency,
+          (group) => this.executeSeriesBatch(
             plan.presetSnapshot!.creationConfig,
             group,
             actor,
             deferredSync,
-          ));
-        }
-        // 创建后同步收在这里做，一个账户一次。挂在每个系列末尾时它是整个计划的
-        // 全部耗时（见 applyCreationSync 的注释）。
+          ),
+        );
+        // 创建后同步收在这里做，一个账户一次。
         const pending = mergePendingCreationSync(deferredSync);
         if (pending) await this.applyCreationSync(pending);
         return results;
@@ -1758,7 +1760,7 @@ export class LaunchService {
   }
 
   // 一键扩组：批量选中的源广告组，每个各扩 count 个新组。
-  // 按账户串行、账户内并发 expandAccountConcurrency 条，复用 copyAdGroupWithinAccount。
+  // 按账户串行、账户内并发 accountWriteConcurrency 条，复用 copyAdGroupWithinAccount。
   // 幂等：相同 (账户+源组+扩组预设指纹) 已成功则跳过，不重复建组。
   async batchExpandAdGroups(input: {
     sources: Array<{
@@ -1856,7 +1858,7 @@ export class LaunchService {
       // 挂掉会把还没轮到的那些也留成 running，得靠人来收。
       const outcomes = await mapWithConcurrency(
         planned,
-        expandAccountConcurrency,
+        accountWriteConcurrency,
         async ({ source, baseAdGroupName, taskKey }): Promise<ExpandSourceOutcome> => {
           const claim = this.store.claimAdGroupExpandTask(
             taskKey,

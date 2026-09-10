@@ -2761,10 +2761,17 @@ describe("local API", () => {
     expect(store.getAccount("demo-account")?.enabled).toBe(true);
   });
 
-  it("一个账户的多个系列只做一次创建后同步，每条仍按最终快照核对", async () => {
+  it("一个账户的多个系列并发创建，且只做一次创建后同步", async () => {
     const created: CreationMutationResult[] = [];
-    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) =>
-      mutations.map((mutation): CreationMutationResult => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // 让出一轮，给别的系列制造真正重叠的机会；串行时这里恒为 1。
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return mutations.map((mutation): CreationMutationResult => {
         const suffix = mutation.row.rowNumber;
         const result: CreationMutationResult = {
           ...mutation,
@@ -2776,8 +2783,8 @@ describe("local API", () => {
         };
         created.push(result);
         return result;
-      }),
-    );
+      });
+    });
     // 最终快照看得见此前建出来的全部对象——这正是收成一次之后每条的核对依据。
     const syncReadOnly = vi.fn<NonNullable<AdsProvider["syncReadOnly"]>>(async () => {
       const entities = created.flatMap((result) => [
@@ -2818,12 +2825,18 @@ describe("local API", () => {
     const results = executed.json().results as Array<{ status: string; syncWarning: string | null }>;
     expect(results).toHaveLength(4);
     expect(createFromPreset).toHaveBeenCalledTimes(4);
-    // 这条是整个改动的要点：全账户三层分页一个账户只跑一次。挂在每个系列末尾时
-    // 它是新建计划的全部耗时（153 个组的计划里 97 分钟有 96.7 分钟在这儿）。
+    // 账户内按系列并发。串行时这里恒为 1，实测那样 153 条要跑一个多小时。
+    expect(maxInFlight).toBe(4);
+    // 全账户三层分页一个账户只跑一次，不是一个系列一次。
     expect(syncReadOnly).toHaveBeenCalledTimes(1);
     for (const result of results) {
       expect(result).toMatchObject({ status: "succeeded", syncWarning: null });
     }
+    // 结果仍按导入表顺序返回，不是先跑完谁就先报谁。
+    const rowNumbers = (executed.json().results as Array<{ itemId: string }>)
+      .map((result) => store.listLaunchPlanItems(planId)
+        .find((item) => item.itemId === result.itemId)?.itemIndex ?? -1);
+    expect(rowNumbers).toEqual([...rowNumbers].sort((left, right) => left - right));
   });
 
   it("keeps creation succeeded and account automation unchanged on non-healthy readback quality", async () => {
@@ -3266,7 +3279,9 @@ describe("local API", () => {
     });
   });
 
-  it("runs different campaign batches serially within one target account", async () => {
+  // 契约在 1.4.127 变了：账户内**按系列并发**，不再逐系列串行。同一个系列的广告组
+  // 仍然合在一次 createFromPreset 里，Provider 的闸门也仍然按系列名互斥。
+  it("runs different campaign batches concurrently within one target account", async () => {
     let activeBatches = 0;
     let maxActiveBatches = 0;
     const createFromPreset = vi.fn(async (_context, mutations: CreationMutation[]) => {
@@ -3293,8 +3308,9 @@ describe("local API", () => {
 
     expect(executed.statusCode).toBe(200);
     expect(createFromPreset).toHaveBeenCalledTimes(5);
+    // 每个系列仍然各自一次调用——并发的是系列之间，不是把系列合并成一次大调用。
     expect(createFromPreset.mock.calls.every((call) => call[1].length === 1)).toBe(true);
-    expect(maxActiveBatches).toBe(1);
+    expect(maxActiveBatches).toBe(5);
     expect(store.listLaunchPlanItems(planId).map((item) => item.status))
       .toEqual(Array.from({ length: 5 }, () => "succeeded"));
   });
