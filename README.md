@@ -2,9 +2,15 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.4.135
+## Windows 桌面版 1.4.136
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.135.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.136.exe`
+
+升级到 1.4.136 后会出现的变化：
+
+- **余额告警浮窗里的「请充值」变成链接。** 点击后由**默认浏览器**打开充值页（yinocloud.yinolink.com/homepage），不在客户端窗口内打开。客户端此前把一切外链弹出整体拦掉，本次改为：http(s) 链接转交系统默认浏览器，弹窗拦截与防内跳的安全防线不变。
+
+升级到 1.4.135 后会出现的变化：
 
 升级到 1.4.135 后会出现的变化：
 

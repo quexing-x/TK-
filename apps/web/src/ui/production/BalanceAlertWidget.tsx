@@ -64,7 +64,14 @@ export function BalanceAlertWidget({ accounts }: {
                   余额：{account.totalAmount === null ? "—" : account.totalAmount}
                   {account.totalAmount !== null && account.currency ? ` ${account.currency}` : ""}
                 </span>
-                <em>请充值</em>
+                {/* 客户端主进程把 http(s) 的窗口打开行为转交 shell.openExternal——
+                    点击后由默认浏览器打开充值页。 */}
+                <a
+                  className="p-balance-alert-recharge"
+                  href="https://yinocloud.yinolink.com/homepage"
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >请充值</a>
               </li>
             ))}
           </ul>
