@@ -17,6 +17,7 @@ import {
   Menu,
   nativeImage,
   Notification,
+  shell,
   Tray,
 } from "electron";
 import { installOutboundProxy, resolveOutboundProxy, startOutboundProxyWatcher } from "../../api/src/proxy.ts";
@@ -218,7 +219,16 @@ async function startRuntime(origin: string) {
 function createWindow(origin: string): BrowserWindow {
   const window = new BrowserWindow({ title: PRODUCT_NAME, width: 1440, height: 960, minWidth: 1100, minHeight: 720, show: false, autoHideMenuBar: true, backgroundColor: "#f5f7fb", webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
   const allowedOrigin = new URL(origin).origin;
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // 界面里的外链（余额告警的「请充值」等）走默认浏览器打开，而不是被窗口打开
+  // 处理器整个拦掉：拦掉的初衷是防弹窗，但把所有 href 一律吞掉后，界面作者之外
+  // 任何想把人带去外部页面（充值、公告、文档）的入口都没有出路。这里只认 http(s)
+  // 明确协议，其余一切照旧拒绝；will-navigate 的防内跳防线不动。
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
   window.webContents.on("will-navigate", (event, url) => { if (new URL(url).origin !== allowedOrigin) event.preventDefault(); });
   window.on("close", (event) => {
     if (clientQuitRequested) return;

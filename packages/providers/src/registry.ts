@@ -1,5 +1,6 @@
 import {
   ProviderCapabilitySchema,
+  type AccountBalanceSnapshot,
   type AccountProviderCapabilities,
   type ProviderCapability,
   type ProviderConnection,
@@ -183,6 +184,24 @@ export class ProviderRegistry {
       throw new Error(`${provider.displayName} 暂不支持读取广告数据。`);
     }
     return provider.syncReadOnly(context);
+  }
+
+  /**
+   * 读账户余额；provider 不支持或没声明该能力时返回 undefined。
+   *
+   * 刻意不抛异常（与 syncReadOnly 不同）：余额是附加信息，调用方拿不到就该显示成
+   * 未接入，而不是让一次轮询报错。能力闸门照旧走 capabilities，避免对没导入会话
+   * cURL 的账户发一个必然失败的请求。
+   */
+  async readBalance(
+    kind: ProviderKind,
+    context: ProviderContext,
+  ): Promise<AccountBalanceSnapshot | undefined> {
+    const provider = this.get(kind) as { readBalance?: ReadProvider["readBalance"] };
+    if (!provider.readBalance || !this.get(kind).capabilities.has("read-account-balance")) {
+      return undefined;
+    }
+    return provider.readBalance(context);
   }
 
   /** 定向回读单个实体；provider 不支持时返回 null，由调用方决定退路。 */

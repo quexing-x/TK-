@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dateTimeSuffix, type ProviderEntity, type SyncEntityType } from "@tk-auto/core";
-import type { SyncDataQualityStatus } from "@tk-auto/core";
+import { dateTimeSuffix, type NotificationRenderedMessage, type ProviderEntity, type SyncEntityType } from "@tk-auto/core";
+import type { AccountBalanceSnapshot, SyncDataQualityStatus } from "@tk-auto/core";
 import { InMemoryCredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
@@ -44,7 +44,9 @@ class FakeProvider implements AdsProvider {
   readonly implementationStatus = "available" as const;
   readonly displayName = "Fake Cookie";
   readonly capabilityVersion = "fake-cookie-v1";
-  readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status", "appeal-ads", "copy-ads", "delete-ad-groups"] as const);
+  readonly capabilities = new Set(["read-campaigns", "read-ad-groups", "change-status", "appeal-ads", "copy-ads", "delete-ad-groups", "read-account-balance"] as const);
+  /** 供余额链路用例控制 readBalance 的返回值；不设置时不实现该行为，既有用例不受影响。 */
+  balance: AccountBalanceSnapshot | undefined = undefined;
   readonly mutations: StatusMutation[] = [];
   readonly appeals: AppealMutation[] = [];
   readonly appealOutcomes: boolean[] = [];
@@ -86,6 +88,10 @@ class FakeProvider implements AdsProvider {
     message: string;
   }> {
     return { ok: true, status: "ready" as const, message: "ready" };
+  }
+
+  async readBalance(): Promise<AccountBalanceSnapshot | undefined> {
+    return this.balance;
   }
 
   async syncReadOnly() {
@@ -566,6 +572,146 @@ describe("AutomationService", () => {
   afterEach(() => {
     vi.useRealTimers();
     store.close();
+  });
+
+  // 把余额快照回拨到 15 分钟节流窗口之外，让下一次 runAccount 强制重新读余额。
+  function backdateBalanceSnapshot(): void {
+    const db = Reflect.get(store, "db") as {
+      prepare(sql: string): { run(...values: unknown[]): void };
+    };
+    db.prepare("UPDATE account_balance_snapshots SET captured_at = ?")
+      .run("2026-07-01T00:00:00.000Z");
+  }
+
+  function balance(amount: string): AccountBalanceSnapshot {
+    return {
+      totalAmount: amount,
+      cashAmount: "0",
+      creditAmount: amount,
+      currency: "USD",
+      precision: 2,
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
+  describe("余额不足告警", () => {
+    const lowBalance = () => balance("20.00");
+
+    type BalanceAlertsDispatcher = {
+      deliverBalanceAlert(
+        message: NotificationRenderedMessage,
+      ): Promise<{ acknowledged: boolean }>;
+    };
+    function makeDispatcher(acknowledged: boolean) {
+      return {
+        deliverBalanceAlert: vi.fn(
+          async (
+            _message: NotificationRenderedMessage,
+          ): Promise<{ acknowledged: boolean }> => ({ acknowledged }),
+        ),
+      } satisfies BalanceAlertsDispatcher;
+    }
+
+    it("跌破 30 时发消息并 @所有人，持续低不重复提醒，回升静默复位", async () => {
+      const dispatcher = makeDispatcher(true);
+      provider.balance = lowBalance();
+      const alerting = new AutomationService(
+        store,
+        vault,
+        new ProviderRegistry([provider]),
+        undefined,
+        undefined,
+        dispatcher,
+      );
+
+      await alerting.runAccount("demo-account", "preview");
+
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(1);
+      const message = dispatcher.deliverBalanceAlert.mock.calls[0]![0];
+      expect(message.mentionAll).toBe(true);
+      expect(message.subject).toContain("低于 30");
+      expect(message.text).toContain("20.00 USD");
+      expect(store.getBalanceAlertBelow("demo-account")).toBe(true);
+
+      // 持续低：不再重复轰炸。回拨快照绕过 15 分钟节流，模拟下一个刷新周期。
+      backdateBalanceSnapshot();
+      await alerting.runAccount("demo-account", "preview");
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(1);
+
+      // 回升：静默复位，不发恢复消息；之后再次跌破才再提醒。
+      provider.balance = balance("88.00");
+      backdateBalanceSnapshot();
+      await alerting.runAccount("demo-account", "preview");
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(1);
+      expect(store.getBalanceAlertBelow("demo-account")).toBe(false);
+
+      provider.balance = balance("5.00");
+      backdateBalanceSnapshot();
+      await alerting.runAccount("demo-account", "preview");
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it("全渠道发送失败时不落已提醒状态，下个刷新周期重试", async () => {
+      const dispatcher = makeDispatcher(false);
+      provider.balance = lowBalance();
+      const alerting = new AutomationService(
+        store,
+        vault,
+        new ProviderRegistry([provider]),
+        undefined,
+        undefined,
+        dispatcher,
+      );
+
+      await alerting.runAccount("demo-account", "preview");
+
+      // 发送失败 → 不记「已提醒」，webhook 抖动不会永久吞掉告警。
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(1);
+      expect(store.getBalanceAlertBelow("demo-account")).toBe(false);
+
+      backdateBalanceSnapshot();
+      await alerting.runAccount("demo-account", "preview");
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it("阈值默认 30、可配置；余额异常值不触发也不崩溃", async () => {
+      expect(store.getBalanceAlertThreshold()).toBe("30");
+      store.setBalanceAlertThreshold("50");
+      expect(store.getBalanceAlertThreshold()).toBe("50");
+      expect(() => store.setBalanceAlertThreshold("abc")).toThrow();
+
+      // 接口返回的金额解析不出数字时：直接跳过，不往状态表写任何东西。
+      const dispatcher = makeDispatcher(true);
+      provider.balance = { ...balance("20.00"), totalAmount: "" };
+      const alerting = new AutomationService(
+        store,
+        vault,
+        new ProviderRegistry([provider]),
+        undefined,
+        undefined,
+        dispatcher,
+      );
+      await alerting.runAccount("demo-account", "preview");
+      expect(dispatcher.deliverBalanceAlert).not.toHaveBeenCalled();
+      expect(store.getBalanceAlertBelow("demo-account")).toBe(false);
+    });
+
+    it("阈值改成 50 后跌破 50 的余额也会告警", async () => {
+      store.setBalanceAlertThreshold("50");
+      const dispatcher = makeDispatcher(true);
+      provider.balance = balance("45.00");
+      const alerting = new AutomationService(
+        store,
+        vault,
+        new ProviderRegistry([provider]),
+        undefined,
+        undefined,
+        dispatcher,
+      );
+      await alerting.runAccount("demo-account", "preview");
+      expect(dispatcher.deliverBalanceAlert).toHaveBeenCalledTimes(1);
+      expect(dispatcher.deliverBalanceAlert.mock.calls[0]![0].subject).toContain("低于 50");
+    });
   });
 
   it("previews matching decisions without writing", async () => {

@@ -32,7 +32,10 @@ import {
   selectDeletionCandidates,
   syncLayerComplete,
   creativeNeedsAppeal,
+  type AccountConfig,
+  type NotificationRenderedMessage,
 } from "@tk-auto/core";
+import { renderBalanceAlert } from "@tk-auto/notifications";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
@@ -76,6 +79,14 @@ const METRIC_FULL_RESOLUTION_DAYS = 2;
  * 把同步卡住。实测删除速度约 1.5 万行/秒，2 万行约 1.4 秒，摊在几十秒的一轮同步里可以忽略。
  */
 const DOWNSAMPLE_ROW_LIMIT = 20_000;
+/**
+ * 账户余额的刷新间隔。
+ *
+ * 15 分钟，独立于 5 分钟的轮询节拍。余额是「账上还剩多少钱」，一笔充值管很久，
+ * 而消耗每轮都在变；跟着轮询每轮问一次，只是把支付接口的请求量乘几倍，换来的
+ * 是一个几乎不动的数字。15 分钟足够让「快没钱了」这件事在失控之前被发现。
+ */
+const BALANCE_REFRESH_INTERVAL_MS = 15 * 60_000;
 /**
  * 单跳最多回收多少行「已删账户」的指标快照。
  *
@@ -139,6 +150,16 @@ export class AutomationService {
     private readonly draftPublishers?: {
       expand: (taskKey: string) => Promise<unknown>;
       campaignCopy: (taskKey: string) => Promise<unknown>;
+    },
+    /**
+     * 余额告警发送器。注入而不是直接依赖 NotificationService，理由和 draftPublishers
+     * 相同：两 service 互相持有会绕成环。返回值是「是否算已触达」——只有触达（或确认
+     * 无渠道可发）才落「已提醒」，全渠道失败时保持未提醒，下个刷新周期重试。
+     */
+    private readonly balanceAlerts?: {
+      deliverBalanceAlert(message: NotificationRenderedMessage): Promise<{
+        acknowledged: boolean;
+      }>;
     },
   ) {
     this.statusTasks = new WriteTaskKernel({
@@ -1034,6 +1055,10 @@ export class AutomationService {
         // 纯记账：连接在同步期间被重置或删除都会走到这里。数据已经取回来了，
         // 规则该照常判，不能让一次状态回写把成功的一轮翻成失败。
       }
+      // 余额与同步解耦、单独节流。轮询是 5 分钟一轮，而余额变化远比消耗慢，
+      // 每轮都去问一次等于把支付接口的请求量翻了好几倍，还平白多担一份限流风险。
+      // 取不到就照旧显示上一次的值（或未接入），不影响本轮任何判定。
+      await this.refreshBalanceIfStale(account, context);
       const ruleConfiguration = this.store.getRuleConfiguration();
       const ruleVersion = ruleConfiguration.updatedAt;
       if (!ruleVersion) throw new Error("平台规则配置缺失。");
@@ -2124,6 +2149,103 @@ export class AutomationService {
       });
     } catch {
       // 下一轮还会再来，不值得把整轮同步打掉。
+    }
+  }
+
+  /**
+   * 按节流刷新账户余额。
+   *
+   * 余额的变化比消耗慢得多——一笔充值能用很久，而消耗每轮都在动。跟着 5 分钟的
+   * 轮询每轮去问一次，等于把支付接口的请求量翻好几倍，还平白多担一份限流风险，
+   * 换来的只是一个几乎不会变的数字。所以单独按 15 分钟节流。
+   *
+   * 节流依据用余额快照自己的 captured_at，不另立字段：快照本来就要写，而
+   * 「上次什么时候取到的」正是它的语义。没有快照（首次或读不到）就立刻取一次。
+   *
+   * 整个方法不抛异常：余额是附加信息，它失败不该把整轮同步打掉。
+   */
+  private async refreshBalanceIfStale(
+    account: AccountConfig,
+    context: ProviderContext,
+  ): Promise<void> {
+    try {
+      const existing = this.store.getAccountBalance(account.id, account.providerKind);
+      if (existing) {
+        const age = Date.now() - new Date(existing.capturedAt).getTime();
+        if (Number.isFinite(age) && age < BALANCE_REFRESH_INTERVAL_MS) return;
+      }
+      const balance = await this.providers.readBalance(account.providerKind, context);
+      if (!balance) return;
+      this.store.saveAccountBalance(account.id, account.providerKind, balance);
+      await this.evaluateBalanceAlert(account, balance);
+    } catch {
+      // 下一轮还会再来。
+    }
+  }
+
+  /**
+   * 余额跌破阈值就通过已配置的通知渠道发消息并 @所有人。
+   *
+   * 状态机刻意简单：跌破且未提醒 → 发 + 记「已提醒」；持续低 → 静；回升 → 静默
+   * 复位（用户没要恢复提醒）；之后再次跌破才再提醒。**只在消息真正送达（或确认无
+   * 渠道可发）之后才记状态**——全渠道发送失败时不落状态，15 分钟后的下一次刷新会
+   * 自然重试，webhook 抖动不会把告警永久吞掉。
+   *
+   * 阈值按账户原币解释：不同账户币种可能不同，不做汇率换算。配置读不到或改坏时
+   * 按默认 30 处理，绝不让一个脏配置值悄悄抬高或关闭告警线。
+   */
+  private evaluateBalanceAlert(
+    account: AccountConfig,
+    balance: {
+      totalAmount: string;
+      cashAmount: string;
+      creditAmount: string;
+      currency: string;
+      precision: number;
+      capturedAt: string;
+    },
+  ): Promise<void> {
+    const thresholdValue = Number(this.balanceAlertThreshold());
+    const threshold = Number.isFinite(thresholdValue) ? thresholdValue : 30;
+    // 空串会被 Number() 吞成 0——那样一次字段缺失会被当成「余额 0」而告警。
+    // 0 和「没读到」是两件事，这里直接跳过。
+    if (balance.totalAmount.trim() === "") return Promise.resolve();
+    const amount = Number(balance.totalAmount);
+    if (!Number.isFinite(amount)) return Promise.resolve();
+    const below = amount < threshold;
+    const wasBelow = this.store.getBalanceAlertBelow(account.id);
+    if (!below) {
+      if (wasBelow) this.store.setBalanceAlertBelow(account.id, false);
+      return Promise.resolve();
+    }
+    if (wasBelow) return Promise.resolve();
+    const message = renderBalanceAlert({
+      accountName: account.displayName,
+      totalAmount: balance.totalAmount,
+      currency: balance.currency,
+      threshold: this.store.getBalanceAlertThreshold(),
+    });
+    // 没注入发送器（单测/仅读模式）视作已提醒：不然会以 15 分钟一次的频率
+    // 在没有发送通路的环境里永远重试。
+    if (!this.balanceAlerts) {
+      this.store.setBalanceAlertBelow(account.id, true);
+      return Promise.resolve();
+    }
+    return this.balanceAlerts
+      .deliverBalanceAlert(message)
+      .then((result) => {
+        if (result.acknowledged) this.store.setBalanceAlertBelow(account.id, true);
+      })
+      .catch(() => {
+        // 发送链路抛错时与「全渠道失败」同等对待：不落状态，下次重试。
+      });
+  }
+
+  private balanceAlertThreshold(): string {
+    try {
+      return this.store.getBalanceAlertThreshold();
+    } catch {
+      return "30";
     }
   }
 

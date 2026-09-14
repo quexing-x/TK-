@@ -3,6 +3,7 @@ import {
   type NotificationChannelKind,
   type NotificationChannelRecord,
   type NotificationDeliveryRecord,
+  type NotificationRenderedMessage,
   type PollCycleRecord,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
@@ -46,6 +47,56 @@ export class NotificationService {
     if (cycle.status !== "completed" || cycle.accounts.length === 0) return;
     this.store.enqueueNotificationDeliveries(cycle.id);
     await this.flushPending();
+  }
+
+  /**
+   * 立即把一条余额告警发往所有已启用渠道，返回「是否算已触达」。
+   *
+   * 与轮询汇总的投递记录不同，这里没有 retry 队列：告警的去重状态由调用方管——
+   * 它只有**发送成功或确认无渠道可发**之后才落「已提醒」，发全失败就保持未提醒，
+   * 下一个 15 分钟的余额刷新会自然重试。部分渠道成功也算已触达：失败的那个渠道
+   * 是配置/网络问题，让它把同步告警变成每 15 分钟一次的全渠道重发，反而会骚扰。
+   *
+   * return true  = 已触达或无需再试（调用方应记「已提醒」）
+   * return false = 全部已启用渠道都发送失败（调用方不记，等下次重试）
+   */
+  async deliverBalanceAlert(
+    message: NotificationRenderedMessage,
+  ): Promise<{ acknowledged: boolean; errors: string[] }> {
+    const kinds: NotificationChannelKind[] = ["email", "wecom", "feishu"];
+    const sendable: Array<{ kind: NotificationChannelKind }> = [];
+    const unavailable: string[] = [];
+    for (const kind of kinds) {
+      try {
+        const context = await this.loadChannel(kind);
+        if (!context.settings.enabled) continue;
+        sendable.push({ kind });
+      } catch {
+        // 未配置渠道/凭据是预期的常态，不是错误；不进 errors。
+      }
+    }
+    if (sendable.length === 0) {
+      // 一个启用的渠道都没有：现在没处可发，但告警本身是成立的，记「已提醒」
+      // 免得余额一直低的时候每 15 分钟空转一轮。
+      return { acknowledged: true, errors: [] };
+    }
+    const errors: string[] = [];
+    const delivered: boolean[] = [];
+    for (const { kind } of sendable) {
+      try {
+        const context = await this.loadChannel(kind);
+        const result = await this.senders
+          .get(kind)
+          .send(context.settings, context.credential, message);
+        delivered.push(result.ok);
+        if (!result.ok) errors.push(`${kind}：${result.message}`);
+      } catch (cause) {
+        delivered.push(false);
+        errors.push(`${kind}：${safeNotificationError(cause)}`);
+      }
+    }
+    const acknowledged = delivered.some(Boolean);
+    return { acknowledged, errors: errors.filter(Boolean) };
   }
 
   async flushPending(): Promise<void> {

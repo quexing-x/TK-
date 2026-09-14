@@ -46,4 +46,36 @@ if (!/isSchedulerProcess\s*\|\|\s*(?:import_electron\.)?app\.requestSingleInstan
   throw new Error("Release preflight failed: the scheduler single-instance separation is missing from app.asar.");
 }
 
+/**
+ * MCP 的两个入口都要在包里，且不能比源码旧。
+ *
+ * 与前端同一个道理：electron-builder 只是把 `../mcp/dist` 原样拷进 resources/mcp。
+ * 1.4.131 及以前 `dist` 脚本没构建 MCP，装出来的包里那份是上一次构建留下的——
+ * 缺了 mcp-http.cjs 时，豆包工作这类只认 URL 的宿主会直接连不上端点，而界面和
+ * stdio 宿主一切正常，看不出是打包漏了。
+ */
+const mcpSourceDirectory = resolve(desktopDirectory, "..", "mcp", "src");
+const mcpResourcesDirectory = join(appOutDirectory, "resources", "mcp");
+for (const entry of ["mcp-server.cjs", "mcp-http.cjs"]) {
+  const path = join(mcpResourcesDirectory, entry);
+  if (!existsSync(path)) {
+    throw new Error(
+      `Release preflight failed: 安装包缺少 resources/mcp/${entry}。先跑 pnpm --filter @tk-auto/mcp build。`,
+    );
+  }
+}
+if (existsSync(mcpSourceDirectory)) {
+  const sourceMtime = newestSourceMtime(mcpSourceDirectory);
+  const oldestPackaged = Math.min(
+    ...["mcp-server.cjs", "mcp-http.cjs"].map(
+      (entry) => statSync(join(mcpResourcesDirectory, entry)).mtimeMs,
+    ),
+  );
+  if (sourceMtime > oldestPackaged) {
+    throw new Error(
+      `Release preflight failed: 打包的 MCP 服务比源码旧（源码 ${new Date(sourceMtime).toISOString()} > 产物 ${new Date(oldestPackaged).toISOString()}）。先跑 pnpm --filter @tk-auto/mcp build。`,
+    );
+  }
+}
+
 console.log("Release preflight passed: client, named scheduler, and scheduler lock separation are packaged.");

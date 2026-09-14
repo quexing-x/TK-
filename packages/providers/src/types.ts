@@ -1,4 +1,5 @@
 import type {
+  AccountBalanceSnapshot,
   ProviderConnectionSettings,
   ProviderCredentialInput,
   ProviderEntity,
@@ -154,6 +155,15 @@ export interface ReadProvider extends ProviderContract {
     entityType: "campaign" | "ad-group" | "ad",
     externalId: string,
   ): Promise<ProviderEntity | null>;
+  /**
+   * 读账户余额。
+   *
+   * 可选、且刻意与 syncReadOnly 分开：它有自己的节流（余额变化远慢于消耗），
+   * 取不到也不算同步失败。不实现或返回 undefined 时，界面显示成未接入。
+   */
+  readBalance?(
+    context: ProviderContext,
+  ): Promise<AccountBalanceSnapshot | undefined>;
 }
 
 export interface OriginalPostMigrationProvider extends ProviderContract {

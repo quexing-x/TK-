@@ -113,6 +113,33 @@ export function renderTestMessage(): NotificationRenderedMessage {
   };
 }
 
+/**
+ * 余额不足告警。
+ *
+ * mentionAll 恒为 true：这个告警意味着投放可能中途断量，是在喊人充值，渠道自己
+ * 的 mentionAll 设置表达不了「按消息类型决定要不要 @」（轮询汇总的先例）。
+ *
+ * 金额照抄接口返回的十进制字符串；阈值同账户原币种比较——不同账户币种可能不同，
+ * 界面上的阈值也按账户原币解释，不做汇率换算。
+ */
+export function renderBalanceAlert(input: {
+  accountName: string;
+  totalAmount: string;
+  currency: string;
+  threshold: string;
+}): NotificationRenderedMessage {
+  const text =
+    `「${input.accountName}」当前可用余额 ${input.totalAmount}${input.currency ? ` ${input.currency}` : ""}，`
+    + `已低于告警阈值 ${input.threshold}。自动化启停不受影响，但继续投放可能中途断量，请及时充值。`;
+  return {
+    subject: `TK 余额告警：${input.accountName} 可用余额低于 ${input.threshold}`,
+    text,
+    markdown: `**TK 余额告警：${escapeMarkdown(input.accountName)} 可用余额低于 ${escapeMarkdown(input.threshold)}**\n\n${escapeMarkdown(text)}`,
+    html: `<h2>TK 余额告警</h2><p>${escapeMarkdown(text)}</p>`,
+    mentionAll: true,
+  };
+}
+
 function summarize(accounts: PollAccountResult[]) {
   return accounts.reduce(
     (total, account) => {

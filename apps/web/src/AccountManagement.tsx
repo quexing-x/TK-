@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowClockwise, ArrowSquareOut, ClockCounterClockwise, MagnifyingGlass, Pause, PencilSimple, Play, Plug, Plus, Trash, UsersThree, WarningCircle } from "@phosphor-icons/react";
 import type { AccountConfig, AdOperationRecord, AutomationRunRecord, DailyMetricRecord } from "@tk-auto/core";
 import { api } from "./api";
-import { accountHealth, accountLocalDate, accountTypeNames, filterManagedAccounts, providerNames, type ConnectionMap } from "./account-management-model";
+import { accountHealth, accountLocalDate, accountLocalDayRange, accountTypeNames, filterManagedAccounts, providerNames, type ConnectionMap } from "./account-management-model";
 import { Badge, Button, Checkbox, ControlRail, Drawer, EmptyState, Pagination } from "./ui/production/primitives";
 
 type MetricState = { day?: DailyMetricRecord | undefined; error?: string; loading?: boolean };
@@ -80,9 +80,11 @@ export function AccountManagement(props: Props) {
       while (!cancelled && cursor < targets.length) {
         const [id, timezone] = targets[cursor++]!;
         try {
-          const date = accountLocalDate(timezone);
-          const days = await api.getMetricDays(id, { from: date, to: date }, "ad-group");
-          if (!cancelled) setMetrics((old) => ({ ...old, [id]: { day: days.find((d) => d.date === date) } }));
+          // 查询窗口要的是 UTC 时刻区间，回查当天那一行仍按账户当地日期比对，
+          // 两者不能混用：正偏移时区的 from 会落在前一天的 UTC 日期上。
+          const localDate = accountLocalDate(timezone);
+          const days = await api.getMetricDays(id, accountLocalDayRange(timezone), "ad-group");
+          if (!cancelled) setMetrics((old) => ({ ...old, [id]: { day: days.find((d) => d.date === localDate) } }));
         } catch (error) {
           if (!cancelled) setMetrics((old) => ({ ...old, [id]: { error: error instanceof Error ? error.message : "指标读取失败" } }));
         }
@@ -108,7 +110,29 @@ export function AccountManagement(props: Props) {
     if (!metric || metric.loading) return <span className="p-loading-text" role="status">读取中…</span>;
     if (metric.error) return <button type="button" className="p-metric-error" title={metric.error} onClick={() => setRefresh((n) => n + 1)}>读取失败 · 重试</button>;
     if (!metric.day) return <><span className="p-number">—</span><small>暂无今日数据</small></>;
-    return <><strong className="p-number">{metric.day.spend.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><small>截至 {metric.day.lastLocalTime}</small></>;
+    return <strong className="p-number">{metric.day.spend.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>;
+  };
+  /**
+   * 账户余额。读的是后端快照（15 分钟刷一次），不在这里现拉。
+   *
+   * 三种「没有值」要分开表达，混成一句话会误导：
+   *   - 能力不可用（没导入会话 cURL）→ 说明为什么，而不是让人反复点重试；
+   *   - 有快照 → 显示金额与币种；
+   *   - 其余（还没刷到、接口读不到）→ 未接入。
+   */
+  const renderBalance = (account: AccountConfig) => {
+    const capability = states[account.id]?.capabilities?.capabilities?.find(
+      (item) => item.capability === "read-account-balance",
+    );
+    const balance = states[account.id]?.balance;
+    if (!balance) {
+      return <><span className="p-number">—</span><small>{capability && !capability.available ? "能力不可用" : "未接入"}</small></>;
+    }
+    const digits = Math.min(Math.max(balance.precision, 0), 4);
+    return <strong className="p-number">
+      {Number(balance.totalAmount).toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits })}
+      {balance.currency ? <em className="p-balance-currency"> {balance.currency}</em> : null}
+    </strong>;
   };
   return <section className="p-accounts" aria-label="账户管理">
     <header className="p-page-heading"><div><h1>账户管理<span>{accounts.length}</span></h1><p>管理广告账户接入、同步与自动化</p></div><div className="p-actions"><Button busy={busy} onClick={() => void refreshData()}><ArrowClockwise size={16} />刷新状态</Button><Button tone="primary" disabled={!canManage || disabled} onClick={props.onNew}><Plus size={16} />新增账户</Button></div></header>
@@ -125,12 +149,12 @@ export function AccountManagement(props: Props) {
     <div className="p-account-surface">
       <div className="p-filters"><label className="p-search"><MagnifyingGlass size={18} /><input aria-label="搜索账户" placeholder="搜索账户名称或 ID" value={query} onChange={(e) => setQuery(e.target.value)} /></label><label>账户状态<select aria-label="账户状态筛选" value={status} onChange={(e) => setStatus(e.target.value)}><option value="all">全部状态</option><option value="healthy">健康</option><option value="warning">待完善</option><option value="danger">异常</option></select></label><label>平台<select aria-label="平台筛选" value={platform} onChange={(e) => setPlatform(e.target.value)}><option value="all">全部平台</option><option value="tiktok">TikTok Ads</option></select></label><label>自动化<select aria-label="自动化范围筛选" value={scope} onChange={(e) => setScope(e.target.value)}><option value="all">全部账户</option><option value="enabled">开关已开启</option><option value="disabled">开关已关闭</option></select></label></div>
       {selectedAccounts.length > 0 && <div className="p-selection" role="status"><strong>已选择 {selectedAccounts.length} 个账户</strong><Button disabled={!canManage || disabled || !selectedAccounts.some((a) => !a.enabled && canEnable(a))} onClick={() => void run(() => props.onBulk(selectedAccounts, true))}><Play size={14} />开启自动化</Button><Button disabled={!canManage || disabled || !selectedAccounts.some((a) => a.enabled)} onClick={() => void run(() => props.onBulk(selectedAccounts, false))}><Pause size={14} />关闭自动化</Button><Button tone="quiet" disabled={disabled} onClick={() => setSelected(new Set())}>取消选择</Button></div>}
-      <div className="p-table-scroll"><table className="p-account-table"><thead><tr><th className="p-check-cell"><Checkbox aria-label="选择本页账户" checked={visible.length > 0 && visibleSelected === visible.length} mixed={visibleSelected > 0 && visibleSelected < visible.length} disabled={!visible.length || disabled} onChange={(e) => setSelected((old) => { const next = new Set(old); visible.forEach((a) => e.target.checked ? next.add(a.id) : next.delete(a.id)); return next; })} /></th><th>账户</th><th>平台 / 类型</th><th>账户状态</th><th>最近同步</th><th className="p-numeric">今日消耗</th><th>自动化</th><th>操作</th></tr></thead><tbody>
-        {visible.map((account) => { const health = accountHealth(states[account.id]); const sync = states[account.id]?.latestSync; const suspended = account.enabled && !runtimeEnabled; return <tr key={account.id} className={selected.has(account.id) ? "is-selected" : ""}><td className="p-check-cell"><Checkbox aria-label={`选择 ${account.displayName}`} checked={selected.has(account.id)} disabled={disabled} onChange={(e) => setSelected((old) => { const next = new Set(old); if (e.target.checked) next.add(account.id); else next.delete(account.id); return next; })} /></td><td><button className="p-account-name" type="button" onClick={() => setDetailId(account.id)}>{account.displayName}</button><small className="p-number p-account-id" title={account.id}>{account.id}</small></td><td><span>TikTok Ads</span><small>{accountTypeNames[account.accountType]}</small></td><td><Badge tone={health.tone}>{health.label}</Badge></td><td><span>{timestamp(sync?.finishedAt)}</span><small className={sync && sync.quality.status !== "healthy" ? "p-warning-text" : ""}>{sync ? sync.quality.status === "healthy" ? "同步完成" : "数据待检查" : "等待首次同步"}</small></td><td className="p-numeric">{renderSpend(account)}</td><td><button type="button" role="switch" aria-checked={account.enabled} aria-label={`${account.displayName}账户自动化配置`} className={`p-switch ${account.enabled ? "is-on" : ""} ${suspended ? "is-suspended" : ""}`} disabled={!canManage || disabled || (!account.enabled && !canEnable(account))} title={!account.enabled && !canEnable(account) ? "需完成接入与启停能力检测" : suspended ? "账户自动化配置已开启；全局自动化暂停期间不会执行" : undefined} onClick={() => void run(() => props.onToggle(account))}><span /></button><small>{!account.enabled ? "已关闭" : suspended ? "已开启 · 全局暂停" : !canEnable(account) ? "已开启 · 能力异常" : "已开启"}</small></td><td><div className="p-row-actions"><Button tone="quiet" className="p-compact" onClick={() => setDetailId(account.id)}>详情<ArrowSquareOut size={14} /></Button><Button tone="quiet" className="p-compact" disabled={!canManage || disabled} onClick={() => props.onConnect(account)}>接入</Button></div></td></tr>; })}
+      <div className="p-table-scroll"><table className="p-account-table"><thead><tr><th className="p-check-cell"><Checkbox aria-label="选择本页账户" checked={visible.length > 0 && visibleSelected === visible.length} mixed={visibleSelected > 0 && visibleSelected < visible.length} disabled={!visible.length || disabled} onChange={(e) => setSelected((old) => { const next = new Set(old); visible.forEach((a) => e.target.checked ? next.add(a.id) : next.delete(a.id)); return next; })} /></th><th>账户</th><th>平台 / 类型</th><th>账户状态</th><th>最近同步</th><th className="p-numeric">今日消耗</th><th className="p-numeric">余额</th><th>自动化</th><th>操作</th></tr></thead><tbody>
+        {visible.map((account) => { const health = accountHealth(states[account.id]); const sync = states[account.id]?.latestSync; const suspended = account.enabled && !runtimeEnabled; return <tr key={account.id} className={selected.has(account.id) ? "is-selected" : ""}><td className="p-check-cell"><Checkbox aria-label={`选择 ${account.displayName}`} checked={selected.has(account.id)} disabled={disabled} onChange={(e) => setSelected((old) => { const next = new Set(old); if (e.target.checked) next.add(account.id); else next.delete(account.id); return next; })} /></td><td><button className="p-account-name" type="button" onClick={() => setDetailId(account.id)}>{account.displayName}</button><small className="p-number p-account-id" title={account.id}>{account.id}</small></td><td><span>TikTok Ads</span><small>{accountTypeNames[account.accountType]}</small></td><td><Badge tone={health.tone}>{health.label}</Badge></td><td><span>{timestamp(sync?.finishedAt)}</span><small className={sync && sync.quality.status !== "healthy" ? "p-warning-text" : ""}>{sync ? sync.quality.status === "healthy" ? "同步完成" : "数据待检查" : "等待首次同步"}</small></td><td className="p-numeric">{renderSpend(account)}</td><td className="p-numeric">{renderBalance(account)}</td><td><button type="button" role="switch" aria-checked={account.enabled} aria-label={`${account.displayName}账户自动化配置`} className={`p-switch ${account.enabled ? "is-on" : ""} ${suspended ? "is-suspended" : ""}`} disabled={!canManage || disabled || (!account.enabled && !canEnable(account))} title={!account.enabled && !canEnable(account) ? "需完成接入与启停能力检测" : suspended ? "账户自动化配置已开启；全局自动化暂停期间不会执行" : undefined} onClick={() => void run(() => props.onToggle(account))}><span /></button><small>{!account.enabled ? "已关闭" : suspended ? "已开启 · 全局暂停" : !canEnable(account) ? "已开启 · 能力异常" : "已开启"}</small></td><td><div className="p-row-actions"><Button tone="quiet" className="p-compact" onClick={() => setDetailId(account.id)}>详情<ArrowSquareOut size={14} /></Button><Button tone="quiet" className="p-compact" disabled={!canManage || disabled} onClick={() => props.onConnect(account)}>接入</Button></div></td></tr>; })}
       </tbody></table></div>
       {visible.length === 0 && <EmptyState icon={<UsersThree size={32} />} title={accounts.length ? "没有匹配的账户" : "还没有广告账户"}>{accounts.length ? <><p>试试其他关键词或筛选条件。</p><Button onClick={() => { setQuery(""); setPlatform("all"); setStatus("all"); setScope("all"); }}>清除筛选</Button></> : <><p>添加账户后即可配置接入并查看同步状态。</p><Button tone="primary" disabled={!canManage} onClick={props.onNew}>新增账户</Button></>}</EmptyState>}
       <Pagination page={currentPage} total={filtered.length} size={size} onPage={setPage} onSize={setSize} />
-    </div><p className="p-data-note">今日消耗按各账户时区统计，保留账户原币数值。</p>
+    </div><p className="p-data-note">今日消耗按各账户时区统计，保留账户原币数值。余额每 15 分钟刷新一次，同样保留账户原币数值，不跨币种换算。</p>
     {detail && (() => {
       const state = states[detail.id];
       const health = accountHealth(state);

@@ -186,6 +186,9 @@ export async function createApp(
     ? null
     : new LaunchWorker(dependencies.store, launchService);
   launchWorker?.start();
+  const notifications =
+    dependencies.notifications ??
+    new NotificationService(dependencies.store, dependencies.vault);
   const automation =
     dependencies.automation ??
     new AutomationService(
@@ -197,10 +200,8 @@ export async function createApp(
         expand: (taskKey) => launchService.publishStuckExpandDraft(taskKey),
         campaignCopy: (taskKey) => launchService.publishStuckCampaignCopyDraft(taskKey),
       },
+      notifications,
     );
-  const notifications =
-    dependencies.notifications ??
-    new NotificationService(dependencies.store, dependencies.vault);
   const auth = new AuthService(
     dependencies.store,
     dependencies.authSessionLifetimeMs,
@@ -449,6 +450,12 @@ export async function createApp(
           account.id,
           account.providerKind,
         ),
+        // 余额读快照而不是现拉：它是 15 分钟才刷一次的数据，按页面打开去现拉既慢
+        // 又多担一份限流风险；没有快照时是 undefined，界面显示成「未接入」。
+        // balanceAlerted：该账户当前正处于「跌破告警阈值」的状态（告警引擎维护
+        // 的状态机），顶栏的余额告警浮窗按它筛账户；阈值在服务端判，前端不猜。
+        balance: dependencies.store.getAccountBalance(account.id, account.providerKind),
+        balanceAlerted: dependencies.store.getBalanceAlertBelow(account.id),
         capabilities: providers.describeAccount(
           account.id,
           account.providerKind,

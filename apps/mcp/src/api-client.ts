@@ -41,7 +41,11 @@ export function endpointFilePath(): string {
   return join(appData, PRODUCT_NAME, "mcp-endpoint.json");
 }
 
-function readEndpoint(): McpEndpoint | null {
+/**
+ * 读接入信息文件。HTTP 入口要用它做鉴权（每次请求现读，才能跟上令牌重签），
+ * 所以导出；stdio 侧仍只通过 LocalApiClient 间接使用。
+ */
+export function readEndpointFile(): McpEndpoint | null {
   const path = endpointFilePath();
   if (!existsSync(path)) return null;
   try {
@@ -124,7 +128,7 @@ export class LocalApiClient {
    */
   private async ensureEndpoint(): Promise<McpEndpoint> {
     if (this.endpoint) return this.endpoint;
-    const existing = readEndpoint();
+    const existing = readEndpointFile();
     if (existing && await isHealthy(existing.origin)) {
       this.endpoint = existing;
       return existing;
@@ -152,7 +156,7 @@ export class LocalApiClient {
         );
       }
     }
-    const endpoint = readEndpoint();
+    const endpoint = readEndpointFile();
     if (!endpoint) {
       throw new LocalApiError(
         "本地服务在跑，但还没有写下 MCP 接入信息。请升级到支持 MCP 的客户端版本后重启一次程序。",

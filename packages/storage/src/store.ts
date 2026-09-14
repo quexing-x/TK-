@@ -5588,6 +5588,123 @@ export class AutomationStore {
   }
 
   /**
+   * 写入账户余额快照。每个账户只留最新一条，重复调用是覆盖而不是追加。
+   *
+   * 读不到余额时调用方不写（而不是写 0）：0 和「没读到」是两件事，前者会触发
+   * 充值告警，后者只该显示成未接入。
+   */
+  saveAccountBalance(
+    accountId: string,
+    kind: ProviderKind,
+    balance: {
+      totalAmount: string;
+      cashAmount: string;
+      creditAmount: string;
+      currency: string;
+      precision: number;
+      capturedAt: string;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO account_balance_snapshots (
+           account_id, provider_kind, total_amount, cash_amount, credit_amount,
+           currency, precision, captured_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (account_id, provider_kind) DO UPDATE SET
+           total_amount = excluded.total_amount,
+           cash_amount = excluded.cash_amount,
+           credit_amount = excluded.credit_amount,
+           currency = excluded.currency,
+           precision = excluded.precision,
+           captured_at = excluded.captured_at`,
+      )
+      .run(
+        accountId,
+        kind,
+        balance.totalAmount,
+        balance.cashAmount,
+        balance.creditAmount,
+        balance.currency,
+        balance.precision,
+        balance.capturedAt,
+      );
+  }
+
+  /** 读账户余额快照。没读过返回 undefined，由界面显示成「未接入」。 */
+  getAccountBalance(
+    accountId: string,
+    kind: ProviderKind,
+  ): {
+    totalAmount: string;
+    cashAmount: string;
+    creditAmount: string;
+    currency: string;
+    precision: number;
+    capturedAt: string;
+  } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT total_amount, cash_amount, credit_amount, currency, precision, captured_at
+         FROM account_balance_snapshots
+         WHERE account_id = ? AND provider_kind = ?`,
+      )
+      .get(accountId, kind) as SqlRow | undefined;
+    if (!row) return undefined;
+    return {
+      totalAmount: String(row.total_amount),
+      cashAmount: String(row.cash_amount),
+      creditAmount: String(row.credit_amount),
+      currency: String(row.currency),
+      precision: Number(row.precision),
+      capturedAt: String(row.captured_at),
+    };
+  }
+
+  /** 读告警阈值；配置行不存在或被改坏时按 30 处理，不让脏配置静默抬高告警线。 */
+  getBalanceAlertThreshold(): string {
+    const row = this.db
+      .prepare("SELECT threshold FROM balance_alert_configuration WHERE id = 1")
+      .get() as SqlRow | undefined;
+    const value = row ? String(row.threshold).trim() : "";
+    return /^\d+(?:\.\d+)?$/.test(value) ? value : "30";
+  }
+
+  setBalanceAlertThreshold(threshold: string): void {
+    const normalized = threshold.trim();
+    if (!/^\d+(?:\.\d+)?$/.test(normalized)) {
+      throw new Error("余额告警阈值必须是大于等于 0 的数字。");
+    }
+    this.db
+      .prepare(
+        `INSERT INTO balance_alert_configuration (id, threshold, updated_at)
+         VALUES (1, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET threshold = excluded.threshold, updated_at = excluded.updated_at`,
+      )
+      .run(normalized, new Date().toISOString());
+  }
+
+  getBalanceAlertBelow(accountId: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT below_threshold FROM account_balance_alert_state WHERE account_id = ?",
+      )
+      .get(accountId) as SqlRow | undefined;
+    return Boolean(row && row.below_threshold);
+  }
+
+  setBalanceAlertBelow(accountId: string, below: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO account_balance_alert_state (account_id, below_threshold, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (account_id) DO UPDATE SET
+           below_threshold = excluded.below_threshold, updated_at = excluded.updated_at`,
+      )
+      .run(accountId, below ? 1 : 0, new Date().toISOString());
+  }
+
+  /**
    * 按账户时区的自然日汇总指标。
    *
    * 快照里的 spend/clicks/conversions 是当日累计值，一天里写几十条。按 (实体, 自然日)
@@ -7345,6 +7462,45 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS orphaned_snapshot_accounts (
         account_id TEXT PRIMARY KEY,
         marked_at TEXT NOT NULL
+      );
+
+      -- 账户余额快照。每个账户只保留最新一条（主键就是账户 + Provider），
+      -- 不做时间序列：余额是「现在还剩多少」，历史余额对充值和告警都没有用处，
+      -- 而按轮询频率（30 分钟）存历史，一年下来是一张十几万行的表换一个没人看的图。
+      --
+      -- 金额存 TEXT 而不是 REAL：接口返回的就是十进制字符串（"298.35"），转成
+      -- 浮点再存会在界面上重现 298.35000000000002 这类尾差，而这是给人看着决定
+      -- 要不要充值的数。
+      CREATE TABLE IF NOT EXISTS account_balance_snapshots (
+        account_id TEXT NOT NULL,
+        provider_kind TEXT NOT NULL,
+        total_amount TEXT NOT NULL,
+        cash_amount TEXT NOT NULL,
+        credit_amount TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        precision INTEGER NOT NULL DEFAULT 2,
+        captured_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, provider_kind)
+      );
+
+      -- 余额告警的「已提醒」状态。跌破阈值发一次消息；持续低于阈值不重复轰炸，
+      -- 回到阈值以上就悄悄复位——之后再跌破才再提醒。没有这张表，每个 15 分钟
+      -- 的余额刷新都会 @所有人 一次，告警会退化成骚扰。
+      -- 状态行只在【成功触达（或确认无渠道可发）】之后才写：发送失败时保持
+      -- below=0，下一个 15 分钟刷新会再试，webhook 短暂抖动不会吞掉告警。
+      CREATE TABLE IF NOT EXISTS account_balance_alert_state (
+        account_id TEXT PRIMARY KEY,
+        below_threshold INTEGER NOT NULL CHECK (below_threshold IN (0, 1)),
+        updated_at TEXT NOT NULL
+      );
+
+      -- 告警阈值。固定一行（id=1）；读不到按 30 处理。单独成行而不是写死常量：
+      -- 每个账户的币种和消耗节奏不同，这个数几乎必然要调，放进库里以后加界面
+      -- 也不用动代码。同理不做按账户覆盖，等真有人需要再说。
+      CREATE TABLE IF NOT EXISTS balance_alert_configuration (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        threshold TEXT NOT NULL DEFAULT '30',
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS sync_runs (
