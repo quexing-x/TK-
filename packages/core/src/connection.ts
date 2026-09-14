@@ -13,6 +13,7 @@ export const ProviderCapabilitySchema = z.enum([
   "delete-ad-groups",
   "update-ad-group-budget",
   "appeal-ads",
+  "read-account-balance",
 ]);
 export type ProviderCapability = z.infer<typeof ProviderCapabilitySchema>;
 
@@ -289,4 +290,29 @@ export interface ReadOnlySyncResult {
   counts: Record<SyncEntityType, number>;
   warnings: string[];
   quality: SyncDataQuality;
+}
+
+/**
+ * 账户余额快照。
+ *
+ * 刻意不进 entities：entities 是「系列 / 广告组 / 广告」三层投放对象的集合，
+ * 每个对象都有 ID、父级和指标。余额是**账户级**的单个数值，混进那三层会让
+ * 所有按 entityType 分派的地方（同步计数、层级完整性、删除与自动复制的对象筛选）
+ * 都要额外排除它，等于给每个下游都留一个坑。它作为同步结果的独立旁路字段。
+ *
+ * 金额一律用字符串存：TikTok 返回的就是十进制字符串（"298.35"），转成 number
+ * 再格式化会在累加与显示时引入浮点误差，而余额是要给人看着做充值决策的。
+ */
+export interface AccountBalanceSnapshot {
+  /** 账户总余额（现金 + 授信），对应 adv_full_balance.sum_total_balance.abs_amount。 */
+  totalAmount: string;
+  /** 现金余额与授信余额，用于说明总额的组成。 */
+  cashAmount: string;
+  creditAmount: string;
+  /** ISO 4217 币种代码。不同账户可能不同，比较与告警必须按币种分开。 */
+  currency: string;
+  /** 小数位，来自接口的 currency_format.precision。 */
+  precision: number;
+  /** 本轮取到余额的时刻。 */
+  capturedAt: string;
 }

@@ -32,6 +32,7 @@ import {
   selectDeletionCandidates,
   syncLayerComplete,
   creativeNeedsAppeal,
+  type AccountConfig,
 } from "@tk-auto/core";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
@@ -76,6 +77,14 @@ const METRIC_FULL_RESOLUTION_DAYS = 2;
  * 把同步卡住。实测删除速度约 1.5 万行/秒，2 万行约 1.4 秒，摊在几十秒的一轮同步里可以忽略。
  */
 const DOWNSAMPLE_ROW_LIMIT = 20_000;
+/**
+ * 账户余额的刷新间隔。
+ *
+ * 15 分钟，独立于 5 分钟的轮询节拍。余额是「账上还剩多少钱」，一笔充值管很久，
+ * 而消耗每轮都在变；跟着轮询每轮问一次，只是把支付接口的请求量乘几倍，换来的
+ * 是一个几乎不动的数字。15 分钟足够让「快没钱了」这件事在失控之前被发现。
+ */
+const BALANCE_REFRESH_INTERVAL_MS = 15 * 60_000;
 /**
  * 单跳最多回收多少行「已删账户」的指标快照。
  *
@@ -1034,6 +1043,10 @@ export class AutomationService {
         // 纯记账：连接在同步期间被重置或删除都会走到这里。数据已经取回来了，
         // 规则该照常判，不能让一次状态回写把成功的一轮翻成失败。
       }
+      // 余额与同步解耦、单独节流。轮询是 5 分钟一轮，而余额变化远比消耗慢，
+      // 每轮都去问一次等于把支付接口的请求量翻了好几倍，还平白多担一份限流风险。
+      // 取不到就照旧显示上一次的值（或未接入），不影响本轮任何判定。
+      await this.refreshBalanceIfStale(account, context);
       const ruleConfiguration = this.store.getRuleConfiguration();
       const ruleVersion = ruleConfiguration.updatedAt;
       if (!ruleVersion) throw new Error("平台规则配置缺失。");
@@ -2124,6 +2137,36 @@ export class AutomationService {
       });
     } catch {
       // 下一轮还会再来，不值得把整轮同步打掉。
+    }
+  }
+
+  /**
+   * 按节流刷新账户余额。
+   *
+   * 余额的变化比消耗慢得多——一笔充值能用很久，而消耗每轮都在动。跟着 5 分钟的
+   * 轮询每轮去问一次，等于把支付接口的请求量翻好几倍，还平白多担一份限流风险，
+   * 换来的只是一个几乎不会变的数字。所以单独按 15 分钟节流。
+   *
+   * 节流依据用余额快照自己的 captured_at，不另立字段：快照本来就要写，而
+   * 「上次什么时候取到的」正是它的语义。没有快照（首次或读不到）就立刻取一次。
+   *
+   * 整个方法不抛异常：余额是附加信息，它失败不该把整轮同步打掉。
+   */
+  private async refreshBalanceIfStale(
+    account: AccountConfig,
+    context: ProviderContext,
+  ): Promise<void> {
+    try {
+      const existing = this.store.getAccountBalance(account.id, account.providerKind);
+      if (existing) {
+        const age = Date.now() - new Date(existing.capturedAt).getTime();
+        if (Number.isFinite(age) && age < BALANCE_REFRESH_INTERVAL_MS) return;
+      }
+      const balance = await this.providers.readBalance(account.providerKind, context);
+      if (!balance) return;
+      this.store.saveAccountBalance(account.id, account.providerKind, balance);
+    } catch {
+      // 下一轮还会再来。
     }
   }
 

@@ -1,5 +1,6 @@
 import type {
   AccountConfig,
+  AccountBalanceSnapshot,
   AccountSettingsUpdate,
   AccountCreateInput,
   GlobalAutomationSettings,
@@ -117,6 +118,8 @@ export interface BootstrapPayload {
     accountId: string;
     connection: ProviderConnection | null;
     latestSync: ReadOnlySyncResult | null;
+    /** 账户余额快照；没有时 undefined，界面显示成未接入。 */
+    balance?: AccountBalanceSnapshot;
     capabilities: AccountProviderCapabilities;
   }>;
   globalAutomationSettings: GlobalAutomationSettings;

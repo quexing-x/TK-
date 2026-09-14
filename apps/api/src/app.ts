@@ -449,6 +449,9 @@ export async function createApp(
           account.id,
           account.providerKind,
         ),
+        // 余额读快照而不是现拉：它是 15 分钟才刷一次的数据，按页面打开去现拉既慢
+        // 又多担一份限流风险；没有快照时是 undefined，界面显示成「未接入」。
+        balance: dependencies.store.getAccountBalance(account.id, account.providerKind),
         capabilities: providers.describeAccount(
           account.id,
           account.providerKind,

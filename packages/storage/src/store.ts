@@ -5588,6 +5588,80 @@ export class AutomationStore {
   }
 
   /**
+   * 写入账户余额快照。每个账户只留最新一条，重复调用是覆盖而不是追加。
+   *
+   * 读不到余额时调用方不写（而不是写 0）：0 和「没读到」是两件事，前者会触发
+   * 充值告警，后者只该显示成未接入。
+   */
+  saveAccountBalance(
+    accountId: string,
+    kind: ProviderKind,
+    balance: {
+      totalAmount: string;
+      cashAmount: string;
+      creditAmount: string;
+      currency: string;
+      precision: number;
+      capturedAt: string;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO account_balance_snapshots (
+           account_id, provider_kind, total_amount, cash_amount, credit_amount,
+           currency, precision, captured_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (account_id, provider_kind) DO UPDATE SET
+           total_amount = excluded.total_amount,
+           cash_amount = excluded.cash_amount,
+           credit_amount = excluded.credit_amount,
+           currency = excluded.currency,
+           precision = excluded.precision,
+           captured_at = excluded.captured_at`,
+      )
+      .run(
+        accountId,
+        kind,
+        balance.totalAmount,
+        balance.cashAmount,
+        balance.creditAmount,
+        balance.currency,
+        balance.precision,
+        balance.capturedAt,
+      );
+  }
+
+  /** 读账户余额快照。没读过返回 undefined，由界面显示成「未接入」。 */
+  getAccountBalance(
+    accountId: string,
+    kind: ProviderKind,
+  ): {
+    totalAmount: string;
+    cashAmount: string;
+    creditAmount: string;
+    currency: string;
+    precision: number;
+    capturedAt: string;
+  } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT total_amount, cash_amount, credit_amount, currency, precision, captured_at
+         FROM account_balance_snapshots
+         WHERE account_id = ? AND provider_kind = ?`,
+      )
+      .get(accountId, kind) as SqlRow | undefined;
+    if (!row) return undefined;
+    return {
+      totalAmount: String(row.total_amount),
+      cashAmount: String(row.cash_amount),
+      creditAmount: String(row.credit_amount),
+      currency: String(row.currency),
+      precision: Number(row.precision),
+      capturedAt: String(row.captured_at),
+    };
+  }
+
+  /**
    * 按账户时区的自然日汇总指标。
    *
    * 快照里的 spend/clicks/conversions 是当日累计值，一天里写几十条。按 (实体, 自然日)
@@ -7345,6 +7419,25 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS orphaned_snapshot_accounts (
         account_id TEXT PRIMARY KEY,
         marked_at TEXT NOT NULL
+      );
+
+      -- 账户余额快照。每个账户只保留最新一条（主键就是账户 + Provider），
+      -- 不做时间序列：余额是「现在还剩多少」，历史余额对充值和告警都没有用处，
+      -- 而按轮询频率（30 分钟）存历史，一年下来是一张十几万行的表换一个没人看的图。
+      --
+      -- 金额存 TEXT 而不是 REAL：接口返回的就是十进制字符串（"298.35"），转成
+      -- 浮点再存会在界面上重现 298.35000000000002 这类尾差，而这是给人看着决定
+      -- 要不要充值的数。
+      CREATE TABLE IF NOT EXISTS account_balance_snapshots (
+        account_id TEXT NOT NULL,
+        provider_kind TEXT NOT NULL,
+        total_amount TEXT NOT NULL,
+        cash_amount TEXT NOT NULL,
+        credit_amount TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        precision INTEGER NOT NULL DEFAULT 2,
+        captured_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, provider_kind)
       );
 
       CREATE TABLE IF NOT EXISTS sync_runs (

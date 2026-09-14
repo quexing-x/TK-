@@ -1,8 +1,7 @@
 import {
   CookieConnectionSettingsSchema,
   CookieCredentialInputSchema,
-  buildDraftPayloads,
-  buildDraftPublishPayload,
+  buildDraftPayloads,  buildDraftPublishPayload,
   buildDraftSketchListPayload,
   buildProfileDraftPayloads,
   buildPublishInput,
@@ -30,6 +29,7 @@ import {
   type LaunchOriginalPost,
   type LaunchProductInfo,
   type LaunchSentRequest,
+  type AccountBalanceSnapshot,
   appendTrackingParams,
 } from "@tk-auto/core";
 import type {
@@ -85,6 +85,7 @@ const capabilities = new Set<ProviderCapability>([
   "copy-campaigns",
   "appeal-ads",
   "delete-ad-groups",
+  "read-account-balance",
 ]);
 
 const COOKIE_SYNC_CONTRACT_VERSION = "cookie-statistics-v5-2026-07";
@@ -101,13 +102,14 @@ export class CookieAdsProvider implements AdsProvider {
   // v4：新增 copy-campaigns（系列级复制）。契约版本变更会让所有已接入账户显示
   // “能力契约已更新，请重新检测连接”，重新检测后才会开放新能力。
   // v5：新增 update-ad-group-budget。
+  // v6：新增 read-account-balance。
   //
   // **加能力必须同时升这个版本号。** authorizedCapabilities 是账户上次连接检测时记下的
   // 集合，新能力不在里面；而 available 要求 ready && authorizedCapabilities.has(...)，
   // 版本不升则 contractCurrent 仍为 true、界面不会提示重新检测，于是新能力对所有存量账户
   // 永久不可用——执行器每轮在能力闸门静默 return，开关打开了也毫无动静。
   // 2026-08-25 的提额规则就是这么白开了一整天。
-  readonly capabilityVersion = "cookie-capabilities-v5-2026-08";
+  readonly capabilityVersion = "cookie-capabilities-v6-2026-09";
   readonly capabilities = capabilities;
   private readonly creationGates = new Map<string, AccountCreationGate>();
 
@@ -162,6 +164,9 @@ export class CookieAdsProvider implements AdsProvider {
       // authorizedCapabilities，执行器每轮在能力闸门静默 return，而界面上一切正常——
       // 2026-08-25 的提额规则就是这么白开了一整天，重新检测多少次都没用。
       ...(hasAdGroupStatusSession ? ["update-ad-group-budget"] as const : []),
+      // 余额读取只需要一条已导入的会话 cURL：从它继承 Cookie、CSRF 与 aadvid
+      // （adv_id），pa_id 由接口按 adv_id 反查。不额外要求任何余额专用 cURL。
+      ...(hasListSession ? ["read-account-balance"] as const : []),
     ]);
   }
 
@@ -916,6 +921,28 @@ export class CookieAdsProvider implements AdsProvider {
         }),
       },
     };
+  }
+
+  /**
+   * 读账户余额。刻意**不在 syncReadOnly 里**做。
+   *
+   * 余额与投放数据是两个独立的关注点：它两个请求、走的是支付域名，而列表同步那条
+   * 链路上每一步都在被断言（哪一层取全了、翻了几页、哪些请求发出去了）。把余额塞
+   * 进同步，等于让每一条「这轮发了哪些请求」的既有测试都跟着变脆，日后改支付接口
+   * 还会牵动同步的成败判定。
+   *
+   * 所以它是同步完成之后单独调的一步：同步照旧只回答投放数据的问题，余额取不到就
+   * 是没有，互不牵连。调用方（同步调度）在 syncReadOnly 之后调它，节拍与同步一致。
+   */
+  async readBalance(context: ProviderContext): Promise<AccountBalanceSnapshot | undefined> {
+    if (!this.capabilities.has("read-account-balance")) return undefined;
+    const settings = CookieConnectionSettingsSchema.parse(context.settings);
+    const credential = CookieCredentialInputSchema.parse(context.credential);
+    const sessionRequest = credential.requestTemplates?.find(
+      (item) => item.target === "ad-group" && !item.derived,
+    );
+    if (!sessionRequest || !settings.advertiserId) return undefined;
+    return readAccountBalanceQuietly(sessionRequest, credential, settings.advertiserId);
   }
 
   async changeStatus(
@@ -2187,7 +2214,7 @@ export class AccountCreationGate {
 
   async acquireShared(kind: AccountWriteKind, scopeKey: string): Promise<() => void> {
     // 1) 同系列串行。键带上类型，免得两类写的键空间意外撞在一起。
-    const tailKey = `${kind} ${scopeKey}`;
+    const tailKey = `${kind}\u0000${scopeKey}`;
     const previous = this.scopeTails.get(tailKey) ?? Promise.resolve();
     let releaseScope!: () => void;
     const current = new Promise<void>((resolve) => { releaseScope = resolve; });
@@ -7021,6 +7048,121 @@ function sanitizeProviderMessage(message: string): string {
     .replace(/https?:\/\/\S+/gi, "[URL 已隐藏]")
     .replace(/\b(?:bearer\s+)?[A-Za-z0-9_-]{24,}\b/gi, "[敏感值已隐藏]")
     .replace(/\b(cookie|token|signature|session|csrf)\s*[:=]\s*[^\s,;]+/gi, "$1=[敏感值已隐藏]");
+}
+
+/**
+ * 读余额，但绝不因为读不到而影响整轮同步。
+ *
+ * 把异常吞在这里而不是让调用方 try/catch：同步路径上已经有一堆「哪一层失败了
+ * 要不要算 partial」的判断，再往那儿塞一个 try 只会让那段更难看懂。余额的失败
+ * 语义很简单——取不到就是没有，不影响其它任何东西。
+ */
+async function readAccountBalanceQuietly(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  advertiserId: string,
+): Promise<AccountBalanceSnapshot | undefined> {
+  try {
+    return await readAccountBalance(sessionRequest, credential, advertiserId) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 读账户余额。
+ *
+ * 两步，缺一不可：
+ *   1. `pa/api/spider/query_payment_account` —— 用 adv_id 反查 pa_id 与币种。
+ *   2. `pa/api/common/query/payment/query_payment_summary` —— 用 adv_id + pa_id 取余额。
+ *
+ * 两个请求都从账户已导入的会话 cURL 派生：只把 pathname 换成余额接口的路径，其余
+ * （Cookie、CSRF、UA、aadvid）原样继承。所以用户不需要为余额再拓一条 cURL。
+ *
+ * 读不到余额返回 null，不抛异常：余额是附加信息，接口变更或账户没有支付账户
+ * 都不该让整轮投放数据同步跟着判失败。
+ */
+async function readAccountBalance(
+  sessionRequest: CapturedCookieRequest,
+  credential: ParsedCookieCredential,
+  advertiserId: string,
+): Promise<AccountBalanceSnapshot | null> {
+  if (!advertiserId) return null;
+
+  // 第 1 跳：adv_id → pa_id。没有 pa_id 就没有第 2 跳。
+  const accountPayload = await requestCookieJson(
+    balancePathRequest(sessionRequest, "/pa/api/spider/query_payment_account", {
+      Context: { platform: 1, adv_id: advertiserId, bc_id: "" },
+      module_list: [0, 3],
+    }),
+    credential,
+    COOKIE_LIST_REQUEST_TIMEOUT_MS,
+  );
+  const accountData = isRecord(accountPayload.data) ? accountPayload.data : undefined;
+  const paInfo = accountData && isRecord(accountData.pa_info) ? accountData.pa_info : undefined;
+  const paId = typeof paInfo?.pa_id === "string" ? paInfo.pa_id : "";
+  if (!paId) return null;
+  // 币种以 pa_info 为准。summary 响应里多处都带 currency，混用容易取到不是本账户的那个。
+  const paCurrencies = paInfo?.pa_currency_list;
+  const currency = Array.isArray(paCurrencies) && typeof paCurrencies[0] === "string"
+    ? paCurrencies[0]
+    : "";
+
+  // 第 2 跳：adv_id + pa_id → 余额。
+  const summaryPayload = await requestCookieJson(
+    balancePathRequest(sessionRequest, "/pa/api/common/query/payment/query_payment_summary", {
+      adv_id: advertiserId,
+      pa_id: paId,
+      ...(currency ? { currency } : {}),
+      display_option: [1],
+      options: [1, 7, 11, 13],
+      Context: { platform: 1, pa_id: paId, adv_id: advertiserId },
+    }),
+    credential,
+    COOKIE_LIST_REQUEST_TIMEOUT_MS,
+  );
+  const data = isRecord(summaryPayload.data) ? summaryPayload.data : undefined;
+  const fullBalance = data && isRecord(data.adv_full_balance) ? data.adv_full_balance : undefined;
+  if (!fullBalance) return null;
+  // 总余额取 sum_total_balance，它与后台首页显示的金额一致（实测同为 298.35）；
+  // sum_cash_balance / sum_credit_balance 是它的组成，用于说明这笔钱是怎么来的。
+  const total = isRecord(fullBalance.sum_total_balance) ? fullBalance.sum_total_balance : undefined;
+  const cash = isRecord(fullBalance.sum_cash_balance) ? fullBalance.sum_cash_balance : undefined;
+  const credit = isRecord(fullBalance.sum_credit_balance) ? fullBalance.sum_credit_balance : undefined;
+  const totalAmount = typeof total?.abs_amount === "string" ? total.abs_amount : "";
+  if (!totalAmount) return null;
+
+  const currencyFormat = total && isRecord(total.currency) ? total.currency : undefined;
+  const resolvedCurrency = currency
+    || (typeof currencyFormat?.currency === "string" ? currencyFormat.currency : "");
+  const precision = typeof currencyFormat?.precision === "number" ? currencyFormat.precision : 2;
+
+  return {
+    totalAmount,
+    cashAmount: typeof cash?.abs_amount === "string" ? cash.abs_amount : "0",
+    creditAmount: typeof credit?.abs_amount === "string" ? credit.abs_amount : "0",
+    currency: resolvedCurrency,
+    precision,
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+/** 把会话 cURL 改写成余额接口的请求：只换 pathname，Cookie / CSRF / aadvid 全部继承。 */
+function balancePathRequest(
+  sessionRequest: CapturedCookieRequest,
+  pathname: string,
+  body: unknown,
+): CapturedCookieRequest {
+  const url = new URL(sessionRequest.url);
+  url.pathname = pathname;
+  return {
+    target: "health",
+    url: url.toString(),
+    method: "POST",
+    body: JSON.stringify(body),
+    contentType: "application/json",
+    ...(sessionRequest.headers ? { headers: sessionRequest.headers } : {}),
+  };
 }
 
 function materializeStatusRequest(
