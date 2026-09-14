@@ -5705,6 +5705,33 @@ export class AutomationStore {
   }
 
   /**
+   * 账户「今日消耗」的单一取值口。
+   *
+   * 存在的理由是首屏：账户列表要同时显示余额与今日消耗，余额随 bootstrap 一次到手，
+   * 消耗却要每账户单发一次 metric-days 请求，于是同一张表里一列已有值、另一列还在
+   * 转圈。这里让 bootstrap 顺带把今日消耗一起带回，首屏一次到位。
+   *
+   * 口径与 metric-days 端点完全同源——直接调 listDailyMetricTotals 再挑
+   * isCurrentDay 那行（该标记本来就由它按账户时区算好），所以不存在两套算法漂移的
+   * 可能。窗口给最近 2 天而不是「当地今天一整天」：跨日边界上多取一天更宽松，
+   * 不会因为时差把当天那行漏在窗口外，而多出来的那行会被 isCurrentDay 过滤掉。
+   */
+  getAccountTodaySpend(
+    accountId: string,
+    kind: ProviderKind,
+  ): { spend: number; lastLocalTime: string; entityCount: number } | undefined {
+    const since = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+    const days = this.listDailyMetricTotals(accountId, kind, since, "ad-group");
+    const today = days.find((day) => day.isCurrentDay);
+    if (!today) return undefined;
+    return {
+      spend: today.spend,
+      lastLocalTime: today.lastLocalTime,
+      entityCount: today.count,
+    };
+  }
+
+  /**
    * 按账户时区的自然日汇总指标。
    *
    * 快照里的 spend/clicks/conversions 是当日累计值，一天里写几十条。按 (实体, 自然日)

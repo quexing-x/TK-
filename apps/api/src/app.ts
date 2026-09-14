@@ -456,6 +456,12 @@ export async function createApp(
         // 的状态机），顶栏的余额告警浮窗按它筛账户；阈值在服务端判，前端不猜。
         balance: dependencies.store.getAccountBalance(account.id, account.providerKind),
         balanceAlerted: dependencies.store.getBalanceAlertBelow(account.id),
+        // 今日消耗顺带带回，与余额同一批：否则首屏余额已有值、消耗那一列还在转圈，
+        // 同一张表里两列表现不一致。口径与 metric-days 端点同源（同一个聚合函数）。
+        todaySpend: dependencies.store.getAccountTodaySpend(
+          account.id,
+          account.providerKind,
+        ),
         capabilities: providers.describeAccount(
           account.id,
           account.providerKind,
