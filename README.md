@@ -2,9 +2,9 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.4.35
+## Windows 桌面版 1.4.132
 
-安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.35.exe`
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.132.exe`
 
 - 适用于 Windows x64，双击安装后从桌面或开始菜单启动。
 - 不依赖自建服务器；界面、本地 API、SQLite 和 DPAPI 凭据库均在本机运行。
@@ -14,6 +14,14 @@
 - 后续升级先关闭程序，再直接运行更高版本安装包；不要先卸载旧版本。
 - 固定 App ID `com.tkads.automation`，新版安装包覆盖程序文件并保留用户数据。
 - 当前安装包未配置商业代码签名证书，Windows 可能显示未知发布者提示。
+
+升级到 1.4.132 后会出现的变化：
+
+- **MCP 助手可以接的客户端从 2 个扩到 5 个。** 除原有的 Codex、Claude 桌面端，新增 DSH（DeepSeek Harness）、WorkBuddy（腾讯 CodeBuddy）和豆包工作。手册第 17 节逐家给了配置写法。
+- **豆包工作走的是新加的本地 HTTP 端点。** 它的连接器只能填 URL 和密钥，填不了命令行，所以接不了 stdio。安装包里多了一个 `resources/mcp/mcp-http.cjs`，监听 `http://127.0.0.1:31374/mcp`，用 `mcp-endpoint.json` 里那张令牌做 Bearer 鉴权；端口被占用时设 `TK_AUTO_MCP_HTTP_PORT` 换一个。只监听回环地址，不对外网开放。
+- **两种接法是同一套工具、同一套把关。** stdio 和 HTTP 共用一个工具集，扩组的幂等闸门、冲突预检、写熔断和「结果未知禁止自动重试」在两侧行为完全一致；两个写工具（扩组、系列复制）在任何宿主下都默认只做预演，必须明确同意才真正下单。
+- 打包脚本补齐了 MCP 构建：此前 `pnpm --filter @tk-auto/desktop dist` 不会构建 MCP，会把上一次的产物打进安装包。现在 dist 与 dist:signed 都会先构建 MCP，发布前检查也会核对 `resources/mcp` 下两个入口的存在与新鲜度。
+- 手册版本号此前一直停在 1.4.101（「手册版本」在界面上可见），本次同步为 1.4.132。
 
 升级到 1.4.128 后会出现的变化：
 

@@ -1,7 +1,7 @@
 {
   "title": "TK Ads 自动化操作使用手册",
-  "version": "1.4.101",
-  "updatedAt": "2026-09-06",
+  "version": "1.4.132",
+  "updatedAt": "2026-09-14",
   "summary": "本手册覆盖 Windows 桌面版安装与升级、本机登录权限、多广告账户、Cookie 与官方 API 接入、自动化检测与启停、定时任务、规则配置、广告分析、消息推送和多账户投放计划。",
   "sections": [
     {
@@ -342,12 +342,15 @@
     {
       "id": "agent-mcp",
       "title": "17. AI 助手接入（MCP）",
-      "intro": "把本机的 TK 自动化接进 Codex、Claude 桌面端这类 AI 助手，让它直接读账户快照、分辨哪些广告组是原组、哪些是重扩出来的，并生成一张只差视频代码的扩组导入表。扩组与系列复制也能由助手执行，但默认只做预演，必须你明确同意后才会真正创建。",
+      "intro": "把本机的 TK 自动化接进 Codex、Claude 桌面端、DSH、WorkBuddy、豆包工作这类 AI 助手，让它直接读账户快照、分辨哪些广告组是原组、哪些是重扩出来的，并生成一张只差视频代码的扩组导入表。扩组与系列复制也能由助手执行，但默认只做预演，必须你明确同意后才会真正创建。有命令行配置的助手走 stdio，只认 URL 的助手（豆包工作）走本地 HTTP 端点，两者是同一套工具、同一套把关。",
       "steps": [
         "先确认客户端已经启动过一次：接入信息由后台程序在启动时写入，没跑过就没有这个文件。",
         "找到接入信息文件：按 Win+R 输入 %APPDATA%\\TK Ads Automation 回车，里面的 mcp-endpoint.json 就是。它记录了本地服务地址和一张访问令牌，助手会自己读取，你不需要复制里面的内容。",
         "在 Codex 里接入：编辑 %USERPROFILE%\\.codex\\config.toml，加入一段 [mcp_servers.tk_ads]，command 填客户端主程序 exe 的完整路径，args 填 [\"<安装目录>\\\\resources\\\\mcp\\\\mcp-server.cjs\"]，env 里设 ELECTRON_RUN_AS_NODE = \"1\"。默认安装目录是 %LOCALAPPDATA%\\Programs\\TK Ads Automation；安装时改过目录的以实际为准，在开始菜单的快捷方式上点右键「打开文件所在位置」就能确认。",
         "在 Claude 桌面端接入：打开设置里的开发者选项，编辑 claude_desktop_config.json，在 mcpServers 下按同样的 command / args / env 三项填写，然后重启客户端。",
+        "在 DSH（DeepSeek Harness）里接入：编辑 $DSH_HOME/cordis.patch.yml，在已有的 insert 列表里加一项，id 填 tk-ads-automation，name 填 \"@deepseek-ai/dsh-mcp-client\"，config 下填 serverName: tk_ads、transport: stdio、command 填主程序 exe 的完整路径、args 填 resources\\\\mcp\\\\mcp-server.cjs 的完整路径、env 里设 ELECTRON_RUN_AS_NODE: \"1\"。注意 YAML 里 Windows 路径要加单引号，否则反斜杠会被当转义符。重启 DSH 后工具会以 mcp__tk_ads__ 开头。",
+        "在 WorkBuddy（腾讯 CodeBuddy）里接入：编辑 %USERPROFILE%\\\\.workbuddy\\\\.mcp.json（该文件不存在时也可用 ~/.codebuddy/.mcp.json），在 mcpServers 下加一个 tk_ads 项，type 填 stdio、command 填主程序 exe 的完整路径、args 填 [\"<安装目录>\\\\resources\\\\mcp\\\\mcp-server.cjs\"]、env 里设 ELECTRON_RUN_AS_NODE = \"1\"。它支持 JSONC（可写注释、可留尾逗号）。项目根的 .mcp.json 首次连接需要在界面里人工批准；用 -p 无界面模式时必须补 --settings '{\"enabledMcpjsonServers\":[\"tk_ads\"]}'，否则它连不上。",
+        "在豆包工作里接入：它只认「URL + 密钥」，填不了命令行，所以要用 HTTP 端点。先在客户端目录下用主程序以纯 Node 模式启动 resources\\\\mcp\\\\mcp-http.cjs（设 ELECTRON_RUN_AS_NODE=1），它会监听 http://127.0.0.1:31374/mcp；然后在豆包工作左侧「技能·连接器·伙伴」里添加 MCP 连接器，URL 填这个地址，密钥填 %APPDATA%\\TK Ads Automation\\mcp-endpoint.json 里的 token。端口被占用时设 TK_AUTO_MCP_HTTP_PORT 换一个。",
         "接好后先让助手「列出广告账户」验证连通，它会返回账户 ID、时区和最近一次同步是否健康。",
         "要分清原组和重扩组时，让助手「看某个账户的谱系」。它会按品名把每个品的原组和历次重扩链列出来，标明每条的判据是确证（有复制/扩组任务记录）还是推断（只看名字形状），并单独列出账户内的重名系列。",
         "要上新素材时，让助手「给这几个组生成扩组导入表」。生成的 .xlsx 默认落在下载目录，系列名、广告组名按扩组的同一套规则算好并避开了账户里已占用的名称，产品 URL 和定向沿用这个品上次填的值，只有视频代码留空（表里已标黄）。",
@@ -356,6 +359,7 @@
       ],
       "notes": [
         "接入信息文件里是一张真实的访问令牌，等同于一个可以操作广告账户的登录态。不要发到群里、不要提交进代码仓库、不要随文件夹一起分享。",
+        "HTTP 端点（给豆包工作这类只认 URL 的助手用）只监听 127.0.0.1，不对外网开放，且每个请求都要校验同一张令牌——不带或带错一律拒绝。它和 stdio 版是同一套工具、同样的预演与确认流程，写操作照样走幂等闸门和操作记录。",
         "这个身份在「用户管理」里显示为 MCP 助手，角色是操作员：能读账户、生成表、扩组复制，但改不了系统设置、也管不了本机账户。停用它，助手立即失去访问权限。",
         "助手做的每一次写操作都会照常写进操作记录，事后能查到是谁下的单。扩组的幂等闸门、冲突预检、写熔断和「结果未知禁止自动重试」全部照常生效——助手走的是和界面完全相同的那条路。",
         "生成导入表不会创建任何广告对象，也不会占用名称。真正占住名字的是你导入并创建的那一刻，所以生成表之后隔太久再导入，仍有被别的操作抢先占名的可能。",
