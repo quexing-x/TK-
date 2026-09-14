@@ -186,6 +186,9 @@ export async function createApp(
     ? null
     : new LaunchWorker(dependencies.store, launchService);
   launchWorker?.start();
+  const notifications =
+    dependencies.notifications ??
+    new NotificationService(dependencies.store, dependencies.vault);
   const automation =
     dependencies.automation ??
     new AutomationService(
@@ -197,10 +200,8 @@ export async function createApp(
         expand: (taskKey) => launchService.publishStuckExpandDraft(taskKey),
         campaignCopy: (taskKey) => launchService.publishStuckCampaignCopyDraft(taskKey),
       },
+      notifications,
     );
-  const notifications =
-    dependencies.notifications ??
-    new NotificationService(dependencies.store, dependencies.vault);
   const auth = new AuthService(
     dependencies.store,
     dependencies.authSessionLifetimeMs,

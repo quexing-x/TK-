@@ -5661,6 +5661,49 @@ export class AutomationStore {
     };
   }
 
+  /** 读告警阈值；配置行不存在或被改坏时按 30 处理，不让脏配置静默抬高告警线。 */
+  getBalanceAlertThreshold(): string {
+    const row = this.db
+      .prepare("SELECT threshold FROM balance_alert_configuration WHERE id = 1")
+      .get() as SqlRow | undefined;
+    const value = row ? String(row.threshold).trim() : "";
+    return /^\d+(?:\.\d+)?$/.test(value) ? value : "30";
+  }
+
+  setBalanceAlertThreshold(threshold: string): void {
+    const normalized = threshold.trim();
+    if (!/^\d+(?:\.\d+)?$/.test(normalized)) {
+      throw new Error("余额告警阈值必须是大于等于 0 的数字。");
+    }
+    this.db
+      .prepare(
+        `INSERT INTO balance_alert_configuration (id, threshold, updated_at)
+         VALUES (1, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET threshold = excluded.threshold, updated_at = excluded.updated_at`,
+      )
+      .run(normalized, new Date().toISOString());
+  }
+
+  getBalanceAlertBelow(accountId: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT below_threshold FROM account_balance_alert_state WHERE account_id = ?",
+      )
+      .get(accountId) as SqlRow | undefined;
+    return Boolean(row && row.below_threshold);
+  }
+
+  setBalanceAlertBelow(accountId: string, below: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO account_balance_alert_state (account_id, below_threshold, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (account_id) DO UPDATE SET
+           below_threshold = excluded.below_threshold, updated_at = excluded.updated_at`,
+      )
+      .run(accountId, below ? 1 : 0, new Date().toISOString());
+  }
+
   /**
    * 按账户时区的自然日汇总指标。
    *
@@ -7438,6 +7481,26 @@ export class AutomationStore {
         precision INTEGER NOT NULL DEFAULT 2,
         captured_at TEXT NOT NULL,
         PRIMARY KEY (account_id, provider_kind)
+      );
+
+      -- 余额告警的「已提醒」状态。跌破阈值发一次消息；持续低于阈值不重复轰炸，
+      -- 回到阈值以上就悄悄复位——之后再跌破才再提醒。没有这张表，每个 15 分钟
+      -- 的余额刷新都会 @所有人 一次，告警会退化成骚扰。
+      -- 状态行只在【成功触达（或确认无渠道可发）】之后才写：发送失败时保持
+      -- below=0，下一个 15 分钟刷新会再试，webhook 短暂抖动不会吞掉告警。
+      CREATE TABLE IF NOT EXISTS account_balance_alert_state (
+        account_id TEXT PRIMARY KEY,
+        below_threshold INTEGER NOT NULL CHECK (below_threshold IN (0, 1)),
+        updated_at TEXT NOT NULL
+      );
+
+      -- 告警阈值。固定一行（id=1）；读不到按 30 处理。单独成行而不是写死常量：
+      -- 每个账户的币种和消耗节奏不同，这个数几乎必然要调，放进库里以后加界面
+      -- 也不用动代码。同理不做按账户覆盖，等真有人需要再说。
+      CREATE TABLE IF NOT EXISTS balance_alert_configuration (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        threshold TEXT NOT NULL DEFAULT '30',
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS sync_runs (

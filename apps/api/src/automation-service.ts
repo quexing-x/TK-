@@ -33,7 +33,9 @@ import {
   syncLayerComplete,
   creativeNeedsAppeal,
   type AccountConfig,
+  type NotificationRenderedMessage,
 } from "@tk-auto/core";
+import { renderBalanceAlert } from "@tk-auto/notifications";
 import type { CredentialVault } from "@tk-auto/credentials";
 import {
   ProviderRegistry,
@@ -148,6 +150,16 @@ export class AutomationService {
     private readonly draftPublishers?: {
       expand: (taskKey: string) => Promise<unknown>;
       campaignCopy: (taskKey: string) => Promise<unknown>;
+    },
+    /**
+     * 余额告警发送器。注入而不是直接依赖 NotificationService，理由和 draftPublishers
+     * 相同：两 service 互相持有会绕成环。返回值是「是否算已触达」——只有触达（或确认
+     * 无渠道可发）才落「已提醒」，全渠道失败时保持未提醒，下个刷新周期重试。
+     */
+    private readonly balanceAlerts?: {
+      deliverBalanceAlert(message: NotificationRenderedMessage): Promise<{
+        acknowledged: boolean;
+      }>;
     },
   ) {
     this.statusTasks = new WriteTaskKernel({
@@ -2165,8 +2177,75 @@ export class AutomationService {
       const balance = await this.providers.readBalance(account.providerKind, context);
       if (!balance) return;
       this.store.saveAccountBalance(account.id, account.providerKind, balance);
+      await this.evaluateBalanceAlert(account, balance);
     } catch {
       // 下一轮还会再来。
+    }
+  }
+
+  /**
+   * 余额跌破阈值就通过已配置的通知渠道发消息并 @所有人。
+   *
+   * 状态机刻意简单：跌破且未提醒 → 发 + 记「已提醒」；持续低 → 静；回升 → 静默
+   * 复位（用户没要恢复提醒）；之后再次跌破才再提醒。**只在消息真正送达（或确认无
+   * 渠道可发）之后才记状态**——全渠道发送失败时不落状态，15 分钟后的下一次刷新会
+   * 自然重试，webhook 抖动不会把告警永久吞掉。
+   *
+   * 阈值按账户原币解释：不同账户币种可能不同，不做汇率换算。配置读不到或改坏时
+   * 按默认 30 处理，绝不让一个脏配置值悄悄抬高或关闭告警线。
+   */
+  private evaluateBalanceAlert(
+    account: AccountConfig,
+    balance: {
+      totalAmount: string;
+      cashAmount: string;
+      creditAmount: string;
+      currency: string;
+      precision: number;
+      capturedAt: string;
+    },
+  ): Promise<void> {
+    const thresholdValue = Number(this.balanceAlertThreshold());
+    const threshold = Number.isFinite(thresholdValue) ? thresholdValue : 30;
+    // 空串会被 Number() 吞成 0——那样一次字段缺失会被当成「余额 0」而告警。
+    // 0 和「没读到」是两件事，这里直接跳过。
+    if (balance.totalAmount.trim() === "") return Promise.resolve();
+    const amount = Number(balance.totalAmount);
+    if (!Number.isFinite(amount)) return Promise.resolve();
+    const below = amount < threshold;
+    const wasBelow = this.store.getBalanceAlertBelow(account.id);
+    if (!below) {
+      if (wasBelow) this.store.setBalanceAlertBelow(account.id, false);
+      return Promise.resolve();
+    }
+    if (wasBelow) return Promise.resolve();
+    const message = renderBalanceAlert({
+      accountName: account.displayName,
+      totalAmount: balance.totalAmount,
+      currency: balance.currency,
+      threshold: this.store.getBalanceAlertThreshold(),
+    });
+    // 没注入发送器（单测/仅读模式）视作已提醒：不然会以 15 分钟一次的频率
+    // 在没有发送通路的环境里永远重试。
+    if (!this.balanceAlerts) {
+      this.store.setBalanceAlertBelow(account.id, true);
+      return Promise.resolve();
+    }
+    return this.balanceAlerts
+      .deliverBalanceAlert(message)
+      .then((result) => {
+        if (result.acknowledged) this.store.setBalanceAlertBelow(account.id, true);
+      })
+      .catch(() => {
+        // 发送链路抛错时与「全渠道失败」同等对待：不落状态，下次重试。
+      });
+  }
+
+  private balanceAlertThreshold(): string {
+    try {
+      return this.store.getBalanceAlertThreshold();
+    } catch {
+      return "30";
     }
   }
 
