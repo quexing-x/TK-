@@ -79,3 +79,29 @@ export function filterManagedAccounts(accounts: AccountConfig[], states: Connect
 }
 export const accountTypeNames = { standard: "普通广告账户", agency: "代理账户", shop: "TikTok Shop" };
 export const providerNames = { cookie: "Cookie 会话", "official-api": "TikTok Marketing API" };
+
+/**
+ * 当前处于「跌破余额告警阈值」状态的账户，供顶栏告警浮窗展示。
+ *
+ * 只信服务端维护的 balanceAlerted 状态（与群消息告警是同一状态机），不在前端
+ * 重新拿阈值比较——两处口径一旦漂移，会出现「消息说没钱、浮窗不亮」或反之。
+ * 有告警状态的账户若无余额快照（历史遗留），也照常列出，金额显示 —。
+ */
+export function balanceAlertAccounts(
+  accounts: AccountConfig[],
+  states: ConnectionMap,
+): Array<{
+  id: string;
+  displayName: string;
+  totalAmount: string | null;
+  currency: string;
+}> {
+  return accounts
+    .filter((account) => states[account.id]?.balanceAlerted === true)
+    .map((account) => ({
+      id: account.id,
+      displayName: account.displayName,
+      totalAmount: states[account.id]?.balance?.totalAmount ?? null,
+      currency: states[account.id]?.balance?.currency ?? "",
+    }));
+}

@@ -120,6 +120,8 @@ export interface BootstrapPayload {
     latestSync: ReadOnlySyncResult | null;
     /** 账户余额快照；没有时 undefined，界面显示成未接入。 */
     balance?: AccountBalanceSnapshot;
+    /** 该账户当前是否处于「跌破余额告警阈值」状态；引擎维护，顶栏浮窗据此筛。 */
+    balanceAlerted?: boolean;
     capabilities: AccountProviderCapabilities;
   }>;
   globalAutomationSettings: GlobalAutomationSettings;

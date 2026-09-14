@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AccountConfig } from "@tk-auto/core";
-import { accountHealth, accountLocalDate, accountLocalDayRange, filterManagedAccounts } from "./account-management-model";
+import { accountHealth, accountLocalDate, accountLocalDayRange, balanceAlertAccounts, filterManagedAccounts } from "./account-management-model";
 
 describe("production account list", () => {
   const accounts = [
@@ -70,5 +70,34 @@ describe("production account list", () => {
   });
   it("does not invent healthy status when connection state is missing", () => {
     expect(accountHealth(undefined)).toMatchObject({ label: "待检测", tone: "warning", readReady: false, createReady: false });
+  });
+
+  describe("balanceAlertAccounts", () => {
+    it("只列服务端标记为跌破阈值的账户，带名称与原币金额", () => {
+      const list = [
+        { id: "low", displayName: "余杭茵未-24HP", platform: "tiktok", enabled: true },
+        { id: "fine", displayName: "纵姿0830-1", platform: "tiktok", enabled: true },
+      ] as never;
+      const states = {
+        low: { balance: { totalAmount: "139.50", currency: "USD" }, balanceAlerted: true },
+        fine: { balance: { totalAmount: "371.61", currency: "USD" }, balanceAlerted: false },
+      } as never;
+      expect(balanceAlertAccounts(list, states)).toEqual([
+        { id: "low", displayName: "余杭茵未-24HP", totalAmount: "139.50", currency: "USD" },
+      ]);
+    });
+
+    it("有告警状态但快照缺失的账户照常列出，金额为 null（浮窗显示 —）", () => {
+      const list = [{ id: "x", displayName: "纵姿0918-1", platform: "tiktok", enabled: true }] as never;
+      const states = { x: { balanceAlerted: true } } as never;
+      expect(balanceAlertAccounts(list, states)).toEqual([
+        { id: "x", displayName: "纵姿0918-1", totalAmount: null, currency: "" },
+      ]);
+    });
+
+    it("没有标记的账户一律不出现，哪怕它有余额", () => {
+      const list = [{ id: "y", displayName: "健康账户", platform: "tiktok", enabled: true }] as never;
+      expect(balanceAlertAccounts(list, { y: { balance: { totalAmount: "300" } } } as never)).toEqual([]);
+    });
   });
 });

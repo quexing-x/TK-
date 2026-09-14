@@ -126,6 +126,8 @@ import {
 import { CommandPalette, OverlayProvider, useOverlays } from "./ui/overlays";
 import { AccountManagement } from "./AccountManagement";
 import { AccountShell } from "./ui/production/AccountShell";
+import { BalanceAlertWidget } from "./ui/production/BalanceAlertWidget";
+import { balanceAlertAccounts } from "./account-management-model";
 import { X as AccountCloseIcon, FloppyDisk as AccountSaveIcon } from "@phosphor-icons/react";
 
 export type PageKey =
@@ -485,8 +487,15 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
 
   const visibleNavigation = navItems.filter((item) => canAccessNavigationItem(item.key, auth.status.permissions));
   const pageTitle = page === "overview" ? "总览" : page === "manual" ? "操作手册" : visibleNavigation.find((item) => item.key === page)?.label ?? "工作空间";
+  // 顶栏余额告警浮窗：数据来自同一份 bootstrap 快照，账户管理页的表格里本来就有
+  // 余额一列，那一页不再重复放浮窗。
+  const balanceAlerts = balanceAlertAccounts(
+    bootstrap.accounts,
+    Object.fromEntries(bootstrap.accountConnectionStates.map((state) => [state.accountId, state])),
+  );
   const headerActions = page === "accounts" ? undefined : (
     <>
+      <BalanceAlertWidget accounts={balanceAlerts} />
       <div className="p-command-area">
         <button className="command-trigger" type="button" onClick={() => setCommandOpen((open) => !open)} aria-expanded={commandOpen}>
           <Search size={15} /><span>跳转账户、规则、任务…</span><kbd>Ctrl K</kbd>
