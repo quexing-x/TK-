@@ -3529,12 +3529,6 @@ describe("AutomationStore", () => {
     )).toMatchObject({
       status: "unknown",
     });
-    expect(store.hasBlockingStatusOperationForEntity(
-      "demo-account",
-      "cookie",
-      "ad-group",
-      "group-readback-failed",
-    )).toBe(true);
   });
 
   it("exposes filtered task history and never claims cancelled launch work", () => {

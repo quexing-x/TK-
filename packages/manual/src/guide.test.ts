@@ -3,7 +3,7 @@ import { userGuide } from "./index.js";
 
 describe("user guide", () => {
   it("contains both provider tutorials and the update policy", () => {
-    expect(userGuide.version).toBe("1.4.137");
+    expect(userGuide.version).toBe("1.4.138");
     const ids = userGuide.sections.map((section) => section.id);
     expect(ids).toContain("cookie-provider");
     expect(ids).toContain("official-api-provider");
