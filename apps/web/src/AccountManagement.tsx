@@ -107,7 +107,17 @@ export function AccountManagement(props: Props) {
   const healthCounts = accounts.reduce((result, a) => { result[accountHealth(states[a.id]).tone]++; return result; }, { healthy: 0, warning: 0, danger: 0 });
   const renderSpend = (account: AccountConfig) => {
     const metric = metrics[account.id];
-    if (!metric || metric.loading) return <span className="p-loading-text" role="status">读取中…</span>;
+    // 预渲染：bootstrap 已经带回今日消耗，首屏直接画出来，不再显示「读取中…」。
+    // 精确值仍由 metric-days 请求补齐——两者口径同源（同一个聚合函数），差别只在
+    // 刷新时刻的毫秒级新鲜度，所以请求回来前后显示的值不会跳变。
+    const seeded = states[account.id]?.todaySpend;
+    // 只在「还没拿到结果」的空窗期用预渲染值兜底。读取失败仍然如实报错：那是真实
+    // 异常，用旧值把它盖住会让人既看不到问题、也找不到重试入口。
+    if (!metric || metric.loading) {
+      return seeded
+        ? <strong className="p-number">{seeded.spend.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+        : <span className="p-loading-text" role="status">读取中…</span>;
+    }
     if (metric.error) return <button type="button" className="p-metric-error" title={metric.error} onClick={() => setRefresh((n) => n + 1)}>读取失败 · 重试</button>;
     if (!metric.day) return <><span className="p-number">—</span><small>暂无今日数据</small></>;
     return <strong className="p-number">{metric.day.spend.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>;

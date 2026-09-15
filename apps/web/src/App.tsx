@@ -83,8 +83,11 @@ import {
   providerCapabilitySummary,
 } from "./provider-capability-view";
 import {
+  DEFAULT_ANALYSIS_PRESET,
   resolveAnalysisRange,
+  toSecondPrecision,
   type AnalysisPreset,
+  type AnalysisRange,
 } from "./analytics";
 import { syncQualityPresentation } from "./sync-quality-view";
 import { selectActionableDecisionHistory } from "./automation-decision-view";
@@ -522,7 +525,7 @@ function ConsoleApp({ theme, onThemeToggle }: { theme: UiTheme; onThemeToggle: (
         production
         runtimeEnabled={bootstrap.systemRuntime.enabled}
         accounts={bootstrap.accounts}
-        initialConnectionStates={Object.fromEntries(bootstrap.accountConnectionStates.map((state) => [state.accountId, { connection: state.connection, readiness: null, latestSync: state.latestSync, capabilities: state.capabilities }]))}
+        initialConnectionStates={Object.fromEntries(bootstrap.accountConnectionStates.map((state) => [state.accountId, { ...state, readiness: null }]))}
         onChanged={loadBootstrap}
         onError={setError}
       />
@@ -1752,14 +1755,12 @@ function AnalyticsPage({
   const today = formatDateInput(new Date());
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
-  const [preset, setPreset] = useState<AnalysisPreset>("7d");
+  const [preset, setPreset] = useState<AnalysisPreset>(DEFAULT_ANALYSIS_PRESET);
   const [customFrom, setCustomFrom] = useState(formatDateInput(sevenDaysAgo));
   const [customTo, setCustomTo] = useState(today);
   const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("ad-group");
   const [barMetric, setBarMetric] = useState<BatchBarMetric>("spend");
   const [lineMetric, setLineMetric] = useState<BatchLineMetric>("cpc");
-  const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
-  const [days, setDays] = useState<DailyMetricRecord[] | null>(null);
   const range = useMemo(
     () => {
       try {
@@ -1770,27 +1771,12 @@ function AnalyticsPage({
     },
     [customFrom, customTo, preset],
   );
+  const accountIds = useMemo(() => [account.id], [account.id]);
+  const { days, batches } = useAnalyticsData(accountIds, range, level, onError);
 
   useEffect(() => {
     if (account.providerKind === "cookie" && level === "ad") setLevel("ad-group");
   }, [account.providerKind, level]);
-
-  useEffect(() => {
-    if (!range) return;
-    setBatches(null);
-    setDays(null);
-    const entityType = level === "all" ? undefined : level;
-    void Promise.all([
-      api.getMetricDays(account.id, range, entityType),
-      api.getAnalytics(account.id, range, entityType),
-    ])
-      .then(([dailyResult, batchResult]) => {
-        setDays(dailyResult);
-        setBatches(batchResult);
-        onError(null);
-      })
-      .catch((cause) => onError(getErrorMessage(cause)));
-  }, [account.id, level, onError, range?.from, range?.to]);
 
   const summary = useMemo(() => summarizeDailyMetrics(days ?? []), [days]);
   if (!days || !batches) return <EmptyState text="正在分析指标快照…" loading />;
@@ -2511,39 +2497,74 @@ function aggregateAccountBatches(lists: MetricBatchRecord[][]): MetricBatchRecor
   return [...byTime.values()];
 }
 
+/**
+ * 分析页的取数。
+ *
+ * 三个坑都在这里，视图那边只管渲染：
+ *
+ * 1. 区间右端必须裁到秒。原始实现把 `new Date()`（带毫秒）当区间右端交给依赖它的
+ *    effect，毫秒不同 → 依赖每次渲染都变 → 请求反复重发 → 页面永远在加载。
+ * 2. 请求发出时立刻清空数据，于是每次切筛选都要重新转一圈加载态。这里改成保留旧数据
+ *    继续显示，直到新数据落地——切换筛选时不再白屏。
+ * 3. 竞态：快速切筛选时先发的请求可能后到。用序号丢弃过期响应。
+ */
+function useAnalyticsData(
+  accountIds: string[],
+  range: AnalysisRange | null,
+  level: "all" | ManagedEntityRecord["entityType"],
+  onError: (message: string | null) => void,
+) {
+  const [days, setDays] = useState<DailyMetricRecord[] | null>(null);
+  const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
+  // 只用来丢弃过期响应，不参与渲染，所以用 ref 而不是 state。
+  const requestSequence = useRef(0);
+
+  // 数组用「内容」而不是引用进依赖：父组件每次渲染都会新建 accounts 数组。
+  const accountKey = accountIds.join(",");
+  const from = range?.from;
+  // 右端裁到秒，让同一秒内的多次渲染算出同一个值。
+  const to = range ? toSecondPrecision(new Date(range.to)) : undefined;
+
+  useEffect(() => {
+    if (accountKey === "" || !from || !to) return;
+    const ids = accountKey.split(",");
+    const entityType = level === "all" ? undefined : level;
+    const sequence = ++requestSequence.current;
+    void Promise.all(ids.map(async (accountId) => ({
+      days: await api.getMetricDays(accountId, { from, to }, entityType).catch(() => [] as DailyMetricRecord[]),
+      batches: await api.getAnalytics(accountId, { from, to }, entityType).catch(() => [] as MetricBatchRecord[]),
+    })))
+      .then((results) => {
+        // 过期响应直接丢，否则慢的旧请求会把新的筛选结果盖回去。
+        if (sequence !== requestSequence.current) return;
+        setDays(mergeDailyMetricsAcrossAccounts(results.map((result) => result.days)));
+        setBatches(aggregateAccountBatches(results.map((result) => result.batches)));
+        onError(null);
+      })
+      .catch((cause) => {
+        if (sequence !== requestSequence.current) return;
+        onError(getErrorMessage(cause));
+      });
+  }, [accountKey, from, level, onError, to]);
+
+  return { days, batches };
+}
+
 function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConfig[]; onError: (message: string | null) => void }) {
   const today = formatDateInput(new Date());
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
-  const [preset, setPreset] = useState<AnalysisPreset>("7d");
+  const [preset, setPreset] = useState<AnalysisPreset>(DEFAULT_ANALYSIS_PRESET);
   const [customFrom, setCustomFrom] = useState(formatDateInput(sevenDaysAgo));
   const [customTo, setCustomTo] = useState(today);
   const [level, setLevel] = useState<"all" | ManagedEntityRecord["entityType"]>("ad-group");
   const [barMetric, setBarMetric] = useState<BatchBarMetric>("spend");
   const [lineMetric, setLineMetric] = useState<BatchLineMetric>("cpc");
-  const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
-  const [days, setDays] = useState<DailyMetricRecord[] | null>(null);
   const range = useMemo(() => {
     try { return resolveAnalysisRange(preset, customFrom, customTo); } catch { return null; }
   }, [customFrom, customTo, preset]);
-
-  useEffect(() => {
-    if (!range) return;
-    setBatches(null);
-    setDays(null);
-    const entityType = level === "all" ? undefined : level;
-    void Promise.all([
-      Promise.all(accounts.map((account) => api.getMetricDays(account.id, range, entityType).catch(() => [] as DailyMetricRecord[]))),
-      Promise.all(accounts.map((account) => api.getAnalytics(account.id, range, entityType).catch(() => [] as MetricBatchRecord[]))),
-    ])
-      .then(([dailyLists, batchLists]) => {
-        // 跨账户按自然日相加；批次只是同步日志，仍按时间戳并列。
-        setDays(mergeDailyMetricsAcrossAccounts(dailyLists));
-        setBatches(aggregateAccountBatches(batchLists));
-        onError(null);
-      })
-      .catch((cause) => onError(getErrorMessage(cause)));
-  }, [accounts, level, onError, range?.from, range?.to]);
+  const accountIds = useMemo(() => accounts.map((account) => account.id), [accounts]);
+  const { days, batches } = useAnalyticsData(accountIds, range, level, onError);
 
   const summary = useMemo(() => summarizeDailyMetrics(days ?? []), [days]);
   if (!days || !batches) return <EmptyState text="正在汇总全部账户指标…" loading />;

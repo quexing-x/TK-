@@ -122,6 +122,11 @@ export interface BootstrapPayload {
     balance?: AccountBalanceSnapshot;
     /** 该账户当前是否处于「跌破余额告警阈值」状态；引擎维护，顶栏浮窗据此筛。 */
     balanceAlerted?: boolean;
+    /**
+     * 今日消耗（账户当地日、广告组层）。随 bootstrap 一次带回，供账户列表首屏直接
+     * 渲染——否则同一张表里余额已有值、消耗还在转圈。口径与 metric-days 端点同源。
+     */
+    todaySpend?: { spend: number; lastLocalTime: string; entityCount: number };
     capabilities: AccountProviderCapabilities;
   }>;
   globalAutomationSettings: GlobalAutomationSettings;

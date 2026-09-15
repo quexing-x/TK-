@@ -1101,6 +1101,45 @@ describe("AutomationStore", () => {
       expect(day?.lastLocalTime).toBe("08:06");
       expect(day?.isCurrentDay).toBe(false);
     });
+
+    // 2026-09-16：账户列表首屏要「余额 + 今日消耗」同时到位。余额随 bootstrap 一次到手，
+    // 消耗却要每账户单发一次 metric-days，于是同一张表里一列有值、一列转圈。这个取值口
+    // 就是给 bootstrap 用的——它必须和 metric-days 端点同源，不能是第二套算法。
+    //
+    // 注意：「今天」是按账户时区（demo-account 是 Asia/Shanghai）判定的，所以这些用例
+    // 一律用相对当前时刻的偏移来造快照，不能写死某一天——写死就要靠"跑测试那天正好是
+    // 那一天"才成立。
+    describe("首屏取今日消耗", () => {
+      it("取当地今天那行的合计，而不是把当天各批次相加", () => {
+        const now = Date.now();
+        const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
+        capture(at(180), { g1: 1, g2: 0.5 });
+        capture(at(10), { g1: 9, g2: 3 });   // 当天最后一条
+
+        expect(store.getAccountTodaySpend("demo-account", "cookie")).toEqual({
+          spend: 12,                         // 9 + 3：当天终值，不是 1 + 0.5 + 9 + 3
+          lastLocalTime: expect.any(String),
+          entityCount: 2,
+        });
+      });
+
+      // 有一条今天、一条昨天的快照时，只能把今天那条算进来——把昨天一起算进来是首屏
+      // 最可能出的错，因为两者都在 2 天窗口内。
+      it("只认当地今天，不把窗口里昨天的数据一起算进来", () => {
+        const now = Date.now();
+        capture(new Date(now - 26 * 60 * 60_000).toISOString(), { g1: 100, g2: 50 });
+        capture(new Date(now - 5 * 60_000).toISOString(), { g1: 9, g2: 3 });
+
+        expect(store.getAccountTodaySpend("demo-account", "cookie")).toMatchObject({
+          spend: 12,
+          entityCount: 2,
+        });
+      });
+
+      it("没有任何快照时返回 undefined，交给界面显示占位", () => {
+        expect(store.getAccountTodaySpend("demo-account", "cookie")).toBeUndefined();
+      });
+    });
   });
 
   // 2026-08-06：三条自动申诉因 TikTok 后端解包失败被判 unknown，而 blocked 把
