@@ -2514,6 +2514,73 @@ describe("local API", () => {
     expect(entities.find((item) => item.externalId === "adgroup-2")?.status).toBe("enabled");
   });
 
+  // 2026-09-15：这里曾经拦下「该对象存在结果待确认的历史启停操作时禁止再次写入」。
+  // 解除 unknown 需要人工逐条去平台后台回读，没人做，于是线上 126 个对象被永久锁死
+  // （最早的 14 天前），连已经人工接管、明确不参与自动化的对象也一起被挡。已按用户
+  // 决定移除。这条用例钉住「历史 unknown 不再阻断新的启停」，防止它被无意中加回来。
+  it("历史 unknown 启停不再阻断新的状态写入", async () => {
+    const changeStatus = vi.fn<NonNullable<AdsProvider["changeStatus"]>>(
+      async (_context, mutations) => mutations.map((mutation) => ({
+        ...mutation, ok: true, message: "applied",
+      })),
+    );
+    await installLaunchTestProvider(
+      async (_context, mutations) => mutations.map((mutation) => ({
+        ...mutation, ok: true, campaignId: "campaign", adGroupId: "group", adId: "ad", message: "created",
+      })),
+      [apiLaunchRow(2)],
+      async () => {
+        const finishedAt = new Date().toISOString();
+        return {
+          entities: [{ entityType: "ad-group" as const, externalId: "adgroup-1", payload: { status: "DISABLE" } }],
+          result: {
+            startedAt: finishedAt,
+            finishedAt,
+            counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
+            warnings: [],
+            quality: testSyncQuality(finishedAt),
+          },
+        };
+      },
+      undefined,
+      changeStatus,
+    );
+    const syncedAt = new Date().toISOString();
+    store.saveReadOnlySync("demo-account", "cookie", [
+      { entityType: "ad-group", externalId: "adgroup-1", payload: { primary_status: "enable" } },
+    ], {
+      startedAt: syncedAt,
+      finishedAt: syncedAt,
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 },
+      warnings: [],
+      quality: testSyncQuality(syncedAt),
+    });
+
+    // 造一条历史 unknown：曾经下发过 disable，但请求超时、结果未知。
+    const stale = store.createStatusWriteTask({
+      accountId: "demo-account",
+      providerKind: "cookie",
+      entityType: "ad-group",
+      externalId: "adgroup-1",
+      entityName: "adgroup-1",
+      action: "disable",
+      source: "scheduled",
+    }, { id: "system", name: "scheduler", kind: "system" });
+    store.claimStatusWriteTask(stale.id, "executor-stale", "pending");
+    store.completeStatusWriteTask(
+      stale.id, "executor-stale", "unknown", "The operation was aborted due to timeout",
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/accounts/demo-account/entities/status",
+      payload: { entityType: "ad-group", externalId: "adgroup-1", action: "disable" },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    await vi.waitFor(() => expect(changeStatus).toHaveBeenCalledTimes(1));
+  });
+
   it("定向回读拿不到实体时退回全量同步，而不是把状态判成未确认", async () => {
     const syncReadOnly = vi.fn<NonNullable<AdsProvider["syncReadOnly"]>>(async () => {
       const finishedAt = new Date().toISOString();

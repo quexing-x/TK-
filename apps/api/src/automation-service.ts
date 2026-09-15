@@ -1492,14 +1492,6 @@ export class AutomationService {
     );
     if (!entity) throw new Error("Ad object is missing or has not been synced.");
     this.assertWriteAllowed(accountId, false, input);
-    if (this.store.hasBlockingStatusOperationForEntity(
-      accountId,
-      account.providerKind,
-      input.entityType,
-      input.externalId,
-    )) {
-      throw new Error("该对象存在结果待确认的历史启停操作；完成只读回读或人工核验前禁止再次写入。");
-    }
     const task = this.store.createStatusWriteTask({
       accountId,
       providerKind: account.providerKind,
@@ -1757,14 +1749,17 @@ export class AutomationService {
           item.entityType === input.entityType &&
           item.externalId === input.externalId,
       );
-    if (!existingTask && this.store.hasBlockingStatusOperationForEntity(
-      accountId,
-      account.providerKind,
-      input.entityType,
-      input.externalId,
-    )) {
-      throw new Error("该对象存在结果待确认的历史启停操作；完成只读回读或人工核验前禁止再次写入。");
-    }
+    // 这里曾经有一道闸门：「该对象存在结果待确认的历史启停操作时禁止再次写入」。
+    //
+    // 它防的是：一次启停请求超时后结果未知，系统却以为状态已按预期改变，再按相反
+    // 方向写一次就成了基于错误认知的决定。出发点是对的，但实际后果是永久封路——
+    // 解除它需要人工逐条去平台后台回读，这件事没人做，于是 unknown 只增不减
+    // （线上 126 个对象被锁死，最早的可追溯到 14 天前），闸门从「安全提醒」退化成
+    // 「不能再写」，连已经人工接管、明确不参与自动化的对象也被一起挡住。
+    //
+    // 已按用户决定移除。启停是绝对指令（「设为关闭」而不是「切换」），重复下发的
+    // 最终状态仍然正确，所以放宽的代价只是可能多打一次平台接口，不会写错状态。
+    // unknown 操作不自动重试那条约束在别处，不受本次改动影响。
     const task = existingTask ?? this.store.createStatusWriteTask({
       accountId,
       providerKind: account.providerKind,

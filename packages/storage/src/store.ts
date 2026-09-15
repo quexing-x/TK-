@@ -6448,22 +6448,6 @@ export class AutomationStore {
     return Boolean(row);
   }
 
-  hasBlockingStatusOperationForEntity(
-    accountId: string,
-    providerKind: ProviderKind,
-    entityType: ProviderEntity["entityType"],
-    externalId: string,
-  ): boolean {
-    const statuses = "('running', 'unknown')";
-    const row = this.db.prepare(
-      `SELECT 1 FROM ad_operations
-       WHERE account_id = ? AND provider_kind = ? AND entity_type = ? AND external_id = ?
-         AND action IN ('enable', 'disable')
-         AND status IN ${statuses} LIMIT 1`,
-    ).get(accountId, providerKind, entityType, externalId);
-    return Boolean(row);
-  }
-
   wasDisabledByAutomation(
     accountId: string,
     entityType: ProviderEntity["entityType"],
