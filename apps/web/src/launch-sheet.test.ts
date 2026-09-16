@@ -8,6 +8,7 @@ import {
   parseCsvTable,
   readLaunchSpreadsheet,
   selectFailedLaunchRows,
+  selectRetryableLaunchItems,
 } from "./launch-sheet.js";
 
 const preset = { name: "测试预设", region: "US", dailyBudget: 120, bid: null, startAt: null, endAt: null, initialStatus: "disabled" as const };
@@ -152,6 +153,19 @@ describe("launch spreadsheet", () => {
       { status: "unknown", launchRow: { ...failedRow, adGroupName: "等待回读" } },
       { status: "succeeded", launchRow: { ...failedRow, adGroupName: "已成功" } },
     ])).toEqual([failedRow]);
+  });
+
+  it("只把明确失败的任务交给重试，等回读确认的一律不碰", () => {
+    // unknown = TikTok 已受理、等回读确认。重发它就是重复创建、重复花钱，
+    // 所以这里必须和「导出失败列表」一样只挑 failed。
+    expect(selectRetryableLaunchItems([
+      { status: "failed", itemId: "item-failed" },
+      { status: "unknown", itemId: "item-unknown" },
+      { status: "succeeded", itemId: "item-succeeded" },
+      { status: "pending", itemId: "item-pending" },
+      { status: "running", itemId: "item-running" },
+      { status: "cancelled", itemId: "item-cancelled" },
+    ])).toEqual([{ status: "failed", itemId: "item-failed" }]);
   });
 
   it("downloads the failed rows with a safe account label", async () => {

@@ -74,6 +74,22 @@ export function selectFailedLaunchRows(
     .map((item) => item.launchRow);
 }
 
+/**
+ * 挑出可以原样重发的任务，供「重试失败项」用。
+ *
+ * **只收 failed，绝不收 unknown。** failed 是在发出创建请求之前就停住的（列表翻页
+ * 超时、组名校验没过这类），重发不会产生第二个广告。unknown 的语义是「TikTok 已经
+ * 受理、正式对象等回读确认」，重发它就是实打实的重复创建、重复花钱。
+ *
+ * 与 selectFailedLaunchRows 的区别：那个返回表格行用于导出，这个保留 itemId，
+ * 因为重试接口是按 itemId 逐条调的。
+ */
+export function selectRetryableLaunchItems<
+  T extends Pick<LaunchPlanItemRecord, "status" | "itemId">,
+>(items: readonly T[]): T[] {
+  return items.filter((item) => item.status === "failed");
+}
+
 export async function downloadFailedLaunchItems(
   items: readonly Pick<LaunchPlanItemRecord, "status" | "launchRow">[],
   options: { fileLabel?: string; now?: Date } = {},
