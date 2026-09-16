@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -171,8 +174,31 @@ export function rollbackPendingDatabaseRestore(applied: AppliedRestore): void {
   rmSync(applied.markerPath, { force: true });
 }
 
+/**
+ * 分块读着算哈希，不把整个文件读进内存。
+ *
+ * 原来是 `readFileSync(path)` 一次性读完。Node 的单次读有 2 GiB 硬上限，超了直接
+ * `ERR_FS_FILE_TOO_LARGE`，而这个哈希是**迁移前备份的校验步骤**——于是库一旦超过
+ * 2 GiB，任何带新迁移的版本都会在启动时抛「数据库迁移失败，服务未启动」，客户端
+ * 再也升不上去。2026-09-17 生产机上就是这样：库 4.13 GB，1.4.142 装完起不来，
+ * 现象是端口不监听、迁移记录不落库，看起来像新版本崩了。
+ *
+ * 备份文件按定义就是整库大小，只会越来越大，所以这里必须流式。
+ */
 export function hashFile(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
+  const handle = openSync(path, "r");
+  try {
+    let bytesRead = readSync(handle, buffer, 0, buffer.length, null);
+    while (bytesRead > 0) {
+      hash.update(buffer.subarray(0, bytesRead));
+      bytesRead = readSync(handle, buffer, 0, buffer.length, null);
+    }
+  } finally {
+    closeSync(handle);
+  }
+  return hash.digest("hex");
 }
 
 function restoreMarkerPath(databasePath: string): string {
