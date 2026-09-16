@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, CircleX, Download, FileSpreadsheet, Pencil, Rocket, Settings2, Trash2, Upload, X } from "./ui/icons";
+import { CheckCircle2, CircleX, Download, FileSpreadsheet, Pencil, RefreshCw, Rocket, Settings2, Trash2, Upload, X } from "./ui/icons";
 import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, splitVideoCodes, type AccountConfig, type AccountProviderCapabilities, type LaunchBudgetMode, type LaunchConfigurationRow, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
 import { api, type LaunchExecutionResult } from "./api";
 import { useAuth } from "./AuthGate";
-import { downloadFailedLaunchItems, downloadLaunchTemplate, readLaunchSpreadsheet } from "./launch-sheet";
+import { downloadFailedLaunchItems, downloadLaunchTemplate, readLaunchSpreadsheet, selectRetryableLaunchItems } from "./launch-sheet";
 import {
   accountAccessStatus,
   canUseCopySource,
@@ -301,6 +301,8 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [planRequestId, setPlanRequestId] = useState(() => crypto.randomUUID());
   const [fileName, setFileName] = useState("");
   const [busy, setBusy] = useState(false);
+  // 串行重试一批失败项可能要跑很久，按钮上得能看见进度，否则跟卡死没区别。
+  const [retryProgress, setRetryProgress] = useState<{ planId: string; done: number; total: number } | null>(null);
   const [executionFeedback, setExecutionFeedback] = useState<LaunchFeedback | null>(null);
   const [presetFeedback, setPresetFeedback] = useState<LaunchFeedback | null>(null);
   const [expandPresetHost, setExpandPresetHost] = useState<HTMLDivElement | null>(null);
@@ -842,6 +844,52 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     catch (cause) { onError(messageOf(cause)); }
     finally { setBusy(false); }
   };
+  /**
+   * 重试这个计划里所有明确失败的任务。
+   *
+   * **逐条串行，不并发。** 这类失败绝大多数是列表接口被打满（翻页超时、429/403），
+   * 并发重试等于把导致失败的那个场景再造一遍。慢一点换一次能过。
+   *
+   * 只收 failed。unknown 是「TikTok 已受理、等回读确认」，重试它有真实的重复创建风险。
+   */
+  const retryPlanFailures = async (
+    plan: MultiAccountLaunchPlanRecord,
+    items: LaunchPlanItemRecord[],
+  ) => {
+    const failed = selectRetryableLaunchItems(items);
+    if (failed.length === 0) return;
+    if (!await confirm({
+      title: `重试 ${failed.length} 个失败项？`,
+      message: "按原内容逐条重新创建，一次一条。这些任务是在发出创建请求之前失败的，不会重复建出广告。",
+      confirmLabel: "开始重试",
+    })) return;
+    try {
+      setBusy(true);
+      let succeeded = 0;
+      let stillFailing = 0;
+      for (const [index, item] of failed.entries()) {
+        setRetryProgress({ planId: plan.id, done: index, total: failed.length });
+        try {
+          const outcome = await api.retryLaunchPlanItem(plan.id, item.itemId);
+          const status = outcome.results.find((result) => result.itemId === item.itemId)?.status;
+          if (status === "succeeded") succeeded += 1;
+          else if (status === "failed") stillFailing += 1;
+        } catch {
+          // 单条重试失败不能中断整轮：后面那些可能正好赶上限流恢复。
+          stillFailing += 1;
+        }
+      }
+      setRetryProgress(null);
+      await load();
+      toast(
+        `重试完成：成功 ${succeeded} / 仍失败 ${stillFailing}`
+        + (succeeded + stillFailing < failed.length ? "，其余待回读确认" : ""),
+        stillFailing === 0 ? "success" : "error",
+      );
+      onError(null);
+    } catch (cause) { onError(messageOf(cause)); }
+    finally { setRetryProgress(null); setBusy(false); }
+  };
   const exportPlanFailures = async (
     plan: MultiAccountLaunchPlanRecord,
     items: LaunchPlanItemRecord[],
@@ -1023,7 +1071,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
               </details>}
             </div></td>
             <td><span className={`plan-result-state ${resultState.tone}`}><i />{resultState.label}</span>{skippedMaterials > 0 && <small className="plan-execution-summary">{skippedMaterials} 条素材已跳过</small>}</td>
-            <td><div className="plan-result-actions">{failedItems.length > 0 && <button className="secondary-button compact-button" disabled={busy} onClick={() => void exportPlanFailures(plan, items)} title={`按原导入表七列格式导出 ${failedItems.length} 个明确失败项`} type="button"><Download size={14} /> 导出失败列表</button>}{["blocked", "draft"].includes(plan.status) && <button className="compact-button" disabled={busy} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</div></td>
+            <td><div className="plan-result-actions">{failedItems.length > 0 && <button className="secondary-button compact-button" disabled={busy} onClick={() => void retryPlanFailures(plan, items)} title={`逐条重新创建 ${failedItems.length} 个明确失败项；待回读确认的不会重试`} type="button"><RefreshCw size={14} /> {retryProgress?.planId === plan.id ? `重试中 ${retryProgress.done}/${retryProgress.total}` : `重试失败项（${failedItems.length}）`}</button>}{failedItems.length > 0 && <button className="secondary-button compact-button" disabled={busy} onClick={() => void exportPlanFailures(plan, items)} title={`按原导入表七列格式导出 ${failedItems.length} 个明确失败项`} type="button"><Download size={14} /> 导出失败列表</button>}{["blocked", "draft"].includes(plan.status) && <button className="compact-button" disabled={busy} onClick={() => void cancelPlan(plan.id)} type="button"><Trash2 size={14} /> 取消</button>}</div></td>
           </tr>;
         })}
       </tbody></table></div>
