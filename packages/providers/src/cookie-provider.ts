@@ -112,6 +112,7 @@ export class CookieAdsProvider implements AdsProvider {
   readonly capabilityVersion = "cookie-capabilities-v6-2026-09";
   readonly capabilities = capabilities;
   private readonly creationGates = new Map<string, AccountCreationGate>();
+  private readonly creationSessions = new Map<string, AccountCreationSession>();
 
   resolveCapabilities(context: ProviderContext): ReadonlySet<ProviderCapability> {
     const credential = CookieCredentialInputSchema.parse(context.credential);
@@ -1119,21 +1120,27 @@ export class CookieAdsProvider implements AdsProvider {
       // 数据连接（旧称 Pixel）在每条 mutation 自己的创建前解析，数据取自那次本来
       // 就要发的 adgroup/list 实时读取。不再预先拉事件管理器目录：那个接口已对所有
       // 账户返回 code 50002，而它一挂，整批创建会在发出任何写请求前全部失败。
-      // Reservations are scoped to this invocation only. Persisting failed names
-      // across retries was the source of unrequested `-001` ad groups.
-      const reservations = {
-        campaignIds: new Map<string, string>(),
-        adGroupNames: new Map<string, Set<string>>(),
-      };
+      // Reservations 跟着账户会话走，而不是单次调用。
+      //
+      // 只记**建成功了的**系列 id 与组名（下面两处 result.ok 分支），失败的名字一律
+      // 不留——那正是以前冒出 `-001` 广告组的原因，别因为改了作用域就把失败也记进来。
+      //
+      // 跨调用保留是必须的：列表快照现在整个账户共用一份，它看不见我们自己刚建出来
+      // 的系列和组，得靠这两张表补。作用域退回单次调用，下一条系列就会认为组名还没
+      // 被占用。
+      const session = this.creationSession(context.accountId);
+      const { reservations } = session;
       if (canPublishAsSeriesBatch) {
         const campaignKey = [...campaignKeys][0]!;
         const batchCampaignId = mutations.find((mutation) => mutation.batchCampaignId)?.batchCampaignId;
         if (batchCampaignId) reservations.campaignIds.set(campaignKey, batchCampaignId);
-        const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+        // 这一批要预留的名字只在本次调用内有效，所以用副本，**不写回会话**。
+        // 会话里的那份只登记真正建成功的（见下面 result.ok 分支）：把没建成的名字
+        // 留下来，重试时会被自己上一次的失败判成「组名已占用」。
+        const names = new Set(reservations.adGroupNames.get(campaignKey) ?? []);
         for (const mutation of mutations) {
           for (const name of mutation.batchAdGroupNames ?? []) names.add(name.trim());
         }
-        reservations.adGroupNames.set(campaignKey, names);
         const batchResults = await createCookieDraftBatch(
           sessionRequest,
           campaignObjectRequest,
@@ -1146,19 +1153,24 @@ export class CookieAdsProvider implements AdsProvider {
               : {}),
             adGroupNames: names,
           },
+          session,
         );
         const successful = batchResults.find((result) => result.ok && result.campaignId);
         if (successful?.campaignId) reservations.campaignIds.set(campaignKey, successful.campaignId);
+        // 只有建成功的组名才进会话：列表快照看不见它们，后面的系列要靠这里判重名。
+        const created = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
+        for (const result of batchResults) {
+          if (result.ok) created.add(result.row.adGroupName.trim());
+        }
+        reservations.adGroupNames.set(campaignKey, created);
         return batchResults;
       }
       for (const mutation of mutations) {
         const campaignKey = mutation.row.campaignName.trim();
         if (mutation.batchCampaignId) reservations.campaignIds.set(campaignKey, mutation.batchCampaignId);
-        if (mutation.batchAdGroupNames?.length) {
-          const names = reservations.adGroupNames.get(campaignKey) ?? new Set<string>();
-          for (const name of mutation.batchAdGroupNames) names.add(name.trim());
-          reservations.adGroupNames.set(campaignKey, names);
-        }
+        // 同上：本次要预留的名字走副本，只有建成功了才写回会话。
+        const pending = new Set(reservations.adGroupNames.get(campaignKey) ?? []);
+        for (const name of mutation.batchAdGroupNames ?? []) pending.add(name.trim());
         try {
           const result = await createCookieDraftChain(
             sessionRequest,
@@ -1172,7 +1184,7 @@ export class CookieAdsProvider implements AdsProvider {
               ...(reservations.campaignIds.get(campaignKey)
                 ? { campaignId: reservations.campaignIds.get(campaignKey)! }
                 : {}),
-              adGroupNames: reservations.adGroupNames.get(campaignKey) ?? new Set<string>(),
+              adGroupNames: pending,
             },
           );
           results.push(result);
@@ -1211,6 +1223,32 @@ export class CookieAdsProvider implements AdsProvider {
     if (existing) return existing;
     const created = new AccountCreationGate();
     this.creationGates.set(accountId, created);
+    return created;
+  }
+
+  /**
+   * 这个账户的创建会话：列表快照 + 已建对象登记表，跨 createFromPreset 调用复用。
+   *
+   * 按账户分开存，不能共用一份：组名和系列名只在自己账户里唯一，混用会把 A 账户
+   * 的组名当成 B 账户已占用。
+   */
+  private creationSession(accountId: string): AccountCreationSession {
+    const now = Date.now();
+    const existing = this.creationSessions.get(accountId);
+    if (existing && now - existing.lastUsedAt < CREATION_SESSION_IDLE_MS) {
+      existing.lastUsedAt = now;
+      return existing;
+    }
+    const created: AccountCreationSession = {
+      lists: null,
+      capturedAt: 0,
+      lastUsedAt: now,
+      reservations: {
+        campaignIds: new Map<string, string>(),
+        adGroupNames: new Map<string, Set<string>>(),
+      },
+    };
+    this.creationSessions.set(accountId, created);
     return created;
   }
 
@@ -3294,6 +3332,86 @@ interface CookieDraftPreflight {
   baseline: CookieCreationBaseline;
 }
 
+/**
+ * 一个账户一次创建会话共享的远端快照：系列列表、广告组列表、三份草稿列表。
+ *
+ * 为什么要共享——批量创建是**按系列**分批调 createFromPreset 的，而每批开头都要把
+ * 这五份列表整个翻一遍。600 组分散在 550 条系列上，就是 550 轮全量翻页；账户里的
+ * 系列越多每轮页数越多，于是「今天建得多 → 明天翻得更久」正反馈下去。
+ * 2026-09-16 实测：299 个组发了 2056 次请求，其中 1307 次是翻列表，
+ * TikTok 直接回 HTTP 403 风控，四个账户同步质量集体掉 partial。
+ */
+interface SharedCreationLists {
+  adGroupPayloads: Record<string, unknown>[];
+  campaignPayloads: Record<string, unknown>[];
+  campaignSketchRows: Record<string, unknown>[];
+  adSketchRows: Record<string, unknown>[];
+  creativeSketchRows: Record<string, unknown>[];
+}
+
+interface AccountCreationSession {
+  /**
+   * 存 Promise 而不是结果，是为了**并发去重**：调用方按系列 12 路并发进来，
+   * 存结果的话 12 条链会同时发现缓存为空、同时去翻列表，省不掉任何一次。
+   */
+  lists: Promise<SharedCreationLists> | null;
+  capturedAt: number;
+  /** 最后一次被用到的时刻，用来判会话是不是该整个丢掉重来。 */
+  lastUsedAt: number;
+  /**
+   * 本次会话已经建出来的系列与组名。列表快照是拍下来那一刻的，看不见我们自己
+   * 刚建的东西，靠这两张表补上——否则下一条系列会认为组名还没被占用。
+   */
+  reservations: {
+    campaignIds: Map<string, string>;
+    adGroupNames: Map<string, Set<string>>;
+  };
+}
+
+/**
+ * 快照最多复用这么久。
+ *
+ * 不设过期不行：投手可能同时在客户端手动建组，快照越旧越容易把「组名已占用」
+ * 看成可用，撞名会被 TikTok 拒。但也不能太短，否则退化回每批一翻。
+ * 5 分钟是权衡值——一批 600 组约跑 1.5 小时，全程只翻 18 轮左右，
+ * 相比原来的 550 轮仍是数量级的差距。
+ */
+const SHARED_LISTS_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * 会话闲置这么久就整个丢掉（含已建对象登记表）。
+ *
+ * 登记表只在「快照拍完之后、我们自己又建了东西」这段窗口里有用。一批跑完之后
+ * 它就该消失：那些组早已进入远端列表，下次重新拍快照本来就看得见。留着反而有害
+ * ——组要是后来被删了，本地还记着「名字已占用」，同名组再也建不出来，而且不报错、
+ * 只是静默建不出。
+ */
+const CREATION_SESSION_IDLE_MS = 30 * 60 * 1000;
+
+/**
+ * 取这个账户当前的列表快照；没有或已过期就用 loader 拉一份。
+ *
+ * 没有 session 时（系列复制、补发布这些不共享会话的路径）直接拉，行为与改造前一致。
+ *
+ * 失败必须把 lists 清空。留着一个 rejected 的 Promise，后面每一条系列都会拿到同一个
+ * 旧错误、再也不会真正重试——403 这种一过性风控会被永久固化成「整批全灭」。
+ */
+async function acquireSharedCreationLists(
+  session: AccountCreationSession | undefined,
+  loader: () => Promise<SharedCreationLists>,
+): Promise<SharedCreationLists> {
+  if (!session) return loader();
+  const fresh = session.lists && Date.now() - session.capturedAt < SHARED_LISTS_TTL_MS;
+  if (!fresh) {
+    session.capturedAt = Date.now();
+    session.lists = loader().catch((cause: unknown) => {
+      session.lists = null;
+      throw cause;
+    });
+  }
+  return session.lists!;
+}
+
 interface CookieCreationBaseline {
   campaignIds: Set<string>;
   adGroupIds: Set<string>;
@@ -3318,6 +3436,7 @@ async function createCookieDraftBatch(
   mutations: CreationMutation[],
   timezone: string,
   batchReservation: CookieDraftReservation,
+  session?: AccountCreationSession,
 ): Promise<CreationMutationResult[]> {
   const recorder = createSentRequestRecorder();
   let lastPhase: LaunchCreationProgress["phase"] = "validation";
@@ -3337,6 +3456,7 @@ async function createCookieDraftBatch(
       timezone,
       batchReservation,
       recorder,
+      session,
     );
   } finally {
     const sentRequests = recorder.drain();
@@ -3358,6 +3478,7 @@ async function runCookieDraftBatch(
   timezone: string,
   batchReservation: CookieDraftReservation,
   recorder: ReturnType<typeof createSentRequestRecorder>,
+  session?: AccountCreationSession,
 ): Promise<CreationMutationResult[]> {
   const batchState: CookieDraftBatchState = {
     ...(batchReservation.campaignId ? { campaignId: batchReservation.campaignId } : {}),
@@ -3415,39 +3536,44 @@ async function runCookieDraftBatch(
   let baseline: CookieCreationBaseline;
   let library = new Map<string, ResolvedVideo>();
   try {
-    adGroupPayloads = await requestCompleteListPages(
-      "adgroup/list",
-      sessionRequest,
-      credential,
-      preflightDispatchState,
-    );
-    campaignPayloads = await requestCompleteListPages(
-      "campaign/list",
-      campaignObjectRequest,
-      credential,
-      preflightDispatchState,
-    );
-    const campaignSketchRows = await listAllSketchRows({
-      kind: "campaign",
-      sessionRequest,
-      credential,
-      dispatchState: preflightDispatchState,
-      semantics: "preflight-read",
-    });
-    const adSketchRows = await listAllSketchRows({
-      kind: "ad",
-      sessionRequest,
-      credential,
-      dispatchState: preflightDispatchState,
-      semantics: "preflight-read",
-    });
-    const creativeSketchRows = await listAllSketchRows({
-      kind: "creative",
-      sessionRequest,
-      credential,
-      dispatchState: preflightDispatchState,
-      semantics: "preflight-read",
-    });
+    const shared = await acquireSharedCreationLists(session, async () => ({
+      adGroupPayloads: await requestCompleteListPages(
+        "adgroup/list",
+        sessionRequest,
+        credential,
+        preflightDispatchState,
+      ),
+      campaignPayloads: await requestCompleteListPages(
+        "campaign/list",
+        campaignObjectRequest,
+        credential,
+        preflightDispatchState,
+      ),
+      campaignSketchRows: await listAllSketchRows({
+        kind: "campaign",
+        sessionRequest,
+        credential,
+        dispatchState: preflightDispatchState,
+        semantics: "preflight-read",
+      }),
+      adSketchRows: await listAllSketchRows({
+        kind: "ad",
+        sessionRequest,
+        credential,
+        dispatchState: preflightDispatchState,
+        semantics: "preflight-read",
+      }),
+      creativeSketchRows: await listAllSketchRows({
+        kind: "creative",
+        sessionRequest,
+        credential,
+        dispatchState: preflightDispatchState,
+        semantics: "preflight-read",
+      }),
+    }));
+    adGroupPayloads = shared.adGroupPayloads;
+    campaignPayloads = shared.campaignPayloads;
+    const { campaignSketchRows, adSketchRows, creativeSketchRows } = shared;
     if (reconcileOnly) {
       const adRequest = deriveFinalAdReadRequest(sessionRequest);
       if (!adRequest) {

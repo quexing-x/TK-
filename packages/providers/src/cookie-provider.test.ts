@@ -3853,6 +3853,72 @@ describe("CookieAdsProvider", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
   });
 
+  it("同一账户的后续系列复用列表快照，不再逐条重翻", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const isListRead = (url: string) => url.includes("/statistics/op/campaign/list")
+      || url.includes("/statistics/op/adgroup/list")
+      || url.includes("statistics/sketch/");
+
+    const provider = new CookieAdsProvider();
+    const first = creationTestMutation("none");
+    const second = creationTestMutation("none");
+    second.row.campaignName = "campaign-2";
+    second.row.adGroupName = "group-2";
+    second.row.adName = "260717:002";
+
+    /**
+     * 只数 preflight 段的列表请求：创建前（第一个 campaign_snap/save 之前）那一截。
+     * 创建后的回读也要查列表，那是确认新对象用的、本来就该发，混在一起数就什么都证不了。
+     */
+    const preflightLists = (from: number, to: number) => {
+      const slice = requested.slice(from, to);
+      const firstSave = slice.findIndex((url) => url.includes("campaign_snap/save"));
+      return (firstSave === -1 ? slice : slice.slice(0, firstSave)).filter(isListRead).length;
+    };
+
+    const [one] = await provider.createFromPreset!(creationTestContext(false), [first]);
+    const afterFirst = requested.length;
+    await provider.createFromPreset!(creationTestContext(false), [second]);
+
+    expect(one).toMatchObject({ ok: true });
+    // 第二条只断言请求形态，不断言 ok：夹具把回读结果写死成第一条的
+    // campaign_id / creative_name，换个系列名必然回读对不上，那是夹具的限制。
+    // 这条用例要证的是「还翻不翻列表」，不是回读。
+    //
+    // 第一条系列该翻的还得翻：快照是这时候拍下来的。
+    expect(preflightLists(0, afterFirst)).toBeGreaterThan(0);
+    // 第二条系列在创建前一次列表都不该翻。600 组分散在 550 条系列上时，
+    // 这就是 1300 次请求和几次的差别，也是 2026-09-16 撞上 403 风控的原因。
+    expect(preflightLists(afterFirst, requested.length)).toBe(0);
+    // 但创建本身照常发生，别把「不翻列表」做成「跳过创建」。
+    expect(requested.filter((url) => url.includes("campaign_snap/save"))).toHaveLength(2);
+  });
+
+  it("快照拍下之后自己建出来的组名，后续系列仍判为已占用", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      return jsonResponse(successfulCreationPayload(url));
+    }));
+    const provider = new CookieAdsProvider();
+    const first = creationTestMutation("none");
+    // 第二条走同一个系列、同一个组名：列表快照里没有刚建的那个组，
+    // 只有会话登记表能挡住它，挡不住就会在同一系列下建出两个同名组。
+    const second = creationTestMutation("none");
+    second.row.adName = "260717:002";
+
+    const [one] = await provider.createFromPreset!(creationTestContext(false), [first]);
+    const [two] = await provider.createFromPreset!(creationTestContext(false), [second]);
+
+    expect(one).toMatchObject({ ok: true });
+    expect(two).toMatchObject({ ok: false });
+    expect(two?.message ?? "").toContain("广告组名称");
+  });
+
   it("creates a new campaign directly even when the preset still contains a template campaign id", async () => {
     const requested: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
