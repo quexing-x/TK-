@@ -2303,22 +2303,15 @@ export class AutomationService {
     ) {
       return "对象在忽略名单中。";
     }
-    if (
-      this.store.hasUnknownDecision(
-        accountId,
-        candidate.entity.entityType,
-        candidate.entity.externalId,
-        candidate.action,
-      ) ||
-      this.store.hasUnresolvedStatusOperation(
-        accountId,
-        candidate.entity.entityType,
-        candidate.entity.externalId,
-        candidate.action,
-      )
-    ) {
-      return "该对象存在结果待确认的历史操作，已阻止生成新的同动作建议。";
-    }
+    // 这里曾经也有一道「历史结果待确认就不再生成同动作建议」的闸门。
+    //
+    // 它与上面移除的那道同源、症状一样，只是看起来更窄（只挡同动作、不挡写入）：
+    // 一次启停请求超时后该对象就被永久跳过，同一个对象每轮轮询都判定「要关」又都被
+    // 挡下，实测连续 30 次 skipped 持续 10 小时，关不掉也永远好不了——unknown 不会
+    // 自己消失，而解除它依赖人工去平台逐条回读，没人做得完。
+    //
+    // 已按用户决定一并移除。下面紧邻的冷却期检查才是防止反复写入的正确约束：它给的是
+    // 有限等待，不是无限期封锁。
     if (
       this.store.isDecisionInCooldown(
         accountId,

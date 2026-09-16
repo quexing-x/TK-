@@ -6420,34 +6420,6 @@ export class AutomationStore {
     );
   }
 
-  hasUnknownDecision(
-    accountId: string,
-    entityType: ProviderEntity["entityType"],
-    externalId: string,
-    action: AutomationAction,
-  ): boolean {
-    const row = this.db.prepare(
-      `SELECT 1 FROM automation_decisions
-       WHERE account_id = ? AND entity_type = ? AND external_id = ?
-         AND action = ? AND status = 'unknown' LIMIT 1`,
-    ).get(accountId, entityType, externalId, action);
-    return Boolean(row);
-  }
-
-  hasUnresolvedStatusOperation(
-    accountId: string,
-    entityType: ProviderEntity["entityType"],
-    externalId: string,
-    action: AutomationAction,
-  ): boolean {
-    const row = this.db.prepare(
-      `SELECT 1 FROM ad_operations
-       WHERE account_id = ? AND entity_type = ? AND external_id = ?
-         AND action = ? AND status IN ('pending', 'running', 'unknown') LIMIT 1`,
-    ).get(accountId, entityType, externalId, action);
-    return Boolean(row);
-  }
-
   wasDisabledByAutomation(
     accountId: string,
     entityType: ProviderEntity["entityType"],
