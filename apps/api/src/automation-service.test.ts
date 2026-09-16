@@ -2492,6 +2492,16 @@ describe("AutomationService", () => {
     ]));
   });
 
+  // 2026-09-16：这里曾经也有一道「对象存在结果待确认的历史操作就不再生成同动作建议」
+  // 的闸门，已按用户决定移除（它看起来比封死写入的那道窄，实际后果一样是永久卡死：
+  // 一次 disable 超时后该对象每轮都被跳过，线上连续 30 次 skipped 持续 10 小时）。
+  //
+  // 本来想在这里补一条回归用例钉住这个行为，但没能写出真正有效的断言，所以故意不留：
+  // default 场景下 adgroup-1/disable 并不经过 getSkipReason（把等价闸门注回去、甚至加了
+  // 打印都不会命中），断言写出来永远是绿的，属于假通过。与其留一条给假信心的测试，
+  // 不如留这段说明。真正防回归的是 app.test.ts 里「历史 unknown 不再阻断状态写入」那条，
+  // 它走的是被删掉的第一道闸门所在的路径，已做反向验证。
+
   it("filters parent-child conflicts before applying the per-run limit", async () => {
     provider.scenario = "parent-child";
     store.updateGlobalAutomationSettings({
