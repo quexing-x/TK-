@@ -648,6 +648,35 @@ function dateTimePartsInZone(value: Date, timeZone: string): {
 export const MAX_LAUNCH_ADS_PER_IMPORT = 5000;
 
 /**
+ * 计划跑完到收尾核对之间的静默期。
+ *
+ * 留这段等待是因为 TikTok 的正式对象有延迟：刚结束就查，会把「马上就成」的条目误判成
+ * 「只剩草稿」，然后把它的草稿清掉——那就白建了一次。
+ *
+ * 前后端共用：worker 用它决定什么时候核对，界面用它算「核对中 · 还有 2:30」的倒计时。
+ * 两边各写一个数的话，界面会在倒计时归零后继续空转。
+ */
+export const LAUNCH_RECONCILE_QUIET_MS = 3 * 60_000;
+
+/**
+ * 一次收尾核对的结论。
+ *
+ * `staleDrafts` 是**清理失败、还躺在 TikTok 后台**的草稿数——界面上那句「N 个遗留草稿」
+ * 指的就是它。清理成功的那些已经改判失败进了重试列表，不算遗留。
+ */
+export const LaunchReconcileSummarySchema = z.object({
+  /** 核对时发现正式广告组已经建成，改判成功。 */
+  confirmed: z.number().int().nonnegative(),
+  /** 只剩草稿、草稿已清理、已改判失败，可以重试重建。 */
+  cleared: z.number().int().nonnegative(),
+  /** 只剩草稿但清理失败，需要人工去后台处理。 */
+  staleDrafts: z.number().int().nonnegative(),
+  /** 正式对象和草稿都没查到，这一轮不下结论。 */
+  pending: z.number().int().nonnegative(),
+});
+export type LaunchReconcileSummary = z.infer<typeof LaunchReconcileSummarySchema>;
+
+/**
  * 单次导入允许的**行数**上限，一行 = 一个广告组。
  *
  * 与广告条数是两个独立的闸门，别混用：一行 50 个代码时 100 行就顶满 5000 条广告，

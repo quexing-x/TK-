@@ -142,6 +142,7 @@ import {
   DatabaseBackupRecordSchema,
   type DatabaseBackupKind,
   type DatabaseBackupRecord,
+  type LaunchReconcileSummary,
   AUTOMATION_MANAGED_LOOKBACK_HOURS,
 } from "@tk-auto/core";
 
@@ -3987,9 +3988,98 @@ export class AutomationStore {
          actor_id = excluded.actor_id,
          actor_name = excluded.actor_name,
          actor_kind = excluded.actor_kind,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at,
+         -- 重新入队 = 又要建东西了，上一轮的核对结论作废。不清空的话，重试建出来的
+         -- 对象永远等不到核对，草稿也就永远没人认领。
+         -- summary 也必须一起清：留着的话，界面会挂着上一轮的「N 个遗留草稿」，
+         -- 而那些草稿可能早就处理掉了。
+         settled_at = NULL,
+         reconciled_at = NULL,
+         reconcile_summary = NULL`,
     ).run(planId, actor.id, actor.name, actor.kind, now, now);
     return plan;
+  }
+
+  /**
+   * 标记这个计划的条目全部到终态了，静默期从此刻起算。
+   *
+   * 只写第一次：重复调用不刷新时间戳，否则每轮 drain 都把静默期推后，永远等不到核对。
+   */
+  markLaunchPlanSettled(planId: string, settledAt = new Date().toISOString()): void {
+    this.db.prepare(
+      `UPDATE launch_plan_dispatches SET settled_at = ?, updated_at = ?
+       WHERE plan_id = ? AND settled_at IS NULL`,
+    ).run(settledAt, new Date().toISOString(), planId);
+  }
+
+  markLaunchPlanReconciled(
+    planId: string,
+    reconciledAt = new Date().toISOString(),
+    summary?: LaunchReconcileSummary,
+  ): void {
+    this.db.prepare(
+      `UPDATE launch_plan_dispatches
+       SET reconciled_at = ?, reconcile_summary = ?, updated_at = ?
+       WHERE plan_id = ?`,
+    ).run(
+      reconciledAt,
+      summary ? JSON.stringify(summary) : null,
+      new Date().toISOString(),
+      planId,
+    );
+  }
+
+  /** 静默期已满、还没核对过的计划。按 settled_at 排序，保证多账户串行时先结束的先核对。 */
+  listLaunchPlansAwaitingReconcile(
+    quietMs: number,
+    now = new Date(),
+    limit = 20,
+  ): Array<{ planId: string; actor: WriteTaskActor; settledAt: string }> {
+    const cutoff = new Date(now.getTime() - quietMs).toISOString();
+    const rows = this.db.prepare(
+      `SELECT plan_id, actor_id, actor_name, actor_kind, settled_at
+       FROM launch_plan_dispatches
+       WHERE settled_at IS NOT NULL AND reconciled_at IS NULL AND settled_at <= ?
+       ORDER BY settled_at
+       LIMIT ?`,
+    ).all(cutoff, limit) as SqlRow[];
+    return rows.map((row) => ({
+      planId: String(row.plan_id),
+      actor: {
+        id: String(row.actor_id),
+        name: String(row.actor_name),
+        kind: row.actor_kind === "system" ? "system" : "user",
+      },
+      settledAt: String(row.settled_at),
+    }));
+  }
+
+  /** 给界面算倒计时用：这个计划是什么时候结束的、核对过没有、核对出了什么。 */
+  getLaunchPlanReconcileState(planId: string): {
+    settledAt: string | null;
+    reconciledAt: string | null;
+    summary: LaunchReconcileSummary | null;
+  } | null {
+    const row = this.db.prepare(
+      "SELECT settled_at, reconciled_at, reconcile_summary FROM launch_plan_dispatches WHERE plan_id = ?",
+    ).get(planId) as SqlRow | undefined;
+    if (!row) return null;
+    let summary: LaunchReconcileSummary | null = null;
+    if (row.reconcile_summary) {
+      // 存量行可能是旧格式或半截 JSON；解析不了就当没有，不能因此让整个计划列表读不出来。
+      try {
+        summary = JSON.parse(String(row.reconcile_summary)) as LaunchReconcileSummary;
+      } catch {
+        summary = null;
+      }
+    }
+    return {
+      settledAt: row.settled_at === null || row.settled_at === undefined ? null : String(row.settled_at),
+      reconciledAt: row.reconciled_at === null || row.reconciled_at === undefined
+        ? null
+        : String(row.reconciled_at),
+      summary,
+    };
   }
 
   listQueuedLaunchPlans(limit = 100): Array<{ planId: string; actor: WriteTaskActor }> {
@@ -4778,6 +4868,65 @@ export class AutomationStore {
     });
     this.db.exec("COMMIT");
     return mapLaunchPlanItem(row);
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  /**
+   * 核对后改判一条「结果未知」的任务。
+   *
+   * 与 completeLaunchPlanItem* 系列的区别：那些要求条目正被某个执行器领着
+   * （`status='running' AND claimed_by=?`），是创建链路的收尾；这里改的是**已经落定
+   * 为 unknown、没有人领**的条目，靠的是事后去平台查到的事实。
+   *
+   * 只认 unknown：成功和失败都是已经查证过的结论，不该被再翻一次。
+   */
+  reconcileLaunchPlanItem(
+    itemId: string,
+    next: "succeeded" | "failed",
+    message: string,
+    found: { campaignId?: string | null; adGroupId?: string | null } = {},
+  ): LaunchPlanItemRecord | null {
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `UPDATE launch_plan_items
+           SET status = ?,
+               error_message = ?,
+               campaign_id = COALESCE(?, campaign_id),
+               ad_id = COALESCE(?, ad_id),
+               completed_at = ?,
+               updated_at = ?
+           WHERE item_id = ? AND status = 'unknown'
+           RETURNING *`,
+        )
+        .get(
+          next,
+          message.slice(0, 2000),
+          found.campaignId ?? null,
+          found.adGroupId ?? null,
+          now,
+          now,
+          itemId,
+        ) as SqlRow | undefined;
+      if (!row) {
+        // 已经不是 unknown 了——可能轮询先一步认领了它。不是错误，交给调用方跳过。
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      this.writeAudit(String(row.actor_name), String(row.account_id), "write-task.reconciled", {
+        taskType: "launch",
+        taskId: itemId,
+        correlationId: row.correlation_id,
+        nextStatus: next,
+        message: message.slice(0, 500),
+      });
+      this.db.exec("COMMIT");
+      return mapLaunchPlanItem(row);
     } catch (cause) {
       this.db.exec("ROLLBACK");
       throw cause;
@@ -7271,7 +7420,13 @@ export class AutomationStore {
         actor_name TEXT NOT NULL,
         actor_kind TEXT NOT NULL,
         requested_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        -- 所有条目都到终态的时刻。核对的静默期从这里起算。
+        settled_at TEXT,
+        -- 核对做完的时刻。一个计划只核对一次，有值就不再核对。
+        reconciled_at TEXT,
+        -- 核对结论 JSON。界面靠它显示「N 个遗留草稿」，不落库就只存在于那一次调用的返回值里。
+        reconcile_summary TEXT
       );
 
       CREATE TABLE IF NOT EXISTS provider_write_circuits (
@@ -8209,6 +8364,21 @@ export class AutomationStore {
         DROP TABLE IF EXISTS platform_rule_configurations;
         DROP TABLE IF EXISTS platform_automation_runtime;
       `);
+    });
+    this.applyMigration("launch-plan-reconcile-v1", () => {
+      const columns = this.db
+        .prepare("PRAGMA table_info(launch_plan_dispatches)")
+        .all() as SqlRow[];
+      const has = (name: string) => columns.some((column) => column.name === name);
+      if (!has("settled_at")) {
+        this.db.exec("ALTER TABLE launch_plan_dispatches ADD COLUMN settled_at TEXT");
+      }
+      if (!has("reconciled_at")) {
+        this.db.exec("ALTER TABLE launch_plan_dispatches ADD COLUMN reconciled_at TEXT");
+      }
+      if (!has("reconcile_summary")) {
+        this.db.exec("ALTER TABLE launch_plan_dispatches ADD COLUMN reconcile_summary TEXT");
+      }
     });
     this.ensureGlobalDefaults();
   }

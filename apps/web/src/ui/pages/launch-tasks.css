@@ -281,6 +281,12 @@
   font-weight: 600;
   list-style-position: inside;
 }
+/* 遗留草稿跟失败项不是一回事：失败的能一键重试，这些要人去 TikTok 后台处理，
+   所以用告警色区分开，别让人以为点重试就能解决。 */
+.launch-workspace .plan-failed-details summary .plan-stale-drafts {
+  color: var(--warning);
+  font-style: normal;
+}
 .launch-workspace .plan-failed-details summary:focus-visible {
   border-radius: 4px;
   outline: 2px solid var(--primary);

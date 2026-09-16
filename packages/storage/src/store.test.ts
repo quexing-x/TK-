@@ -3407,6 +3407,49 @@ describe("AutomationStore", () => {
     expect(store.listQueuedLaunchPlans().map((queued) => queued.planId)).not.toContain(plan.id);
   });
 
+  it("静默期满才交出待核对的计划，重新入队会作废上一轮的核对结论", () => {
+    const plan = store.createMultiAccountLaunchPlan({
+      mode: "single",
+      sourceAccountId: "demo-account",
+      sourceAdGroupId: null,
+      targetAccountIds: ["demo-account"],
+      launchPresetId: "default-launch-preset",
+      launchRows: [launchItemRow(2)],
+    });
+    const actor = { id: "local-user", name: "本地用户", kind: "user" as const };
+    store.enqueueLaunchPlan(plan.id, actor);
+
+    const settledAt = new Date("2026-09-17T00:00:00.000Z");
+    store.markLaunchPlanSettled(plan.id, settledAt.toISOString());
+
+    // 静默期没满：一条都不交出去，否则等于没等。
+    const tooEarly = new Date(settledAt.getTime() + 60_000);
+    expect(store.listLaunchPlansAwaitingReconcile(180_000, tooEarly)).toEqual([]);
+
+    // 满了才交。
+    const ready = new Date(settledAt.getTime() + 180_000);
+    expect(store.listLaunchPlansAwaitingReconcile(180_000, ready).map((row) => row.planId))
+      .toEqual([plan.id]);
+
+    // 重复标记不刷新时间戳，否则每轮 drain 都把静默期推后，永远等不到核对。
+    store.markLaunchPlanSettled(plan.id, new Date(settledAt.getTime() + 120_000).toISOString());
+    expect(store.getLaunchPlanReconcileState(plan.id)?.settledAt).toBe(settledAt.toISOString());
+
+    // 核对过就不再交出去，结论要能读回来——界面上那句「N 个遗留草稿」就存在这里。
+    store.markLaunchPlanReconciled(plan.id, undefined, {
+      confirmed: 2, cleared: 5, staleDrafts: 3, pending: 1,
+    });
+    expect(store.listLaunchPlansAwaitingReconcile(180_000, ready)).toEqual([]);
+    expect(store.getLaunchPlanReconcileState(plan.id)?.summary).toEqual({
+      confirmed: 2, cleared: 5, staleDrafts: 3, pending: 1,
+    });
+
+    // 重新入队 = 又要建东西，上一轮结论作废，否则重试建出来的对象永远等不到核对。
+    store.enqueueLaunchPlan(plan.id, actor);
+    const afterRequeue = store.getLaunchPlanReconcileState(plan.id);
+    expect(afterRequeue).toEqual({ settledAt: null, reconciledAt: null, summary: null });
+  });
+
   it("renews launch and status leases so another instance cannot recover active work", () => {
     const plan = store.createMultiAccountLaunchPlan({
       mode: "single",

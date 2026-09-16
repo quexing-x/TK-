@@ -66,6 +66,7 @@ import type {
   UpdateRuntimeStatus,
   AccountProviderCapabilities,
   ProviderCapability,
+  LaunchReconcileSummary,
 } from "@tk-auto/core";
 import type { TikTokCookieImportReadiness as CookieConnectionReadiness } from "@tk-auto/providers";
 
@@ -137,6 +138,15 @@ export interface BootstrapPayload {
 export interface ManualStatusResult extends ManualStatusInput {
   ok: boolean;
   message: string;
+}
+
+export interface LaunchReconcileState {
+  /** 条目全部到终态的时刻；为空表示还在建。界面用它算静默期倒计时。 */
+  settledAt: string | null;
+  /** 核对完成的时刻；为空且静默期已过 = 正在核对。 */
+  reconciledAt: string | null;
+  quietPeriodMs: number;
+  summary: LaunchReconcileSummary | null;
 }
 
 export interface LaunchExecutionResult {
@@ -454,6 +464,8 @@ export const api = {
     }),
   getLaunchPlanItems: (planId: string) =>
     request<LaunchPlanItemRecord[]>(`/api/launch-plans/${planId}/items`),
+  getLaunchPlanReconcileState: (planId: string) =>
+    request<LaunchReconcileState>(`/api/launch-plans/${planId}/reconcile-state`),
   retryLaunchPlanItem: (planId: string, itemId: string) =>
     request<LaunchExecutionResult>(`/api/launch-plans/${planId}/items/${itemId}/retry`, {
       method: "POST",
