@@ -42,6 +42,7 @@ import {
   buildLineageReport,
   classifyCampaignsForExpand,
   dateKeyInTimeZone,
+  LAUNCH_RECONCILE_QUIET_MS,
   type AppPermission,
   type ProviderKind,
   type WriteTaskActor,
@@ -510,6 +511,14 @@ export async function createApp(
   app.get("/api/launch-plans/queued", async () =>
     dependencies.store.listQueuedLaunchPlans().map((queued) => queued.planId),
   );
+
+  // 核对状态：界面靠 settledAt 算静默期倒计时，靠 reconciledAt 判断该不该还显示「等待核对」。
+  app.get("/api/launch-plans/:planId/reconcile-state", async (request, reply) => {
+    const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
+    const state = dependencies.store.getLaunchPlanReconcileState(planId);
+    if (!state) return reply.send({ settledAt: null, reconciledAt: null, quietPeriodMs: LAUNCH_RECONCILE_QUIET_MS });
+    return reply.send({ ...state, quietPeriodMs: LAUNCH_RECONCILE_QUIET_MS });
+  });
 
   app.get("/api/write-tasks", async (request) => {
     const query = z.object({

@@ -5,9 +5,11 @@ import {
   dateKeyInTimeZone,
   dateTimeSuffix,
   monthDaySuffix,
+  reconcileExpandTask,
   stripGeneratedNameSuffixes,
   getCreationTemplateReadiness,
   defaultCreationPresetConfig,
+  type DraftSketchEntry,
   planCampaignCopy,
   selectStaleDrafts,
   stripAutomaticAdGroupNameSuffixes,
@@ -998,6 +1000,113 @@ export class LaunchService {
   }
 
   /**
+   * 一个计划跑完后的收尾核对，**每个计划只做一次**。
+   *
+   * 为什么需要它：`unknown` 这个筐里混着两种完全不同的东西。一种是「TikTok 已受理、
+   * 正式对象等回读确认」，等等就好；另一种是**创建被明确拒绝、但此前已经发出过创建
+   * 请求**（`code 50000` 这类），它永远不会自愈，只会在后台留一个草稿。2026-09-16
+   * 实测一个账户 10 条 unknown 里 7 条是后者，而界面上完全看不出区别。
+   *
+   * 三种结论各有出路：
+   * - `confirmed`：正式广告组已经在账户快照里了 → 改判成功，黄点自己消掉
+   * - `draft-only`：只剩草稿 → **先清掉草稿，确认清掉了才改判失败**，让它进重试列表
+   * - `not-found`：正式对象和草稿都没有 → 不下结论，原样留着
+   *
+   * ⚠️ **顺序不能反。** 先改判失败再清草稿的话，中间任何一步失败都会留下「已标记可重试
+   * 但草稿还在」的状态，重试会撞上自己的残留。
+   *
+   * ⚠️ **草稿列表读不到就整轮不下结论**（与 reconcileUncertainExpands 同一条原则）：
+   * 看不见草稿时，`draft-only` 会被误判成 `not-found`，那等于把草稿永久藏起来。
+   */
+  async reconcileSettledPlan(planId: string, asOf = new Date()): Promise<{
+    confirmed: number;
+    cleared: number;
+    staleDrafts: number;
+    pending: number;
+    skipped?: string;
+  }> {
+    const empty = { confirmed: 0, cleared: 0, staleDrafts: 0, pending: 0 };
+    const plan = this.store.getMultiAccountLaunchPlan(planId);
+    if (!plan) return { ...empty, skipped: "计划不存在" };
+    const uncertain = this.store
+      .listLaunchPlanItems(planId)
+      .filter((item) => item.status === "unknown");
+    if (uncertain.length === 0) {
+      this.store.markLaunchPlanReconciled(planId, asOf.toISOString());
+      return empty;
+    }
+
+    // 计划是按账户建的，一个计划只对一个目标账户。
+    const accountId = plan.targetAccountIds[0];
+    if (!accountId) return { ...empty, skipped: "计划没有目标账户" };
+
+    let account: ReturnType<AutomationStore["getAccount"]>;
+    let context: ProviderContext;
+    let drafts: DraftSketchEntry[] | null;
+    try {
+      ({ account, context } = await this.requireDraftAccess(accountId));
+      drafts = await this.providers.listDraftAdGroups(account!.providerKind, context);
+    } catch (cause) {
+      // 账户掉线、连接没过检测：这一轮什么都不判，也不标记已核对，下次再来。
+      return { ...empty, skipped: cause instanceof Error ? cause.message : "读取草稿失败" };
+    }
+    if (!drafts) return { ...empty, skipped: "当前接入不支持读取草稿列表" };
+
+    const snapshot = this.store.listAdGroupPlatformStatuses(accountId, account!.providerKind);
+    const draftByName = new Map<string, DraftSketchEntry>();
+    for (const draft of drafts) {
+      const name = draft.adSketchName.trim();
+      // 同名草稿有多份时不认领：删错一个就是删掉别人正在用的那个。
+      if (draftByName.has(name)) draftByName.set(name, draft);
+      else draftByName.set(name, draft);
+    }
+    const draftNames = drafts.map((draft) => draft.adSketchName);
+
+    const classified = classifyUncertainLaunchItems(uncertain, snapshot, draftNames, draftByName);
+
+    let confirmed = 0;
+    for (const entry of classified.confirmed) {
+      const updated = this.store.reconcileLaunchPlanItem(
+        entry.itemId,
+        "succeeded",
+        "核对确认：广告组已建成。",
+        { campaignId: entry.campaignId },
+      );
+      if (updated) confirmed += 1;
+    }
+    let pending = classified.pending;
+    const toClear = classified.toClear;
+
+    let cleared = 0;
+    let staleDrafts = 0;
+    if (toClear.length > 0) {
+      let deletedIds: Set<string>;
+      try {
+        const result = await this.providers.deleteDraftAdGroups(account!.providerKind, context, {
+          adSketchIds: toClear.map((entry) => entry.sketchId),
+        });
+        deletedIds = new Set(result.deleted);
+      } catch {
+        // 删不掉就全部留着等人工，绝不在草稿还在的情况下标成可重试。
+        this.store.markLaunchPlanReconciled(planId, asOf.toISOString());
+        return { confirmed, cleared: 0, staleDrafts: toClear.length, pending };
+      }
+      for (const entry of toClear) {
+        if (!deletedIds.has(entry.sketchId)) { staleDrafts += 1; continue; }
+        const updated = this.store.reconcileLaunchPlanItem(
+          entry.itemId,
+          "failed",
+          "核对确认：只建出草稿、没有正式广告组；草稿已清理，可重试重建。",
+        );
+        if (updated) cleared += 1;
+      }
+    }
+
+    this.store.markLaunchPlanReconciled(planId, asOf.toISOString());
+    return { confirmed, cleared, staleDrafts, pending };
+  }
+
+  /**
    * TikTok 后台遗留的草稿广告组：够格清理的，和被保护住的。
    *
    * 草稿会因为人工中途放弃、网络卡顿、自动化断联而留在后台，只进不出。但**扩组本身就是
@@ -1959,6 +2068,48 @@ export class LaunchService {
  * 快照可能滞后于账户真实状态（刚建好、还没被同步捕获的系列查不到）。那种情况下会
  * 走新建、被 TikTok 判重名——与改动前的行为一致，不构成回退。
  */
+/**
+ * 把「结果未知」的条目分成三堆：已建成的、只剩草稿的、还看不出来的。
+ *
+ * 判定本身抽成纯函数，因为它决定了**要不要删掉一个草稿**——删错就是把人家正在等发布的
+ * 东西清掉。副作用（改判、清理）留在调用方，薄到一眼能看完。
+ *
+ * `not-found`（正式对象和草稿都没有）一律归入 pending：可能只是账户快照还没同步到，
+ * 也可能真没建成。不下结论，原样留着等下一次。
+ */
+export function classifyUncertainLaunchItems(
+  items: readonly LaunchPlanItemRecord[],
+  snapshot: readonly { name: string; campaignId: string | null }[],
+  draftNames: readonly string[],
+  draftByName: ReadonlyMap<string, DraftSketchEntry>,
+): {
+  confirmed: Array<{ itemId: string; name: string; campaignId: string | null }>;
+  toClear: Array<{ itemId: string; name: string; sketchId: string }>;
+  pending: number;
+} {
+  const confirmed: Array<{ itemId: string; name: string; campaignId: string | null }> = [];
+  const toClear: Array<{ itemId: string; name: string; sketchId: string }> = [];
+  let pending = 0;
+  for (const item of items) {
+    const name = item.launchRow.adGroupName.trim();
+    const verdict = reconcileExpandTask([name], snapshot, draftNames);
+    if (verdict === "confirmed") {
+      const found = snapshot.find((entity) => entity.name.trim() === name);
+      confirmed.push({ itemId: item.itemId, name, campaignId: found?.campaignId ?? null });
+      continue;
+    }
+    if (verdict === "draft-only") {
+      const draft = draftByName.get(name);
+      // 判成 draft-only 却拿不到草稿 ID，就没法删；没删掉的草稿绝不能标成可重试。
+      if (draft) toClear.push({ itemId: item.itemId, name, sketchId: draft.adSketchId });
+      else pending += 1;
+      continue;
+    }
+    pending += 1;
+  }
+  return { confirmed, toClear, pending };
+}
+
 export function resolveExistingCampaignIdByName(
   managed: Array<{ entityType: string; externalId: string; name: string }>,
   campaignName: string,
