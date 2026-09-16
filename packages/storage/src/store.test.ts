@@ -3435,14 +3435,19 @@ describe("AutomationStore", () => {
     store.markLaunchPlanSettled(plan.id, new Date(settledAt.getTime() + 120_000).toISOString());
     expect(store.getLaunchPlanReconcileState(plan.id)?.settledAt).toBe(settledAt.toISOString());
 
-    // 核对过就不再交出去。
-    store.markLaunchPlanReconciled(plan.id);
+    // 核对过就不再交出去，结论要能读回来——界面上那句「N 个遗留草稿」就存在这里。
+    store.markLaunchPlanReconciled(plan.id, undefined, {
+      confirmed: 2, cleared: 5, staleDrafts: 3, pending: 1,
+    });
     expect(store.listLaunchPlansAwaitingReconcile(180_000, ready)).toEqual([]);
+    expect(store.getLaunchPlanReconcileState(plan.id)?.summary).toEqual({
+      confirmed: 2, cleared: 5, staleDrafts: 3, pending: 1,
+    });
 
     // 重新入队 = 又要建东西，上一轮结论作废，否则重试建出来的对象永远等不到核对。
     store.enqueueLaunchPlan(plan.id, actor);
     const afterRequeue = store.getLaunchPlanReconcileState(plan.id);
-    expect(afterRequeue).toEqual({ settledAt: null, reconciledAt: null });
+    expect(afterRequeue).toEqual({ settledAt: null, reconciledAt: null, summary: null });
   });
 
   it("renews launch and status leases so another instance cannot recover active work", () => {

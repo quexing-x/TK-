@@ -1032,7 +1032,7 @@ export class LaunchService {
       .listLaunchPlanItems(planId)
       .filter((item) => item.status === "unknown");
     if (uncertain.length === 0) {
-      this.store.markLaunchPlanReconciled(planId, asOf.toISOString());
+      this.store.markLaunchPlanReconciled(planId, asOf.toISOString(), empty);
       return empty;
     }
 
@@ -1088,8 +1088,9 @@ export class LaunchService {
         deletedIds = new Set(result.deleted);
       } catch {
         // 删不掉就全部留着等人工，绝不在草稿还在的情况下标成可重试。
-        this.store.markLaunchPlanReconciled(planId, asOf.toISOString());
-        return { confirmed, cleared: 0, staleDrafts: toClear.length, pending };
+        const summary = { confirmed, cleared: 0, staleDrafts: toClear.length, pending };
+        this.store.markLaunchPlanReconciled(planId, asOf.toISOString(), summary);
+        return summary;
       }
       for (const entry of toClear) {
         if (!deletedIds.has(entry.sketchId)) { staleDrafts += 1; continue; }
@@ -1102,8 +1103,9 @@ export class LaunchService {
       }
     }
 
-    this.store.markLaunchPlanReconciled(planId, asOf.toISOString());
-    return { confirmed, cleared, staleDrafts, pending };
+    const summary = { confirmed, cleared, staleDrafts, pending };
+    this.store.markLaunchPlanReconciled(planId, asOf.toISOString(), summary);
+    return summary;
   }
 
   /**

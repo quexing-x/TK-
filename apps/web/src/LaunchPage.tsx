@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, CircleX, Download, FileSpreadsheet, Pencil, RefreshCw, Rocket, Settings2, Trash2, Upload, X } from "./ui/icons";
 import { CreationPresetConfigSchema, defaultCreationPresetConfig, getCreationTemplateReadiness, LaunchAgeRangeValues, resolveConfiguredBudgetMode, splitVideoCodes, type AccountConfig, type AccountProviderCapabilities, type LaunchBudgetMode, type LaunchConfigurationRow, type LaunchCopyPreviewRecord, type LaunchMigrationTargetConfig, type LaunchPlanItemRecord, type LaunchPresetInput, type LaunchPresetRecord, type LaunchSheetImportResult, type ManagedEntityRecord, type MultiAccountLaunchPlanRecord, type ProviderConnection } from "@tk-auto/core";
-import { api, type LaunchExecutionResult } from "./api";
+import { api, type LaunchExecutionResult, type LaunchReconcileState } from "./api";
 import { useAuth } from "./AuthGate";
 import { downloadFailedLaunchItems, downloadLaunchTemplate, readLaunchSpreadsheet, selectRetryableLaunchItems } from "./launch-sheet";
 import {
@@ -155,6 +155,33 @@ export type LaunchSummaryRow = Pick<
  * 预算 / 出价 / 时间来自预设、逐行相同，所以只有真的不一致时才显示「各行不同」：
  * 那说明这张表被手改过，必须让人看见，**不能取第一行糊弄过去**。
  */
+/**
+ * 收尾核对在界面上处于哪一段。
+ *
+ * 投手看到「153/153」之后后台还要静默 3 分钟才核对，这段时间如果界面什么都不说，
+ * 跟卡死没有区别——所以必须能显示出「在等、还有多久」。
+ */
+export function describeReconcileState(
+  state: { settledAt: string | null; reconciledAt: string | null; quietPeriodMs: number } | null,
+  now: Date = new Date(),
+): { phase: "creating" | "waiting" | "reconciling" | "done"; remainingMs: number } {
+  if (!state?.settledAt) return { phase: "creating", remainingMs: 0 };
+  if (state.reconciledAt) return { phase: "done", remainingMs: 0 };
+  const settled = Date.parse(state.settledAt);
+  // 时间戳坏掉时按「正在核对」显示：至少不会摆出一个永远不动的倒计时。
+  if (!Number.isFinite(settled)) return { phase: "reconciling", remainingMs: 0 };
+  const remainingMs = settled + state.quietPeriodMs - now.getTime();
+  return remainingMs > 0
+    ? { phase: "waiting", remainingMs }
+    : { phase: "reconciling", remainingMs: 0 };
+}
+
+/** 把剩余毫秒写成 2:30 这种形式。与下方按秒计的 formatCountdown 不是一回事。 */
+export function formatReconcileCountdown(remainingMs: number): string {
+  const total = Math.max(0, Math.ceil(remainingMs / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 export function summarizeLaunchPlan(input: {
   rows: readonly LaunchSummaryRow[];
   accountNames: readonly string[];
@@ -295,6 +322,10 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [plans, setPlans] = useState<MultiAccountLaunchPlanRecord[]>([]);
   const [planItems, setPlanItems] = useState<Record<string, LaunchPlanItemRecord[]>>({});
+  const [reconcileStates, setReconcileStates] = useState<Record<string, LaunchReconcileState>>({});
+  // 倒计时要每秒重算，但计划数据只在轮询时才刷。单独用一个秒针驱动重渲染，
+  // 免得为了走字去加快整个列表的轮询频率。
+  const [clockTick, setClockTick] = useState(() => new Date());
   const [activePlanIds, setActivePlanIds] = useState<string[]>([]);
   const [connections, setConnections] = useState<Record<string, ProviderConnection | null>>({});
   const [sheet, setSheet] = useState<LaunchSheetImportResult | null>(null);
@@ -536,9 +567,31 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
       }
     }
     setPlanItems(nextPlanItems);
+    void loadReconcileStates(nextPlans);
     setPresetId((current) => current && nextPresets.some((item) => item.id === current) ? current : (nextPresets[0]?.id ?? ""));
     onError(null);
   };
+  /**
+   * 拉还没核对完的计划的核对状态。
+   *
+   * 已经核对过的也要拉一次——「N 个遗留草稿」这个结论就存在那里面，不拉就永远显示不出来。
+   * 只跳过已取消的：它不会再有核对。
+   */
+  const loadReconcileStates = async (targetPlans: MultiAccountLaunchPlanRecord[]) => {
+    const wanted = targetPlans.filter((plan) => plan.status !== "cancelled");
+    if (wanted.length === 0) return;
+    const entries = await Promise.all(wanted.map(async (plan) => {
+      try {
+        return [plan.id, await api.getLaunchPlanReconcileState(plan.id)] as const;
+      } catch {
+        // 单个计划读不到不该让整页报错：核对状态只是装饰，缺了退回原来的显示。
+        return null;
+      }
+    }));
+    const next = Object.fromEntries(entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null));
+    if (Object.keys(next).length > 0) setReconcileStates((current) => ({ ...current, ...next }));
+  };
+
   const refreshProgress = async () => {
     const [nextPlans, queuedPlanIds] = await Promise.all([
       api.getLaunchPlans(),
@@ -550,6 +603,7 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     setPlans(nextPlans);
     setActivePlanIds(queuedPlanIds);
     setPlanItems((current) => ({ ...current, ...refreshedItems }));
+    void loadReconcileStates(nextPlans);
     for (const plan of nextPlans) {
       if (!["completed", "blocked"].includes(plan.status) || notifiedTerminalPlanIds.current.has(plan.id)) continue;
       notifiedTerminalPlanIds.current.add(plan.id);
@@ -571,6 +625,17 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
     poller.reconcile(activePlanIds);
     return () => poller.stop();
   }, [activePlanIds.join("|"), onError]);
+  // 静默期倒计时的秒针。只在真有计划在等核对时走，等完就停——没必要为了一个不显示的
+  // 倒计时让整页每秒重渲染。
+  const awaitingReconcile = plans.some((plan) => {
+    const state = reconcileStates[plan.id];
+    return plan.status !== "cancelled" && state?.settledAt && !state.reconciledAt;
+  });
+  useEffect(() => {
+    if (!awaitingReconcile) return;
+    const timer = setInterval(() => setClockTick(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, [awaitingReconcile]);
   useEffect(() => {
     if (sourceAccounts.length === 0) {
       setSourceAccountId("");
@@ -1035,17 +1100,25 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
           const targetNames = plan.targetAccountIds.map((accountId) => accountNameById.get(accountId) ?? accountId);
           const accountLabel = targetNames.length <= 1 ? targetNames[0] : `${targetNames[0]} 等 ${targetNames.length} 个账户`;
           const active = activePlanIds.includes(plan.id);
+          // 跑完之后还有一段静默期才核对。这段时间界面必须说清楚「在等、还有多久」，
+          // 否则就是一个「153/153 却标着未全部完成」的画面，跟卡死没区别。
+          const reconcile = describeReconcileState(reconcileStates[plan.id] ?? null, clockTick);
+          const staleDrafts = reconcileStates[plan.id]?.summary?.staleDrafts ?? 0;
           const resultState = plan.status === "cancelled"
             ? { label: "已取消", tone: "danger" }
             : progress.running > 0 || active
               ? { label: "创建中", tone: "running" }
-              : plan.status === "blocked" || progress.failed > 0
-                ? { label: "未全部完成", tone: "warning" }
-                : progress.readback > 0
-                  ? { label: "等待回读", tone: "warning" }
-                  : plan.status === "completed"
-                    ? { label: "已收口", tone: "success" }
-                    : { label: "排队中", tone: "warning" };
+              : reconcile.phase === "waiting"
+                ? { label: `等待核对 · ${formatReconcileCountdown(reconcile.remainingMs)}`, tone: "running" }
+                : reconcile.phase === "reconciling"
+                  ? { label: "核对中", tone: "running" }
+                  : plan.status === "blocked" || progress.failed > 0
+                    ? { label: "未全部完成", tone: "warning" }
+                    : progress.readback > 0
+                      ? { label: "等待回读", tone: "warning" }
+                      : plan.status === "completed"
+                        ? { label: "已收口", tone: "success" }
+                        : { label: "排队中", tone: "warning" };
           const skippedMaterials = countSkippedMaterials(items);
           return <tr key={plan.id}>
             <td className="plan-account-cell" title={targetNames.join("、")}><strong>{accountLabel || "未识别账户"}</strong><small>{plan.sourceAdName} · {total} 条</small></td>
@@ -1065,8 +1138,14 @@ export function LaunchPage({ accounts, accountCapabilities, connectionStates, pr
                 <small>创建中 <b>{progress.running}</b></small>
                 {progress.cancelled > 0 && <small>已取消 <b>{progress.cancelled}</b></small>}
               </span>
-              {failedItems.length > 0 && <details className="plan-failed-details">
-                <summary>{failedItems.length} 个失败项</summary>
+              {(failedItems.length > 0 || staleDrafts > 0) && <details className="plan-failed-details">
+                <summary>
+                  {failedItems.length} 个失败项
+                  {/* 清理不掉的草稿：清理成功的那些已经改判失败进了上面的列表，不重复计数。 */}
+                  {staleDrafts > 0 && <em className="plan-stale-drafts" title="只建出草稿、且草稿没能自动清理；需要去 TikTok 后台手动处理">
+                    {" · "}{staleDrafts} 个遗留草稿
+                  </em>}
+                </summary>
                 <div className="plan-failed-list">{failedItems.map((item) => <span key={item.itemId} title={item.errorMessage ?? "创建失败"}><strong>{item.launchRow.adGroupName}</strong><small>{item.errorMessage ?? "创建失败"}</small></span>)}</div>
               </details>}
             </div></td>

@@ -142,6 +142,7 @@ import {
   DatabaseBackupRecordSchema,
   type DatabaseBackupKind,
   type DatabaseBackupRecord,
+  type LaunchReconcileSummary,
   AUTOMATION_MANAGED_LOOKBACK_HOURS,
 } from "@tk-auto/core";
 
@@ -3990,8 +3991,11 @@ export class AutomationStore {
          updated_at = excluded.updated_at,
          -- 重新入队 = 又要建东西了，上一轮的核对结论作废。不清空的话，重试建出来的
          -- 对象永远等不到核对，草稿也就永远没人认领。
+         -- summary 也必须一起清：留着的话，界面会挂着上一轮的「N 个遗留草稿」，
+         -- 而那些草稿可能早就处理掉了。
          settled_at = NULL,
-         reconciled_at = NULL`,
+         reconciled_at = NULL,
+         reconcile_summary = NULL`,
     ).run(planId, actor.id, actor.name, actor.kind, now, now);
     return plan;
   }
@@ -4008,10 +4012,21 @@ export class AutomationStore {
     ).run(settledAt, new Date().toISOString(), planId);
   }
 
-  markLaunchPlanReconciled(planId: string, reconciledAt = new Date().toISOString()): void {
+  markLaunchPlanReconciled(
+    planId: string,
+    reconciledAt = new Date().toISOString(),
+    summary?: LaunchReconcileSummary,
+  ): void {
     this.db.prepare(
-      `UPDATE launch_plan_dispatches SET reconciled_at = ?, updated_at = ? WHERE plan_id = ?`,
-    ).run(reconciledAt, new Date().toISOString(), planId);
+      `UPDATE launch_plan_dispatches
+       SET reconciled_at = ?, reconcile_summary = ?, updated_at = ?
+       WHERE plan_id = ?`,
+    ).run(
+      reconciledAt,
+      summary ? JSON.stringify(summary) : null,
+      new Date().toISOString(),
+      planId,
+    );
   }
 
   /** 静默期已满、还没核对过的计划。按 settled_at 排序，保证多账户串行时先结束的先核对。 */
@@ -4039,19 +4054,31 @@ export class AutomationStore {
     }));
   }
 
-  /** 给界面算倒计时用：这个计划是什么时候结束的、核对过没有。 */
-  getLaunchPlanReconcileState(
-    planId: string,
-  ): { settledAt: string | null; reconciledAt: string | null } | null {
+  /** 给界面算倒计时用：这个计划是什么时候结束的、核对过没有、核对出了什么。 */
+  getLaunchPlanReconcileState(planId: string): {
+    settledAt: string | null;
+    reconciledAt: string | null;
+    summary: LaunchReconcileSummary | null;
+  } | null {
     const row = this.db.prepare(
-      "SELECT settled_at, reconciled_at FROM launch_plan_dispatches WHERE plan_id = ?",
+      "SELECT settled_at, reconciled_at, reconcile_summary FROM launch_plan_dispatches WHERE plan_id = ?",
     ).get(planId) as SqlRow | undefined;
     if (!row) return null;
+    let summary: LaunchReconcileSummary | null = null;
+    if (row.reconcile_summary) {
+      // 存量行可能是旧格式或半截 JSON；解析不了就当没有，不能因此让整个计划列表读不出来。
+      try {
+        summary = JSON.parse(String(row.reconcile_summary)) as LaunchReconcileSummary;
+      } catch {
+        summary = null;
+      }
+    }
     return {
       settledAt: row.settled_at === null || row.settled_at === undefined ? null : String(row.settled_at),
       reconciledAt: row.reconciled_at === null || row.reconciled_at === undefined
         ? null
         : String(row.reconciled_at),
+      summary,
     };
   }
 
@@ -7397,7 +7424,9 @@ export class AutomationStore {
         -- 所有条目都到终态的时刻。核对的静默期从这里起算。
         settled_at TEXT,
         -- 核对做完的时刻。一个计划只核对一次，有值就不再核对。
-        reconciled_at TEXT
+        reconciled_at TEXT,
+        -- 核对结论 JSON。界面靠它显示「N 个遗留草稿」，不落库就只存在于那一次调用的返回值里。
+        reconcile_summary TEXT
       );
 
       CREATE TABLE IF NOT EXISTS provider_write_circuits (
@@ -8346,6 +8375,9 @@ export class AutomationStore {
       }
       if (!has("reconciled_at")) {
         this.db.exec("ALTER TABLE launch_plan_dispatches ADD COLUMN reconciled_at TEXT");
+      }
+      if (!has("reconcile_summary")) {
+        this.db.exec("ALTER TABLE launch_plan_dispatches ADD COLUMN reconcile_summary TEXT");
       }
     });
     this.ensureGlobalDefaults();
