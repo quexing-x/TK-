@@ -210,6 +210,31 @@ export class PlatformConfigurationConflictError extends Error {
 const historyRetentionDays = 30;
 
 /**
+ * 迁移前备份保留几份。
+ *
+ * 只留最近一份。备份的唯一用途是「这次升级迁移失败了，能退回去」，而**真实数据在广告
+ * 平台那边，本地库是可以重新同步出来的快照**——不需要为数据安全囤多份历史备份。
+ *
+ * 每份备份约等于整库大小。2026-09-17 生产机上库 4.33 GB，而保留数原本是 5：一次排查
+ * 反复重启就在磁盘上堆了 4 份共 15.4 GB，C 盘只剩 50 GB。
+ */
+const DATABASE_BACKUP_RETENTION = 1;
+
+/**
+ * 素材层指标快照的最小写入间隔。
+ *
+ * 快照行数 = 轮询次数 × 实体数，而**素材是实体数最多的一层**：2026-09-17 生产库里
+ * material 占 232 万行（35%），比广告组还多。但素材的指标变化远比广告组慢——它只在
+ * 有消耗时才动，跟着每轮（约 5 分钟）全量写纯属浪费。
+ *
+ * 降到每小时一次，这一层的写入量掉到约 1/12。
+ *
+ * ⚠️ 只降**快照**（历史趋势）的频率，`provider_entities`（当前状态）照旧每轮更新——
+ * 规则判定读的是后者，降它会让规则看着过期数据做决定。
+ */
+const MATERIAL_SNAPSHOT_MIN_INTERVAL_MS = 60 * 60_000;
+
+/**
  * 判定账户失效提醒时往前回溯的轮次上限。
  *
  * 只用来确认「这段连续失败是不是刚开始」，够短就行：连续失败超过这个长度的账户，
@@ -1873,6 +1898,21 @@ export class AutomationStore {
     ) {
       persisted.add("material");
     }
+    // 素材层的快照按小时节流：它是实体数最多的一层，而指标变化最慢。
+    // 判据取这一层已有快照的最新时刻，不另立字段——快照本来就要写，
+    // 「上一次写到什么时候」正是它自己的语义。
+    const lastMaterialSnapshot = this.db.prepare(
+      `SELECT MAX(captured_at) AS captured_at FROM entity_metric_snapshots
+        WHERE account_id = ? AND provider_kind = ? AND entity_type = 'material'`,
+    ).get(accountId, kind) as SqlRow | undefined;
+    const materialCutoff = new Date(
+      new Date(result.finishedAt).getTime() - MATERIAL_SNAPSHOT_MIN_INTERVAL_MS,
+    ).toISOString();
+    const skipMaterialSnapshot = Boolean(
+      lastMaterialSnapshot?.captured_at
+      && String(lastMaterialSnapshot.captured_at) > materialCutoff,
+    );
+
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (persisted.size > 0) {
@@ -1881,6 +1921,7 @@ export class AutomationStore {
         }
         for (const entity of entities) {
           if (!persisted.has(entity.entityType)) continue;
+          // 当前状态每轮都要刷——规则判定读的是这张表，降频会让它按过期数据做决定。
           insert.run(
             accountId,
             kind,
@@ -1889,6 +1930,8 @@ export class AutomationStore {
             JSON.stringify(entity.payload),
             result.finishedAt,
           );
+          // 只有历史趋势那张表对素材降频。
+          if (entity.entityType === "material" && skipMaterialSnapshot) continue;
           const normalized = normalizeProviderEntity(entity);
           insertSnapshot.run(
             randomUUID(),
@@ -7069,7 +7112,7 @@ export class AutomationStore {
     const rows = this.db.prepare(
       "SELECT id, file_path FROM database_backups ORDER BY created_at DESC, id DESC",
     ).all() as SqlRow[];
-    for (const row of rows.slice(5)) {
+    for (const row of rows.slice(DATABASE_BACKUP_RETENTION)) {
       rmSync(String(row.file_path), { force: true });
       this.db.prepare("DELETE FROM database_backups WHERE id = ?").run(String(row.id));
     }
@@ -7082,7 +7125,7 @@ export class AutomationStore {
         const timeDifference = statSync(right).mtimeMs - statSync(left).mtimeMs;
         return timeDifference !== 0 ? timeDifference : right.localeCompare(left);
       });
-    for (const stalePath of backupFiles.slice(5)) {
+    for (const stalePath of backupFiles.slice(DATABASE_BACKUP_RETENTION)) {
       rmSync(stalePath, { force: true });
       this.db.prepare("DELETE FROM database_backups WHERE file_path = ?").run(stalePath);
     }

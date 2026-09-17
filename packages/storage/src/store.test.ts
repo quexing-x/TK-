@@ -1269,6 +1269,52 @@ describe("AutomationStore", () => {
       expect(materials[0]).toMatchObject({ externalId: "1872777743628513" });
     });
 
+    /**
+     * 素材层的指标快照按小时节流。
+     *
+     * 快照行数 = 轮询次数 × 实体数，素材是实体数最多的一层（2026-09-17 生产库里
+     * 占 232 万行 / 35%），而它的指标变化最慢。跟着每轮全量写纯属浪费磁盘。
+     */
+    it("素材快照按小时节流，但当前状态每轮都刷新", () => {
+      const materialRows = () => store.listMetricSnapshots(
+        "demo-account",
+        "cookie",
+        "2026-09-16T00:00:00.000Z",
+        "material",
+        5000,
+        "2026-09-18T00:00:00.000Z",
+      ).length;
+      const sync = (finishedAt: string, cost: string) => {
+        store.saveReadOnlySync("demo-account", "cookie", [{
+          entityType: "material",
+          externalId: "m1",
+          payload: { main_entity_name: "素材", stat_cost: cost },
+        }], {
+          startedAt: finishedAt,
+          finishedAt,
+          counts: { campaign: 0, "ad-group": 0, ad: 0, material: 1 },
+          warnings: [],
+          quality: { ...healthySyncQuality(finishedAt), completeEntityTypes: ["material"] },
+        });
+      };
+
+      sync("2026-09-17T00:00:00.000Z", "10.00");
+      expect(materialRows()).toBe(1);
+
+      // 5 分钟后的下一轮：快照不该再写一条。
+      sync("2026-09-17T00:05:00.000Z", "20.00");
+      expect(materialRows()).toBe(1);
+
+      // 但当前状态必须已经更新——规则判定读的是这张表，读到旧值会照着过期数据决策。
+      const current = store.listCurrentProviderEntities("demo-account", "cookie")
+        .find((entity) => entity.entityType === "material" && entity.externalId === "m1");
+      expect(current?.payload).toMatchObject({ stat_cost: "20.00" });
+
+      // 过了一小时才再写一条。
+      sync("2026-09-17T01:05:00.000Z", "30.00");
+      expect(materialRows()).toBe(2);
+    });
+
     // 同一个 ID 在不同层级各自独立：主键含 entity_type，不能互相顶掉。
     it("素材与广告同名 ID 互不覆盖", () => {
       store.saveReadOnlySync("demo-account", "cookie", [
@@ -2608,7 +2654,9 @@ describe("AutomationStore", () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it("counts a restore rollback snapshot inside the five-backup retention limit", () => {
+  // 保留额度 2026-09-17 从 5 份收到 1 份：每份备份约等于整库大小（当时生产库 4.33 GB），
+  // 而真实数据在广告平台、本地库是可重新同步的快照，备份只用来「升级迁移失败能退回去」。
+  it("回滚快照也占备份保留额度，且额度内留的是最新那份", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-restore-retention-"));
     const databasePath = join(directory, "automation.db");
     vi.useFakeTimers();
@@ -2634,12 +2682,14 @@ describe("AutomationStore", () => {
     finalizePendingDatabaseRestore(applied);
 
     expect(rollback).toMatchObject({ kind: "restore-rollback", status: "verified" });
-    expect(restored.listDatabaseBackups().length).toBeLessThanOrEqual(5);
+    expect(restored.listDatabaseBackups().length).toBeLessThanOrEqual(1);
+    // 留下的那一份必须是回滚快照本身——它是最新的，也是唯一能把这次还原退回去的东西。
     expect(restored.listDatabaseBackups()).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: rollback!.id }),
     ]));
+    // 磁盘上也要真的只剩这么多：登记表清了而文件留着，等于没省空间。
     expect(readdirSync(directory).filter((name) => name.endsWith(".bak")).length)
-      .toBeLessThanOrEqual(5);
+      .toBeLessThanOrEqual(1);
     restored.close();
     vi.useRealTimers();
     rmSync(directory, { recursive: true, force: true });
