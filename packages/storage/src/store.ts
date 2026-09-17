@@ -210,13 +210,24 @@ export class PlatformConfigurationConflictError extends Error {
 const historyRetentionDays = 30;
 
 /**
- * 迁移前备份保留几份。
+ * 升级迁移前要不要自动整库备份。
  *
- * 只留最近一份。备份的唯一用途是「这次升级迁移失败了，能退回去」，而**真实数据在广告
- * 平台那边，本地库是可以重新同步出来的快照**——不需要为数据安全囤多份历史备份。
+ * 关掉了。**真实数据在广告平台那边，本地库是可以重新同步出来的快照**，不需要为数据
+ * 安全囤备份；而代价很实在：备份走 `VACUUM INTO` 再算一次哈希，2026-09-17 生产机上
+ * 库 4.33 GB，这一步让带迁移的升级足足卡了 3 分钟，看起来跟启动失败一模一样
+ * （端口不监听、迁移不落库），当时差点误判成新版本有 bug。
  *
- * 每份备份约等于整库大小。2026-09-17 生产机上库 4.33 GB，而保留数原本是 5：一次排查
- * 反复重启就在磁盘上堆了 4 份共 15.4 GB，C 盘只剩 50 GB。
+ * 界面上的手动备份不受影响——那是投手自己决定要留的，照常可用。
+ *
+ * 想开回来就把它改成 true，备份与保留逻辑都还在。
+ */
+const CREATE_PRE_MIGRATION_BACKUP = false;
+
+/**
+ * 备份保留几份（手动备份与历史遗留的迁移前备份共用这个额度）。
+ *
+ * 每份约等于整库大小。原本是 5：一次排查反复重启就在磁盘上堆了 4 份共 15.4 GB，
+ * 而 C 盘当时只剩 50 GB。
  */
 const DATABASE_BACKUP_RETENTION = 1;
 
@@ -288,7 +299,7 @@ export class AutomationStore {
       // 单个事务需要更多空间时 WAL 仍会临时涨过 64 MB，之后被收回，不影响正确性。
       this.db.exec(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES}`);
       this.migrationRunner = new MigrationRunner(this.db, () => {
-        if (!databaseExistedBefore) return;
+        if (!databaseExistedBefore || !CREATE_PRE_MIGRATION_BACKUP) return;
         const path = `${databasePath}.pre-migration-${fileTimestamp()}.bak`;
         const inspection = createConsistentSnapshot(this.db, path);
         backupPath = path;

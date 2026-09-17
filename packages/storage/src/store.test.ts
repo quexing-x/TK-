@@ -2584,7 +2584,10 @@ describe("AutomationStore", () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it("does not replace the source database when consistent snapshot promotion fails", () => {
+  // 触发点从「启动时的迁移前备份」改成手动备份：迁移前自动备份 2026-09-17 关掉了
+  // （数据在广告平台、本地库可重新同步，而 VACUUM 4 GB 让升级卡了 3 分钟）。
+  // 这条要保护的行为没变——快照提升失败时，源库和它的 WAL 一个字节都不能动。
+  it("手动备份的快照提升失败时，不替换源数据库", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-auto-snapshot-promotion-"));
     const databasePath = join(directory, "automation.db");
     const writer = new DatabaseSync(databasePath);
@@ -2602,11 +2605,14 @@ describe("AutomationStore", () => {
       return originalPrepare.call(this, sql);
     });
 
-    expect(() => new AutomationStore(databasePath)).toThrow("simulated snapshot promotion failure");
+    // 启动本身不再做备份，所以构造得过；VACUUM 由手动备份触发。
+    const store = new AutomationStore(databasePath);
+    expect(() => store.createDatabaseBackup("manual")).toThrow("simulated snapshot promotion failure");
     expect(existsSync(`${databasePath}-wal`)).toBe(true);
     expect(writer.prepare("SELECT value FROM committed_in_wal").get()).toEqual({
       value: "preserve-me",
     });
+    store.close();
 
     writer.close();
     vi.restoreAllMocks();
@@ -2793,6 +2799,39 @@ describe("AutomationStore", () => {
     // 每次启动都拷贝 + VACUUM 整库、冷启动从 30 秒降到秒级的关键。
     // （既有库遇到待跑迁移时仍会备份——由 rollback 与 snapshot-promotion 两个用例覆盖。）
     const second = new AutomationStore(databasePath);
+    second.close();
+    expect(backupCount()).toBe(0);
+
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  /**
+   * 迁移前自动备份 2026-09-17 关掉了。
+   *
+   * 理由：真实数据在广告平台那边，本地库是可以重新同步出来的快照，不需要为数据安全
+   * 囤备份；而代价很实在——备份走 VACUUM INTO 再算哈希，生产机上 4.33 GB 的库让带
+   * 迁移的升级卡了 3 分钟，现象（端口不监听、迁移不落库）跟启动失败一模一样。
+   */
+  it("有待跑迁移的既有库，启动时也不再自动备份", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-auto-no-premigration-backup-"));
+    const databasePath = join(directory, "automation.db");
+    const backupCount = () =>
+      readdirSync(directory).filter(
+        (name) => name.startsWith("automation.db.pre-migration-") && name.endsWith(".bak"),
+      ).length;
+
+    const first = new AutomationStore(databasePath);
+    first.seed();
+    first.close();
+
+    // 抹掉一条迁移记录，制造「既有库 + 有待跑迁移」——这正是以前会触发整库备份的场景。
+    const tamper = new DatabaseSync(databasePath);
+    tamper.exec("DELETE FROM schema_migrations WHERE migration_key = 'drop-meta-tables-v1'");
+    tamper.close();
+
+    const second = new AutomationStore(databasePath);
+    // 迁移照样补上，只是不再顺手拷一份整库。
+    expect(second.listAccounts()).toBeDefined();
     second.close();
     expect(backupCount()).toBe(0);
 
