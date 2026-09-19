@@ -5,6 +5,7 @@ import {
   type ManagedEntitySnapshot,
 } from "./decision.js";
 import type { ProviderEntity, SyncEntityType } from "./connection.js";
+import { dateKeyInTimeZone } from "./copy-naming.js";
 import {
   RULE_LOOKBACK_HOURS,
   automationRuleDefinitions,
@@ -76,9 +77,26 @@ export function filterEntitiesToRecentWindow(
   return { entities: filtered, excludedCount: entities.length - filtered.length };
 }
 
+/**
+ * 判定当下的时间坐标。
+ *
+ * 只有「投放够久仍未出单」用得上：它是唯一一条判据带时间的规则，别的规则都只看
+ * 当轮指标。时区必须是**账户时区**——平台指标是按账户时区的「今天」取的，判据要跟
+ * 取数窗口用同一把尺子，详见 matchRule 里那条规则的注释。
+ *
+ * 不传就等于**让那条规则整个停掉**，刻意不给 UTC 之类的默认值：账户在 UTC+8 时，
+ * 拿 UTC 的「今天」去框账户时区的昨天，会把昨天开投、今天指标还没覆盖的组当成
+ * 今天的组关掉。少关一批是小事，关错一批不是。
+ */
+export interface RuleEvaluationContext {
+  now: Date;
+  timezone: string;
+}
+
 export function evaluateRuleConfiguration(
   entities: ProviderEntity[],
   configuration: RuleConfiguration,
+  context?: RuleEvaluationContext,
 ): AutomationEvaluation {
   const candidates: AutomationCandidate[] = [];
   const skipped: AutomationEvaluation["skipped"] = [];
@@ -92,7 +110,7 @@ export function evaluateRuleConfiguration(
     for (const definition of automationRuleDefinitions) {
       const rule = rulesByCode.get(definition.code);
       if (!rule?.enabled) continue;
-      const match = matchRule(rule, entity);
+      const match = matchRule(rule, entity, context);
       if (!match) continue;
 
       const desiredStatus = definition.action === "enable" ? "enabled" : "disabled";
@@ -134,6 +152,7 @@ interface RuleMatch {
 function matchRule(
   rule: AutomationRule,
   entity: ManagedEntitySnapshot,
+  context: RuleEvaluationContext | undefined,
 ): RuleMatch | null {
   const conversions = entity.metrics.conversions;
   const cpc = entity.metrics.cost_per_click;
@@ -208,6 +227,40 @@ function matchRule(
         clicks === value("clicks")
         ? primary("spend", spend, "gte", value("spend"))
         : null;
+    // 跑够时长还没出单：时间是判据的一部分，其余规则都只看当轮指标。
+    //
+    // 三道前置条件缺一不可，否则会关错组：
+    //
+    // 1) 起算点取「创建时间」与「排期开始时间」里**较晚**的那个。草稿放久了
+    //    start_time 会停在过去（发布时才顶排期），只认它会把一条刚发出去的组算成
+    //    已经跑了半个月；预约投放的组 start_time 在未来，取较晚的那个自然得到负的
+    //    时长，不会命中。
+    // 2) 起算点必须落在**账户时区的今天**。平台指标是按账户时区的「今天」取的
+    //    （withTodayMetricWindow），过零点归零。昨天开投的组，今天的 conversions=0
+    //    只说明今天没单，不代表投放以来没单——拿它判「8 小时没出单」会把昨晚出过单
+    //    的组砍掉。宁可漏判（跨零点的那几小时这条不生效，交给别的规则），不能误关。
+    // 3) 必须真的花出去钱。spend=0 意味着根本没投出去（审核中、没拿到量），这时候
+    //    关掉它既不省钱也说明不了问题，而且多半是平台侧延迟。
+    //
+    // 没给时间坐标就整条停掉，理由见 RuleEvaluationContext。
+    case "NO_CONV_HOURS_CLOSE": {
+      if (!context) return null;
+      const startedAt = deliveryStartedAt(entity);
+      if (startedAt === null) return null;
+      if (
+        dateKeyInTimeZone(new Date(startedAt), context.timezone)
+        !== dateKeyInTimeZone(context.now, context.timezone)
+      ) {
+        return null;
+      }
+      const elapsedHours = (context.now.getTime() - startedAt) / 3_600_000;
+      return elapsedHours >= value("hours") &&
+        spend !== null &&
+        spend > 0 &&
+        conversions === value("conversions")
+        ? primary("conversions", conversions, "lte", value("conversions"))
+        : null;
+    }
     case "HAS_CART_OPEN":
       return spend !== null &&
         spend >= value("spend") &&
@@ -216,6 +269,18 @@ function matchRule(
         ? primary("spend", spend, "gte", value("spend"))
         : null;
   }
+}
+
+/**
+ * 开始投放的时刻，取不到任何时间就返回 null。
+ *
+ * 取创建时间与排期开始时间里较晚的那个，理由见 NO_CONV_HOURS_CLOSE 的注释。
+ */
+function deliveryStartedAt(entity: ManagedEntitySnapshot): number | null {
+  const timestamps = [entity.createdAt, entity.scheduledStartAt]
+    .map((value) => (value ? Date.parse(value) : Number.NaN))
+    .filter((value) => Number.isFinite(value));
+  return timestamps.length > 0 ? Math.max(...timestamps) : null;
 }
 
 function primary(

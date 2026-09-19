@@ -461,3 +461,95 @@ describe("有消耗无点击关闭（NO_CLICK_CLOSE）", () => {
     expect(hit?.thresholdCode).toBe("NO_CLICK_CLOSE");
   });
 });
+
+describe("投放够久仍未出单关闭（NO_CONV_HOURS_CLOSE）", () => {
+  // 账户时区取上海：now 是 04:00Z，也就是当地 12:00，这样「今天开投且已满 8 小时」
+  // 才构造得出来。UTC 下当地才过 4 小时，这条规则的窗口根本打不开。
+  const 时区 = "Asia/Shanghai";
+  // 指标刻意避开前面每一条关闭规则：消耗 1.5（低于零转化消耗的 2、高于无加购的 1）、
+  // 有点击、CPC 0.3（低于零转化 CPC 的 0.5）、有加购。只剩这条够得着。
+  const 组 = (over: Record<string, unknown> = {}): ProviderEntity => ({
+    entityType: "ad-group",
+    externalId: "group-hours",
+    payload: {
+      campaign_id: "c-1",
+      adgroup_id: "group-hours",
+      ad_primary_status: "enable",
+      create_time: "2026-07-14T18:00:00.000Z", // 当地 7/15 02:00，距 now 十小时
+      row_data: {
+        campaign_id: "c-1",
+        time_attr_convert_cnt: 0,
+        time_attr_on_web_cart: 2,
+        stat_cost: 1.5,
+        click_cnt: 5,
+        cpc: 0.3,
+        ...over,
+      },
+    },
+  });
+  const 判 = (entity: ProviderEntity) =>
+    evaluateRuleConfiguration([entity], configuration(), { now, timezone: 时区 })
+      .candidates.find((c) => c.entity.externalId === "group-hours");
+
+  it("当天开投、跑满设定时长仍零转化就关闭", () => {
+    const hit = 判(组());
+    expect(hit?.thresholdCode).toBe("NO_CONV_HOURS_CLOSE");
+    expect(hit?.action).toBe("disable");
+  });
+
+  // 这条排在「有加购恢复」之前，否则有加购的组会被一直开着——加购不是出单。
+  it("有加购也照关，不让恢复规则先兜走", () => {
+    expect(判(组({ time_attr_on_web_cart: 9 }))?.thresholdCode)
+      .toBe("NO_CONV_HOURS_CLOSE");
+  });
+
+  it("时长没到不关", () => {
+    // 当地 7/15 09:00，距 now 三小时。
+    const entity = 组();
+    entity.payload.create_time = "2026-07-15T01:00:00.000Z";
+    expect(判(entity)).toBeUndefined();
+  });
+
+  it("出过单就不归这条管", () => {
+    expect(判(组({ time_attr_convert_cnt: 1 }))?.thresholdCode)
+      .not.toBe("NO_CONV_HOURS_CLOSE");
+  });
+
+  // 一分钱没花说明根本没投出去（审核中、没拿到量），关掉既不省钱也说明不了问题。
+  it("零消耗不关", () => {
+    expect(判(组({ stat_cost: 0 }))).toBeUndefined();
+  });
+
+  // 平台指标按账户时区的「今天」取，过零点归零。昨天开投的组今天转化为 0 只说明
+  // 今天没单，拿它判「投放以来没出单」会把昨晚出过单的组砍掉。
+  it("起算点在昨天就不判，哪怕早就超过时长", () => {
+    const entity = 组();
+    entity.payload.create_time = "2026-07-14T10:00:00.000Z"; // 当地 7/14 18:00
+    expect(判(entity)).toBeUndefined();
+  });
+
+  // 草稿的 start_time 会停在过去，发布时才顶排期；预约投放的又停在未来。
+  // 两个时间取较晚的那个，这两种情形才都不会误判。
+  it("排期在未来时按排期算，不关", () => {
+    const entity = 组();
+    entity.payload.start_time = "2026-07-15T08:00:00.000Z"; // 当地 7/15 16:00
+    expect(判(entity)).toBeUndefined();
+  });
+
+  // 拿 UTC 当默认去框账户时区的「今天」会关错组，所以没给时间坐标时这条整个停掉。
+  it("调用方没给时间坐标就不判", () => {
+    const hit = evaluateRuleConfiguration([组()], configuration()).candidates
+      .find((c) => c.entity.externalId === "group-hours");
+
+    expect(hit).toBeUndefined();
+  });
+
+  it("默认就是八小时，且开着", () => {
+    const rule = defaultRuleConfiguration.rules
+      .find((item) => item.code === "NO_CONV_HOURS_CLOSE");
+
+    expect(rule?.enabled).toBe(true);
+    expect(rule?.values.hours).toBe(8);
+    expect(rule?.values.conversions).toBe(0);
+  });
+});

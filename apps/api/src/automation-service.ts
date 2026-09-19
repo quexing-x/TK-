@@ -1105,6 +1105,8 @@ export class AutomationService {
         return evaluateRuleConfiguration(
           output.result.quality.status === "invalid" ? [] : recent.entities,
           ruleConfiguration,
+          // 账户时区：「投放够久仍未出单」要拿它和平台取数的「今天」对齐。
+          { now: new Date(), timezone: account.timezone },
         );
       })();
       this.store.saveReadOnlySync(
