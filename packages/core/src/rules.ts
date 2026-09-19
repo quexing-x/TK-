@@ -13,6 +13,7 @@ export const AutomationRuleCodeSchema = z.enum([
   "NO_CONV_CPC_CLOSE",
   "NO_CART_CLOSE",
   "NO_CLICK_CLOSE",
+  "NO_CONV_HOURS_CLOSE",
   "HAS_CART_OPEN",
 ]);
 export type AutomationRuleCode = z.infer<typeof AutomationRuleCodeSchema>;
@@ -157,6 +158,21 @@ export const automationRuleDefinitions: readonly AutomationRuleDefinition[] = [
     ],
   },
   {
+    // **必须排在「有加购恢复」之前**：这条的立场是「时间到了就砍」，而加购不是出单。
+    // 排在后面的话，一个有加购、投放一整天也没出一单的广告组会被恢复规则一直开着——
+    // 那正是这条规则要拦的情形。排在这里，它只在前面那些按消耗/点击/加购判的关闭
+    // 规则都够不着时才生效，理由也最准：不是花太多，是跑够久了还没出单。
+    code: "NO_CONV_HOURS_CLOSE",
+    label: "投放够久仍未出单",
+    description: "自开始投放满设定小时数，转化量仍等于设定值时关闭。",
+    priority: 6,
+    action: "disable",
+    parameters: [
+      { key: "hours", label: "投放时长", unit: "小时", step: 1 },
+      { key: "conversions", label: "转化量", unit: "次", step: 1 },
+    ],
+  },
+  {
     code: "HAS_CART_OPEN",
     label: "有加购恢复",
     description: "消耗和加购量均达到设定值时开启。",
@@ -222,6 +238,7 @@ export const defaultRuleConfiguration: RuleConfigurationInput = {
     // configuration.rules 只是个按 code 取值的映射源。谁先被匹配由定义数组的顺序决定。
     { code: "NO_CLICK_CLOSE", enabled: true, values: { spend: 0.5, clicks: 0 } },
     { code: "NO_CART_CLOSE", enabled: true, values: { spend: 1, carts: 0 } },
+    { code: "NO_CONV_HOURS_CLOSE", enabled: true, values: { hours: 8, conversions: 0 } },
     { code: "HAS_CART_OPEN", enabled: true, values: { spend: 1, carts: 1 } },
   ],
 };
