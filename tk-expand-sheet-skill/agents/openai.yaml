@@ -1,0 +1,7 @@
+interface:
+  display_name: "TikTok 扩组导入表"
+  short_description: "按品库生成并核验 TikTok 扩组表"
+  default_prompt: "使用 $tk-expand-sheet 根据我提供的账户和品库生成下一投放日的扩组导入表。"
+
+policy:
+  allow_implicit_invocation: true
