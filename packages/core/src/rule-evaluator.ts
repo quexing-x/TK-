@@ -229,34 +229,40 @@ function matchRule(
         : null;
     // 跑够时长还没出单：时间是判据的一部分，其余规则都只看当轮指标。
     //
-    // 三道前置条件缺一不可，否则会关错组：
+    // 起算点取「创建时间」与「排期开始时间」里**较晚**的那个。草稿放久了
+    // start_time 会停在过去（发布时才顶排期），只认它会把一条刚发出去的组算成
+    // 已经跑了半个月；预约投放的组 start_time 在未来，取较晚的那个自然得到负的
+    // 时长，不会命中。
     //
-    // 1) 起算点取「创建时间」与「排期开始时间」里**较晚**的那个。草稿放久了
-    //    start_time 会停在过去（发布时才顶排期），只认它会把一条刚发出去的组算成
-    //    已经跑了半个月；预约投放的组 start_time 在未来，取较晚的那个自然得到负的
-    //    时长，不会命中。
-    // 2) 起算点必须落在**账户时区的今天**。平台指标是按账户时区的「今天」取的
-    //    （withTodayMetricWindow），过零点归零。昨天开投的组，今天的 conversions=0
-    //    只说明今天没单，不代表投放以来没单——拿它判「8 小时没出单」会把昨晚出过单
-    //    的组砍掉。宁可漏判（跨零点的那几小时这条不生效，交给别的规则），不能误关。
-    // 3) 必须真的花出去钱。spend=0 意味着根本没投出去（审核中、没拿到量），这时候
-    //    关掉它既不省钱也说明不了问题，而且多半是平台侧延迟。
+    // 起算点**允许跨零点**，判据是「距今不超过 24 小时」而不是「落在今天」。这条
+    // 曾经要求起算点必须落在账户时区的今天，结果是它几乎从不生效：广告组普遍是
+    // 前一天下午建、次日 06:00 才开投，而 06:00 在账户时区里属于新的一天，起算点
+    // 却被算到前一天，整条规则对这类组直接返回——实测在投组里只有当天现场新建
+    // 的极少数够得着。24 小时上限既放开了这种「昨晚开投、今天上午该关」的组，
+    // 又挡住草稿停留导致的远古 create_time 被当成今天开投。
     //
-    // 没给时间坐标就整条停掉，理由见 RuleEvaluationContext。
+    // 上限必须是 24 而不是「只要超过 hours 就关」：平台指标是按账户时区的「今天」
+    // 取的（withTodayMetricWindow），过零点归零。一条 30 小时前开投的组，今天的
+    // conversions=0 只说明今天没单，不代表投放以来没单——那正是要避免的误关。
+    // 这条规则的覆盖范围因此是「投放起算 24 小时内、且已跑满设定时长」。
+    //
+    // 另外两道前置条件：
+    // - 必须真的花出去钱。spend=0 意味着根本没投出去（审核中、没拿到量），这时候
+    //   关掉它既不省钱也说明不了问题，而且多半是平台侧延迟。spend 是「当天」指标，
+    //   所以再要求一条**投放以来累计花费 > 0** 的证据：否则一条昨晚开投、今天才
+    //   被关得着的组，会在今早 06:00 刚过、当天指标还没回传时以「零消耗」被误判。
+    // - 没给时间坐标就整条停掉，理由见 RuleEvaluationContext。
     case "NO_CONV_HOURS_CLOSE": {
       if (!context) return null;
       const startedAt = deliveryStartedAt(entity);
       if (startedAt === null) return null;
-      if (
-        dateKeyInTimeZone(new Date(startedAt), context.timezone)
-        !== dateKeyInTimeZone(context.now, context.timezone)
-      ) {
-        return null;
-      }
       const elapsedHours = (context.now.getTime() - startedAt) / 3_600_000;
+      // 上限挡住远古起算点（负数自然也被挡下：预约投放的组耗时长为负）。
+      if (!(elapsedHours >= 0 && elapsedHours < maxElapsedHours)) return null;
+      const spentEver = (entity.totalSpend ?? 0) > 0;
+      const spentToday = spend !== null && spend > 0;
       return elapsedHours >= value("hours") &&
-        spend !== null &&
-        spend > 0 &&
+        (spentToday || spentEver) &&
         conversions === value("conversions")
         ? primary("conversions", conversions, "lte", value("conversions"))
         : null;
@@ -270,6 +276,15 @@ function matchRule(
         : null;
   }
 }
+
+/**
+ * 「投放够久仍未出单」的起算点距今上限。
+ *
+ * 放这么宽是为了容纳「前一天下午建、次日早上开投」这条主流投放节奏——那种组的
+ * 起算点必然落在前一个自然日。上限只是用来挡住草稿停留等造成的远古 create_time，
+ * 不是精度来源：真正决定关不关的是 hours 阈值。
+ */
+const maxElapsedHours = 24;
 
 /**
  * 开始投放的时刻，取不到任何时间就返回 null。
