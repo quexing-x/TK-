@@ -1925,7 +1925,7 @@ describe("AutomationService", () => {
         { id: "c-stalled", name: "停跑系列", spend: 5, conversions: 0, groupEnabled: false },
         // 同样零转化花过钱，但组还在跑 -> 不碰。关掉它会连带掐掉正在投放的组。
         { id: "c-running", name: "在跑系列", spend: 5, conversions: 0, groupEnabled: true },
-        // 从没花过钱：无在投组只是还没开始投，不是跑不出来 -> 不碰
+        // 零转化且无在投组：不再要求累计花费超过 3 -> 关
         { id: "c-fresh", name: "新建未投", spend: 0, conversions: 0, groupEnabled: false },
         // 单转达标 -> 不碰
         { id: "c-ok", name: "达标系列", spend: 8, conversions: 2, groupEnabled: false },
@@ -1935,10 +1935,26 @@ describe("AutomationService", () => {
 
       expect(provider.mutations).toEqual([
         { entityType: "campaign", externalId: "c-stalled", action: "disable" },
+        { entityType: "campaign", externalId: "c-fresh", action: "disable" },
       ]);
     });
 
-    it("关闭前提是开关打开，且落在计划小时", async () => {
+    it("累计单转达标的好系列即使连续零转化也不关", async () => {
+      enable();
+      vi.useFakeTimers();
+      vi.setSystemTime(atSix);
+      seedCampaigns([
+        { id: "c-good-stalled", name: "历史好系列", spend: 8, conversions: 2, groupEnabled: false },
+      ]);
+      vi.spyOn(store, "listCampaignZeroConversionStreaks")
+        .mockReturnValue(new Map([["c-good-stalled", 3]]));
+
+      await service.runScheduledStalledCampaignClose("demo-account", atSix);
+
+      expect(provider.mutations).toEqual([]);
+    });
+
+    it("关闭前提是开关打开，命中即关不受计划小时限制", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(atSix);
       seedCampaigns([
@@ -1949,13 +1965,15 @@ describe("AutomationService", () => {
       await service.runScheduledStalledCampaignClose("demo-account", atSix);
       expect(provider.mutations).toEqual([]);
 
-      // 开了但不在计划小时
+      // 开了但不在原计划小时：命中即关。
       enable();
       await service.runScheduledStalledCampaignClose(
         "demo-account",
         new Date("2026-07-24T20:00:00.000Z"),
       );
-      expect(provider.mutations).toEqual([]);
+      expect(provider.mutations).toEqual([
+        { entityType: "campaign", externalId: "c-stalled", action: "disable" },
+      ]);
     });
 
     it("每账户每个本地日只跑一次", async () => {

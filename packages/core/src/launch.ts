@@ -493,6 +493,12 @@ export const LaunchSheetImportResultSchema = z.object({
 });
 export type LaunchSheetImportResult = z.infer<typeof LaunchSheetImportResultSchema>;
 
+export interface LaunchSheetParseOptions {
+  requireVideoCode?: boolean;
+  /** Zero-based row index of the header. Omit to locate it automatically. */
+  headerRowIndex?: number;
+}
+
 /**
  * 导入表的列定义。
  *
@@ -503,17 +509,38 @@ export type LaunchSheetImportResult = z.infer<typeof LaunchSheetImportResultSche
  * 以及反查这一行属于哪个品。
  */
 export const launchSheetColumns = [
-  { key: "campaignName", label: "推广系列名称", aliases: ["系列名称", "广告系列名称", "campaign", "campaign name"], required: true },
-  { key: "adGroupName", label: "广告组名称", aliases: ["组名称", "adgroup", "ad group name"], required: true },
-  { key: "videoCode", label: "视频代码", aliases: ["视频ID", "视频id", "video", "video code", "video id"], required: true },
-  { key: "productUrl", label: "产品 URL", aliases: ["产品链接", "落地页", "product url", "url", "landing page"], required: true },
-  { key: "ageRanges", label: "年龄", aliases: ["年龄段", "age", "age range", "age ranges"], required: false },
-  { key: "gender", label: "性别", aliases: ["gender", "sex"], required: false },
+  { key: "campaignName", label: "推广系列名称", aliases: ["系列", "系列名", "系列名称", "推广系列", "推广系列名", "广告系列", "广告系列名称", "campaign", "campaign name", "campaign_name", "campaignname"], required: true },
+  { key: "adGroupName", label: "广告组名称", aliases: ["组", "组名", "组名称", "广告组", "广告组名", "adgroup", "ad group", "ad group name", "ad_group_name", "adgroupname"], required: true },
+  { key: "videoCode", label: "视频代码", aliases: ["视频", "视频编码", "视频ID", "视频id", "授权码", "帖子代码", "视频代码列表", "video", "video code", "video id", "video_code", "videocode", "post id", "postid"], required: true },
+  { key: "productUrl", label: "产品 URL", aliases: ["产品链接", "商品链接", "商品网址", "落地页", "落地页链接", "产品URL", "product url", "product_url", "producturl", "url", "landing page", "landing url", "landingurl"], required: true },
+  { key: "ageRanges", label: "年龄", aliases: ["年龄段", "年龄范围", "年龄选择", "age", "age range", "age ranges", "age_range", "ageranges"], required: false },
+  { key: "gender", label: "性别", aliases: ["性别选择", "gender", "sex"], required: false },
   // 排在最后、且非必填：存量表格没有这一列，按表头名匹配的 mapHeaders 会直接跳过它，
   // 老表照样能导入。放在中间会打乱按位置写值的模板生成与 expandSheetTable。
   { key: "productCode", label: "编码", aliases: ["产品编码", "品编码", "商品编码", "product code", "code", "sku"], required: false },
 ] as const;
 type LaunchSheetColumnKey = (typeof launchSheetColumns)[number]["key"];
+
+/**
+ * 找到导入表的表头行。
+ *
+ * 实际流转中常见两种合法文件：模板第一页直接从表头开始，以及导出工具在
+ * 表头前加了标题/账户/投放时间说明。以前只看第 1 行，后一种文件会被误判为
+ * 缺少全部必填列。只认同时包含四个业务必填列的行，避免把「填写规范」里的
+ * 说明文字当成数据表头。
+ */
+export function findLaunchSheetHeaderRow(table: readonly unknown[][]): number | null {
+  const maxRowsToInspect = Math.min(table.length, 50);
+  for (let index = 0; index < maxRowsToInspect; index += 1) {
+    const map = mapHeaders(table[index] ?? [], [], index + 1, false);
+    if (launchSheetColumns
+      .filter((column) => column.required)
+      .every((column) => map.has(column.key))) {
+      return index;
+    }
+  }
+  return null;
+}
 
 /** 表格逐行读取广告组字段；预算、地区、出价和时间仍由所选预设统一提供。 */
 /**
@@ -693,14 +720,20 @@ export function parseLaunchSheetTable(
   preset: LaunchPresetInput,
   now = new Date(),
   timeZone?: string,
-  options: { requireVideoCode?: boolean } = {},
+  options: LaunchSheetParseOptions = {},
 ): LaunchSheetImportResult {
   const errors: LaunchSheetIssue[] = [];
   const warnings: LaunchSheetIssue[] = [];
   if (table.length === 0) {
     return { rows: [], errors: [{ rowNumber: 1, field: "文件", message: "表格为空。" }], warnings };
   }
-  const headerMap = mapHeaders(table[0] ?? [], errors);
+  const detectedHeaderRowIndex = findLaunchSheetHeaderRow(table);
+  const headerRowIndex = Number.isInteger(options.headerRowIndex)
+    && (options.headerRowIndex as number) >= 0
+    && (options.headerRowIndex as number) < table.length
+    ? options.headerRowIndex as number
+    : detectedHeaderRowIndex ?? 0;
+  const headerMap = mapHeaders(table[headerRowIndex] ?? [], errors, headerRowIndex + 1);
   const rows: LaunchConfigurationRow[] = [];
   let serial = 1;
   let adCount = 0;
@@ -711,7 +744,7 @@ export function parseLaunchSheetTable(
   // sheet express: one campaign → several ad-groups → each ad-group the same
   // set of video codes (= ads), without repeating the codes on every line.
   let block: { campaignName: string; videoCode: string; productUrl: string; productCode: string } | null = null;
-  for (let index = 1; index < table.length; index += 1) {
+  for (let index = headerRowIndex + 1; index < table.length; index += 1) {
     const source = table[index] ?? [];
     // 下载模板会预填 500 行“年龄全选 / 性别不限”。只要四个业务字段都为空，
     // 该行仍然是空白占位行，不能产生 500 条必填错误。
@@ -948,7 +981,12 @@ export const MultiAccountLaunchPlanRecordSchema = MultiAccountLaunchPlanInputSch
 });
 export type MultiAccountLaunchPlanRecord = z.infer<typeof MultiAccountLaunchPlanRecordSchema>;
 
-function mapHeaders(headers: unknown[], errors: LaunchSheetIssue[]): Map<LaunchSheetColumnKey, number> {
+function mapHeaders(
+  headers: readonly unknown[],
+  errors: LaunchSheetIssue[],
+  headerRowNumber = 1,
+  reportMissing = true,
+): Map<LaunchSheetColumnKey, number> {
   const map = new Map<LaunchSheetColumnKey, number>();
   headers.forEach((header, index) => {
     const normalized = normalizeHeader(header);
@@ -957,9 +995,11 @@ function mapHeaders(headers: unknown[], errors: LaunchSheetIssue[]): Map<LaunchS
     );
     if (definition && !map.has(definition.key)) map.set(definition.key, index);
   });
-  for (const column of launchSheetColumns) {
-    if (column.required && !map.has(column.key)) {
-      errors.push({ rowNumber: 1, field: column.label, message: `缺少必需表头“${column.label}”。` });
+  if (reportMissing) {
+    for (const column of launchSheetColumns) {
+      if (column.required && !map.has(column.key)) {
+        errors.push({ rowNumber: headerRowNumber, field: column.label, message: `缺少必需表头“${column.label}”。` });
+      }
     }
   }
   return map;
@@ -995,13 +1035,30 @@ function parseLaunchAgeRanges(value: unknown): LaunchAgeRange[] | null {
 
 function asText(value: unknown): string {
   if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    const cell = value as Record<string, unknown>;
+    if ("result" in cell) return asText(cell.result);
+    if (Array.isArray(cell.richText)) {
+      return cell.richText
+        .map((part) => (part && typeof part === "object" && "text" in part ? asText(part.text) : ""))
+        .join("")
+        .trim();
+    }
+    if ("text" in cell) return asText(cell.text);
+  }
   return String(value).trim();
 }
 function isBlank(value: unknown): boolean {
-  return value === null || value === undefined || (typeof value === "string" && value.trim() === "");
+  return asText(value) === "";
 }
 function normalizeHeader(value: unknown): string {
-  return asText(value).toLowerCase().replace(/[\s_\-（）()]/g, "");
+  return asText(value)
+    .normalize("NFKC")
+    .replace(/[\uFEFF\u200B-\u200D\u2060]/g, "")
+    // 表头后常带“（必填）/（可选）”这类人类提示，不属于列名。
+    .replace(/\([^)]*\)|（[^）]*）|\[[^\]]*\]|【[^】]*】/g, "")
+    .toLowerCase()
+    .replace(/[\s_\-（）()【】\[\]{}<>：:·./\\|,，、*#]+/g, "");
 }
 function addError(issues: LaunchSheetIssue[], rowNumber: number, field: string, message: string): void {
   issues.push({ rowNumber, field, message });

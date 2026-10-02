@@ -50,10 +50,9 @@ describe("扩组判定", () => {
     });
   });
 
-  describe("零转化时按累计花费判", () => {
-    // 2026-09-07 口径：花过钱但零转化的一律重扩，观察期不再是例外。
-    // 组还在投就不判重扩，无论花了多少：判重扩只剩「单转超上限」和「无在投组且无转化」
-    // 两条（2026-09-09 口径）。默认夹具 hasActiveAdGroups 为 true。
+  describe("零转化时按在投组状态判", () => {
+    // 组还在投就不判重扩，无论花了多少；只有「单转超上限」和「无在投组且无转化」
+    // 会进入重扩桶。默认夹具 hasActiveAdGroups 为 true。
     it("零转化但组还在投，留在可扩桶", () => {
       const result = classifyCampaignForExpand(campaign({ spend: 2.5, conversions: 0 }));
       expect(result.verdict).toBe("expand");
@@ -61,7 +60,7 @@ describe("扩组判定", () => {
       expect(result.costPerConversion).toBeNull();
     });
 
-    it("花超上限但组还在投，仍不判重扩，只是 reason 换成花超", () => {
+    it("花费超过旧兼容阈值但组还在投，仍不判重扩", () => {
       const result = classifyCampaignForExpand(campaign({ spend: 16.17, conversions: 0 }));
       expect(result.verdict).toBe("expand");
       expect(result.reason).toBe("no-conversion-overspent");
@@ -158,11 +157,11 @@ describe("扩组判定", () => {
     });
   });
 
-  it("阈值可改，默认是 12 / 3 / 3 天", () => {
+  it("阈值可改，默认停用连续零转化天数规则", () => {
     expect(DEFAULT_EXPAND_THRESHOLDS).toEqual({
       maxCostPerConversion: 12,
       maxSpendWithoutConversion: 3,
-      maxConsecutiveZeroConversionDays: 3,
+      maxConsecutiveZeroConversionDays: null,
     });
     const strict = {
       maxCostPerConversion: 8,
@@ -178,6 +177,14 @@ describe("扩组判定", () => {
       campaign({ spend: 2, conversions: 0, hasActiveAdGroups: false }), strict).verdict)
       .toBe("recreate-campaign");
   });
+
+  it("连续零转化规则停用时不触发天数判据", () => {
+    const result = classifyCampaignForExpand(
+      campaign({ spend: 2, conversions: 0, hasActiveAdGroups: true, consecutiveZeroConversionDays: 30 }),
+    );
+    expect(result.verdict).toBe("expand");
+    expect(result.reason).toBe("observing");
+  });
 });
 
 describe("组已被规则关光的系列", () => {
@@ -189,11 +196,9 @@ describe("组已被规则关光的系列", () => {
     hasActiveAdGroups: false,
   };
 
-  // 观察期的前提是「再花一点就能看出结果」。组全关了之后系列一分钱也花不出去，
-  // 消耗永远停在当前值，spend > 3 那条线再也跨不过去——系列会永久卡在「观察中」，
-  // 既不被扩也不被判重扩，等于从名单里静默消失。
-  it("零转化且组已关光，不看消耗直接判重扩", () => {
-    const result = classifyCampaignForExpand({ ...stalled, spend: 0.5 });
+  // 累计花费门槛已废除：只要零转化且无在投组，就进入重扩。
+  it("零转化且组已关光，不看累计花费直接判重扩", () => {
+    const result = classifyCampaignForExpand({ ...stalled, spend: 0 });
     expect(result.verdict).toBe("recreate-campaign");
     expect(result.reason).toBe("no-conversion-stalled");
   });
@@ -208,22 +213,18 @@ describe("组已被规则关光的系列", () => {
     expect(overspent.reason).toBe("no-conversion-overspent");
   });
 
-  // 没提供该信息时不能当成「已关光」——那会把一批还在跑的系列误判成需重扩。
-  // 建好还没投的系列同样「无在投组」，但它不是跑不出来，只是还没开始。实测账户里
-  // 有 4 条这种系列（如「八寶茶」「隨身wifi」），少了这个判据会被判重扩、进而被一键关掉。
-  it("从没花过钱的系列不算停跑，也不判重扩", () => {
-    const result = classifyCampaignForExpand({ ...stalled, spend: 0 });
+  // 没提供该信息时不能当成「无在投组」。
+  it("从没花过钱且组状态未知的系列仍按未开始处理", () => {
+    const { hasActiveAdGroups, ...unknownGroups } = stalled;
+    const result = classifyCampaignForExpand({ ...unknownGroups, spend: 0 });
     expect(result.verdict).toBe("expand");
     expect(result.reason).toBe("not-started");
   });
 
-  // 守的是一次真实事故边界。「零转化即重扩」之后，建好还没投的系列同时满足
-  // 零转化 + 无在投组，一旦判进重扩桶就会被每早的自动关停挑中（那条链路正是挑
-  // verdict=recreate-campaign 且 hasActiveAdGroups===false 的那批），当天关掉。
-  it("建好还没投的系列绝不进重扩桶", () => {
+  it("没有花费、零转化且无在投组仍按新规则判重扩", () => {
     const buckets = classifyCampaignsForExpand([{ ...stalled, spend: 0 }]);
-    expect(buckets.recreateCampaign).toEqual([]);
-    expect(buckets.expand.map((item) => item.reason)).toEqual(["not-started"]);
+    expect(buckets.recreateCampaign.map((item) => item.reason)).toEqual(["no-conversion-stalled"]);
+    expect(buckets.expand).toEqual([]);
   });
 
   it("缺少该信息时不当成已关光", () => {
@@ -253,7 +254,7 @@ describe("连续自然日零转化", () => {
     const result = classifyCampaignForExpand({
       externalId: "c", name: "系列", status: "enabled",
       spend: 30, conversions: 5, consecutiveZeroConversionDays: 3,
-    });
+    }, { ...DEFAULT_EXPAND_THRESHOLDS, maxConsecutiveZeroConversionDays: 3 });
     expect(result.verdict).toBe("recreate-campaign");
     expect(result.reason).toBe("no-conversion-days-exceeded");
   });

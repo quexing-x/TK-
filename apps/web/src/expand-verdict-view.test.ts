@@ -62,10 +62,9 @@ describe("判定文案", () => {
     }
   });
 
-  it("两种重扩原因都用同一个短标签，但原因说明不同", () => {
-    expect(VERDICT_LABELS["cost-per-conversion-high"]?.short)
-      .toBe(VERDICT_LABELS["no-conversion-overspent"]?.short);
-    expect(VERDICT_LABELS["cost-per-conversion-high"]?.hint)
-      .not.toBe(VERDICT_LABELS["no-conversion-overspent"]?.hint);
+  it("零转化花费标签不再把仍在投放的系列显示成重扩", () => {
+    expect(VERDICT_LABELS["no-conversion-overspent"]?.short).toBe("可扩组");
+    expect(VERDICT_LABELS["no-conversion-overspent"]?.tone).toBe("active");
+    expect(VERDICT_LABELS["cost-per-conversion-high"]?.short).toBe("重扩系列");
   });
 });

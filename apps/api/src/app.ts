@@ -1815,7 +1815,7 @@ export async function createApp(
         .default(DEFAULT_EXPAND_THRESHOLDS.maxCostPerConversion),
       maxSpendWithoutConversion: z.coerce.number().nonnegative()
         .default(DEFAULT_EXPAND_THRESHOLDS.maxSpendWithoutConversion),
-      maxConsecutiveZeroConversionDays: z.coerce.number().int().min(1)
+      maxConsecutiveZeroConversionDays: z.coerce.number().int().min(1).nullable()
         .default(DEFAULT_EXPAND_THRESHOLDS.maxConsecutiveZeroConversionDays),
     }).parse(request.query);
 
@@ -1835,8 +1835,8 @@ export async function createApp(
     // 已经下线的系列一并带出来（实测生产账户 105 行里有 1 行是陈旧的），那些系列在
     // 账户里已经不存在，却会顶着历史累计出现在判定结果里。
     const managed = dependencies.store.listCurrentManagedEntities(accountId, account.providerKind);
-    // 组被自动化规则一个个关光的系列，再也花不出钱：零转化的观察期判据在它身上是死
-    // 循环（消耗永远跨不过阈值），而「关掉需重扩的系列」也只敢对这批下手。
+    // 组被自动化规则一个个关光的系列，再也花不出钱：零转化时直接按「无在投组」判重扩，
+    // 不再等待累计花费跨阈值；「关掉需重扩的系列」也只对这批下手。
     const campaignsWithActiveAdGroups = new Set(
       managed
         .filter((entity) => entity.entityType === "ad-group"

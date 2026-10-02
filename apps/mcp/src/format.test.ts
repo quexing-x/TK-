@@ -29,7 +29,7 @@ function response(overrides: Partial<ExpandClassificationResponse> = {}): Expand
     thresholds: {
       maxCostPerConversion: 12,
       maxSpendWithoutConversion: 3,
-      maxConsecutiveZeroConversionDays: 3,
+      maxConsecutiveZeroConversionDays: null,
     },
     expand: [],
     recreateCampaign: [],
@@ -126,5 +126,16 @@ describe("已关停系列明细", () => {
     expect(recreateOnly).toContain("要重扩的");
     expect(recreateOnly).not.toContain("可扩的");
     expect(recreateOnly).not.toContain("已关停的");
+  });
+
+  it("重扩原因显示已废除花费门槛后的准确规则", () => {
+    const data = response({
+      recreateCampaign: [
+        campaign("零花费停跑", "no-conversion-stalled", 0, { verdict: "recreate-campaign" }),
+      ],
+    });
+    const text = formatCampaigns(data, "recreate");
+    expect(text).toContain("零转化且无在投组");
+    expect(text).not.toContain("连续零转化天数上限 3");
   });
 });

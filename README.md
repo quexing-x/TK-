@@ -2,6 +2,15 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
+## Windows 桌面版 1.4.147
+
+安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.147.exe`
+
+- 广告分析先显示日指标和趋势，同步批次日志展开后再查询，减少首屏历史快照扫描。
+- 扩组分类、页面和 MCP 文案对齐；默认停用连续零转化天数条件，零转化且无在投组时判重扩。
+- 导入表支持说明页、前置标题、更多表头别名，以及带 `x:` 命名空间前缀的 XLSX 文件。
+- 包含投放时长关停规则跨零点修复。
+
 ## Windows 桌面版 1.4.139
 
 安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.139.exe`

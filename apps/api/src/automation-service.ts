@@ -733,7 +733,7 @@ export class AutomationService {
               ? `连续 ${item.consecutiveZeroConversionDays} 个自然日零转化，且组已全部停跑，自动关闭系列。`
               : item.conversions > 0
                 ? `累计单转 ${item.costPerConversion?.toFixed(2)} 超过 ${settings.maxCostPerConversion}，且组已全部停跑，自动关闭系列。`
-                : `累计花费 ${item.spend.toFixed(2)} 零转化，且组已全部停跑，自动关闭系列。`,
+                : `零转化且组已全部停跑，自动关闭系列。`,
           );
         } catch {
           // 单条写失败不带走整轮；changeStatus 失败时写入内核已把原因落库。

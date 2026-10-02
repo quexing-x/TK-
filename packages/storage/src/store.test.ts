@@ -4203,6 +4203,17 @@ describe("自动化特性开关的分节合并", () => {
     expect(readBack.budgetBump.enabled).toBe(settings.budgetBump.enabled);
     expect(readBack.closeStalledCampaigns.enabled).toBe(settings.closeStalledCampaigns.enabled);
     expect(readBack.closeStalledCampaigns.dailyLimit).toBe(7);
+
+    // 旧库可能仍存着历史默认值 3；读取时必须把它迁移成停用，不能让客户端重启后复活规则。
+    store.updateAutomationFeatureSettings({
+      ...readBack,
+      closeStalledCampaigns: {
+        ...readBack.closeStalledCampaigns,
+        maxConsecutiveZeroConversionDays: 3,
+      },
+    });
+    expect(store.getAutomationFeatureSettings().closeStalledCampaigns.maxConsecutiveZeroConversionDays)
+      .toBeNull();
   });
 });
 
