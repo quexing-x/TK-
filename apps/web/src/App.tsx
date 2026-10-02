@@ -1772,14 +1772,15 @@ function AnalyticsPage({
     [customFrom, customTo, preset],
   );
   const accountIds = useMemo(() => [account.id], [account.id]);
-  const { days, batches } = useAnalyticsData(accountIds, range, level, onError);
+  const [showBatches, setShowBatches] = useState(false);
+  const { days, batches, loadingBatches, batchError, loadError } = useAnalyticsData(accountIds, range, level, onError, showBatches);
 
   useEffect(() => {
     if (account.providerKind === "cookie" && level === "ad") setLevel("ad-group");
   }, [account.providerKind, level]);
 
   const summary = useMemo(() => summarizeDailyMetrics(days ?? []), [days]);
-  if (!days || !batches) return <EmptyState text="正在分析指标快照…" loading />;
+  if (!days) return <EmptyState text={loadError ?? "正在分析指标快照…"} loading={!loadError} />;
 
   return (
     <section className="page-stack analytics-page">
@@ -1809,11 +1810,11 @@ function AnalyticsPage({
         <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>按日趋势</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
         <DailyTrendChart days={days} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
-      <details className="panel table-panel collapsible-panel">
+      <details className="panel table-panel collapsible-panel" onToggle={(event) => setShowBatches(event.currentTarget.open)}>
         <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
-          <tbody>{batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
+          <tbody>{loadingBatches ? <tr><td colSpan={7}>正在加载同步批次日志…</td></tr> : batchError ? <tr><td colSpan={7}>{batchError}</td></tr> : batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
         </table></div>
       </details>
     </section>
@@ -2500,54 +2501,82 @@ function aggregateAccountBatches(lists: MetricBatchRecord[][]): MetricBatchRecor
 /**
  * 分析页的取数。
  *
- * 三个坑都在这里，视图那边只管渲染：
+ * 取数与加载状态集中在这里，视图只管渲染：
  *
  * 1. 区间右端必须裁到秒。原始实现把 `new Date()`（带毫秒）当区间右端交给依赖它的
  *    effect，毫秒不同 → 依赖每次渲染都变 → 请求反复重发 → 页面永远在加载。
  * 2. 请求发出时立刻清空数据，于是每次切筛选都要重新转一圈加载态。这里改成保留旧数据
  *    继续显示，直到新数据落地——切换筛选时不再白屏。
- * 3. 竞态：快速切筛选时先发的请求可能后到。用序号丢弃过期响应。
+ * 3. 竞态：快速切筛选时先发的请求可能后到。effect 清理时丢弃过期响应。
+ * 4. 日趋势先显示，折叠的批次日志展开后才查，避免历史快照扫描阻塞首屏。
  */
 function useAnalyticsData(
   accountIds: string[],
   range: AnalysisRange | null,
   level: "all" | ManagedEntityRecord["entityType"],
   onError: (message: string | null) => void,
+  showBatches: boolean,
 ) {
   const [days, setDays] = useState<DailyMetricRecord[] | null>(null);
-  const [batches, setBatches] = useState<MetricBatchRecord[] | null>(null);
-  // 只用来丢弃过期响应，不参与渲染，所以用 ref 而不是 state。
-  const requestSequence = useRef(0);
-
-  // 数组用「内容」而不是引用进依赖：父组件每次渲染都会新建 accounts 数组。
+  const [batches, setBatches] = useState<MetricBatchRecord[]>([]);
+  const [loadingBatches, setLoadingBatches] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const accountKey = accountIds.join(",");
   const from = range?.from;
-  // 右端裁到秒，让同一秒内的多次渲染算出同一个值。
   const to = range ? toSecondPrecision(new Date(range.to)) : undefined;
 
   useEffect(() => {
-    if (accountKey === "" || !from || !to) return;
-    const ids = accountKey.split(",");
+    let cancelled = false;
+    setLoadError(null);
+    if (accountKey === "") {
+      setDays([]);
+      return;
+    }
+    if (!from || !to) return;
     const entityType = level === "all" ? undefined : level;
-    const sequence = ++requestSequence.current;
-    void Promise.all(ids.map(async (accountId) => ({
-      days: await api.getMetricDays(accountId, { from, to }, entityType).catch(() => [] as DailyMetricRecord[]),
-      batches: await api.getAnalytics(accountId, { from, to }, entityType).catch(() => [] as MetricBatchRecord[]),
-    })))
+    void Promise.all(accountKey.split(",").map((id) => api.getMetricDays(id, { from, to }, entityType)))
       .then((results) => {
-        // 过期响应直接丢，否则慢的旧请求会把新的筛选结果盖回去。
-        if (sequence !== requestSequence.current) return;
-        setDays(mergeDailyMetricsAcrossAccounts(results.map((result) => result.days)));
-        setBatches(aggregateAccountBatches(results.map((result) => result.batches)));
+        if (cancelled) return;
+        setDays(mergeDailyMetricsAcrossAccounts(results));
         onError(null);
       })
       .catch((cause) => {
-        if (sequence !== requestSequence.current) return;
-        onError(getErrorMessage(cause));
+        if (cancelled) return;
+        const message = getErrorMessage(cause);
+        setLoadError(message);
+        onError(message);
       });
+    return () => { cancelled = true; };
   }, [accountKey, from, level, onError, to]);
 
-  return { days, batches };
+  // 折叠的诊断日志不参与首屏取数，避免每个账户额外扫描日内快照。
+  useEffect(() => {
+    let cancelled = false;
+    setBatches([]);
+    setBatchError(null);
+    setLoadingBatches(false);
+    if (!showBatches || accountKey === "" || !from || !to) return;
+    setLoadingBatches(true);
+    const entityType = level === "all" ? undefined : level;
+    void Promise.all(accountKey.split(",").map((id) => api.getAnalytics(id, { from, to }, entityType)))
+      .then((results) => {
+        if (!cancelled) setBatches(aggregateAccountBatches(results));
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          const message = getErrorMessage(cause);
+          setBatchError(message);
+          onError(message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingBatches(false);
+      });
+    return () => { cancelled = true; };
+  }, [accountKey, from, level, onError, showBatches, to]);
+
+  return { days, batches, loadingBatches, batchError, loadError };
 }
 
 function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConfig[]; onError: (message: string | null) => void }) {
@@ -2564,10 +2593,11 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
     try { return resolveAnalysisRange(preset, customFrom, customTo); } catch { return null; }
   }, [customFrom, customTo, preset]);
   const accountIds = useMemo(() => accounts.map((account) => account.id), [accounts]);
-  const { days, batches } = useAnalyticsData(accountIds, range, level, onError);
+  const [showBatches, setShowBatches] = useState(false);
+  const { days, batches, loadingBatches, batchError, loadError } = useAnalyticsData(accountIds, range, level, onError, showBatches);
 
   const summary = useMemo(() => summarizeDailyMetrics(days ?? []), [days]);
-  if (!days || !batches) return <EmptyState text="正在汇总全部账户指标…" loading />;
+  if (!days) return <EmptyState text={loadError ?? "正在汇总全部账户指标…"} loading={!loadError} />;
 
   return (
     <section className="page-stack analytics-page">
@@ -2597,11 +2627,11 @@ function AllAccountsAnalyticsView({ accounts, onError }: { accounts: AccountConf
         <div className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>按日趋势</h2></div></div><div className="chart-selectors"><label>柱状 <select value={barMetric} onChange={(event) => setBarMetric(event.target.value as BatchBarMetric)}><option value="spend">消耗</option><option value="clicks">点击</option><option value="conversions">转化</option></select></label><label>折线 <select value={lineMetric} onChange={(event) => setLineMetric(event.target.value as BatchLineMetric)}><option value="cpc">平均 CPC</option><option value="cpa">平均转化成本</option></select></label></div></div>
         <DailyTrendChart days={days} barMetric={barMetric} lineMetric={lineMetric} />
       </div>
-      <details className="panel table-panel collapsible-panel">
+      <details className="panel table-panel collapsible-panel" onToggle={(event) => setShowBatches(event.currentTarget.open)}>
         <summary className="panel-heading"><div><span className="panel-icon"><BarChart3 size={18} /></span><div><h2>同步批次日志 <em className="heading-count">{batches.length}</em></h2></div></div></summary>
         <div className="table-wrap"><table>
           <thead><tr><th>检测时间</th><th>对象数</th><th>消耗</th><th>点击</th><th>转化</th><th>平均 CPC</th><th>平均转化成本</th></tr></thead>
-          <tbody>{batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
+          <tbody>{loadingBatches ? <tr><td colSpan={7}>正在加载同步批次日志…</td></tr> : batchError ? <tr><td colSpan={7}>{batchError}</td></tr> : batches.length === 0 ? <tr><td colSpan={7}>暂无历史快照，请先执行检测。</td></tr> : batches.map((batch) => <tr key={batch.capturedAt}><td>{new Date(batch.capturedAt).toLocaleString()}</td><td>{batch.count}</td><td>{formatMetric(batch.spend)}</td><td>{formatMetric(batch.clicks)}</td><td>{formatMetric(batch.conversions)}</td><td>{formatMetric(batch.clicks > 0 ? batch.spend / batch.clicks : null)}</td><td>{formatMetric(batch.conversions > 0 ? batch.spend / batch.conversions : null)}</td></tr>)}</tbody>
         </table></div>
       </details>
     </section>

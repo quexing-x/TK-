@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automaticName, stripRetiredAgeRanges, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, MAX_LAUNCH_ROWS_PER_IMPORT, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
+import { automaticName, findLaunchSheetHeaderRow, stripRetiredAgeRanges, LaunchCopyPreviewInputSchema, LaunchMigrationTargetConfigSchema, MAX_LAUNCH_ROWS_PER_IMPORT, parseLaunchSheetTable, resolveLaunchStartAt, resolveMigrationStartAt } from "./launch.js";
 
 describe("resolveLaunchStartAt", () => {
   const now = new Date("2026-07-23T09:15:00.000Z");
@@ -92,6 +92,31 @@ const preset = {
 };
 
 describe("parseLaunchSheetTable", () => {
+  it("自动识别前置说明后的表头，并保留 Excel 实际行号", () => {
+    const table = [
+      ["TK 广告批量创建"],
+      ["账户：测试账户 / 投放时间：明天 06:00"],
+      ["推广系列名称", "广告组名称", "视频代码", "产品 URL"],
+      ["系列", "广告组", "video-001", "https://example.com/product"],
+    ];
+
+    expect(findLaunchSheetHeaderRow(table)).toBe(2);
+    const result = parseLaunchSheetTable(table, preset);
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[0]).toMatchObject({ rowNumber: 4, campaignName: "系列", adGroupName: "广告组" });
+  });
+
+  it("忽略表头上的必填提示、不可见字符和装饰符号", () => {
+    const result = parseLaunchSheetTable([
+      ["\uFEFF推广系列名称（必填）", "广告组名称 *", "视频代码（多个用分号分隔）", "产品 URL（必填）"],
+      ["系列", "广告组", "video-001", "https://example.com/product"],
+    ], preset);
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows).toHaveLength(1);
+  });
+
   it("上限按广告条数算：一行多代码顶多条，报错要说清现在多少、超多少、谁占大头", () => {
     // 每行 50 个代码 = 50 条广告，101 行刚好越过 5000。
     const header = ["推广系列名称", "广告组名称", "视频代码", "产品 URL"];

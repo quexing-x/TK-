@@ -1,6 +1,8 @@
-import type { CellValue } from "exceljs";
+import type { CellValue, Worksheet } from "exceljs";
+import JSZip from "jszip";
 import { loadExcelJs } from "./exceljs-loader.js";
 import {
+  findLaunchSheetHeaderRow,
   LaunchAgeRangeValues,
   launchSheetColumns,
   parseLaunchSheetTable,
@@ -27,21 +29,86 @@ export async function readLaunchSpreadsheet(
     table = parseCsvTable(await file.text());
   } else if (extension === "xlsx") {
     const { Workbook } = await loadExcelJs();
-    const workbook = new Workbook();
-    await workbook.xlsx.load(await file.arrayBuffer());
-    const worksheet = workbook.worksheets[0];
-    if (!worksheet) throw new Error("Excel 文件中没有工作表。");
-    table = [];
-    const width = Math.max(worksheet.actualColumnCount, worksheet.columnCount);
-    worksheet.eachRow({ includeEmpty: true }, (row) => {
-      const values: unknown[] = [];
-      for (let column = 1; column <= width; column += 1) values.push(extractCellValue(row.getCell(column).value));
-      table.push(values);
+    const input = await file.arrayBuffer();
+    let workbook = new Workbook();
+    try {
+      await workbook.xlsx.load(input);
+    } catch (error) {
+      // Some spreadsheet exporters write every SpreadsheetML element with an
+      // `x:` namespace prefix. ExcelJS 4.4's SAX parser does not strip that
+      // prefix, so it returns no workbook model and throws while reading
+      // `workbook.xml`. Normalize only this known shape, then retry with a
+      // fresh workbook instance; genuine corrupt files still surface the
+      // original ExcelJS error.
+      let normalized: ArrayBuffer | null;
+      try {
+        normalized = await normalizePrefixedXlsx(input);
+      } catch {
+        throw error;
+      }
+      if (!normalized) throw error;
+      workbook = new Workbook();
+      try {
+        await workbook.xlsx.load(normalized);
+      } catch {
+        throw error;
+      }
+    }
+    if (workbook.worksheets.length === 0) throw new Error("Excel 文件中没有工作表。");
+    const candidates = workbook.worksheets.map((worksheet) => {
+      const sheetTable = readWorksheetTable(worksheet);
+      return {
+        worksheet,
+        table: sheetTable,
+        headerRowIndex: findLaunchSheetHeaderRow(sheetTable),
+      };
     });
+    const namedDataSheet = candidates.find(({ worksheet }) => isLaunchDataSheetName(worksheet.name));
+    const detectedDataSheets = candidates.filter(({ headerRowIndex }) => headerRowIndex !== null);
+    const selected = namedDataSheet?.headerRowIndex !== null && namedDataSheet?.headerRowIndex !== undefined
+      ? namedDataSheet
+      : detectedDataSheets.length === 1
+        ? detectedDataSheets[0]
+        : detectedDataSheets.length > 1
+          ? null
+          : namedDataSheet ?? candidates[0];
+    if (!selected) {
+      const names = detectedDataSheets.map(({ worksheet }) => worksheet.name).join("、");
+      throw new Error(`文件包含多个可导入工作表（${names}），请把要导入的工作表命名为“批量创建”后重试。`);
+    }
+    table = selected.table;
+    const detectedHeaderRowIndex = selected.headerRowIndex;
+    return parseLaunchSheetTable(
+      table,
+      preset,
+      new Date(),
+      undefined,
+      detectedHeaderRowIndex === null
+        ? options
+        : { ...options, headerRowIndex: detectedHeaderRowIndex },
+    );
   } else {
     throw new Error("仅支持 .xlsx 或 .csv 文件。");
   }
   return parseLaunchSheetTable(table, preset, new Date(), undefined, options);
+}
+
+async function normalizePrefixedXlsx(input: ArrayBuffer): Promise<ArrayBuffer | null> {
+  const zip = await JSZip.loadAsync(input);
+  let changed = false;
+  for (const [name, entry] of Object.entries(zip.files)) {
+    if (entry.dir || !name.toLowerCase().endsWith(".xml")) continue;
+    const xml = await entry.async("string");
+    if (!xml.includes("<x:")) continue;
+    zip.file(
+      name,
+      xml
+        .replace(/(<\/?)(x:)/g, "$1")
+        .replace(/\s+xmlns:x="[^"]*"/g, ""),
+    );
+    changed = true;
+  }
+  return changed ? zip.generateAsync({ type: "arraybuffer" }) : null;
 }
 
 export async function downloadLaunchTemplate(
@@ -260,4 +327,21 @@ function extractCellValue(value: CellValue): unknown {
   if ("richText" in value) return value.richText.map((part) => part.text).join("");
   if ("text" in value) return value.text;
   return String(value);
+}
+
+function readWorksheetTable(worksheet: Worksheet): unknown[][] {
+  const table: unknown[][] = [];
+  const width = Math.max(worksheet.actualColumnCount, worksheet.columnCount, 1);
+  worksheet.eachRow({ includeEmpty: true }, (row) => {
+    const values: unknown[] = [];
+    for (let column = 1; column <= width; column += 1) {
+      values.push(extractCellValue(row.getCell(column).value));
+    }
+    table.push(values);
+  });
+  return table;
+}
+
+function isLaunchDataSheetName(name: string): boolean {
+  return name.trim().toLowerCase().replace(/[\s_\-]/g, "") === "批量创建";
 }

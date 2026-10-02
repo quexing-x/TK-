@@ -27,6 +27,7 @@ import {
   type WriteTaskActor,
   type ManagedEntitySnapshot,
   normalizeProviderEntity,
+  TOTAL_SPEND_PAYLOAD_KEY,
   reconcileExpandTask,
   selectBudgetBumpCandidate,
   selectDeletionCandidates,
@@ -708,7 +709,16 @@ export class AutomationService {
       // 不再截断到 dailyLimit：在投系列有 200 条的硬上限，留着废系列不关就是占着配额
       // 不让新的建出来。而「组已全停」本身就是一道足够强的闸门——一条组全关了的系列
       // 既不花钱也不产生数据，关掉它没有任何投放上的代价。
-      const closable = recreateCampaign.filter((item) => item.hasActiveAdGroups === false);
+      const closable = recreateCampaign.filter((item) =>
+        item.hasActiveAdGroups === false
+        // 一条系列只要累计单转仍达标，就算最近连续几天没花钱/没转化，
+        // 也不能被这条“停跑即关”规则再次关掉。它可能只是旧好系列的组被
+        // 关光，正是扩组表要恢复并补组的对象；关掉后会和“恢复好系列”的
+        // 动作互相打架，下一轮又回到未投放。
+        && !(item.conversions > 0
+          && item.costPerConversion !== null
+          && item.costPerConversion < settings.maxCostPerConversion),
+      );
       for (const item of closable) {
         try {
           await this.changeStatus(
@@ -723,7 +733,7 @@ export class AutomationService {
               ? `连续 ${item.consecutiveZeroConversionDays} 个自然日零转化，且组已全部停跑，自动关闭系列。`
               : item.conversions > 0
                 ? `累计单转 ${item.costPerConversion?.toFixed(2)} 超过 ${settings.maxCostPerConversion}，且组已全部停跑，自动关闭系列。`
-                : `累计花费 ${item.spend.toFixed(2)} 零转化，且组已全部停跑，自动关闭系列。`,
+                : `零转化且组已全部停跑，自动关闭系列。`,
           );
         } catch {
           // 单条写失败不带走整轮；changeStatus 失败时写入内核已把原因落库。
@@ -1102,8 +1112,34 @@ export class AutomationService {
           ruleConfiguration.lookbackHours,
           managedAdGroupIds,
         );
+        if (output.result.quality.status === "invalid") {
+          return evaluateRuleConfiguration([], ruleConfiguration, {
+            now: new Date(),
+            timezone: account.timezone,
+          });
+        }
+        // 「投放够久仍未出单」需要知道对象**投放以来**花没花过钱，而实体载荷里的
+        // spend 是当天口径、过零点归零。这里按保留期取一次累计，贴到载荷的保留键上
+        // 传给评估器——不这么做，一条昨晚开投、今天上午才够时长的组会因为当天指标
+        // 还没回传而被当成「零消耗」漏判。
+        const since = new Date(
+          Date.now() - METRIC_RETENTION_DAYS * 24 * 60 * 60_000,
+        ).toISOString();
+        const totalSpendByEntity = new Map(
+          this.store
+            .listEntityRangeMetrics(accountId, account.providerKind, since, "ad-group")
+            .map((row) => [row.externalId, row.spend]),
+        );
         return evaluateRuleConfiguration(
-          output.result.quality.status === "invalid" ? [] : recent.entities,
+          recent.entities.map((entity) => {
+            if (entity.entityType !== "ad-group") return entity;
+            const total = totalSpendByEntity.get(entity.externalId);
+            if (total === undefined) return entity;
+            return {
+              ...entity,
+              payload: { ...entity.payload, [TOTAL_SPEND_PAYLOAD_KEY]: total },
+            };
+          }),
           ruleConfiguration,
           // 账户时区：「投放够久仍未出单」要拿它和平台取数的「今天」对齐。
           { now: new Date(), timezone: account.timezone },

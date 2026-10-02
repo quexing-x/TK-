@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  TOTAL_SPEND_PAYLOAD_KEY,
   defaultRuleConfiguration,
   evaluateRuleConfiguration,
   filterEntitiesToRecentWindow,
@@ -520,11 +521,31 @@ describe("投放够久仍未出单关闭（NO_CONV_HOURS_CLOSE）", () => {
     expect(判(组({ stat_cost: 0 }))).toBeUndefined();
   });
 
-  // 平台指标按账户时区的「今天」取，过零点归零。昨天开投的组今天转化为 0 只说明
-  // 今天没单，拿它判「投放以来没出单」会把昨晚出过单的组砍掉。
-  it("起算点在昨天就不判，哪怕早就超过时长", () => {
+  // 这是本次修复的核心场景，也是生产上最主流的投放节奏：前一天下午建组，次日 06:00
+  // 开投。旧判据要求起算点落在账户时区的「今天」，06:00 在账户时区里属于新的一天、
+  // 起算点却算在前一天，于是这类组**一条都判不到**——规则看着开着，实际从不生效。
+  it("起算点落在昨天也照判，覆盖「前一天建、次日早上开投」", () => {
     const entity = 组();
-    entity.payload.create_time = "2026-07-14T10:00:00.000Z"; // 当地 7/14 18:00
+    // 当地 7/14 22:00（UTC 7/14 14:00），距 now 六小时。
+    entity.payload.create_time = "2026-07-14T14:00:00.000Z";
+    const hit = 判(entity);
+    expect(hit?.thresholdCode).toBe("NO_CONV_HOURS_CLOSE");
+  });
+
+  it("跨零点的组当天指标还没回传时，靠累计花费兜底照关", () => {
+    const entity = 组({ stat_cost: 0 });
+    entity.payload.create_time = "2026-07-14T14:00:00.000Z";
+    // 当天指标还没回传（spend=0），但投放以来花过钱。
+    entity.payload[TOTAL_SPEND_PAYLOAD_KEY] = 3.2;
+    const hit = 判(entity);
+    expect(hit?.thresholdCode).toBe("NO_CONV_HOURS_CLOSE");
+  });
+
+  // 上限 24 小时是为了挡住草稿停留等造成的远古 create_time。再往前的组，今天的
+  // conversions=0 只说明今天没单，不代表投放以来没单——那正是要避免的误关。
+  it("起算点超过 24 小时就不判", () => {
+    const entity = 组();
+    entity.payload.create_time = "2026-07-13T04:00:00.000Z"; // 距 now 四十八小时
     expect(判(entity)).toBeUndefined();
   });
 

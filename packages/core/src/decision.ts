@@ -106,7 +106,28 @@ export interface ManagedEntitySnapshot {
   /** True when the owning campaign runs 系列预算优化 (CBO); such ad groups cannot carry their own budget. */
   campaignBudgetOptimized: boolean;
   metrics: NormalizedMetrics;
+  /**
+   * 投放以来的累计花费，由调用方从指标快照里算好带进来。读的时候缺省当 0。
+   *
+   * `metrics.spend` 是**当天**口径，过零点归零，判断不出「这个对象到底投出去过钱没有」。
+   * 需要这条信息的规则（目前只有「投放够久仍未出单」）必须在当天指标还没回传时也能
+   * 分辨「还没投出去」和「昨天花过、今天刚过零点」。运行时策略与指标快照不同源，
+   * 所以由调用方注入。
+   *
+   * 选做可选字段：展示层与界面测试会直接构造这个快照，它们既不取数也不需要这个值，
+   * 强制填只会逼出一串与规则无关的补丁。
+   */
+  totalSpend?: number;
 }
+
+/**
+ * 从同步载荷里透传累计花费用的保留键。
+ *
+ * 加下划线前缀是为了跟真实 provider 字段隔开：`normalizeProviderEntity` 会把
+ * payload / row_data / metrics 三处摊平成同一个 source，任意一层塞进来的同名键都会
+ * 被当成真实指标读走。这个键只在内部接力的那一段存在，不会被别的规则用到。
+ */
+export const TOTAL_SPEND_PAYLOAD_KEY = "__total_spend";
 
 export interface AutomationCandidate {
   thresholdId: string;
@@ -325,6 +346,8 @@ export function normalizeProviderEntity(
     // 该字段在广告组行上即携带其所属系列的预算信息，无需回查系列实体。
     campaignBudget,
     campaignBudgetOptimized,
+    // 缺省 0：全量同步这条路上没人知道累计花费，此时只有当天 spend>0 才算投出去过钱。
+    totalSpend: firstNumber(source, [TOTAL_SPEND_PAYLOAD_KEY]) ?? 0,
     metrics: {
       cost_per_conversion: firstNumber(source, [
         "time_attr_conversion_cost",

@@ -68,7 +68,7 @@ export interface ExpandClassificationResponse {
   thresholds: {
     maxCostPerConversion: number;
     maxSpendWithoutConversion: number;
-    maxConsecutiveZeroConversionDays: number;
+    maxConsecutiveZeroConversionDays: number | null;
   };
   expand: ExpandClassification[];
   recreateCampaign: ExpandClassification[];
@@ -97,11 +97,11 @@ export interface ExpandSheetPlanResponse {
 
 const REASON_LABEL: Record<string, string> = {
   "cost-per-conversion-ok": "单转达标",
-  observing: "零转化，累计花费还没到上限",
+  observing: "零转化，但仍有在投组",
   "not-started": "还没开始投，一分钱没花",
   "cost-per-conversion-high": "单转超标",
-  "no-conversion-overspent": "零转化且已花超上限",
-  "no-conversion-stalled": "零转化，且组已被规则关光",
+  "no-conversion-overspent": "零转化，但仍有在投组",
+  "no-conversion-stalled": "零转化且无在投组",
   "no-conversion-days-exceeded": "连续多日零转化",
   "not-enabled": "系列已关停",
   "non-operational": "诊断或占位系列",
@@ -168,8 +168,8 @@ export function formatCampaigns(
       + (notes.length > 0 ? ` · ${notes.join("，")}` : "");
   };
   const sections: string[] = [
-    `判定阈值：单转上限 ${data.thresholds.maxCostPerConversion}，零转化容忍花费 ${data.thresholds.maxSpendWithoutConversion}，`
-    + `连续零转化天数上限 ${data.thresholds.maxConsecutiveZeroConversionDays}。指标为自系列创建以来累计。`,
+    `判定阈值：单转上限 ${data.thresholds.maxCostPerConversion}；零转化只在无在投组时判重扩；`
+    + `连续零转化天数规则 ${data.thresholds.maxConsecutiveZeroConversionDays === null ? "已停用" : `上限 ${data.thresholds.maxConsecutiveZeroConversionDays} 天`}。指标为自系列创建以来累计。`,
     "",
   ];
   // 已关停与诊断系列都落在 excluded 桶里，但它们完全是两回事：诊断/占位系列不是投放

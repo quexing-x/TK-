@@ -36,8 +36,8 @@ export interface ExpandCampaignInput {
   /**
    * 这条系列下还有没有在投的广告组。
    *
-   * 组被自动化规则一个个关光之后，系列就再也花不出钱了——继续等它「花够 3 块」
-   * 永远等不到，那条零转化的观察期判据在这种系列上是死循环。
+   * 组被自动化规则一个个关光之后，系列就再也花不出钱了——这时直接按「无在投组」
+   * 处理，不能再用累计花费阈值等待它跨线。
    */
   hasActiveAdGroups?: boolean;
   /**
@@ -67,11 +67,10 @@ export interface ExpandThresholds {
   /** 单转上限，超过就不再在这条系列上扩组。 */
   maxCostPerConversion: number;
   /**
-   * 零转化时容忍的累计花费上限。
+   * 兼容旧调用方的零转化花费分层参数。
    *
-   * 2026-09-07 口径变更后零转化一律判重扩，这个阈值**不再改变 verdict**，只用来分
-   * reason（`observing` / `no-conversion-overspent`），让人一眼看出这条是刚起步还是
-   * 已经烧过一笔。
+   * 它不参与是否重扩的判定；零转化系列只有在没有在投广告组时才判重扩。保留它是为了
+   * 兼容旧版接口和已有数据，reason 只作诊断标记。
    */
   maxSpendWithoutConversion: number;
   /**
@@ -80,13 +79,14 @@ export interface ExpandThresholds {
    * 与累计口径互补：累计单转可能被早期的好成绩撑着，但连着几天一个转化都没有，
    * 说明这条系列**现在**已经不出货了。
    */
-  maxConsecutiveZeroConversionDays: number;
+  /** 留空表示不启用连续零转化天数判据。 */
+  maxConsecutiveZeroConversionDays: number | null;
 }
 
 export const DEFAULT_EXPAND_THRESHOLDS: ExpandThresholds = {
   maxCostPerConversion: 12,
   maxSpendWithoutConversion: 3,
-  maxConsecutiveZeroConversionDays: 3,
+  maxConsecutiveZeroConversionDays: null,
 };
 
 export type ExpandVerdict =
@@ -100,13 +100,13 @@ export type ExpandVerdict =
 export type ExpandReason =
   /** 有转化且单转达标。 */
   | "cost-per-conversion-ok"
-  /** 零转化，累计花费还没到上限。2026-09-07 起这也判重扩。 */
+  /** 零转化但仍有在投组，花费未超过旧分层参数。 */
   | "observing"
   /** 一分钱都没花过——还没开始跑，不是跑不出来。 */
   | "not-started"
   /** 有转化但单转超标。 */
   | "cost-per-conversion-high"
-  /** 零转化且累计花费已超上限。 */
+  /** 零转化但仍有在投组，花费超过旧分层参数；不改变可扩判定。 */
   | "no-conversion-overspent"
   /** 零转化，且组已被规则关光——这条系列不会再有新数据了。 */
   | "no-conversion-stalled"
@@ -228,7 +228,10 @@ export function classifyCampaignForExpand(
   // 最近三天颗粒无收的系列，累计单转可能还漂亮，但它**现在**已经不出货了，
   // 继续往上扩组是在给一条死掉的系列加预算。
   const zeroDays = campaign.consecutiveZeroConversionDays ?? 0;
-  if (zeroDays >= thresholds.maxConsecutiveZeroConversionDays) {
+  if (
+    thresholds.maxConsecutiveZeroConversionDays !== null
+    && zeroDays >= thresholds.maxConsecutiveZeroConversionDays
+  ) {
     return { ...base, verdict: "recreate-campaign", reason: "no-conversion-days-exceeded" };
   }
 
@@ -238,22 +241,14 @@ export function classifyCampaignForExpand(
       : { ...base, verdict: "recreate-campaign", reason: "cost-per-conversion-high" };
   }
 
-  // 一分钱都没花过：这条系列不是跑不出来，是还没开始跑。必须在「零转化即重扩」之前
-  // 拦下来，且**绝不能判成重扩**。
-  //
-  // 建好还没投的系列同样「无在投组」，而每早的自动关停正是挑 verdict=recreate-campaign
-  // 且 hasActiveAdGroups===false 的那批下手——判错等于把刚建好、还没来得及投的系列
-  // 当天关掉。实测账户里有 4 条这种系列（如「八寶茶」「隨身wifi」）。
-  if (spend <= 0) {
-    return { ...base, verdict: "expand", reason: "not-started" };
-  }
-
-  // 零转化、且组已被规则关光：这条系列不会再有新数据了。
-  //
-  // 组全关了之后系列一分钱也花不出去，消耗永远停在当前值。单独列出来是为了让人知道
-  // 它是「被关光的」而不是「还在烧」——两者都判重扩，但前者连关停动作都不用做。
+  // 零转化且没有在投广告组：累计花费不再作为门槛；没有在投组就不会再产生新数据。
   if (campaign.hasActiveAdGroups === false) {
     return { ...base, verdict: "recreate-campaign", reason: "no-conversion-stalled" };
+  }
+
+  // 没有花费、且无法确认广告组状态，按尚未开始处理；不能把未知状态当成「无在投组」。
+  if (spend <= 0) {
+    return { ...base, verdict: "expand", reason: "not-started" };
   }
 
   // 花过钱、还没出转化，但组还在投：**留在可扩桶，不判重扩**。
@@ -265,7 +260,7 @@ export function classifyCampaignForExpand(
   // 两个纵姿账户在投的 160 条系列里有 140 多条卡在「花了几毛钱、还没出转化」，
   // 全被判成重扩——既让重扩名单虚高，又会让「判重扩即关闭」把刚起步的系列成片关掉。
   //
-  // 仍然分两个 reason：花超上限的值得单独看一眼，它比纯观察期更接近该换一条的状态。
+  // 仍保留两个诊断 reason 以兼容旧表格和接口；它们都属于可扩组，累计花费不再改变 verdict。
   return spend > thresholds.maxSpendWithoutConversion
     ? { ...base, verdict: "expand", reason: "no-conversion-overspent" }
     : { ...base, verdict: "expand", reason: "observing" };

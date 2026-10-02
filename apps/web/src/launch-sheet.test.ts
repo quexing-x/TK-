@@ -70,6 +70,54 @@ describe("launch spreadsheet", () => {
       gender: "all",
     });
   });
+
+  it("按名称选择批量创建页，不会把说明页当成导入数据", { timeout: 30_000 }, async () => {
+    const { Workbook } = await import("exceljs");
+    const workbook = new Workbook();
+    workbook.addWorksheet("说明").addRow(["这是汇总说明，不是导入页"]);
+    const worksheet = workbook.addWorksheet("批量创建");
+    worksheet.addRow(["推广系列名称", "广告组名称", "视频代码", "产品 URL"]);
+    worksheet.addRow(["测试系列", "测试广告组", "video-001", "https://example.com/product"]);
+    const buffer = await workbook.xlsx.writeBuffer();
+    const file = new File([buffer as BlobPart], "带说明页.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+
+    const result = await readLaunchSpreadsheet(file, preset);
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[0]?.campaignName).toBe("测试系列");
+  });
+
+  it("没有批量创建页时，唯一含业务表头的工作表仍可导入", { timeout: 30_000 }, async () => {
+    const { Workbook } = await import("exceljs");
+    const workbook = new Workbook();
+    workbook.addWorksheet("填写规范").addRow(["规则", "说明"]);
+    const worksheet = workbook.addWorksheet("我的扩组数据");
+    worksheet.addRow(["本批数据"]);
+    worksheet.addRow(["推广系列名称", "广告组名称", "视频代码", "产品 URL"]);
+    worksheet.addRow(["测试系列", "测试广告组", "video-001", "https://example.com/product"]);
+    const buffer = await workbook.xlsx.writeBuffer();
+    const file = new File([buffer as BlobPart], "自定义数据页.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+
+    const result = await readLaunchSpreadsheet(file, preset);
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[0]).toMatchObject({ rowNumber: 3, campaignName: "测试系列" });
+  });
+
+  it("多个数据工作表没有明确名称时拒绝猜账户，避免导错账户", { timeout: 30_000 }, async () => {
+    const { Workbook } = await import("exceljs");
+    const workbook = new Workbook();
+    for (const name of ["账户 A", "账户 B"]) {
+      const worksheet = workbook.addWorksheet(name);
+      worksheet.addRow(["推广系列名称", "广告组名称", "视频代码", "产品 URL"]);
+      worksheet.addRow(["测试系列", "测试广告组", "video-001", "https://example.com/product"]);
+    }
+    const buffer = await workbook.xlsx.writeBuffer();
+    const file = new File([buffer as BlobPart], "多账户汇总.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+
+    await expect(readLaunchSpreadsheet(file, preset)).rejects.toThrow("请把要导入的工作表命名为“批量创建”");
+  });
+
   it("builds 500 editable rows with 18+ ages and unrestricted gender prefilled", async () => {
     const { Workbook } = await import("exceljs");
     const workbook = new Workbook();

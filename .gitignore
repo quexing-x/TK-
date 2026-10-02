@@ -25,3 +25,24 @@ data/credentials/
 data/扩组计划-*.json
 # 飞书授权二维码：扫一次就作废的临时图。
 feishu-auth-qrcode*.png
+
+# 扩组流水线的中间产物（账户实体快照、判定结果、预检、品库对账、切分样张）。
+# 光 JSON 就 130 MB+，且里面是真实账户/品名/素材代码，进历史就压不回去了。
+/.work/
+
+# 扩组表成品：每天一份、每账户一个 xlsx，加逐行解析检查文件。运行时产物。
+/outputs/
+
+# 扩组相关的运行时产物：每日导入表、品库备份、临时脚本。
+# 不动已有的 data/*.db、logs/、performance*/ 规则，只补这几类。
+data/扩组表-*/
+data/扩组导入表-*.xlsx
+data/品库备份-*/
+data/品库删除备份-*/
+
+# 开发时随手落在 data/ 下的查库小脚本（data/*.db 已被忽略，同一批日志）
+data/verify*.cjs
+data/v[0-9]*.cjs
+
+# skill 打包产物：由 .claude/skills/tk-expand-sheet/ 生成，别提交副本。
+tk-expand-sheet-skill.zip

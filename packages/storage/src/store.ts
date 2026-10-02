@@ -1333,6 +1333,13 @@ export class AutomationStore {
     // Legacy rows can predate later-added required fields (e.g. appeal.enabled).
     // Merge each section over the defaults so old configs stay parseable instead
     // of throwing and crashing the caller (the scheduler ticks through here).
+    const storedCloseStalledCampaigns = (
+      stored.closeStalledCampaigns
+      && typeof stored.closeStalledCampaigns === "object"
+      && !Array.isArray(stored.closeStalledCampaigns)
+        ? stored.closeStalledCampaigns
+        : {}
+    ) as Record<string, unknown>;
     const merged = {
       appeal: { ...defaultAutomationFeatureSettings.appeal, ...(stored.appeal as object ?? {}) },
       copy: { ...defaultAutomationFeatureSettings.copy, ...(stored.copy as object ?? {}) },
@@ -1349,7 +1356,14 @@ export class AutomationStore {
       },
       closeStalledCampaigns: {
         ...defaultAutomationFeatureSettings.closeStalledCampaigns,
-        ...(stored.closeStalledCampaigns as object ?? {}),
+        ...storedCloseStalledCampaigns,
+        // 旧配置默认值是 3；规则现在取消，旧值读回时也必须视为停用，
+        // 否则客户端重启后会悄悄恢复这条条件。
+        maxConsecutiveZeroConversionDays:
+          storedCloseStalledCampaigns.maxConsecutiveZeroConversionDays === 3
+            ? null
+            : storedCloseStalledCampaigns.maxConsecutiveZeroConversionDays
+              ?? defaultAutomationFeatureSettings.closeStalledCampaigns.maxConsecutiveZeroConversionDays,
       },
       updatedAt: row.updated_at,
     };
