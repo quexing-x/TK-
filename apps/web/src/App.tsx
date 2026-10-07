@@ -1944,7 +1944,6 @@ function AutomationPage({
   const connectionMessage = automationConnectionMessage(account, connection);
   const canRunAutomation = connection?.status === "ready"
     && hasProviderCapability(capabilities, "read-campaigns");
-  const canChangeStatus = hasProviderCapability(capabilities, "change-status");
 
   const load = useCallback(async () => {
     try {
@@ -1995,25 +1994,16 @@ function AutomationPage({
     }
   };
 
-  const resetCircuit = async () => {
-    try {
-      setBusy("reset-circuit");
-      setCircuitState(await api.resetWriteCircuit(account.id));
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   if (!runs || !decisions || !circuitState) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
   const latest = runs[0];
   const actionableDecisions = selectActionableDecisionHistory(decisions);
-  const automationHealthy = canRunAutomation && !circuitState.circuit?.openedAt;
+  const automationHealthy = canRunAutomation && !circuitState.open;
+  const circuitRetryTime = circuitState.retryAt
+    ? new Date(circuitState.retryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
   return (
     <section className="page-stack automation-page">
       <header className="automation-status-band">
@@ -2079,8 +2069,8 @@ function AutomationPage({
             <li className={latest?.successCount ? "complete" : "pending"}><span><Check size={14} /></span><small>回读确认</small></li>
           </ol>
           <p className="automation-flow-note">
-            {circuitState.circuit?.openedAt
-              ? `熔断已触发：${circuitState.circuit.lastError ?? "未知错误"}`
+            {circuitState.open
+              ? `写入熔断冷却中，${circuitRetryTime} 自动重试：${circuitState.circuit?.lastError ?? "未知错误"}`
               : latest?.failureCount
                 ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
                 : "全局自动化和账户自动化均开启、且 Provider 写入保护未触发时，按规则直接执行。"}
@@ -2101,15 +2091,12 @@ function AutomationPage({
       </div>
 
       <section className="automation-policy-panel write-circuit-panel">
-        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>写入熔断状态</h2><p>连续写入失败会自动熔断以阻止继续启停；数据库原子防重，多实例不会重复领取同一建议。</p></div></div></div>
+        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>写入熔断状态</h2></div></div></div>
         <div className="sync-count-grid">
           <span>今日自动启停 <strong>{circuitState.todayUsage} 次（不限量）</strong></span>
-          <span>熔断 <strong>{circuitState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
+          <span>熔断 <strong>{circuitState.open ? `冷却中 · ${circuitRetryTime} 自动重试` : "正常"}</strong></span>
         </div>
-        {circuitState.circuit?.openedAt && <div className="automation-actions">
-          <button className="secondary-button" disabled={busy !== null || !canChangeStatus} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>
-        </div>}
-        {circuitState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{circuitState.circuit.lastError ?? "未知错误"}。修复连接后人工重置即可恢复自动启停。</p>}
+        {circuitState.open && <p className="error-text">{circuitState.circuit?.lastError ?? "未知错误"}</p>}
       </section>
 
       <AutomationFeaturesPage onError={onError} />

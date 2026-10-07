@@ -105,3 +105,25 @@ export const ProviderWriteCircuitSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 export type ProviderWriteCircuit = z.infer<typeof ProviderWriteCircuitSchema>;
+
+/**
+ * 熔断打开后冷却多久自动放行一次试写。
+ *
+ * 熔断的起因多半是 TikTok 一阵超时，过一会儿就好；以前只能人工复位，开着的那段时间
+ * 账户每轮只记预览不执行，而且没人看得见——0918 曾因此停摆 15 小时。冷却期一过就放行，
+ * 试写成功即复位（成功写入本来就会清零计数），再失败会刷新 openedAt 重新冷却。
+ */
+export const PROVIDER_WRITE_CIRCUIT_COOLDOWN_MS = 15 * 60_000;
+
+export function providerWriteCircuitRetryAt(circuit: ProviderWriteCircuit | null | undefined): string | null {
+  if (!circuit?.openedAt) return null;
+  return new Date(Date.parse(circuit.openedAt) + PROVIDER_WRITE_CIRCUIT_COOLDOWN_MS).toISOString();
+}
+
+export function isProviderWriteCircuitOpen(
+  circuit: ProviderWriteCircuit | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  const retryAt = providerWriteCircuitRetryAt(circuit);
+  return retryAt !== null && now.getTime() < Date.parse(retryAt);
+}

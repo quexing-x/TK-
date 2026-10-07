@@ -9,6 +9,8 @@ import {
   dateTimeSuffix,
   evaluateRuleConfiguration,
   filterEntitiesToRecentWindow,
+  isProviderWriteCircuitOpen,
+  providerWriteCircuitRetryAt,
   mapWithConcurrency,
   networkUnreachableMessagePrefix,
   stripAutomaticAdGroupNameSuffixes,
@@ -188,9 +190,12 @@ export class AutomationService {
     const account = this.store.getAccount(accountId);
     if (!account) throw new Error("账号不存在。");
     const localDate = dateKeyInTimeZone(new Date(), account.timezone);
+    const circuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
     return {
       todayUsage: this.store.countAutomaticActions(accountId, localDate),
-      circuit: this.store.getProviderWriteCircuit(accountId, account.providerKind),
+      circuit,
+      open: isProviderWriteCircuitOpen(circuit),
+      retryAt: providerWriteCircuitRetryAt(circuit),
     };
   }
 
@@ -991,7 +996,7 @@ export class AutomationService {
     const automaticRun =
       trigger !== "preview" &&
       account.enabled &&
-      !writeCircuit?.openedAt;
+      !isProviderWriteCircuitOpen(writeCircuit);
     const run = this.store.createAutomationRun(
       accountId,
       account.providerKind,
@@ -2628,8 +2633,8 @@ export class AutomationService {
         throw new WriteBlockedBeforeDispatchError("账户自动化已关闭，自动状态写入已阻止。");
       }
       const circuit = this.store.getProviderWriteCircuit(accountId, account.providerKind);
-      if (circuit?.openedAt) {
-        throw new WriteBlockedBeforeDispatchError("Provider 连续写入失败熔断仍处于开启状态，请人工检查并重置后再试。");
+      if (isProviderWriteCircuitOpen(circuit)) {
+        throw new WriteBlockedBeforeDispatchError("Provider 连续写入失败熔断冷却中，冷却结束后自动重试。");
       }
     }
   }
