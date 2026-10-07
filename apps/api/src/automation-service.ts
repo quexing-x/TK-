@@ -4,7 +4,6 @@ import {
   METRIC_RETENTION_DAYS,
   ProviderCredentialInputSchema,
   automationRuleDefinitions,
-  classifyCampaignsForExpand,
   dateKeyInTimeZone,
   dateTimeSuffix,
   evaluateRuleConfiguration,
@@ -35,6 +34,7 @@ import {
   selectDeletionCandidates,
   syncLayerComplete,
   creativeNeedsAppeal,
+  isNonOperationalCampaignName,
   type AccountConfig,
   type NotificationRenderedMessage,
 } from "@tk-auto/core";
@@ -105,6 +105,7 @@ const ORPHAN_SNAPSHOT_ROW_LIMIT = 20_000;
  * 一次），又不至于在持续故障时每轮都空敲。试满仍失败的留在清单上，界面查得到原因。
  */
 const DAILY_ENABLE_MAX_ATTEMPTS = 5;
+const STALLED_CAMPAIGN_MAX_CPA = 12;
 export class AutomationBusyError extends Error {}
 class WriteBlockedBeforeDispatchError extends Error {}
 
@@ -623,23 +624,8 @@ export class AutomationService {
   }
 
   /**
-   * 关掉「跑不出来又已经停跑」的系列。命中即关，不等固定时刻。
-   *
-   * 判据整段复用扩组分类，不另起一套：判为需重扩（单转超上限，或零转化且组已关光）、
-   * **且系列下已经没有在投的广告组**。组还在跑的绝不碰——那说明系列还在产生数据，
-   * 关系列会连带掐掉正在投放的组。
-   *
-   * 为什么不进规则链：规则链是单实体 + 当日指标 + 单阈值，而这条要「自创建以来累计」
-   * 加「跨实体的组状态」，表达不了。
-   *
-   * **2026-09-09 口径变更（投手确认）**：此前是每早 `scheduleHour` 定点跑、每天最多关
-   * `dailyLimit` 条。改成命中即关且不设条数上限——因为 TikTok 限制每账户最多 200 条
-   * **在投**系列（已关停的不占配额），等一天再关意味着配额一直被废系列占着，当晚就
-   * 因此撞墙：两个账户各有 89 / 40 条创建请求因为建不出新系列而白跑。
-   *
-   * 节流没有完全取消，只是从「每天一次」收紧到「每 5 分钟一次」：这个执行器要跑全量
-   * 实体分类加 14 天逐日的零转化统计，挂在每 30 秒一轮的维护循环上会把库压垮。
-   * 5 分钟的延迟对「关掉一条已经停跑的系列」没有任何实际代价。
+   * 关闭有转化且 CPA > 12，或零转化且没有在投广告组的系列。
+   * 按账户当地时间每 5 分钟检查一次，同一时间片只执行一次。
    */
   async runScheduledStalledCampaignClose(accountId: string, asOf = new Date()): Promise<void> {
     const settings = this.store.getAutomationFeatureSettings().closeStalledCampaigns;
@@ -681,49 +667,29 @@ export class AutomationService {
           .listEntityRangeMetrics(accountId, account.providerKind, since, "campaign", until)
           .map((row) => [row.externalId, row]),
       );
-      // 连续零转化天数与分类接口走同一个 store 方法，两边算法不会漂。
-      const zeroStreaks = this.store.listCampaignZeroConversionStreaks(
-        accountId,
-        account.providerKind,
-        asOf,
-      );
-      const { recreateCampaign } = classifyCampaignsForExpand(
-        managed
-          .filter((entity) => entity.entityType === "campaign")
-          .map((entity) => {
-            const metric = metrics.get(entity.externalId);
-            return {
-              externalId: entity.externalId,
-              name: entity.name,
-              status: entity.status,
-              hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
-              consecutiveZeroConversionDays: zeroStreaks.get(entity.externalId) ?? 0,
-              spend: metric?.spend ?? 0,
-              conversions: metric?.conversions ?? 0,
-              days: metric?.days ?? 0,
-            };
-          }),
-        {
-          maxCostPerConversion: settings.maxCostPerConversion,
-          maxSpendWithoutConversion: settings.maxSpendWithoutConversion,
-          maxConsecutiveZeroConversionDays: settings.maxConsecutiveZeroConversionDays,
-        },
-      );
-      // 只关组已经全停的那批——这是投手明确的前提，组还在投的一律不碰。
-      //
-      // 不再截断到 dailyLimit：在投系列有 200 条的硬上限，留着废系列不关就是占着配额
-      // 不让新的建出来。而「组已全停」本身就是一道足够强的闸门——一条组全关了的系列
-      // 既不花钱也不产生数据，关掉它没有任何投放上的代价。
-      const closable = recreateCampaign.filter((item) =>
-        item.hasActiveAdGroups === false
-        // 一条系列只要累计单转仍达标，就算最近连续几天没花钱/没转化，
-        // 也不能被这条“停跑即关”规则再次关掉。它可能只是旧好系列的组被
-        // 关光，正是扩组表要恢复并补组的对象；关掉后会和“恢复好系列”的
-        // 动作互相打架，下一轮又回到未投放。
-        && !(item.conversions > 0
-          && item.costPerConversion !== null
-          && item.costPerConversion < settings.maxCostPerConversion),
-      );
+      const closable = managed
+        .filter((entity) => entity.entityType === "campaign"
+          && entity.status === "enabled"
+          && !isNonOperationalCampaignName(entity.name))
+        .map((entity) => {
+          const metric = metrics.get(entity.externalId);
+          const spend = metric?.spend ?? 0;
+          const conversions = metric?.conversions ?? 0;
+          const costPerConversion = conversions > 0 ? spend / conversions : null;
+          return {
+            externalId: entity.externalId,
+            name: entity.name,
+            conversions,
+            costPerConversion,
+            hasActiveAdGroups: campaignsWithActiveAdGroups.has(entity.externalId),
+          };
+        })
+        .filter((item) =>
+          (item.conversions > 0
+            && item.costPerConversion !== null
+            && item.costPerConversion > STALLED_CAMPAIGN_MAX_CPA)
+          || (item.conversions === 0 && !item.hasActiveAdGroups),
+        );
       for (const item of closable) {
         try {
           await this.changeStatus(
@@ -734,11 +700,9 @@ export class AutomationService {
             undefined,
             true,
             undefined,
-            item.reason === "no-conversion-days-exceeded"
-              ? `连续 ${item.consecutiveZeroConversionDays} 个自然日零转化，且组已全部停跑，自动关闭系列。`
-              : item.conversions > 0
-                ? `累计单转 ${item.costPerConversion?.toFixed(2)} 超过 ${settings.maxCostPerConversion}，且组已全部停跑，自动关闭系列。`
-                : `零转化且组已全部停跑，自动关闭系列。`,
+            item.conversions > 0
+              ? `CPA ${item.costPerConversion?.toFixed(2)} 超过 ${STALLED_CAMPAIGN_MAX_CPA}，自动关闭系列。`
+              : `零转化且没有在投广告组，自动关闭系列。`,
           );
         } catch {
           // 单条写失败不带走整轮；changeStatus 失败时写入内核已把原因落库。
