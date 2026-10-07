@@ -104,7 +104,7 @@ export function evaluateRuleConfiguration(
     configuration.rules.map((rule) => [rule.code, rule]),
   );
 
-  for (const entity of entities.map(normalizeProviderEntity)) {
+  for (const entity of entities.map((entity) => normalizeProviderEntity(entity, context?.timezone))) {
     if (!layerEnabled(entity.entityType, configuration)) continue;
 
     for (const definition of automationRuleDefinitions) {

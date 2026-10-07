@@ -1369,6 +1369,63 @@ describe("AutomationService", () => {
     });
   });
 
+  it("keeps automation preview-only while the circuit cools down, then retries on its own", async () => {
+    provider.shouldFail = true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await service.changeStatusManually("demo-account", {
+        entityType: "ad-group",
+        externalId: `adgroup-${attempt}`,
+        action: "disable",
+      });
+    }
+    provider.shouldFail = false;
+    provider.mutations.length = 0;
+
+    const cooling = await service.runAccount("demo-account", "manual");
+    expect(cooling).toMatchObject({ automatic: false, actionCount: 0 });
+    expect(provider.mutations).toHaveLength(0);
+    expect(service.getProviderWriteCircuitState("demo-account")).toMatchObject({ open: true, retryAt: expect.any(String) });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 16 * 60_000);
+      expect(service.getProviderWriteCircuitState("demo-account").open).toBe(false);
+
+      const retried = await service.runAccount("demo-account", "manual");
+
+      expect(retried).toMatchObject({ automatic: true, actionCount: 1, successCount: 1 });
+      expect(provider.mutations).toEqual([{ entityType: "ad-group", externalId: "adgroup-1", action: "disable" }]);
+      expect(store.getProviderWriteCircuit("demo-account", "cookie")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-opens the circuit for another cooldown when the retry write fails", async () => {
+    provider.shouldFail = true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await service.changeStatusManually("demo-account", {
+        entityType: "ad-group",
+        externalId: `adgroup-${attempt}`,
+        action: "disable",
+      });
+    }
+    const firstOpenedAt = store.getProviderWriteCircuit("demo-account", "cookie")!.openedAt!;
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 16 * 60_000);
+      const retried = await service.runAccount("demo-account", "manual");
+
+      expect(retried).toMatchObject({ automatic: true, failureCount: 1 });
+      const circuit = store.getProviderWriteCircuit("demo-account", "cookie")!;
+      expect(Date.parse(circuit.openedAt!)).toBeGreaterThan(Date.parse(firstOpenedAt));
+      expect(service.getProviderWriteCircuitState("demo-account").open).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not evaluate campaigns older than 48 hours", async () => {
     provider.campaignCreatedAt = new Date(Date.now() - 49 * 60 * 60 * 1_000).toISOString();
     provider.adGroupSpend = 0;

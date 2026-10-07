@@ -28,7 +28,7 @@ export function buildSyncDataQuality(input: {
 }): SyncDataQuality {
   const managed = input.entities
     .filter((entity) => entity.entityType === "ad-group" || entity.entityType === "ad")
-    .map(normalizeProviderEntity);
+    .map((entity) => normalizeProviderEntity(entity, input.coverage.timezone));
   const missingMetrics = managed.length === 0
     ? [...requiredMetrics]
     : requiredMetrics.filter((metric) =>

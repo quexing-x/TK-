@@ -969,6 +969,19 @@ describe("AutomationStore", () => {
       expect(days.find((day) => day.date === "2026-08-19")?.lastLocalTime).toBe("23:30");
     });
 
+    it("单一本地日区间沿用最后快照口径", () => {
+      capture("2026-08-19T01:00:00.000Z", { g1: 1, g2: 0.5 });
+      capture("2026-08-19T10:00:00.000Z", { g1: 6, g2: 2 });
+      capture("2026-08-19T15:30:00.000Z", { g1: 9, g2: 3 });
+
+      const days = store.listDailyMetricTotals(
+        "demo-account", "cookie", "2026-08-18T16:00:00.000Z", "ad-group", "2026-08-19T15:59:59.999Z",
+      );
+
+      expect(days.map((day) => [day.date, Number(day.spend.toFixed(2))])).toEqual([["2026-08-19", 12]]);
+      expect(days[0]?.isCurrentDay).toBe(false);
+    });
+
     // 降采样是纯省磁盘的动作，它唯一不能碰的就是查询口径。这几条测的就是「删完之后
     // 按自然日汇总的结果一个数都不变」——那是它有没有删错的唯一硬判据。
     describe("降采样", () => {
@@ -1502,6 +1515,27 @@ describe("AutomationStore", () => {
       manageAdGroupStatus: true,
       manageAdStatus: true,
     });
+  });
+
+  it("reads existing Cookie schedules using the account timezone without rewriting payloads", () => {
+    const now = new Date().toISOString();
+    const account = store.createAccount({ displayName: "schedule-timezone", accountType: "standard", enabled: true,
+      providerKind: "cookie" });
+    expect(account.timezone).toBe("Asia/Shanghai");
+    const payload = { ad_name: "scheduled", ad_primary_status: "delivery_ok",
+      create_time: 1790858235, start_time: 1790920800,
+      start_delivery_time: "2026-10-02 06:00:00" };
+    store.saveReadOnlySync(account.id, "cookie", [{ entityType: "ad-group",
+      externalId: "scheduled", payload }], { startedAt: now, finishedAt: now,
+      counts: { campaign: 0, "ad-group": 1, ad: 0, material: 0 }, warnings: [],
+      quality: healthySyncQuality(now) });
+    expect(store.listManagedEntities(account.id, "cookie")[0]).toMatchObject({
+      scheduledStartAt: "2026-10-01T22:00:00.000Z",
+      createdAt: "2026-10-01T12:37:15.000Z",
+    });
+    expect(store.listCurrentManagedEntities(account.id, "cookie")[0]?.scheduledStartAt)
+      .toBe("2026-10-01T22:00:00.000Z");
+    expect(store.listProviderEntities(account.id, "cookie")[0]?.payload).toEqual(payload);
   });
 
   it("stores metric snapshots and excludes ignored entities", () => {

@@ -132,7 +132,7 @@ describe("OfficialApiAdsProvider reporting", () => {
       paginationComplete: true,
       contractValid: true,
     });
-    expect(output.entities.map(normalizeProviderEntity)).toEqual(
+    expect(output.entities.map((entity) => normalizeProviderEntity(entity))).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ metrics: expect.objectContaining({ spend: 1, carts: 1 }) }),
       ]),

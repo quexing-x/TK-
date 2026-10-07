@@ -1069,6 +1069,7 @@ function AdsManagementPage({
   const [nextRefreshAt, setNextRefreshAt] = useState(() => Date.now());
   const [remoteRefreshing, setRemoteRefreshing] = useState(false);
   const remoteRefreshRunning = useRef(false);
+  const loadSequence = useRef(0);
   const [statusConfirming, setStatusConfirming] = useState<ManagedEntityRecord | null>(null);
   const [scheduling, setScheduling] = useState<ManagedEntityRecord | null>(null);
   const [scheduleKind, setScheduleKind] = useState<"once" | "overnight">("once");
@@ -1100,23 +1101,34 @@ function AdsManagementPage({
   }, [account.id, onError, spendRange]);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
+    // 当前对象是首屏唯一必需数据。先画出来，再补齐操作/决策/定时日志，避免
+    // 几张历史表把广告管理页的首屏一起挡住。
     try {
-      const [nextEntities, nextOperations, nextDecisions, nextSchedules, nextManualTakeovers] = await Promise.all([
-        api.getManagedEntities(account.id),
-        api.getAdOperations(account.id),
-        api.getAutomationDecisions(account.id),
-        api.getSchedules(account.id),
-        api.getManualTakeovers(account.id),
-      ]);
+      const nextEntities = await api.getManagedEntities(account.id);
+      if (sequence !== loadSequence.current) return;
       setEntities(nextEntities);
-      setOperations(nextOperations);
-      setDecisions(nextDecisions);
-      setSchedules(nextSchedules);
-      setManualTakeovers(nextManualTakeovers);
       onError(null);
     } catch (cause) {
-      onError(getErrorMessage(cause));
+      if (sequence === loadSequence.current) onError(getErrorMessage(cause));
+      return;
     }
+    void Promise.all([
+      api.getAdOperations(account.id),
+      api.getAutomationDecisions(account.id),
+      api.getSchedules(account.id),
+      api.getManualTakeovers(account.id),
+    ])
+      .then(([nextOperations, nextDecisions, nextSchedules, nextManualTakeovers]) => {
+        if (sequence !== loadSequence.current) return;
+        setOperations(nextOperations);
+        setDecisions(nextDecisions);
+        setSchedules(nextSchedules);
+        setManualTakeovers(nextManualTakeovers);
+      })
+      .catch((cause) => {
+        if (sequence === loadSequence.current) onError(getErrorMessage(cause));
+      });
   }, [account.id, onError]);
 
   const refreshRemote = useCallback(async () => {
@@ -1158,7 +1170,10 @@ function AdsManagementPage({
       setNextRefreshAt(next);
       refreshTimer = window.setTimeout(() => void runAndSchedule(), intervalMs);
     };
-    void runAndSchedule();
+    // 先使用本地健康快照渲染页面；远程同步延后几秒，避免打开页面时和首屏查询抢锁。
+    const initialDelayMs = 5_000;
+    setNextRefreshAt(Date.now() + initialDelayMs);
+    refreshTimer = window.setTimeout(() => void runAndSchedule(), initialDelayMs);
     return () => {
       stopped = true;
       window.clearInterval(clockTimer);
@@ -1530,16 +1545,25 @@ function AllAccountsAdsView({
   const [disableAt, setDisableAt] = useState("");
   const [enableAt, setEnableAt] = useState("");
 
+  const loadSequence = useRef(0);
   const load = useCallback(async () => {
-    try {
-      const results = await Promise.all(accounts.map(async (account) => ({
-        account,
-        entities: await api.getManagedEntities(account.id),
-      })));
-      setEntitiesByAccount(results.flatMap(({ account, entities }) => entities.map((entity) => ({ account, entity }))));
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
+    const sequence = ++loadSequence.current;
+    const errors: unknown[] = [];
+    await Promise.all(accounts.map(async (account) => {
+      try {
+        const entities = await api.getManagedEntities(account.id);
+        if (sequence !== loadSequence.current) return;
+        setEntitiesByAccount((current) => [
+          ...current.filter((item) => item.account.id !== account.id),
+          ...entities.map((entity) => ({ account, entity })),
+        ]);
+      } catch (cause) {
+        errors.push(cause);
+      }
+    }));
+    if (sequence === loadSequence.current) {
+      if (errors.length > 0) onError(getErrorMessage(errors[0]));
+      else onError(null);
     }
   }, [accounts, onError]);
 
@@ -1944,7 +1968,6 @@ function AutomationPage({
   const connectionMessage = automationConnectionMessage(account, connection);
   const canRunAutomation = connection?.status === "ready"
     && hasProviderCapability(capabilities, "read-campaigns");
-  const canChangeStatus = hasProviderCapability(capabilities, "change-status");
 
   const load = useCallback(async () => {
     try {
@@ -1995,25 +2018,16 @@ function AutomationPage({
     }
   };
 
-  const resetCircuit = async () => {
-    try {
-      setBusy("reset-circuit");
-      setCircuitState(await api.resetWriteCircuit(account.id));
-      onError(null);
-    } catch (cause) {
-      onError(getErrorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   if (!runs || !decisions || !circuitState) {
     return <EmptyState text="正在读取自动化记录…" loading />;
   }
 
   const latest = runs[0];
   const actionableDecisions = selectActionableDecisionHistory(decisions);
-  const automationHealthy = canRunAutomation && !circuitState.circuit?.openedAt;
+  const automationHealthy = canRunAutomation && !circuitState.open;
+  const circuitRetryTime = circuitState.retryAt
+    ? new Date(circuitState.retryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
   return (
     <section className="page-stack automation-page">
       <header className="automation-status-band">
@@ -2079,8 +2093,8 @@ function AutomationPage({
             <li className={latest?.successCount ? "complete" : "pending"}><span><Check size={14} /></span><small>回读确认</small></li>
           </ol>
           <p className="automation-flow-note">
-            {circuitState.circuit?.openedAt
-              ? `熔断已触发：${circuitState.circuit.lastError ?? "未知错误"}`
+            {circuitState.open
+              ? `写入熔断冷却中，${circuitRetryTime} 自动重试：${circuitState.circuit?.lastError ?? "未知错误"}`
               : latest?.failureCount
                 ? `最近一轮有 ${latest.failureCount} 项未完成，请在广告管理中人工处理。`
                 : "全局自动化和账户自动化均开启、且 Provider 写入保护未触发时，按规则直接执行。"}
@@ -2101,15 +2115,12 @@ function AutomationPage({
       </div>
 
       <section className="automation-policy-panel write-circuit-panel">
-        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>写入熔断状态</h2><p>连续写入失败会自动熔断以阻止继续启停；数据库原子防重，多实例不会重复领取同一建议。</p></div></div></div>
+        <div className="automation-section-heading"><div><span className="panel-icon"><ShieldCheck size={18} /></span><div><h2>写入熔断状态</h2></div></div></div>
         <div className="sync-count-grid">
           <span>今日自动启停 <strong>{circuitState.todayUsage} 次（不限量）</strong></span>
-          <span>熔断 <strong>{circuitState.circuit?.openedAt ? "已触发" : "正常"}</strong></span>
+          <span>熔断 <strong>{circuitState.open ? `冷却中 · ${circuitRetryTime} 自动重试` : "正常"}</strong></span>
         </div>
-        {circuitState.circuit?.openedAt && <div className="automation-actions">
-          <button className="secondary-button" disabled={busy !== null || !canChangeStatus} onClick={() => void resetCircuit()} type="button">{busy === "reset-circuit" ? "重置中…" : "人工重置熔断"}</button>
-        </div>}
-        {circuitState.circuit?.openedAt && <p className="error-text">连续写入失败已触发熔断：{circuitState.circuit.lastError ?? "未知错误"}。修复连接后人工重置即可恢复自动启停。</p>}
+        {circuitState.open && <p className="error-text">{circuitState.circuit?.lastError ?? "未知错误"}</p>}
       </section>
 
       <AutomationFeaturesPage onError={onError} />
@@ -2535,11 +2546,17 @@ function useAnalyticsData(
     }
     if (!from || !to) return;
     const entityType = level === "all" ? undefined : level;
-    void Promise.all(accountKey.split(",").map((id) => api.getMetricDays(id, { from, to }, entityType)))
-      .then((results) => {
-        if (cancelled) return;
-        setDays(mergeDailyMetricsAcrossAccounts(results));
-        onError(null);
+    const partial: DailyMetricRecord[][] = [];
+    const ids = accountKey.split(",");
+    void Promise.all(ids.map(async (id, index) => {
+      const result = await api.getMetricDays(id, { from, to }, entityType);
+      if (cancelled) return;
+      partial[index] = result;
+      // 先到的账户先显示，慢账户继续补齐；切换筛选时仍由 cleanup 丢弃旧请求。
+      setDays(mergeDailyMetricsAcrossAccounts(partial.filter((item): item is DailyMetricRecord[] => Boolean(item))));
+    }))
+      .then(() => {
+        if (!cancelled) onError(null);
       })
       .catch((cause) => {
         if (cancelled) return;

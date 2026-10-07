@@ -169,6 +169,9 @@ export interface LaunchQueueResult {
 export interface ProviderWriteCircuitState {
   todayUsage: number;
   circuit: ProviderWriteCircuit | null;
+  /** 冷却期内为 true；冷却过后虽然 circuit 还在，自动化已放行试写。 */
+  open: boolean;
+  retryAt: string | null;
 }
 
 export type WriteTaskAttemptRecord = LaunchPlanItemAttemptRecord | AdOperationAttemptRecord;

@@ -574,3 +574,25 @@ describe("投放够久仍未出单关闭（NO_CONV_HOURS_CLOSE）", () => {
     expect(rule?.values.conversions).toBe(0);
   });
 });
+
+
+describe("Cookie local schedule eight-hour boundary", () => {
+  it("closes a 06:00 Shanghai zero-conversion group at 14:00, not 22:00", () => {
+    const config = { ...configuration(), rules: configuration().rules
+      .filter((rule) => rule.code === "NO_CONV_HOURS_CLOSE") };
+    const entity: ProviderEntity = {
+      entityType: "ad-group", externalId: "timezone-regression",
+      payload: { ad_primary_status: "delivery_ok", create_time: 1790858235,
+        start_time: 1790920800, start_delivery_time: "2026-10-02 06:00:00",
+        stat_cost: 1.16, time_attr_convert_cnt: 0, click_cnt: 4,
+        time_attr_on_web_cart: 2, cpc: 0.29 },
+    };
+    const evaluate = (at: string) => evaluateRuleConfiguration([entity], config,
+      { now: new Date(at), timezone: "Asia/Shanghai" });
+    expect(evaluate("2026-10-02T05:59:59.000Z").candidates).toHaveLength(0);
+    expect(evaluate("2026-10-02T06:00:00.000Z").candidates[0]?.thresholdCode)
+      .toBe("NO_CONV_HOURS_CLOSE");
+    entity.payload.time_attr_convert_cnt = 1;
+    expect(evaluate("2026-10-02T06:00:00.000Z").candidates).toHaveLength(0);
+  });
+});
