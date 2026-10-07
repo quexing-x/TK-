@@ -325,7 +325,7 @@ export class AutomationService {
       const candidates = selectDeletionCandidates({
         readyAdGroups: this.store
           .listDeletionReadyAdGroups(accountId, account.providerKind, disabledBefore)
-          .map(normalizeProviderEntity),
+          .map((entity) => normalizeProviderEntity(entity, account.timezone)),
         currentAdGroups: this.store.listCurrentManagedEntities(accountId, account.providerKind),
         settings,
       });
@@ -352,7 +352,7 @@ export class AutomationService {
     return selectDeletionCandidates({
       readyAdGroups: this.store
         .listDeletionReadyAdGroups(accountId, account.providerKind, disabledBefore)
-        .map(normalizeProviderEntity),
+        .map((entity) => normalizeProviderEntity(entity, account.timezone)),
       currentAdGroups: this.store.listCurrentManagedEntities(accountId, account.providerKind),
       settings,
     });
@@ -2093,7 +2093,8 @@ export class AutomationService {
     if (providerKind !== "cookie") return;
     const waiting = this.store.listLaunchPlanItemsAwaitingPollReadback(accountId);
     if (waiting.length === 0) return;
-    const snapshots = entities.map(normalizeProviderEntity);
+    const timezone = this.store.getAccount(accountId)?.timezone;
+    const snapshots = entities.map((entity) => normalizeProviderEntity(entity, timezone));
     const refreshedPlanIds = new Set<string>();
 
     for (const item of waiting) {

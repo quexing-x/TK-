@@ -215,7 +215,7 @@ export function evaluateAutomation(
   thresholds: ThresholdConfig[],
   switches: AutomationSwitches,
 ): AutomationEvaluation {
-  const snapshots = entities.map(normalizeProviderEntity);
+  const snapshots = entities.map((entity) => normalizeProviderEntity(entity));
   const candidates: AutomationCandidate[] = [];
   const skipped: AutomationEvaluation["skipped"] = [];
 
@@ -285,6 +285,7 @@ export function evaluateAutomation(
 
 export function normalizeProviderEntity(
   entity: ProviderEntity,
+  timeZone?: string,
 ): ManagedEntitySnapshot {
   const rowData = isRecord(entity.payload.row_data)
     ? entity.payload.row_data
@@ -329,7 +330,7 @@ export function normalizeProviderEntity(
     externalId: entity.externalId,
     name: firstString(source, nameKeys[entity.entityType]) ?? entity.externalId,
     createdAt: firstTimestamp(source, ["create_time", "created_at", "createTime"]),
-    scheduledStartAt: firstTimestamp(source, [
+    scheduledStartAt: accountDeliveryStart(source, timeZone) ?? firstTimestamp(source, [
       "start_time",
       "start_at",
       "startTime",
@@ -484,6 +485,33 @@ function firstString(
     if (typeof value === "number") return String(value);
   }
   return null;
+}
+
+function accountDeliveryStart(source: Record<string, unknown>, timeZone?: string): string | null {
+  // Cookie statistics returns start_delivery_time in the account's wall clock.
+  // Its numeric start_time encodes that same wall clock as UTC, not an instant.
+  // Prefer the explicit local field when account timezone is available; leave
+  // ordinary Unix/ISO timestamps (including creation time) untouched.
+  if (!timeZone || typeof source.start_delivery_time !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(source.start_delivery_time.trim());
+  if (!match) return null;
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+  const wallClock = Date.UTC(year!, month! - 1, day!, hour!, minute!, second!);
+  const date = new Date(wallClock);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month
+    || date.getUTCDate() !== day || hour! > 23 || minute! > 59 || second! > 59) return null;
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  });
+  const localClock = (instant: number): number => {
+    const parts = formatter.formatToParts(new Date(instant));
+    const get = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value);
+    return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  };
+  let instant = wallClock;
+  for (let attempt = 0; attempt < 2; attempt += 1) instant += wallClock - localClock(instant);
+  return localClock(instant) === wallClock ? new Date(instant).toISOString() : null;
 }
 
 function firstTimestamp(source: Record<string, unknown>, keys: string[]): string | null {

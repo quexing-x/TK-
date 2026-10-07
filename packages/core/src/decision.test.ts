@@ -354,3 +354,33 @@ describe("creativeNeedsAppeal", () => {
     })).toBe(true);
   });
 });
+
+
+describe("account-local Cookie delivery time", () => {
+  const group = (payload: Record<string, unknown>): ProviderEntity => ({
+    entityType: "ad-group", externalId: "scheduled-group", payload,
+  });
+  it.each([
+    ["Asia/Shanghai", "2026-10-02 06:00:00", "2026-10-01T22:00:00.000Z"],
+    ["UTC", "2026-10-02 06:00:00", "2026-10-02T06:00:00.000Z"],
+    ["America/New_York", "2026-07-02 06:00:00", "2026-07-02T10:00:00.000Z"],
+    ["America/New_York", "2026-12-02 06:00:00", "2026-12-02T11:00:00.000Z"],
+  ])("parses %s wall clock with its date-specific offset", (timezone, local, expected) => {
+    const snapshot = normalizeProviderEntity(group({
+      create_time: 1790858235, start_time: 1790920800, start_delivery_time: local,
+    }), timezone);
+    expect(snapshot.scheduledStartAt).toBe(expected);
+    expect(snapshot.createdAt).toBe("2026-10-01T12:37:15.000Z");
+  });
+  it("preserves genuine epoch and explicit ISO fallback timestamps", () => {
+    expect(normalizeProviderEntity(group({ start_time: 1790920800 }), "Asia/Shanghai")
+      .scheduledStartAt).toBe("2026-10-02T06:00:00.000Z");
+    expect(normalizeProviderEntity(group({ start_at: "2026-10-02T06:00:00+08:00" }), "Asia/Shanghai")
+      .scheduledStartAt).toBe("2026-10-01T22:00:00.000Z");
+  });
+  it("rejects invalid local calendar values and keeps the fallback", () => {
+    expect(normalizeProviderEntity(group({ start_time: 1790920800,
+      start_delivery_time: "2026-02-30 06:00:00" }), "Asia/Shanghai")
+      .scheduledStartAt).toBe("2026-10-02T06:00:00.000Z");
+  });
+});

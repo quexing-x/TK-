@@ -2069,6 +2069,7 @@ export class AutomationStore {
   listManagedEntities(
     accountId: string,
     kind: ProviderKind,
+    currentOnly = false,
   ): ManagedEntityRecord[] {
     const ignored = new Set(
       this.listIgnoredEntities(accountId, kind).map(
@@ -2089,7 +2090,7 @@ export class AutomationStore {
       .prepare(
         `SELECT entity_type, external_id, payload_json, synced_at
          FROM provider_entities
-         WHERE account_id = ? AND provider_kind = ?
+         WHERE account_id = ? AND provider_kind = ?${currentOnly ? " AND is_current = 1" : ""}
          ORDER BY entity_type, external_id`,
       )
       .all(accountId, kind) as SqlRow[];
@@ -2099,7 +2100,7 @@ export class AutomationStore {
         entityType: row.entity_type as ProviderEntity["entityType"],
         externalId: String(row.external_id),
         payload,
-      });
+      }, this.getAccount(accountId)?.timezone);
       return {
         ...snapshot,
         ignored: ignored.has(`${snapshot.entityType}:${snapshot.externalId}`),
@@ -2114,18 +2115,7 @@ export class AutomationStore {
     accountId: string,
     kind: ProviderKind,
   ): ManagedEntityRecord[] {
-    const currentIds = new Set(
-      (this.db
-        .prepare(
-          `SELECT entity_type, external_id FROM provider_entities
-           WHERE account_id = ? AND provider_kind = ? AND is_current = 1`,
-        )
-        .all(accountId, kind) as SqlRow[])
-        .map((row) => `${String(row.entity_type)}:${String(row.external_id)}`),
-    );
-    return this.listManagedEntities(accountId, kind).filter(
-      (entity) => currentIds.has(`${entity.entityType}:${entity.externalId}`),
-    );
+    return this.listManagedEntities(accountId, kind, true);
   }
 
   listIgnoredEntities(
@@ -5937,8 +5927,14 @@ export class AutomationStore {
     accountId: string,
     kind: ProviderKind,
   ): { spend: number; lastLocalTime: string; entityCount: number } | undefined {
-    const since = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
-    const days = this.listDailyMetricTotals(accountId, kind, since, "ad-group");
+    const now = new Date();
+    const account = this.getAccount(accountId);
+    const offsetMinutes = utcOffsetMinutes(account?.timezone ?? "UTC", now);
+    const localDate = new Date(now.getTime() + offsetMinutes * 60_000).toISOString().slice(0, 10);
+    // 只查账户当地今天，命中 listDailyMetricTotals 的单日快速路径；原来回查两天会走
+    // 通用多日 CTE，每个账户都要多扫一遍快照表。
+    const since = new Date(Date.parse(`${localDate}T00:00:00.000Z`) - offsetMinutes * 60_000).toISOString();
+    const days = this.listDailyMetricTotals(accountId, kind, since, "ad-group", now.toISOString());
     const today = days.find((day) => day.isCurrentDay);
     if (!today) return undefined;
     return {
@@ -5973,10 +5969,48 @@ export class AutomationStore {
     if (entityType) parameters.push(entityType);
     parameters.push(since, until);
 
+    const localSince = String(this.db.prepare("SELECT date(?, ?) AS local_day").get(since, dayShift)?.local_day ?? "");
+    const localUntil = String(this.db.prepare("SELECT date(?, ?) AS local_day").get(until, dayShift)?.local_day ?? "");
+    if (localSince && localSince === localUntil) {
+      const fastRows = this.db.prepare(
+        `WITH day_last AS (
+           SELECT entity_type, external_id, MAX(captured_at) AS last_captured
+           FROM entity_metric_snapshots
+           WHERE account_id = ? AND provider_kind = ? ${typeFilter}
+             AND sync_quality_status = 'healthy'
+             AND captured_at >= ? AND captured_at <= ?
+           GROUP BY entity_type, external_id
+         )
+         SELECT COUNT(*) AS entity_count,
+                MAX(d.last_captured) AS last_captured,
+                time(MAX(d.last_captured), ?) AS last_local_time,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.spend') AS REAL), 0)) AS spend,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.conversions') AS REAL), 0)) AS conversions
+         FROM day_last d
+         JOIN entity_metric_snapshots s
+           ON s.account_id = ? AND s.provider_kind = ?
+          AND s.entity_type = d.entity_type AND s.external_id = d.external_id
+          AND s.captured_at = d.last_captured
+          AND s.sync_quality_status = 'healthy'`,
+      ).get(...parameters, dayShift, accountId, kind) as SqlRow | undefined;
+      const today = new Date(Date.now() + offsetMinutes * 60_000).toISOString().slice(0, 10);
+      return fastRows && Number(fastRows.entity_count) > 0 ? [{
+        date: localSince,
+        count: Number(fastRows.entity_count),
+        spend: Number(fastRows.spend),
+        clicks: Number(fastRows.clicks),
+        conversions: Number(fastRows.conversions),
+        lastCapturedAt: String(fastRows.last_captured),
+        lastLocalTime: String(fastRows.last_local_time ?? "").slice(0, 5),
+        isCurrentDay: localSince === today,
+      }] : [];
+    }
+
     const rows = this.db
       .prepare(
         `WITH scoped AS (
-           SELECT external_id, captured_at, metrics_json,
+           SELECT entity_type, external_id, captured_at, metrics_json,
                   date(captured_at, ?) AS local_day
            FROM entity_metric_snapshots
            WHERE account_id = ? AND provider_kind = ? ${typeFilter}
@@ -5984,8 +6018,8 @@ export class AutomationStore {
              AND captured_at >= ? AND captured_at <= ?
          ),
          day_last AS (
-           SELECT external_id, local_day, MAX(captured_at) AS last_captured
-           FROM scoped GROUP BY external_id, local_day
+           SELECT entity_type, external_id, local_day, MAX(captured_at) AS last_captured
+           FROM scoped GROUP BY entity_type, external_id, local_day
          )
          SELECT d.local_day AS local_day,
                 COUNT(*) AS entity_count,
@@ -5996,7 +6030,8 @@ export class AutomationStore {
                 SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.conversions') AS REAL), 0)) AS conversions
          FROM day_last d
          JOIN scoped s
-           ON s.external_id = d.external_id AND s.captured_at = d.last_captured
+           ON s.entity_type = d.entity_type
+          AND s.external_id = d.external_id AND s.captured_at = d.last_captured
          GROUP BY d.local_day
          ORDER BY d.local_day DESC`,
       )
