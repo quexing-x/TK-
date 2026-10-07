@@ -1357,13 +1357,6 @@ export class AutomationStore {
       closeStalledCampaigns: {
         ...defaultAutomationFeatureSettings.closeStalledCampaigns,
         ...storedCloseStalledCampaigns,
-        // 旧配置默认值是 3；规则现在取消，旧值读回时也必须视为停用，
-        // 否则客户端重启后会悄悄恢复这条条件。
-        maxConsecutiveZeroConversionDays:
-          storedCloseStalledCampaigns.maxConsecutiveZeroConversionDays === 3
-            ? null
-            : storedCloseStalledCampaigns.maxConsecutiveZeroConversionDays
-              ?? defaultAutomationFeatureSettings.closeStalledCampaigns.maxConsecutiveZeroConversionDays,
       },
       updatedAt: row.updated_at,
     };

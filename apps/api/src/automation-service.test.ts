@@ -1912,8 +1912,8 @@ describe("AutomationService", () => {
     });
   });
 
-  describe("自动关闭跑不出来又已停跑的系列", () => {
-    // 账户时区 Asia/Shanghai，scheduleHour=6 对应 UTC 前一日 22:00。
+  describe("自动关闭系列", () => {
+    // 账户时区 Asia/Shanghai，本地 06:00 对应 UTC 前一日 22:00。
     const atSix = new Date("2026-07-24T22:00:00.000Z");
 
     function seedCampaigns(rows: Array<{
@@ -1973,39 +1973,41 @@ describe("AutomationService", () => {
       store.updateAutomationFeatureSettings(settings);
     }
 
-    it("只关组已全停的系列，组还在跑的绝不碰", async () => {
+    it("按 CPA 或零转化且无在投组关闭系列", async () => {
       enable();
       vi.useFakeTimers();
       vi.setSystemTime(atSix);
       seedCampaigns([
         // 零转化、花过钱、组已全停 -> 关
         { id: "c-stalled", name: "停跑系列", spend: 5, conversions: 0, groupEnabled: false },
-        // 同样零转化花过钱，但组还在跑 -> 不碰。关掉它会连带掐掉正在投放的组。
+        // 零转化但组还在跑 -> 不碰。
         { id: "c-running", name: "在跑系列", spend: 5, conversions: 0, groupEnabled: true },
-        // 零转化且无在投组：不再要求累计花费超过 3 -> 关
+        // 零转化且无在投组 -> 关
         { id: "c-fresh", name: "新建未投", spend: 0, conversions: 0, groupEnabled: false },
         // 单转达标 -> 不碰
         { id: "c-ok", name: "达标系列", spend: 8, conversions: 2, groupEnabled: false },
+        // CPA 等于 12，不满足严格大于
+        { id: "c-exact-cpa", name: "临界 CPA 系列", spend: 24, conversions: 2, groupEnabled: true },
+        // CPA 超过 12，即使组还在投也关闭
+        { id: "c-high-cpa", name: "高 CPA 系列", spend: 26, conversions: 2, groupEnabled: true },
       ]);
 
       await service.runScheduledStalledCampaignClose("demo-account", atSix);
 
       expect(provider.mutations).toEqual([
-        { entityType: "campaign", externalId: "c-stalled", action: "disable" },
         { entityType: "campaign", externalId: "c-fresh", action: "disable" },
+        { entityType: "campaign", externalId: "c-high-cpa", action: "disable" },
+        { entityType: "campaign", externalId: "c-stalled", action: "disable" },
       ]);
     });
 
-    it("累计单转达标的好系列即使连续零转化也不关", async () => {
+    it("CPA 不超过 12 的系列不关", async () => {
       enable();
       vi.useFakeTimers();
       vi.setSystemTime(atSix);
       seedCampaigns([
         { id: "c-good-stalled", name: "历史好系列", spend: 8, conversions: 2, groupEnabled: false },
       ]);
-      vi.spyOn(store, "listCampaignZeroConversionStreaks")
-        .mockReturnValue(new Map([["c-good-stalled", 3]]));
-
       await service.runScheduledStalledCampaignClose("demo-account", atSix);
 
       expect(provider.mutations).toEqual([]);
@@ -2022,7 +2024,7 @@ describe("AutomationService", () => {
       await service.runScheduledStalledCampaignClose("demo-account", atSix);
       expect(provider.mutations).toEqual([]);
 
-      // 开了但不在原计划小时：命中即关。
+      // 开了但不在整点：命中即关。
       enable();
       await service.runScheduledStalledCampaignClose(
         "demo-account",
@@ -2033,7 +2035,7 @@ describe("AutomationService", () => {
       ]);
     });
 
-    it("每账户每个本地日只跑一次", async () => {
+    it("每账户每个本地五分钟时间片只跑一次", async () => {
       enable();
       vi.useFakeTimers();
       vi.setSystemTime(atSix);
@@ -2047,13 +2049,9 @@ describe("AutomationService", () => {
       expect(provider.mutations).toHaveLength(1);
     });
 
-    // dailyLimit 是判据出错时的兜底：一次关光整个账户的代价比漏关几条大得多。
-    // 不再截断到 dailyLimit：在投系列有 200 条硬上限，留着废系列不关就是占着配额不让
-    // 新的建出来。「组已全停」本身就是足够强的闸门——那样的系列既不花钱也不产生数据。
-    it("命中多少关多少，不受每日上限截断", async () => {
+    it("命中多少关多少", async () => {
       const settings = store.getAutomationFeatureSettings();
       settings.closeStalledCampaigns.enabled = true;
-      settings.closeStalledCampaigns.dailyLimit = 2;
       store.updateAutomationFeatureSettings(settings);
       vi.useFakeTimers();
       vi.setSystemTime(atSix);
@@ -2066,8 +2064,7 @@ describe("AutomationService", () => {
       expect(provider.mutations).toHaveLength(4);
     });
 
-    // 关闭不再等 scheduleHour：配额被废系列占着，等到第二天早上才关等于白等一天。
-    it("不在计划小时也照样关", async () => {
+    it("不在整点也照样关", async () => {
       const settings = store.getAutomationFeatureSettings();
       settings.closeStalledCampaigns.enabled = true;
       store.updateAutomationFeatureSettings(settings);

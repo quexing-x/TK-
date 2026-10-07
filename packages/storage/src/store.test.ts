@@ -4211,10 +4211,7 @@ describe("规则码回填", () => {
 });
 
 describe("自动化特性开关的分节合并", () => {
-  // getAutomationFeatureSettings 的合并是**逐节列举**的：新增小节忘了写进去，存进去的值
-  // 就永远读不回来——schema 上的 default 会把它悄悄填回默认值，界面上像是「保存没生效」，
-  // 而定时执行器则永远看到 enabled=false，一声不响地什么都不做。
-  // 2026-08-31 加 closeStalledCampaigns 时正好踩了这个坑，故补一条兜底断言。
+  // getAutomationFeatureSettings 的合并是逐节列举的，所有小节都必须能持久化。
   it("每个小节都能存进去再读回来", () => {
     const store = new AutomationStore(":memory:");
     store.seed();
@@ -4225,7 +4222,6 @@ describe("自动化特性开关的分节合并", () => {
     settings.dailyEnable.enabled = !settings.dailyEnable.enabled;
     settings.budgetBump.enabled = !settings.budgetBump.enabled;
     settings.closeStalledCampaigns.enabled = !settings.closeStalledCampaigns.enabled;
-    settings.closeStalledCampaigns.dailyLimit = 7;
 
     store.updateAutomationFeatureSettings(settings);
     const readBack = store.getAutomationFeatureSettings();
@@ -4236,18 +4232,6 @@ describe("自动化特性开关的分节合并", () => {
     expect(readBack.dailyEnable.enabled).toBe(settings.dailyEnable.enabled);
     expect(readBack.budgetBump.enabled).toBe(settings.budgetBump.enabled);
     expect(readBack.closeStalledCampaigns.enabled).toBe(settings.closeStalledCampaigns.enabled);
-    expect(readBack.closeStalledCampaigns.dailyLimit).toBe(7);
-
-    // 旧库可能仍存着历史默认值 3；读取时必须把它迁移成停用，不能让客户端重启后复活规则。
-    store.updateAutomationFeatureSettings({
-      ...readBack,
-      closeStalledCampaigns: {
-        ...readBack.closeStalledCampaigns,
-        maxConsecutiveZeroConversionDays: 3,
-      },
-    });
-    expect(store.getAutomationFeatureSettings().closeStalledCampaigns.maxConsecutiveZeroConversionDays)
-      .toBeNull();
   });
 });
 
