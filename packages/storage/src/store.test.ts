@@ -952,6 +952,90 @@ describe("AutomationStore", () => {
       );
     };
 
+    // 2026-10-10：快照只在指标变化时写（每天 240 万行里 97% 是不动的关停对象）。
+    // 除批次日志外的所有读法都只要「每对象每本地日最后一条」，所以这些用例只验一件事：
+    // 少写之后读出来的数一个都不能变。
+    describe("快照只在变化时写", () => {
+      const countRows = (target: AutomationStore, externalId: string) =>
+        target.listMetricSnapshots("demo-account", "cookie", "2026-01-01T00:00:00.000Z", "ad-group", 5000, "2027-01-01T00:00:00.000Z")
+          .filter((row) => row.externalId === externalId).length;
+
+      it("同一天没变的对象只留一条，日汇总与截止时刻不变", () => {
+        capture("2026-08-19T01:00:00.000Z", { g1: 1, g2: 5 });   // 当地 09:00
+        capture("2026-08-19T10:00:00.000Z", { g1: 2, g2: 5 });   // 当地 18:00
+        capture("2026-08-19T15:30:00.000Z", { g1: 3, g2: 5 });   // 当地 23:30
+
+        expect(countRows(store, "g2")).toBe(1);
+        const day = store.listDailyMetricTotals(
+          "demo-account", "cookie", "2026-08-18T16:00:00.000Z", "ad-group", "2026-08-19T15:59:59.000Z",
+        )[0];
+        expect(day).toMatchObject({ date: "2026-08-19", count: 2, spend: 8, lastLocalTime: "23:30" });
+      });
+
+      // 心跳护栏：要是整层都没变就一条不写，当天最大快照时刻会停在早上，界面会把
+      // 这一天标成「同步截止至 09:00，数值可能偏低」。
+      it("整层都没变时心跳仍把截止时刻推到最后一轮", () => {
+        capture("2026-08-19T01:00:00.000Z", { g1: 1, g2: 5 });
+        capture("2026-08-19T15:30:00.000Z", { g1: 1, g2: 5 });
+
+        expect(countRows(store, "g2")).toBe(1);
+        expect(store.listDailyMetricTotals(
+          "demo-account", "cookie", "2026-08-18T16:00:00.000Z", "ad-group", "2026-08-19T15:59:59.000Z",
+        )[0]).toMatchObject({ count: 2, spend: 6, lastLocalTime: "23:30" });
+      });
+
+      it("跨本地日即使指标不变也要再写一条，否则第二天查不到它", () => {
+        capture("2026-08-19T10:00:00.000Z", { g1: 1, g2: 5 });   // 当地 08-19
+        capture("2026-08-19T17:00:00.000Z", { g1: 1, g2: 5 });   // 当地 08-20 01:00
+
+        const nextDay = new Map(
+          store.listEntityMetricsForLocalDate("demo-account", "cookie", "2026-08-20", "ad-group")
+            .map((row) => [row.externalId, row.spend]),
+        );
+        expect(nextDay.get("g2")).toBe(5);
+      });
+
+      // 写这张表的进程不止一个，各自只记得自己写过什么。别的进程插进来写了不同的值后，
+      // 本进程再看到「和我上次写的一样」也必须照写，否则别人那条旧值会成为当天终值。
+      it("别的进程插队写过之后整层照写，不按本进程的旧记录跳过", () => {
+        const directory = mkdtempSync(join(tmpdir(), "tk-snapshot-dedupe-"));
+        const databasePath = join(directory, "shared.db");
+        const first = new AutomationStore(databasePath);
+        first.seed();
+        const second = new AutomationStore(databasePath);
+        const captureOn = (target: AutomationStore, finishedAt: string, spends: Record<string, number>) =>
+          target.saveReadOnlySync("demo-account", "cookie",
+            Object.entries(spends).map(([externalId, stat_cost]) => ({
+              entityType: "ad-group" as const,
+              externalId,
+              payload: { ad_name: externalId, stat_cost },
+            })),
+            {
+              startedAt: finishedAt,
+              finishedAt,
+              counts: { campaign: 0, "ad-group": Object.keys(spends).length, ad: 0, material: 0 },
+              warnings: [],
+              quality: healthySyncQuality(finishedAt),
+            },
+          );
+        try {
+          captureOn(first, "2026-08-19T01:00:00.000Z", { g1: 1, g2: 5 });
+          captureOn(second, "2026-08-19T02:00:00.000Z", { g1: 1, g2: 7 });
+          captureOn(first, "2026-08-19T03:00:00.000Z", { g1: 1, g2: 5 });
+
+          const values = new Map(
+            first.listEntityMetricsForLocalDate("demo-account", "cookie", "2026-08-19", "ad-group")
+              .map((row) => [row.externalId, row.spend]),
+          );
+          expect(values.get("g2")).toBe(5);
+        } finally {
+          second.close();
+          first.close();
+          rmSync(directory, { recursive: true, force: true });
+        }
+      });
+    });
+
     it("每个实体取当天最后一条累计值，跨自然日按账户时区切分", () => {
       capture("2026-08-19T01:00:00.000Z", { g1: 1, g2: 0.5 });   // 当地 08-19 09:00
       capture("2026-08-19T10:00:00.000Z", { g1: 6, g2: 2 });     // 当地 08-19 18:00
