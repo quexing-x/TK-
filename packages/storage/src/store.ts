@@ -257,6 +257,11 @@ export class AutomationStore {
   private readonly db: DatabaseSync;
   /** 上次清理操作历史的时刻，用来把清理限制成每 6 小时一次。 */
   private lastHistoryPruneAt = 0;
+  /** getAccountTodaySpend 的结果，按「账户:平台」存，同步落库时作废。 */
+  private readonly todaySpendCache = new Map<
+    string,
+    { localDate: string; value: { spend: number; lastLocalTime: string; entityCount: number } | undefined }
+  >();
   private readonly migrationRunner: MigrationRunner;
   private readonly databasePath: string;
   private readonly appVersion: string;
@@ -2013,6 +2018,7 @@ export class AutomationStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    this.todaySpendCache.delete(`${accountId}:${kind}`);
     this.writeAudit("local-user", accountId, "provider.read-sync.completed", {
       providerKind: kind,
       counts: result.counts,
@@ -2094,13 +2100,14 @@ export class AutomationStore {
          ORDER BY entity_type, external_id`,
       )
       .all(accountId, kind) as SqlRow[];
+    const timezone = this.getAccount(accountId)?.timezone;
     return rows.map((row) => {
       const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
       const snapshot = normalizeProviderEntity({
         entityType: row.entity_type as ProviderEntity["entityType"],
         externalId: String(row.external_id),
         payload,
-      }, this.getAccount(accountId)?.timezone);
+      }, timezone);
       return {
         ...snapshot,
         ignored: ignored.has(`${snapshot.entityType}:${snapshot.externalId}`),
@@ -5933,15 +5940,20 @@ export class AutomationStore {
     const localDate = new Date(now.getTime() + offsetMinutes * 60_000).toISOString().slice(0, 10);
     // 只查账户当地今天，命中 listDailyMetricTotals 的单日快速路径；原来回查两天会走
     // 通用多日 CTE，每个账户都要多扫一遍快照表。
+    // bootstrap 每 30 秒对每个账户问一次，而这个数只在同步落库时才会变（约 4 分钟
+    // 一轮）。saveReadOnlySync 是今天快照的唯一写入口，在那里作废；换日由 key 里的
+    // localDate 兜住。
+    const cacheKey = `${accountId}:${kind}`;
+    const cached = this.todaySpendCache.get(cacheKey);
+    if (cached?.localDate === localDate) return cached.value;
     const since = new Date(Date.parse(`${localDate}T00:00:00.000Z`) - offsetMinutes * 60_000).toISOString();
     const days = this.listDailyMetricTotals(accountId, kind, since, "ad-group", now.toISOString());
     const today = days.find((day) => day.isCurrentDay);
-    if (!today) return undefined;
-    return {
-      spend: today.spend,
-      lastLocalTime: today.lastLocalTime,
-      entityCount: today.count,
-    };
+    const value = today
+      ? { spend: today.spend, lastLocalTime: today.lastLocalTime, entityCount: today.count }
+      : undefined;
+    this.todaySpendCache.set(cacheKey, { localDate, value });
+    return value;
   }
 
   /**
@@ -5972,9 +5984,14 @@ export class AutomationStore {
     const localSince = String(this.db.prepare("SELECT date(?, ?) AS local_day").get(since, dayShift)?.local_day ?? "");
     const localUntil = String(this.db.prepare("SELECT date(?, ?) AS local_day").get(until, dayShift)?.local_day ?? "");
     if (localSince && localSince === localUntil) {
+      // metrics_json 是裸列：SQLite 保证单个 MAX() 聚合时裸列取自 MAX 命中的那一行，
+      // 一遍扫描就拿到「每对象当天最后一条」。原来先求 MAX 再按 captured_at 回表 JOIN，
+      // 而索引不含 external_id，回表只能用上 (account_id, provider_kind) 两列——每算一个
+      // 账户都把它全部快照扫一遍，组数一多就是平方级。2026-10-10 生产库实测：1800 个组
+      // 的账户单次 14 秒，bootstrap 每 30 秒对 4 个账户各算一遍，主线程被它占满。
       const fastRows = this.db.prepare(
         `WITH day_last AS (
-           SELECT entity_type, external_id, MAX(captured_at) AS last_captured
+           SELECT MAX(captured_at) AS last_captured, metrics_json
            FROM entity_metric_snapshots
            WHERE account_id = ? AND provider_kind = ? ${typeFilter}
              AND sync_quality_status = 'healthy'
@@ -5982,18 +5999,13 @@ export class AutomationStore {
            GROUP BY entity_type, external_id
          )
          SELECT COUNT(*) AS entity_count,
-                MAX(d.last_captured) AS last_captured,
-                time(MAX(d.last_captured), ?) AS last_local_time,
-                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.spend') AS REAL), 0)) AS spend,
-                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
-                SUM(COALESCE(CAST(json_extract(s.metrics_json, '$.conversions') AS REAL), 0)) AS conversions
-         FROM day_last d
-         JOIN entity_metric_snapshots s
-           ON s.account_id = ? AND s.provider_kind = ?
-          AND s.entity_type = d.entity_type AND s.external_id = d.external_id
-          AND s.captured_at = d.last_captured
-          AND s.sync_quality_status = 'healthy'`,
-      ).get(...parameters, dayShift, accountId, kind) as SqlRow | undefined;
+                MAX(last_captured) AS last_captured,
+                time(MAX(last_captured), ?) AS last_local_time,
+                SUM(COALESCE(CAST(json_extract(metrics_json, '$.spend') AS REAL), 0)) AS spend,
+                SUM(COALESCE(CAST(json_extract(metrics_json, '$.clicks') AS REAL), 0)) AS clicks,
+                SUM(COALESCE(CAST(json_extract(metrics_json, '$.conversions') AS REAL), 0)) AS conversions
+         FROM day_last`,
+      ).get(...parameters, dayShift) as SqlRow | undefined;
       const today = new Date(Date.now() + offsetMinutes * 60_000).toISOString().slice(0, 10);
       return fastRows && Number(fastRows.entity_count) > 0 ? [{
         date: localSince,
