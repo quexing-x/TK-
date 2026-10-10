@@ -1170,8 +1170,19 @@ export class AutomationService {
       this.downsampleMetricSnapshots(accountId, account.providerKind);
 
       const eligible: AutomationCandidate[] = [];
+      // 父级状态表整轮只建一次：原来每个 enable 候选都把全账户对象重读重解析一遍，
+      // 候选一多就是「候选数 × 对象数」，2026-10-10 剖析里占后台 CPU 的 12.5%。
+      let parentStatuses: Map<string, ManagedEntityRecord["status"]> | undefined;
+      const parentStatusOf = (entityType: string, externalId: string) => {
+        parentStatuses ??= new Map(
+          this.store
+            .listManagedEntities(accountId, account.providerKind)
+            .map((entity) => [`${entity.entityType}:${entity.externalId}`, entity.status]),
+        );
+        return parentStatuses.get(`${entityType}:${externalId}`);
+      };
       for (const candidate of evaluation.candidates) {
-        const skipReason = this.getSkipReason(accountId, candidate);
+        const skipReason = this.getSkipReason(accountId, candidate, parentStatusOf);
         if (skipReason) {
           saveSuggestion(candidate, "skipped", skipReason);
         } else {
@@ -2334,6 +2345,7 @@ export class AutomationService {
   private getSkipReason(
     accountId: string,
     candidate: AutomationCandidate,
+    parentStatusOf: (entityType: string, externalId: string) => string | undefined,
   ): string | null {
     const providerKind = this.store.getAccount(accountId)?.providerKind;
     if (
@@ -2369,20 +2381,11 @@ export class AutomationService {
       return `仍在 ${candidate.cooldownMinutes} 分钟冷却期内。`;
     }
     if (candidate.action === "enable") {
-      const managedEntities = this.store.listManagedEntities(
-        accountId,
-        providerKind ?? "cookie",
-      );
       if (
         candidate.entity.entityType !== "campaign" &&
         candidate.entity.parentCampaignId
       ) {
-        const parentCampaign = managedEntities.find(
-          (entity) =>
-            entity.entityType === "campaign" &&
-            entity.externalId === candidate.entity.parentCampaignId,
-        );
-        if (parentCampaign?.status === "disabled") {
+        if (parentStatusOf("campaign", candidate.entity.parentCampaignId) === "disabled") {
           return "父推广系列处于关闭状态，不建议开启子对象。";
         }
       }
@@ -2395,12 +2398,7 @@ export class AutomationService {
           candidate.entity.entityType === "material") &&
         candidate.entity.parentAdGroupId
       ) {
-        const parentAdGroup = managedEntities.find(
-          (entity) =>
-            entity.entityType === "ad-group" &&
-            entity.externalId === candidate.entity.parentAdGroupId,
-        );
-        if (parentAdGroup?.status === "disabled") {
+        if (parentStatusOf("ad-group", candidate.entity.parentAdGroupId) === "disabled") {
           return "父广告组处于关闭状态，不建议开启子级。";
         }
       }
