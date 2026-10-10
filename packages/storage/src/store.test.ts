@@ -1152,6 +1152,16 @@ describe("AutomationStore", () => {
       it("没有任何快照时返回 undefined，交给界面显示占位", () => {
         expect(store.getAccountTodaySpend("demo-account", "cookie")).toBeUndefined();
       });
+
+      // 结果按账户缓存（bootstrap 每 30 秒问一次，数只在同步时变），新同步落库必须作废它。
+      it("新同步落库后不返回缓存里的旧数", () => {
+        const now = Date.now();
+        expect(store.getAccountTodaySpend("demo-account", "cookie")).toBeUndefined();
+        capture(new Date(now - 30 * 60_000).toISOString(), { g1: 1, g2: 2 });
+        expect(store.getAccountTodaySpend("demo-account", "cookie")).toMatchObject({ spend: 3 });
+        capture(new Date(now - 5 * 60_000).toISOString(), { g1: 4, g2: 5 });
+        expect(store.getAccountTodaySpend("demo-account", "cookie")).toMatchObject({ spend: 9 });
+      });
     });
   });
 
