@@ -262,6 +262,14 @@ export class AutomationStore {
     string,
     { localDate: string; value: { spend: number; lastLocalTime: string; entityCount: number } | undefined }
   >();
+  /**
+   * 每个对象最后写入的指标快照指纹（本地日 + 状态 + 名称 + 指标），按「账户:平台」→ 层级存；
+   * writtenAt 是本进程上次写该层的时刻，用来发现别的进程插过队。见 saveReadOnlySync。
+   */
+  private readonly snapshotFingerprints = new Map<string, {
+    writtenAt: Map<SyncEntityType, string>;
+    layers: Map<SyncEntityType, Map<string, string>>;
+  }>();
   private readonly migrationRunner: MigrationRunner;
   private readonly databasePath: string;
   private readonly appVersion: string;
@@ -1943,8 +1951,40 @@ export class AutomationStore {
       && String(lastMaterialSnapshot.captured_at) > materialCutoff,
     );
 
+    // 指标快照只在变化时写。2026-10-10 实测每天 240 万行里 97% 是指标根本不动的关停
+    // 对象，而除「同步批次日志」外所有读法都只要「每对象每本地日最后一条」——同一天里
+    // 没变的那几百条删掉，读出来的结果逐字不变。三条护栏：
+    // 1. 跨本地日必写：每对象每天至少一条，日汇总的对象数和跨天累加才不缺。
+    // 2. 每层每轮写一条心跳（本轮该层第一个对象）：日汇总的「同步截止时刻」取的是
+    //    当天快照的最大时刻，心跳让它仍等于最后一轮同步，不会把没动静的夜里误标偏低。
+    // 3. 「上次写了什么」记在进程内存里，而写这张表的进程不止一个。写前核对库里该层
+    //    最新时刻是否还是本进程上次写的那一刻，不是就作废该层记录、整层照写——宁可多写，
+    //    不能漏写：漏写会让别人后写的旧值变成当天终值。
+    const fingerprintKey = `${accountId}:${kind}`;
+    const fingerprintState = this.snapshotFingerprints.get(fingerprintKey)
+      ?? { writtenAt: new Map(), layers: new Map() };
+    const latestInLayer = this.db.prepare(
+      `SELECT MAX(captured_at) AS captured_at FROM entity_metric_snapshots
+        WHERE account_id = ? AND provider_kind = ? AND entity_type = ?`,
+    );
+    const snapshotDay = new Date(
+      Date.parse(result.finishedAt)
+        + utcOffsetMinutes(this.getAccount(accountId)?.timezone ?? "UTC") * 60_000,
+    ).toISOString().slice(0, 10);
+    const pendingFingerprints: Array<[SyncEntityType, string, string]> = [];
+    const heartbeatWritten = new Set<SyncEntityType>();
+
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // 核对必须在拿到写锁之后：放在事务外，别的进程可能恰好插在核对和写入之间。
+      for (const entityType of persisted) {
+        const latest = latestInLayer.get(accountId, kind, entityType) as SqlRow | undefined;
+        const latestAt = latest?.captured_at ? String(latest.captured_at) : undefined;
+        if (latestAt !== fingerprintState.writtenAt.get(entityType)) {
+          fingerprintState.layers.delete(entityType);
+          fingerprintState.writtenAt.delete(entityType);
+        }
+      }
       if (persisted.size > 0) {
         for (const entityType of refreshed) {
           clearCurrentLayer.run(accountId, kind, entityType);
@@ -1963,6 +2003,15 @@ export class AutomationStore {
           // 只有历史趋势那张表对素材降频。
           if (entity.entityType === "material" && skipMaterialSnapshot) continue;
           const normalized = normalizeProviderEntity(entity);
+          const metricsJson = JSON.stringify(normalized.metrics);
+          const fingerprint = `${snapshotDay}\u0000${normalized.status}\u0000${normalized.name}\u0000${metricsJson}`;
+          const isHeartbeat = !heartbeatWritten.has(entity.entityType);
+          if (
+            !isHeartbeat
+            && fingerprintState.layers.get(entity.entityType)?.get(entity.externalId) === fingerprint
+          ) continue;
+          heartbeatWritten.add(entity.entityType);
+          pendingFingerprints.push([entity.entityType, entity.externalId, fingerprint]);
           insertSnapshot.run(
             randomUUID(),
             accountId,
@@ -1971,7 +2020,7 @@ export class AutomationStore {
             entity.externalId,
             normalized.name,
             normalized.status,
-            JSON.stringify(normalized.metrics),
+            metricsJson,
             result.finishedAt,
             // 这一列是"这行数据取得可不可信"，粒度是层级不是整轮同步：只有取全的
             // 层级才会走到这里，所以恒为 healthy，指标趋势查询的口径保持不变。
@@ -2019,6 +2068,16 @@ export class AutomationStore {
       throw error;
     }
     this.todaySpendCache.delete(`${accountId}:${kind}`);
+    // 落库成功才记账：回滚了就当没写过，下一轮照写。
+    for (const [entityType, externalId, fingerprint] of pendingFingerprints) {
+      const layer = fingerprintState.layers.get(entityType) ?? new Map<string, string>();
+      layer.set(externalId, fingerprint);
+      fingerprintState.layers.set(entityType, layer);
+    }
+    for (const entityType of heartbeatWritten) {
+      fingerprintState.writtenAt.set(entityType, result.finishedAt);
+    }
+    this.snapshotFingerprints.set(fingerprintKey, fingerprintState);
     this.writeAudit("local-user", accountId, "provider.read-sync.completed", {
       providerKind: kind,
       counts: result.counts,
