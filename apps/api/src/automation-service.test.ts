@@ -1587,6 +1587,28 @@ describe("AutomationService", () => {
     });
   });
 
+  it("自动过夜只开一次：零点开回后不再每天重复，第二晚要按当天表现重排", async () => {
+    provider.scenario = "priority";
+    await service.runAccount("demo-account", "preview");
+    const firstNight = "2026-07-20T15:45:00.000Z";
+    const firstMidnight = "2026-07-20T16:00:00.000Z";
+    const secondMidnight = "2026-07-21T16:00:00.000Z";
+
+    expect(service.enrollNightlyAdGroups("demo-account", firstNight).overnight).toBe(1);
+    await service.runDueScheduledActions("demo-account", firstNight);
+    await service.runDueScheduledActions("demo-account", firstMidnight);
+
+    const overnightRows = store.listScheduledActions("demo-account")
+      .filter((row) => row.scheduleType === "overnight");
+    expect(overnightRows).toHaveLength(2);
+    expect(overnightRows.every((row) => !row.repeatDaily && row.status === "completed")).toBe(true);
+
+    // 第二晚没有重新登记（当天不出单 / 白天被关），零点就不该再有开启。
+    const before = provider.mutations.length;
+    await service.runDueScheduledActions("demo-account", secondMidnight);
+    expect(provider.mutations.slice(before)).toEqual([]);
+  });
+
   it("submits only offline-audit creatives at 01:00 or 12:00 and never repeats them", async () => {
     provider.scenario = "appeal";
     const synced = await provider.syncReadOnly();

@@ -39,6 +39,45 @@ describe("AutomationStore", () => {
     vi.restoreAllMocks();
   });
 
+  it("升级时取消存量每天重复的过夜对；人工排的过夜仍默认每天重复，自动排的可单次", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tk-overnight-one-shot-"));
+    const databasePath = join(directory, "legacy.db");
+    const original = new AutomationStore(databasePath);
+    original.seed();
+    saveEntity(original, "ad-group", "group-old", "老组");
+    saveEntity(original, "ad-group", "group-new", "新组");
+    original.createOvernightSchedule("demo-account", {
+      externalId: "group-old",
+      disableAt: "2026-10-17T15:45:00.000Z",
+      enableAt: "2026-10-17T16:00:00.000Z",
+    });
+    original.close();
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.prepare("DELETE FROM schema_migrations WHERE migration_key = 'overnight-auto-one-shot-v1'").run();
+    legacy.close();
+
+    const migrated = new AutomationStore(databasePath);
+    const oldRows = migrated.listScheduledActions("demo-account")
+      .filter((row) => row.externalId === "group-old");
+    expect(oldRows).toHaveLength(2);
+    expect(oldRows.every((row) => row.status === "cancelled")).toBe(true);
+
+    const manual = migrated.createOvernightSchedule("demo-account", {
+      externalId: "group-new",
+      disableAt: "2026-10-18T15:45:00.000Z",
+      enableAt: "2026-10-18T16:00:00.000Z",
+    });
+    expect(manual.every((row) => row.repeatDaily)).toBe(true);
+    const automatic = migrated.createOvernightSchedule("demo-account", {
+      externalId: "group-new",
+      disableAt: "2026-10-18T15:45:00.000Z",
+      enableAt: "2026-10-18T16:00:00.000Z",
+    }, { repeatDaily: false });
+    expect(automatic.every((row) => !row.repeatDaily)).toBe(true);
+    migrated.close();
+  });
+
   it("migrates existing TikTok accounts to the explicit platform without data loss", () => {
     const directory = mkdtempSync(join(tmpdir(), "tk-platform-migration-"));
     const databasePath = join(directory, "legacy.db");

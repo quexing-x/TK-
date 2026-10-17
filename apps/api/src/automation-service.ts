@@ -1705,8 +1705,9 @@ export class AutomationService {
   }
 
   /**
-   * At 23:45 in the account timezone, preserve converting ad groups with the
-   * daily overnight pair and queue a single close for every other open group.
+   * At 23:45 in the account timezone, preserve converting ad groups with a
+   * one-shot overnight pair (re-decided every night from that day's results)
+   * and queue a single close for every other open group.
    * Unknown and manually-taken-over groups never receive an automatic write.
    */
   enrollNightlyAdGroups(
@@ -1742,11 +1743,13 @@ export class AutomationService {
 
       if ((entity.metrics.conversions ?? 0) > 0) {
         if (this.store.hasScheduledOvernightForEntity(accountId, entity.externalId)) continue;
+        // 单次：只把今天出单、到 23:45 还开着的组在零点开回来。明晚按明天的表现重判，
+        // 不出单或白天被规则关掉的组就不会再被过夜开回来。
         this.store.createOvernightSchedule(accountId, {
           externalId: entity.externalId,
           disableAt: asOf,
           enableAt: nextMidnight,
-        });
+        }, { repeatDaily: false });
         overnight += 1;
         continue;
       }

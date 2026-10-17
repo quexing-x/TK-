@@ -2752,11 +2752,19 @@ export class AutomationStore {
     });
   }
 
+  /**
+   * 过夜开关对。人工在界面上排的过夜默认每天重复；自动化每晚 23:45 排的过夜必须传
+   * `repeatDaily: false`——那是「今天出单、明天零点开回来」的单次决定，第二晚要按
+   * 第二天的表现重新判。曾经一律每天重复：一个组只要出过一次单，之后每晚零点都被
+   * 开回来，白天被规则关掉也没用（2026-10-18 老域名组天天被重开就是这个）。
+   */
   createOvernightSchedule(
     accountId: string,
     input: OvernightScheduleInput,
+    options: { repeatDaily?: boolean } = {},
   ): ScheduledEntityActionRecord[] {
     const schedule = OvernightScheduleInputSchema.parse(input);
+    const repeatDaily = options.repeatDaily ?? true;
     this.cancelOvernightSchedulesForEntity(accountId, schedule.externalId);
     const groupId = randomUUID();
     return [
@@ -2765,7 +2773,7 @@ export class AutomationStore {
         action: "disable",
         nextRunAt: schedule.disableAt,
         scheduleType: "overnight",
-        repeatDaily: true,
+        repeatDaily,
         groupId,
       }),
       this.insertScheduledAction(accountId, {
@@ -2773,7 +2781,7 @@ export class AutomationStore {
         action: "enable",
         nextRunAt: schedule.enableAt,
         scheduleType: "overnight",
-        repeatDaily: true,
+        repeatDaily,
         groupId,
       }),
     ];
@@ -8546,6 +8554,16 @@ export class AutomationStore {
       if (!has("reconcile_summary")) {
         this.db.exec("ALTER TABLE launch_plan_dispatches ADD COLUMN reconcile_summary TEXT");
       }
+    });
+    // 自动化排的过夜开关对改为单次（见 createOvernightSchedule）。存量里每天重复的
+    // 过夜对绝大多数是自动化排的，分不出哪条是人工排的，一律取消：当晚 23:45 的
+    // enrollNightlyAdGroups 会按当天表现给真正出单的组重新排单次过夜。
+    this.applyMigration("overnight-auto-one-shot-v1", () => {
+      this.db.prepare(
+        `UPDATE scheduled_entity_actions
+         SET status = 'cancelled', last_message = ?, updated_at = ?
+         WHERE schedule_type = 'overnight' AND repeat_daily = 1 AND status = 'scheduled'`,
+      ).run("过夜改为每晚按当天表现重新排，取消旧的每日重复过夜。", new Date().toISOString());
     });
     this.ensureGlobalDefaults();
   }

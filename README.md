@@ -2,7 +2,7 @@
 
 面向 TikTok 广告优化师的本地优先自动化管理工具。
 
-## Windows 桌面版 1.4.153
+## Windows 桌面版 1.4.154
 
 安装包：`apps/desktop/release/TK-Ads-Automation-Setup-1.4.153.exe`
 
