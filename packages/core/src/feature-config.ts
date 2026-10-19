@@ -60,34 +60,10 @@ export const AutomationFeatureSettingsInputSchema = z.object({
     minConversions: z.number().int().min(1).max(1000).default(5),
     scheduleHour: z.number().int().min(0).max(23).default(6),
   }).default({ enabled: false, minConversions: 5, scheduleHour: 6 }),
-  /**
-   * 关掉「跑不出来又已经停跑」的系列。
-   *
-   * 判据复用扩组分类（classifyCampaignsForExpand）：判为需重扩、且系列下已经没有在投
-   * 的广告组。组被规则一个个关光之后系列一分钱也花不出去，留着只是占列表。
-   *
-   * 同样不进规则链：规则链是单实体 + 当日指标 + 单阈值，而这条要「自创建以来累计」
-   * 加「跨实体的组状态」，表达不了。按 deletion / dailyEnable 做成每日执行器。
-   */
+  /** 系列关闭执行器；按账户当地时间每 5 分钟检查一次。 */
   closeStalledCampaigns: z.object({
     enabled: z.boolean().default(false),
-    scheduleHour: z.number().int().min(0).max(23).default(6),
-    /** 单转上限，与扩组分类同一口径。 */
-    maxCostPerConversion: z.number().min(0).default(12),
-    /** 兼容旧配置的零转化花费分层参数；不参与重扩判定。 */
-    maxSpendWithoutConversion: z.number().min(0).default(3),
-    /** 连续多少个完整自然日零转化就判重扩；留空表示停用这条条件。 */
-    maxConsecutiveZeroConversionDays: z.number().int().min(1).max(30).nullable().default(null),
-    /** 每账户每天最多关几条，防止判据出错时一次关光整个账户。 */
-    dailyLimit: z.number().int().min(1).max(500).default(50),
-  }).default({
-    enabled: false,
-    scheduleHour: 6,
-    maxCostPerConversion: 12,
-    maxSpendWithoutConversion: 3,
-    maxConsecutiveZeroConversionDays: null,
-    dailyLimit: 50,
-  }),
+  }).default({ enabled: false }),
   deletion: z.object({
     enabled: z.boolean().default(false),
     onlyDisabled: z.boolean(),
@@ -148,11 +124,6 @@ export const defaultAutomationFeatureSettings: AutomationFeatureSettingsInput = 
   },
   closeStalledCampaigns: {
     enabled: false,
-    scheduleHour: 6,
-    maxCostPerConversion: 12,
-    maxSpendWithoutConversion: 3,
-    maxConsecutiveZeroConversionDays: null,
-    dailyLimit: 50,
   },
   deletion: {
     enabled: false,

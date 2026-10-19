@@ -587,17 +587,14 @@ export function ExpandGroupsPanel({
     return { expand, recreate, computedAt, missing };
   }, [visibleStates, classificationByAccount]);
 
-  /**
-   * 可以直接关掉的系列：判定为需重扩、且组已经被规则关光的。
-   *
-   * 组还在跑的不放进来——那说明系列还在产生数据，关系列会连带掐掉正在投放的组。
-   */
+  /** 只展示符合自动关闭两条规则的系列。 */
   const closableCampaigns = useMemo(
     () => visibleStates.flatMap((state) => {
       const classification = classificationByAccount[state.accountId];
       if (!classification) return [];
       return classification.recreateCampaign
-        .filter((item) => item.hasActiveAdGroups === false)
+        .filter((item) => item.reason === "cost-per-conversion-high"
+          || (item.reason === "no-conversion-stalled" && item.hasActiveAdGroups === false))
         .map((item) => ({ ...item, accountId: state.accountId }));
     }),
     [visibleStates, classificationByAccount],
@@ -606,9 +603,9 @@ export function ExpandGroupsPanel({
   const closeStalledCampaigns = async () => {
     if (closableCampaigns.length === 0) return;
     const confirmed = await confirm({
-      title: "关闭需重扩的系列",
+      title: "关闭符合规则的系列",
       message: [
-        `将关闭 ${closableCampaigns.length} 条系列：它们都已判定为需重扩，且组已被规则全部关停。`,
+        `将关闭 ${closableCampaigns.length} 条系列：有转化且 CPA > 12，或零转化且没有在投广告组。`,
         "",
         ...closableCampaigns.slice(0, 8).map((item) => `· ${item.name}`),
         ...(closableCampaigns.length > 8 ? [`· 另有 ${closableCampaigns.length - 8} 条`] : []),
@@ -1015,11 +1012,11 @@ export function ExpandGroupsPanel({
           })}>
           <CopyPlus size={14} /> 全部带到复制页（{recreateList.filter((item) => item.accountId === recreateList[0]!.accountId).length} 条）
         </button>}
-        {/* 只关组已经全停的那批；组还在跑的不动，关系列会连带掐掉在投的组。 */}
+        {/* 关闭有转化且 CPA 超标，或零转化且没有在投组的系列。 */}
         {closableCampaigns.length > 0 && <button className="secondary-button" disabled={closingCampaigns}
           type="button" onClick={() => void closeStalledCampaigns()}
-          title="仅关闭组已被规则全部关停的系列">
-          <XCircle size={14} /> {closingCampaigns ? "关闭中…" : `关闭已停跑的系列（${closableCampaigns.length} 条）`}
+          title="关闭符合自动关闭规则的系列">
+          <XCircle size={14} /> {closingCampaigns ? "关闭中…" : `关闭符合规则的系列（${closableCampaigns.length} 条）`}
         </button>}
       </div>}
     </section>}
